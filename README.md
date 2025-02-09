@@ -316,7 +316,7 @@ which must complete cleanup operations are antithetical to Zig's design.  Howeve
 Instead one could verify that only one code branch is qualified to cleanup a resource.  One thing that might make this 
 extremely easy is that optional typing in zig is a first-class citizen.  Using a CLR-like tool will effectively make a
 C-like "schroedinger's pointer" that is *maybe-deleted* impossible and instead force you to nullify such a pointer and 
-explictly declare the pointer datatype as a nullable.
+explicitly declare the pointer datatype as a nullable.
 
 #### In action
 
