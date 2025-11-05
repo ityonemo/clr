@@ -12,6 +12,8 @@ discuss on hn: https://news.ycombinator.com/item?id=42923829
 
 discuss on lobste.rs:  https://lobste.rs/s/9sitsj/clr_checker_for_lifetimes_other
 
+live demo video:  https://www.youtube.com/watch?v=ZY_Z-aGbYm8
+
 ## TL;DR
 This repository is an incomplete proof-of-concept implementation of borrow checking (and other goodies) for Zig, done
 by analyzing zig's "AIR" intermediate representation.
