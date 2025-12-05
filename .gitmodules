@@ -1,0 +1,3 @@
+[submodule "zig"]
+	path = zig
+	url = https://codeberg.org/ziglang/zig.git
