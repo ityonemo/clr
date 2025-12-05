@@ -1,3 +1,8 @@
+* NEW:  I'm working on this again.*
+
+Video: https://www.youtube.com/watch?v=mf0WzTOe-40
+Sponsorship: https://buymeacoffee.com/dnautics
+
 # CLR
 
 **C**hecker of
