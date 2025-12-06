@@ -3,6 +3,7 @@
 ## Summary
 
   Add a new -fair-out=<path> flag that routes AIR to a dynamically loaded .so plugin for analysis/validation.
+  Use of this backend will be triggered by setting ofmt=
 
 ## Gameplan
 
@@ -11,10 +12,8 @@
 - File: src/main.zig
   1. Add help text for the new flag (look for -fllvm):
   -fair-out=<path>          Send AIR to a dynamically loaded analyzer plugin
-  -fno-air-out              (default) Do not use AIR analyzer plugin
-  2. Add storage variable for the path (find where use_llvm is stored and add nearby)
-  3. Add argument parsing (near -fllvm parsing):
-  4. Pass air_out_path to Compilation.Config.Options
+  2. Add air to -ofmt documentation
+  2. Add argument parsing (near -fllvm parsing).
 
 ### Compilation Config
 
@@ -22,6 +21,19 @@
   1. Add `air_out ?[] const u8` field to Config (root) struct (near use_llvm).
   2. Add `air_out` field to Options struct (near use_llvm).
   3. Wire through in resolve() function - assign options.air_out to the config
+  // IN THEORY we should build some guards here to make sure that air_out
+  // is set iff air is selected in ofmt
+
+### Object Format Enum
+
+- File: lib/std/Target.zig
+  1. Add air variant to ObjectFormat enum (keep alphabetical)
+  2. Add file extension to fileExt() function.
+
+### Binary name Allocation
+
+- File: lib/std/zig.zig
+  1. Add case in binNameAlloc()
 
 ### Compiler Backend Enum
 
@@ -33,16 +45,15 @@
 - File: src/dev.zig
   1. Add `air_backend` to Feature enum (near llvm_backend):
   2. Add `.air_backend` to supports(...)
+  3. repeat with `air_linker`
 
 ### Target/Backend Selection
 
 - File: src/target.zig
 
-  1. Update zigBackend() function:
-      if (config.air_out != null) return .stage2_air;
-
-  1. Note: This requires changing the function signature. Find all call sites and update them.
-  2. Update backendSupportsFeature() if needed (around line 844) - decide what features the AIR backend claims to support
+  1. Update zigBackend() function (check target.ofmt)
+  2. Update hasLlvmSupport to reject llvm.
+  3. Update backendSupportsFeature() if needed (around line 844) - decide what features the AIR backend claims to support
 
 ### Create Codegen Module
 
@@ -51,7 +62,7 @@
     implementations of `legalizeFeatures` and `generate`
   - empty Mir and Function structs.
   - In generate():
-    const air_out_path = lf.base.comp.config.air_out orelse unreachable;
+    const air_out_path = lf.comp.config.air_out orelse unreachable;
     // Use std.DynLib to load the .so
 
 ### Wire Codegen Module
@@ -87,6 +98,7 @@
     - flush
     - updateExports
     - deleteExport
+  - make sure the .tag is .air 
 
 ### Wire Linker Module
 
@@ -103,8 +115,17 @@
     - Some will need actual handling
     - Review each switch on base.tag and decide
 
+### Compiation Config
+- File: src/Compilation/Config.zig
+  add to debug format resolution .strip.
+
 ### Calling Convention Support
 - File: src/Zcu.zig
 
   1. Update callconvSupported() (around line 4469):
   .stage2_air => true,  // Accept all calling conventions
+
+### Posix Compatibility
+- File: lib/std/posix.zig
+
+  1. Update dl_iterate_phdr()
