@@ -73,8 +73,11 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         debug.dumpAir(fqn, func_index, func_air);
     }
 
+    // Get instruction tags from AIR
+    const tags = func_air.instructions.items(.tag);
+
     // Generate function stub text
-    const text = clr_codegen.functionStub(func_index, fqn) orelse return null;
+    const text = clr_codegen.functionStub(func_index, fqn, tags) orelse return null;
 
     const mir = clr_allocator.allocator().create(FuncMir) catch return null;
     mir.* = .{
@@ -117,9 +120,9 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
         }
     }
 
-    // Write main function that calls entrypoint
+    // Write epilogue (imports and main function)
     if (entrypoint_index) |idx| {
-        const entry_text = clr_codegen.mainFunction(idx) orelse return;
+        const entry_text = clr_codegen.epilogue(idx) orelse return;
         file.writeAll(entry_text) catch return;
     }
 

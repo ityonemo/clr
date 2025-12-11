@@ -83,6 +83,15 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 
 **Solution pattern**: See `src/allocator.zig` for the canonical workaround - accept an AllocatorVTable from the host (with C-ABI shims), and initialize all local vtables at runtime.
 
+**Critical implementation details**:
+1. **Vtables must be module-level `var`** - If you put a vtable inside a struct, even if you initialize it at runtime in `init()`, the struct gets copied by value and the function pointers become invalid. Use a single shared module-level `var vtable` that's initialized once in the global `init()`.
+
+2. **Use `clr_allocator.allocPrint` instead of `std.fmt.allocPrint`** - The stdlib version uses internal Writer vtables that crash. Our version uses `bufPrint` which has no vtables.
+
+3. **`allocPrint` needs size hints for large strings** - When formatting a large string (e.g., 18KB+ of slot lines) into a small buffer, `bufPrint` can crash instead of returning `NoSpaceLeft`. Pass a `size_hint` parameter when you know the approximate output size: `clr_allocator.allocPrint(alloc, fmt, args, size_hint)`.
+
+4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building slot lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
+
 ## AIR Backend Overview
 
 The project adds a custom AIR (Abstract Intermediate Representation) output backend to Zig:

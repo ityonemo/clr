@@ -29,47 +29,78 @@ pub const AllocatorVTable = air.AllocatorVTable;
 
 var stored_avt: AllocatorVTable = undefined;
 
+// =============================================================================
+// Arena Allocator Implementation
+// =============================================================================
 // Simple arena allocator that packs allocations into pages.
 // Uses the host process's page_allocator via stored_avt.
+
 const MAX_PAGES = 1024;
 const PAGE_SIZE: usize = 4096;
 
-var arena_pages: [MAX_PAGES][*]u8 = undefined;
-var arena_page_count: usize = 0;
-var arena_current_page: ?[*]u8 = null;
-var arena_page_offset: usize = 0;
+// Shared vtable for all arenas - must be module-level var initialized at runtime
+// to avoid DLL relocation issues with compile-time function pointers
+var arena_vtable: std.mem.Allocator.VTable = undefined;
 
-fn arenaAlloc(_: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?[*]u8 {
+pub const Arena = struct {
+    pages: [MAX_PAGES][*]u8 = undefined,
+    page_count: usize = 0,
+    current_page: ?[*]u8 = null,
+    page_offset: usize = 0,
+
+    pub fn init() Arena {
+        return Arena{};
+    }
+
+    pub fn deinit(self: *Arena) void {
+        for (self.pages[0..self.page_count]) |page| {
+            stored_avt.free(null, page, PAGE_SIZE, 0, 0);
+        }
+        self.page_count = 0;
+        self.current_page = null;
+        self.page_offset = 0;
+    }
+
+    pub fn allocator(self: *Arena) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &arena_vtable,
+        };
+    }
+};
+
+fn arenaAlloc(ptr: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?[*]u8 {
+    const self: *Arena = @ptrCast(@alignCast(ptr));
     const alignment = @as(usize, 1) << @intFromEnum(ptr_align);
 
     // For large allocations, get dedicated pages
     if (len > PAGE_SIZE / 2) {
         const pages_needed = (len + PAGE_SIZE - 1) / PAGE_SIZE;
-        const ptr = stored_avt.alloc(null, pages_needed * PAGE_SIZE, @intFromEnum(ptr_align), 0) orelse return null;
-        if (arena_page_count < MAX_PAGES) {
-            arena_pages[arena_page_count] = ptr;
-            arena_page_count += 1;
+        const result = stored_avt.alloc(null, pages_needed * PAGE_SIZE, @intFromEnum(ptr_align), 0) orelse return null;
+        if (self.page_count < MAX_PAGES) {
+            self.pages[self.page_count] = result;
+            self.page_count += 1;
         }
-        return ptr;
+        return result;
     }
 
     // Align offset within current page
-    const aligned_offset = (arena_page_offset + alignment - 1) & ~(alignment - 1);
+    const aligned_offset = (self.page_offset + alignment - 1) & ~(alignment - 1);
 
     // Get new page if needed
-    if (arena_current_page == null or aligned_offset + len > PAGE_SIZE) {
+    if (self.current_page == null or aligned_offset + len > PAGE_SIZE) {
         const new_page = stored_avt.alloc(null, PAGE_SIZE, 0, 0) orelse return null;
-        if (arena_page_count < MAX_PAGES) {
-            arena_pages[arena_page_count] = new_page;
-            arena_page_count += 1;
+        if (self.page_count < MAX_PAGES) {
+            self.pages[self.page_count] = new_page;
+            self.page_count += 1;
         }
-        arena_current_page = new_page;
-        arena_page_offset = 0;
-        return arenaAlloc(undefined, len, ptr_align, 0);
+        self.current_page = new_page;
+        self.page_offset = 0;
+        return arenaAlloc(ptr, len, ptr_align, 0);
     }
 
-    const result = arena_current_page.? + aligned_offset;
-    arena_page_offset = aligned_offset + len;
+    const result = self.current_page.? + aligned_offset;
+    self.page_offset = aligned_offset + len;
     return result;
 }
 
@@ -83,46 +114,36 @@ fn arenaRemap(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) 
 
 fn arenaFree(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
 
-// These must be `undefined` and initialized at runtime in init().
-// Compile-time initialization like `.{ .alloc = arenaAlloc, ... }` would
-// create function pointers that don't survive DLL relocation.
-var arena_vtable: std.mem.Allocator.VTable = undefined;
-var arena_allocator: std.mem.Allocator = undefined;
+// Main arena instance
+var main_arena: Arena = undefined;
 
 /// Initialize the allocator with a vtable from the host process.
 /// Must be called before using allocator().
 pub fn init(avt: *const AllocatorVTable) void {
     stored_avt = avt.*;
 
-    // Set up arena vtable at runtime (compile-time vtables have DLL relocation issues)
+    // Initialize shared vtable at runtime (compile-time vtables don't survive DLL relocation)
     arena_vtable = .{
         .alloc = arenaAlloc,
         .resize = arenaResize,
         .remap = arenaRemap,
         .free = arenaFree,
     };
-    arena_allocator = .{
-        .ptr = undefined,
-        .vtable = &arena_vtable,
-    };
 
-    // Reset arena state
-    arena_page_count = 0;
-    arena_current_page = null;
-    arena_page_offset = 0;
+    main_arena = Arena.init();
 }
 
 pub fn deinit() void {
-    for (arena_pages[0..arena_page_count]) |page| {
-        stored_avt.free(null, page, PAGE_SIZE, 0, 0);
-    }
-    arena_page_count = 0;
-    arena_current_page = null;
-    arena_page_offset = 0;
+    main_arena.deinit();
 }
 
 pub fn allocator() std.mem.Allocator {
-    return arena_allocator;
+    return main_arena.allocator();
+}
+
+/// Create a new arena for temporary allocations (e.g., per-function codegen)
+pub fn newArena() Arena {
+    return Arena.init();
 }
 
 /// Replacement for std.fmt.allocPrint that avoids DLL relocation issues.
@@ -130,10 +151,10 @@ pub fn allocator() std.mem.Allocator {
 /// std.fmt.count uses Writer.Discarding - both have compile-time vtables
 /// that fail in DLL context.
 /// Instead: allocate a buffer, format with bufPrint, double on overflow.
-pub fn allocPrint(comptime fmt: []const u8, args: anytype) ?[]u8 {
-    var size: usize = 4096;
+pub fn allocPrint(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype, size_hint: ?usize) ?[]u8 {
+    var size: usize = size_hint orelse 4096;
     while (size <= 1024 * 1024) { // Max 1MB
-        const buf = arena_allocator.alloc(u8, size) catch return null;
+        const buf = alloc.alloc(u8, size) catch return null;
         if (std.fmt.bufPrint(buf, fmt, args)) |result| {
             return result;
         } else |err| switch (err) {
