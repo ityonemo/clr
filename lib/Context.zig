@@ -2,6 +2,7 @@ const std = @import("std");
 
 allocator: std.mem.Allocator,
 stacktrace: std.ArrayListUnmanaged([]const u8),
+stdout: std.fs.File,
 
 const Context = @This();
 
@@ -9,6 +10,7 @@ pub fn init(allocator: std.mem.Allocator) Context {
     return .{
         .allocator = allocator,
         .stacktrace = .empty,
+        .stdout = std.fs.File.stdout(),
     };
 }
 
@@ -28,9 +30,8 @@ pub fn pop(self: *Context) void {
 const Slot = @import("slot.zig").Slot;
 
 pub fn reportUseBeforeAssign(self: *Context, meta: Slot.Meta) error{UseBeforeAssign} {
-    _ = self;
     _ = meta;
-    std.debug.print("undefined\n", .{});
+    self.stdout.writeAll("undefined\n") catch @panic("failed to write to stdout");
     return error.UseBeforeAssign;
 }
 
