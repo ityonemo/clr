@@ -3,6 +3,10 @@ const std = @import("std");
 allocator: std.mem.Allocator,
 stacktrace: std.ArrayListUnmanaged([]const u8),
 stdout: std.fs.File,
+file: []const u8 = "",
+line: u32 = 0,
+column: u32 = 0,
+base_line: u32 = 0,
 
 const Context = @This();
 
@@ -29,9 +33,17 @@ pub fn pop(self: *Context) void {
 
 const Slot = @import("slot.zig").Slot;
 
+pub fn print(self: *Context, comptime fmt: []const u8, args: anytype) void {
+    const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("out of memory");
+    defer self.allocator.free(msg);
+    self.stdout.writeAll(msg) catch @panic("failed to write to stdout");
+}
+
 pub fn reportUseBeforeAssign(self: *Context, meta: Slot.Meta) error{UseBeforeAssign} {
     _ = meta;
-    self.stdout.writeAll("undefined\n") catch @panic("failed to write to stdout");
+    const func_name = self.stacktrace.items[self.stacktrace.items.len - 1];
+    const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.file) catch self.file;
+    self.print("use of undefined value found in {s} ({s}:{d}:{d})\n", .{ func_name, rel_path, self.line, self.column });
     return error.UseBeforeAssign;
 }
 

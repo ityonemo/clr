@@ -46,10 +46,12 @@ test "generateFunction generates correct output for dbg_stmt" {
     const data: []const Data = &.{.{ .dbg_stmt = .{ .line = 10, .column = 5 } }};
     // InternPool not used for dbg_stmt, so pass undefined pointer (aligned)
     const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
-    const result = codegen.generateFunction(42, "mymodule.myfunction", dummy_ip, tags, data);
+    const result = codegen.generateFunction(42, "mymodule.myfunction", dummy_ip, tags, data, 100, "test.zig");
 
     const expected =
         \\fn fn_42(ctx: *Context) !void {
+        \\    ctx.file = "test.zig";
+        \\    ctx.base_line = 100;
         \\    try ctx.push("mymodule.myfunction");
         \\    defer ctx.pop();
         \\
@@ -71,10 +73,12 @@ test "generateFunction generates correct output for alloc" {
     const data: []const Data = &.{.{ .no_op = {} }};
     // InternPool not used for alloc, so pass dummy pointer (aligned)
     const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
-    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data);
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, 0, "root.zig");
 
     const expected =
         \\fn fn_0(ctx: *Context) !void {
+        \\    ctx.file = "root.zig";
+        \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\
@@ -101,10 +105,12 @@ test "generateFunction generates correct output for load" {
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const data: []const Data = &.{.{ .ty_op = .{ .ty = .none, .operand = operand_ref } }};
     const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
-    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data);
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, 0, "root.zig");
 
     const expected =
         \\fn fn_0(ctx: *Context) !void {
+        \\    ctx.file = "root.zig";
+        \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\

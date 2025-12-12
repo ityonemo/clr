@@ -69,16 +69,21 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const expected_main_slice = std.fmt.bufPrint(&expected_main, "{s}.main", .{root_name}) catch return null;
     const is_entrypoint = std.mem.eql(u8, fqn, expected_main_slice);
 
-    if (is_entrypoint) {
-        debug.dumpAir(fqn, func_index, func_air);
-    }
+    //if (is_entrypoint) {
+    //    debug.dumpAir(fqn, func_index, func_air);
+    //}
 
     // Get instruction tags and data from AIR
     const tags = func_air.instructions.items(.tag);
     const data = func_air.instructions.items(.data);
 
+    // Get function's source location
+    const base_line = zcu.navSrcLine(func.owner_nav);
+    const file_scope = zcu.navFileScope(func.owner_nav);
+    const file_path = file_scope.path.toAbsolute(zcu.comp.dirs, clr_allocator.allocator()) catch return null;
+
     // Generate Zig source for this function
-    const text = clr_codegen.generateFunction(func_index, fqn, tags, data);
+    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, base_line, file_path);
 
     const mir = clr_allocator.allocator().create(FuncMir) catch return null;
     mir.* = .{
@@ -123,7 +128,7 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
 
     // Write epilogue (imports and main function)
     if (entrypoint_index) |idx| {
-        const entry_text = clr_codegen.epilogue(idx) orelse return;
+        const entry_text = clr_codegen.epilogue(idx);
         file.writeAll(entry_text) catch return;
     }
 

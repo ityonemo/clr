@@ -34,6 +34,7 @@ pub const Slot = struct {
             .alloc => applyAlloc(),
             .store_safe => applyStoreSafe(tracked, args),
             .load => try applyLoad(tracked, ctx, args),
+            .dbg_stmt => applyDbgStmt(ctx, args),
             else => .{},
         };
     }
@@ -58,6 +59,12 @@ pub const Slot = struct {
         if (slot.state == .undefined) {
             return ctx.reportUseBeforeAssign(slot.meta);
         }
+        return .{};
+    }
+
+    fn applyDbgStmt(ctx: anytype, args: anytype) Slot {
+        ctx.line = ctx.base_line + args.line + 1;
+        ctx.column = args.column;
         return .{};
     }
 };

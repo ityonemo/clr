@@ -93,7 +93,7 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
 }
 
 /// Generate Zig source code for a function from AIR instructions
-pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data) []u8 {
+pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, base_line: u32, file_path: []const u8) []u8 {
     if (tags.len == 0) @panic("function with no instructions encountered");
 
     // Per-function arena for temporary allocations
@@ -108,6 +108,8 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     const size_hint = slot_lines.len + 512;
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\fn fn_{d}(ctx: *Context) !void {{
+        \\    ctx.file = "{s}";
+        \\    ctx.base_line = {d};
         \\    try ctx.push("{s}");
         \\    defer ctx.pop();
         \\
@@ -116,7 +118,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\
         \\{s}}}
         \\
-    , .{ func_index, fqn, tags.len, slot_lines }, size_hint);
+    , .{ func_index, file_path, base_line, fqn, tags.len, slot_lines }, size_hint);
 }
 
 /// Generate epilogue with imports and main function
