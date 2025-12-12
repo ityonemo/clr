@@ -33,15 +33,13 @@ compile_air() {
 }
 
 # Run generated AIR as Zig code
-# Usage: run_air <file.air>
+# Usage: run_air <file.air.zig>
 run_air() {
-    local air_file="$1"
-    local zig_file="${air_file%.air}.zig"
-    cp "$air_file" "$zig_file"
+    local zig_file="$1"
     zig run \
-        --dep context \
+        --dep clr \
         -Mroot="$zig_file" \
-        -Mcontext="${LIB_DIR}/context.zig" \
+        -Mclr="${LIB_DIR}/lib.zig" \
         2>&1
 }
 
@@ -50,7 +48,7 @@ run_air() {
 compile_and_run() {
     local input="$1"
     local basename="$(basename "$input" .zig)"
-    local air_file="${TEST_TEMP}/${basename}.air"
+    local air_file="${TEST_TEMP}/${basename}.air.zig"
 
     compile_air "$input" "$air_file" >/dev/null
     run_air "$air_file"

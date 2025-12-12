@@ -29,8 +29,9 @@ pub const Slot = struct {
         allocator.free(slots);
     }
 
-    pub fn apply(comptime tag: anytype, tracked: []Slot, args: anytype) Slot {
+    pub fn apply(comptime tag: anytype, tracked: []Slot, ctx: anytype, args: anytype) Slot {
         _ = tracked;
+        _ = ctx;
         _ = args;
         _ = tag;
         // For now, return an empty slot - passes will populate state as needed
@@ -39,12 +40,17 @@ pub const Slot = struct {
 };
 
 test "basic slot operations" {
+    const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
+
+    var ctx = Context.init(allocator);
+    defer ctx.deinit();
+
     var slots = Slot.init(allocator, 3);
     defer Slot.deinit(slots, allocator);
 
-    slots[0] = Slot.apply(.dbg_stmt, slots, .{});
-    slots[1] = Slot.apply(.alloc, slots, .{});
+    slots[0] = Slot.apply(.dbg_stmt, slots, &ctx, .{});
+    slots[1] = Slot.apply(.alloc, slots, &ctx, .{});
 
     // State is null by default - passes populate it as needed
     try std.testing.expectEqual(null, slots[0].state);

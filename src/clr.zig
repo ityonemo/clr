@@ -73,11 +73,12 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         debug.dumpAir(fqn, func_index, func_air);
     }
 
-    // Get instruction tags from AIR
+    // Get instruction tags and data from AIR
     const tags = func_air.instructions.items(.tag);
+    const data = func_air.instructions.items(.data);
 
-    // Generate function stub text
-    const text = clr_codegen.functionStub(func_index, fqn, tags) orelse return null;
+    // Generate Zig source for this function
+    const text = clr_codegen.generateFunction(func_index, fqn, tags, data);
 
     const mir = clr_allocator.allocator().create(FuncMir) catch return null;
     mir.* = .{

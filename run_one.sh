@@ -12,7 +12,8 @@ if [ -z "$1" ]; then
 fi
 
 INPUT="$1"
-OUTPUT="${INPUT%.zig}.air"
+BASENAME="$(basename "${INPUT%.zig}")"
+OUTPUT="${SCRIPT_DIR}/${BASENAME}.air.zig"
 
 "$ZIG_COMPILER" build-exe \
     -fair-out="$LIBCLR" \

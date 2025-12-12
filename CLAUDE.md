@@ -33,6 +33,10 @@ brew install bats-core # macOS
 ./run_integration.sh
 ```
 
+**Note**: Integration tests are expected to fail during development (the CLR runtime is incomplete). However, if the tests fail due to **compilation errors in the emitted .air.zig analyzer**, that indicates a real problem in codegen that needs to be fixed.
+
+**Important**: Do NOT modify integration tests to make them pass, unless we have decided to materially change the shape of the output. Integration tests should simply call `compile_and_run` and check the result. If a test fails, fix the codegen or runtime - not the test.
+
 Test structure:
 - `test/integration/*.bats` - BATS test files
 - `test/integration/test_helper.bash` - Common setup and helper functions

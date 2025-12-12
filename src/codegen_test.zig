@@ -4,6 +4,7 @@ const clr_allocator = @import("allocator.zig");
 const compiler = @import("compiler");
 const Air = compiler.Air;
 const Tag = Air.Inst.Tag;
+const Data = Air.Inst.Data;
 
 // Test AllocatorVTable that wraps page_allocator for unit testing.
 // In tests, we don't have DLL relocation issues, so this works fine.
@@ -36,13 +37,13 @@ fn initTestAllocator() void {
     clr_allocator.init(&test_avt);
 }
 
-test "functionStub generates correct output for dbg_stmt" {
+test "generateFunction generates correct output for dbg_stmt" {
     initTestAllocator();
     defer clr_allocator.deinit();
 
-    const instructions: []const Tag = &.{.dbg_stmt};
-    const result = codegen.functionStub(42, "mymodule.myfunction", instructions);
-    try std.testing.expect(result != null);
+    const tags: []const Tag = &.{.dbg_stmt};
+    const data: []const Data = &.{.{ .dbg_stmt = .{ .line = 10, .column = 5 } }};
+    const result = codegen.generateFunction(42, "mymodule.myfunction", tags, data);
 
     const expected =
         \\fn fn_42(ctx: *Context) !void {
@@ -52,20 +53,20 @@ test "functionStub generates correct output for dbg_stmt" {
         \\    var slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
         \\
-        \\    slots[0] = Slot.apply(.dbg_stmt, slots, .{ .context = ctx });
+        \\    slots[0] = Slot.apply(.dbg_stmt, slots, ctx, .{ .line = 10, .column = 5 });
         \\}
         \\
     ;
-    try std.testing.expectEqualStrings(expected, result.?);
+    try std.testing.expectEqualStrings(expected, result);
 }
 
-test "functionStub generates correct output for alloc" {
+test "generateFunction generates correct output for alloc" {
     initTestAllocator();
     defer clr_allocator.deinit();
 
-    const instructions: []const Tag = &.{.alloc};
-    const result = codegen.functionStub(0, "root.main", instructions);
-    try std.testing.expect(result != null);
+    const tags: []const Tag = &.{.alloc};
+    const data: []const Data = &.{.{ .no_op = {} }};
+    const result = codegen.generateFunction(0, "root.main", tags, data);
 
     const expected =
         \\fn fn_0(ctx: *Context) !void {
@@ -75,11 +76,11 @@ test "functionStub generates correct output for alloc" {
         \\    var slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
         \\
-        \\    slots[0] = Slot.apply(.alloc, slots, .{});
+        \\    slots[0] = Slot.apply(.alloc, slots, ctx, .{});
         \\}
         \\
     ;
-    try std.testing.expectEqualStrings(expected, result.?);
+    try std.testing.expectEqualStrings(expected, result);
 }
 
 // Note: Empty instructions will panic - this is intentional as real functions always have instructions
@@ -93,8 +94,9 @@ test "epilogue generates correct output" {
 
     const expected =
         \\const std = @import("std");
-        \\const Context = @import("context");
-        \\const Slot = @import("slot").Slot;
+        \\const clr = @import("clr");
+        \\const Context = clr.Context;
+        \\const Slot = clr.Slot;
         \\
         \\pub fn main() !void {
         \\    var ctx = Context.init(std.heap.page_allocator);
