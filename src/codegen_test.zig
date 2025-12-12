@@ -3,6 +3,7 @@ const codegen = @import("codegen.zig");
 const clr_allocator = @import("allocator.zig");
 const compiler = @import("compiler");
 const Air = compiler.Air;
+const InternPool = compiler.InternPool;
 const Tag = Air.Inst.Tag;
 const Data = Air.Inst.Data;
 
@@ -43,7 +44,9 @@ test "generateFunction generates correct output for dbg_stmt" {
 
     const tags: []const Tag = &.{.dbg_stmt};
     const data: []const Data = &.{.{ .dbg_stmt = .{ .line = 10, .column = 5 } }};
-    const result = codegen.generateFunction(42, "mymodule.myfunction", tags, data);
+    // InternPool not used for dbg_stmt, so pass undefined pointer (aligned)
+    const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
+    const result = codegen.generateFunction(42, "mymodule.myfunction", dummy_ip, tags, data);
 
     const expected =
         \\fn fn_42(ctx: *Context) !void {
@@ -53,7 +56,7 @@ test "generateFunction generates correct output for dbg_stmt" {
         \\    var slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
         \\
-        \\    slots[0] = Slot.apply(.dbg_stmt, slots, ctx, .{ .line = 10, .column = 5 });
+        \\    slots[0] = try Slot.apply(.dbg_stmt, slots, ctx, .{ .line = 10, .column = 5 });
         \\}
         \\
     ;
@@ -66,7 +69,9 @@ test "generateFunction generates correct output for alloc" {
 
     const tags: []const Tag = &.{.alloc};
     const data: []const Data = &.{.{ .no_op = {} }};
-    const result = codegen.generateFunction(0, "root.main", tags, data);
+    // InternPool not used for alloc, so pass dummy pointer (aligned)
+    const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data);
 
     const expected =
         \\fn fn_0(ctx: *Context) !void {
@@ -76,7 +81,7 @@ test "generateFunction generates correct output for alloc" {
         \\    var slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
         \\
-        \\    slots[0] = Slot.apply(.alloc, slots, ctx, .{});
+        \\    slots[0] = try Slot.apply(.alloc, slots, ctx, .{});
         \\}
         \\
     ;
@@ -85,12 +90,39 @@ test "generateFunction generates correct output for alloc" {
 
 // Note: Empty instructions will panic - this is intentional as real functions always have instructions
 
+test "generateFunction generates correct output for load" {
+    initTestAllocator();
+    defer clr_allocator.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const tags: []const Tag = &.{.load};
+    // load uses ty_op: operand is the pointer (slot 5), ty is result type
+    // Ref encoding: bit 31 set indicates instruction index, lower bits are the index
+    const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
+    const data: []const Data = &.{.{ .ty_op = .{ .ty = .none, .operand = operand_ref } }};
+    const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data);
+
+    const expected =
+        \\fn fn_0(ctx: *Context) !void {
+        \\    try ctx.push("root.main");
+        \\    defer ctx.pop();
+        \\
+        \\    var slots = Slot.init(ctx.allocator, 1);
+        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\
+        \\    slots[0] = try Slot.apply(.load, slots, ctx, .{ .ptr = 5 });
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
 test "epilogue generates correct output" {
     initTestAllocator();
     defer clr_allocator.deinit();
 
     const result = codegen.epilogue(123);
-    try std.testing.expect(result != null);
 
     const expected =
         \\const std = @import("std");
@@ -98,12 +130,12 @@ test "epilogue generates correct output" {
         \\const Context = clr.Context;
         \\const Slot = clr.Slot;
         \\
-        \\pub fn main() !void {
+        \\pub fn main() void {
         \\    var ctx = Context.init(std.heap.page_allocator);
         \\    defer ctx.deinit();
-        \\    try fn_123(&ctx);
+        \\    fn_123(&ctx) catch std.process.exit(1);
         \\}
         \\
     ;
-    try std.testing.expectEqualStrings(expected, result.?);
+    try std.testing.expectEqualStrings(expected, result);
 }

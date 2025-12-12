@@ -25,6 +25,15 @@ pub fn pop(self: *Context) void {
     _ = self.stacktrace.pop();
 }
 
+const Slot = @import("slot.zig").Slot;
+
+pub fn reportUseBeforeAssign(self: *Context, meta: Slot.Meta) error{UseBeforeAssign} {
+    _ = self;
+    _ = meta;
+    std.debug.print("undefined\n", .{});
+    return error.UseBeforeAssign;
+}
+
 test "context stacktrace tracks calls" {
     var ctx = Context.init(std.testing.allocator);
     defer ctx.deinit();
