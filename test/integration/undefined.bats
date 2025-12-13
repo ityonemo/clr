@@ -13,3 +13,8 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/assigned_before_use.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no error when variable is initialized with value" {
+    run compile_and_run "$TEST_CASES/undefined/initialized_with_value.zig"
+    [ "$status" -eq 0 ]
+}
