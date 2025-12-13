@@ -151,15 +151,16 @@ pub fn newArena() Arena {
 /// std.fmt.count uses Writer.Discarding - both have compile-time vtables
 /// that fail in DLL context.
 /// Instead: allocate a buffer, format with bufPrint, double on overflow.
-pub fn allocPrint(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype, size_hint: ?usize) ?[]u8 {
+/// Panics on allocation failure or if output exceeds 1MB.
+pub fn allocPrint(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype, size_hint: ?usize) []u8 {
     var size: usize = size_hint orelse 4096;
     while (size <= 1024 * 1024) { // Max 1MB
-        const buf = alloc.alloc(u8, size) catch return null;
+        const buf = alloc.alloc(u8, size) catch @panic("out of memory");
         if (std.fmt.bufPrint(buf, fmt, args)) |result| {
             return result;
         } else |err| switch (err) {
             error.NoSpaceLeft => size *= 2,
         }
     }
-    return null;
+    @panic("allocPrint: output exceeds 1MB");
 }
