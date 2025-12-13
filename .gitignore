@@ -1,0 +1,4 @@
+*.air
+*.air.zig
+.zig-cache/
+zig-out/
