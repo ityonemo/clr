@@ -8,3 +8,8 @@ load test_helper
     [[ "$output" =~ "use of undefined value found in use_before_assign.main" ]]
     [[ "$output" =~ "use_before_assign.zig:3:4)" ]]
 }
+
+@test "no error when variable is assigned before use" {
+    run compile_and_run "$TEST_CASES/undefined/assigned_before_use.zig"
+    [ "$status" -eq 0 ]
+}
