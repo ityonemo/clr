@@ -89,16 +89,17 @@ test "store_safe with value sets state to defined" {
 }
 
 // Mock context for testing load behavior
+// TODO: eliminate MockContext by using real Context with suppressed output
 const MockContext = struct {
-    const Meta = @import("analysis/undefined.zig").Meta;
-
     line: u32 = 0,
     column: u32 = 0,
     base_line: u32 = 0,
+    file: []const u8 = "test",
+    stacktrace: struct {
+        items: []const []const u8 = &.{"test_func"},
+    } = .{},
 
-    pub fn reportUseBeforeAssign(_: *MockContext, _: Meta) error{UseBeforeAssign} {
-        return error.UseBeforeAssign;
-    }
+    pub fn print(_: *MockContext, comptime _: []const u8, _: anytype) void {}
 };
 
 test "load from undefined slot reports use before assign" {

@@ -8,7 +8,7 @@ pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
     const slot = tracked[ptr];
     if (slot.undefined) |undef| {
         switch (undef) {
-            .undefined => |meta| return ctx.reportUseBeforeAssign(meta),
+            .undefined => return undef.reportUseBeforeAssign(ctx),
             .defined => {},
         }
     }

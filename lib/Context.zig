@@ -31,8 +31,6 @@ pub fn pop(self: *Context) void {
     _ = self.stacktrace.pop();
 }
 
-const Meta = @import("analysis/undefined.zig").Meta;
-
 pub fn print(self: *Context, comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("out of memory");
     defer self.allocator.free(msg);
@@ -54,14 +52,6 @@ pub fn dumpStackTrace(self: *Context) void {
             self.print("  {s}\n", .{frame});
         }
     }
-}
-
-pub fn reportUseBeforeAssign(self: *Context, meta: Meta) error{UseBeforeAssign} {
-    _ = meta;
-    const func_name = self.stacktrace.items[self.stacktrace.items.len - 1];
-    const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.file) catch self.file;
-    self.print("use of undefined value found in {s} ({s}:{d}:{d})\n", .{ func_name, rel_path, self.line, self.column });
-    return error.UseBeforeAssign;
 }
 
 test "context stacktrace tracks calls" {
