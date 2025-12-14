@@ -1,22 +1,9 @@
 const std = @import("std");
 const tag = @import("tag.zig");
+const Undefined = @import("analysis/undefined.zig").Undefined;
 
 pub const Slot = struct {
-    state: ?State = null,
-    meta: Meta = .{},
-
-    pub const State = enum {
-        undefined,
-        defined,
-        unknown,
-    };
-
-    pub const Meta = struct {
-        file: ?[]const u8 = null,
-        line: ?u32 = null,
-        column: ?u32 = null,
-        var_name: ?[]const u8 = null,
-    };
+    undefined: ?Undefined = null,
 
     pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: anytype) !void {
         switch (any_tag) {
@@ -58,12 +45,13 @@ test "alloc sets state to undefined" {
     try Slot.apply(.{ .dbg_stmt = .{ .line = 0, .column = 0 } }, list, 0, &ctx);
     try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx);
 
-    // dbg_stmt has no state
-    try std.testing.expectEqual(null, list[0].state);
+    // dbg_stmt has no undefined tracking
+    try std.testing.expectEqual(null, list[0].undefined);
     // alloc marks slot as undefined
-    try std.testing.expectEqual(.undefined, list[1].state);
-    // uninitialized slot has no state
-    try std.testing.expectEqual(null, list[2].state);
+    try std.testing.expect(list[1].undefined != null);
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(list[1].undefined.?));
+    // uninitialized slot has no undefined tracking
+    try std.testing.expectEqual(null, list[2].undefined);
 }
 
 test "store_safe with undef keeps state undefined" {
@@ -80,7 +68,7 @@ test "store_safe with undef keeps state undefined" {
     try Slot.apply(.{ .store_safe = .{ .ptr = 1, .is_undef = true } }, list, 2, &ctx);
 
     // alloc slot stays undefined after store_safe with undef
-    try std.testing.expectEqual(.undefined, list[1].state);
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(list[1].undefined.?));
 }
 
 test "store_safe with value sets state to defined" {
@@ -97,16 +85,18 @@ test "store_safe with value sets state to defined" {
     try Slot.apply(.{ .store_safe = .{ .ptr = 1, .is_undef = false } }, list, 2, &ctx);
 
     // alloc slot becomes defined after store_safe with real value
-    try std.testing.expectEqual(.defined, list[1].state);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(list[1].undefined.?));
 }
 
 // Mock context for testing load behavior
 const MockContext = struct {
+    const Meta = @import("analysis/undefined.zig").Meta;
+
     line: u32 = 0,
     column: u32 = 0,
     base_line: u32 = 0,
 
-    pub fn reportUseBeforeAssign(_: *MockContext, _: Slot.Meta) error{UseBeforeAssign} {
+    pub fn reportUseBeforeAssign(_: *MockContext, _: Meta) error{UseBeforeAssign} {
         return error.UseBeforeAssign;
     }
 };

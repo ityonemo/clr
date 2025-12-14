@@ -31,7 +31,7 @@ pub fn pop(self: *Context) void {
     _ = self.stacktrace.pop();
 }
 
-const Slot = @import("slots.zig").Slot;
+const Meta = @import("analysis/undefined.zig").Meta;
 
 pub fn print(self: *Context, comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("out of memory");
@@ -56,7 +56,7 @@ pub fn dumpStackTrace(self: *Context) void {
     }
 }
 
-pub fn reportUseBeforeAssign(self: *Context, meta: Slot.Meta) error{UseBeforeAssign} {
+pub fn reportUseBeforeAssign(self: *Context, meta: Meta) error{UseBeforeAssign} {
     _ = meta;
     const func_name = self.stacktrace.items[self.stacktrace.items.len - 1];
     const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.file) catch self.file;

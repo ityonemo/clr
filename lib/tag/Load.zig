@@ -6,7 +6,10 @@ pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
     _ = index;
     const ptr = self.ptr orelse return;
     const slot = tracked[ptr];
-    if (slot.state == .undefined) {
-        return ctx.reportUseBeforeAssign(slot.meta);
+    if (slot.undefined) |undef| {
+        switch (undef) {
+            .undefined => |meta| return ctx.reportUseBeforeAssign(meta),
+            .defined => {},
+        }
     }
 }
