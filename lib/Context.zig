@@ -39,6 +39,23 @@ pub fn print(self: *Context, comptime fmt: []const u8, args: anytype) void {
     self.stdout.writeAll(msg) catch @panic("failed to write to stdout");
 }
 
+pub fn dumpStackTrace(self: *Context) void {
+    const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.file) catch self.file;
+    self.print("Stack trace:\n", .{});
+    // Print frames in reverse order (most recent first)
+    var i = self.stacktrace.items.len;
+    while (i > 0) {
+        i -= 1;
+        const frame = self.stacktrace.items[i];
+        if (i == self.stacktrace.items.len - 1) {
+            // Most recent frame - include file/line info
+            self.print("  {s} ({s}:{d}:{d})\n", .{ frame, rel_path, self.line, self.column });
+        } else {
+            self.print("  {s}\n", .{frame});
+        }
+    }
+}
+
 pub fn reportUseBeforeAssign(self: *Context, meta: Slot.Meta) error{UseBeforeAssign} {
     _ = meta;
     const func_name = self.stacktrace.items[self.stacktrace.items.len - 1];

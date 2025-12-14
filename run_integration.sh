@@ -3,6 +3,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# make sure we are running the most recent version
+zig build
+
 # Check if bats is available
 if command -v bats &> /dev/null; then
     bats "$SCRIPT_DIR/test/integration/"

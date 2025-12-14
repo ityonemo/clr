@@ -20,11 +20,18 @@ var vtable: VTable = undefined;
 
 const clr_allocator = @import("allocator.zig");
 const clr_codegen = @import("codegen.zig");
+const tree_shaker = @import("tree_shaker.zig");
 
-const FuncMir = struct {
+pub const CallTarget = struct {
+    index: u32,
+    arity: u32,
+};
+
+pub const FuncMir = struct {
     func_index: u32,
     owner_nav: u32,
     text: []const u8,
+    call_targets: []const CallTarget,
     entrypoint: bool = false,
 };
 
@@ -73,9 +80,10 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     //    debug.dumpAir(fqn, func_index, func_air);
     //}
 
-    // Get instruction tags and data from AIR
+    // Get instruction tags, data, and extra from AIR
     const tags = func_air.instructions.items(.tag);
     const data = func_air.instructions.items(.data);
+    const extra = func_air.extra.items;
 
     // Get function's source location
     const base_line = zcu.navSrcLine(func.owner_nav);
@@ -83,13 +91,17 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const file_path = file_scope.path.toAbsolute(zcu.comp.dirs, clr_allocator.allocator()) catch return null;
 
     // Generate Zig source for this function
-    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, base_line, file_path);
+    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path);
+
+    // Extract call targets from AIR
+    const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), tags, data, extra);
 
     const mir = clr_allocator.allocator().create(FuncMir) catch return null;
     mir.* = .{
         .func_index = func_index,
         .owner_nav = @intFromEnum(func.owner_nav),
         .text = text,
+        .call_targets = call_targets,
         .entrypoint = is_entrypoint,
     };
     return @ptrCast(mir);
@@ -116,14 +128,35 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
 
     file.seekTo(0) catch return;
 
-    // Write all collected function stubs
+    // Find entrypoint first
     var entrypoint_index: ?u32 = null;
     for (mir_list.items) |mir| {
-        file.writeAll(mir.text) catch return;
-        file.writeAll("\n") catch return;
         if (mir.entrypoint) {
             entrypoint_index = mir.func_index;
+            break;
         }
+    }
+
+    // Tree shake to find reachable functions
+    const reachable = if (entrypoint_index) |idx|
+        tree_shaker.shake(mir_list.items, idx)
+    else
+        tree_shaker.FuncSet{};
+
+    // Write all reachable function stubs
+    for (mir_list.items) |mir| {
+        if (!reachable.contains(mir.func_index)) continue;
+        file.writeAll(mir.text) catch return;
+        file.writeAll("\n") catch return;
+    }
+
+    // Generate stubs for missing call targets
+    const missing = tree_shaker.collectMissingTargets(mir_list.items, reachable);
+    var it = missing.iterator();
+    while (it.next()) |entry| {
+        const stub = clr_codegen.generateStub(entry.key_ptr.*, entry.value_ptr.*);
+        file.writeAll(stub) catch return;
+        file.writeAll("\n") catch return;
     }
 
     // Write epilogue (imports and main function)

@@ -29,43 +29,63 @@ pub const Slot = struct {
         allocator.free(slots);
     }
 
-    pub fn apply(comptime tag: anytype, tracked: []Slot, ctx: anytype, args: anytype) !Slot {
-        return switch (tag) {
-            .alloc => applyAlloc(),
+    pub fn apply(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, args: anytype) !void {
+        switch (tag) {
+            .alloc => applyAlloc(tracked, index),
+            .arg => applyArg(tracked, index, args),
             .store_safe => applyStoreSafe(tracked, args),
             .load => try applyLoad(tracked, ctx, args),
             .dbg_stmt => applyDbgStmt(ctx, args),
-            else => .{},
-        };
+            .ret_safe => applyRetSafe(tracked, args),
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => try applyCall(args),
+            else => {},
+        }
     }
 
-    fn applyAlloc() Slot {
-        return .{ .state = .undefined };
+    fn applyAlloc(tracked: []Slot, index: usize) void {
+        tracked[index] = .{ .state = .undefined };
     }
 
-    fn applyStoreSafe(tracked: []Slot, args: anytype) Slot {
+    fn applyArg(tracked: []Slot, index: usize, args: anytype) void {
+        tracked[index] = args[0];
+    }
+
+    fn applyStoreSafe(tracked: []Slot, args: anytype) void {
+        // Skip if ptr is null (global/interned pointer - TODO: handle these)
+        if (@TypeOf(args.ptr) == @TypeOf(null)) return;
         const ptr = args.ptr;
         if (args.is_undef) {
             tracked[ptr].state = .undefined;
         } else {
             tracked[ptr].state = .defined;
         }
-        return .{};
     }
 
-    fn applyLoad(tracked: []Slot, ctx: anytype, args: anytype) !Slot {
+    fn applyLoad(tracked: []Slot, ctx: anytype, args: anytype) !void {
+        // Skip if ptr is null (global/interned pointer - TODO: handle these)
+        if (@TypeOf(args.ptr) == @TypeOf(null)) return;
         const ptr = args.ptr;
         const slot = tracked[ptr];
         if (slot.state == .undefined) {
             return ctx.reportUseBeforeAssign(slot.meta);
         }
-        return .{};
     }
 
-    fn applyDbgStmt(ctx: anytype, args: anytype) Slot {
+    fn applyDbgStmt(ctx: anytype, args: anytype) void {
         ctx.line = ctx.base_line + args.line + 1;
         ctx.column = args.column;
-        return .{};
+    }
+
+    fn applyRetSafe(tracked: []Slot, args: anytype) void {
+        if (@hasField(@TypeOf(args), "src")) {
+            args.retval_ptr.* = tracked[args.src];
+        }
+    }
+
+    fn applyCall(args: anytype) !void {
+        // Skip if called is null (indirect call through function pointer - TODO: handle these)
+        if (@TypeOf(args.called) == @TypeOf(null)) return;
+        _ = try @call(.auto, args.called, args.args);
     }
 };
 
@@ -76,11 +96,11 @@ test "alloc sets state to undefined" {
     var ctx = Context.init(allocator);
     defer ctx.deinit();
 
-    var slots = Slot.init(allocator, 3);
+    const slots = Slot.init(allocator, 3);
     defer Slot.deinit(slots, allocator);
 
-    slots[0] = try Slot.apply(.dbg_stmt, slots, &ctx, .{});
-    slots[1] = try Slot.apply(.alloc, slots, &ctx, .{});
+    try Slot.apply(.dbg_stmt, slots, 0, &ctx, .{ .line = 0, .column = 0 });
+    try Slot.apply(.alloc, slots, 1, &ctx, .{});
 
     // dbg_stmt has no state
     try std.testing.expectEqual(null, slots[0].state);
@@ -97,11 +117,11 @@ test "store_safe with undef keeps state undefined" {
     var ctx = Context.init(allocator);
     defer ctx.deinit();
 
-    var slots = Slot.init(allocator, 3);
+    const slots = Slot.init(allocator, 3);
     defer Slot.deinit(slots, allocator);
 
-    slots[1] = try Slot.apply(.alloc, slots, &ctx, .{});
-    slots[2] = try Slot.apply(.store_safe, slots, &ctx, .{ .ptr = 1, .is_undef = true });
+    try Slot.apply(.alloc, slots, 1, &ctx, .{});
+    try Slot.apply(.store_safe, slots, 2, &ctx, .{ .ptr = 1, .is_undef = true });
 
     // alloc slot stays undefined after store_safe with undef
     try std.testing.expectEqual(.undefined, slots[1].state);
@@ -114,11 +134,11 @@ test "store_safe with value sets state to defined" {
     var ctx = Context.init(allocator);
     defer ctx.deinit();
 
-    var slots = Slot.init(allocator, 3);
+    const slots = Slot.init(allocator, 3);
     defer Slot.deinit(slots, allocator);
 
-    slots[1] = try Slot.apply(.alloc, slots, &ctx, .{});
-    slots[2] = try Slot.apply(.store_safe, slots, &ctx, .{ .ptr = 1, .is_undef = false });
+    try Slot.apply(.alloc, slots, 1, &ctx, .{});
+    try Slot.apply(.store_safe, slots, 2, &ctx, .{ .ptr = 1, .is_undef = false });
 
     // alloc slot becomes defined after store_safe with real value
     try std.testing.expectEqual(.defined, slots[1].state);
@@ -136,14 +156,14 @@ test "load from undefined slot reports use before assign" {
 
     var mock_ctx = MockContext{};
 
-    var slots = Slot.init(allocator, 3);
+    const slots = Slot.init(allocator, 3);
     defer Slot.deinit(slots, allocator);
 
     // Set up: alloc creates undefined slot
-    slots[1] = try Slot.apply(.alloc, slots, &mock_ctx, .{});
+    try Slot.apply(.alloc, slots, 1, &mock_ctx, .{});
 
     // Load from undefined slot should return error
-    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.load, slots, &mock_ctx, .{ .ptr = 1 }));
+    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.load, slots, 2, &mock_ctx, .{ .ptr = 1 }));
 }
 
 test "load from defined slot does not report error" {
@@ -151,13 +171,13 @@ test "load from defined slot does not report error" {
 
     var mock_ctx = MockContext{};
 
-    var slots = Slot.init(allocator, 3);
+    const slots = Slot.init(allocator, 4);
     defer Slot.deinit(slots, allocator);
 
     // Set up: alloc then store a real value
-    slots[1] = try Slot.apply(.alloc, slots, &mock_ctx, .{});
-    slots[2] = try Slot.apply(.store_safe, slots, &mock_ctx, .{ .ptr = 1, .is_undef = false });
+    try Slot.apply(.alloc, slots, 1, &mock_ctx, .{});
+    try Slot.apply(.store_safe, slots, 2, &mock_ctx, .{ .ptr = 1, .is_undef = false });
 
     // Load from defined slot should NOT return error
-    _ = try Slot.apply(.load, slots, &mock_ctx, .{ .ptr = 1 });
+    try Slot.apply(.load, slots, 3, &mock_ctx, .{ .ptr = 1 });
 }

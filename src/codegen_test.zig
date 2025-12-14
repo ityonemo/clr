@@ -46,19 +46,86 @@ test "generateFunction generates correct output for dbg_stmt" {
     const data: []const Data = &.{.{ .dbg_stmt = .{ .line = 10, .column = 5 } }};
     // InternPool not used for dbg_stmt, so pass undefined pointer (aligned)
     const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
-    const result = codegen.generateFunction(42, "mymodule.myfunction", dummy_ip, tags, data, 100, "test.zig");
+    const extra: []const u32 = &.{};
+    const result = codegen.generateFunction(42, "mymodule.myfunction", dummy_ip, tags, data, extra, 100, "test.zig");
 
     const expected =
-        \\fn fn_42(ctx: *Context) !void {
+        \\fn fn_42(ctx: *Context) !Slot {
         \\    ctx.file = "test.zig";
         \\    ctx.base_line = 100;
         \\    try ctx.push("mymodule.myfunction");
         \\    defer ctx.pop();
         \\
-        \\    var slots = Slot.init(ctx.allocator, 1);
+        \\    const slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    var retval: Slot = .{};
         \\
-        \\    slots[0] = try Slot.apply(.dbg_stmt, slots, ctx, .{ .line = 10, .column = 5 });
+        \\    try Slot.apply(.dbg_stmt, slots, 0, ctx, .{ .line = 10, .column = 5 });
+        \\    retval = retval;
+        \\    return retval;
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "generateFunction generates correct output for arg" {
+    initTestAllocator();
+    defer clr_allocator.deinit();
+
+    const tags: []const Tag = &.{.arg};
+    const data: []const Data = &.{.{ .no_op = {} }};
+    const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
+    const extra: []const u32 = &.{};
+    const result = codegen.generateFunction(0, "root.add_one", dummy_ip, tags, data, extra, 0, "root.zig");
+
+    const expected =
+        \\fn fn_0(ctx: *Context, arg0: Slot) !Slot {
+        \\    ctx.file = "root.zig";
+        \\    ctx.base_line = 0;
+        \\    try ctx.push("root.add_one");
+        \\    defer ctx.pop();
+        \\
+        \\    const slots = Slot.init(ctx.allocator, 1);
+        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    var retval: Slot = .{};
+        \\
+        \\    try Slot.apply(.arg, slots, 0, ctx, .{ arg0 });
+        \\    retval = retval;
+        \\    return retval;
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "generateFunction generates correct output for ret_safe" {
+    initTestAllocator();
+    defer clr_allocator.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const tags: []const Tag = &.{.ret_safe};
+    // ret_safe uses un_op: operand is the return value slot (slot 5)
+    const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
+    const data: []const Data = &.{.{ .un_op = operand_ref }};
+    const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
+    const extra: []const u32 = &.{};
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, extra, 0, "root.zig");
+
+    const expected =
+        \\fn fn_0(ctx: *Context) !Slot {
+        \\    ctx.file = "root.zig";
+        \\    ctx.base_line = 0;
+        \\    try ctx.push("root.main");
+        \\    defer ctx.pop();
+        \\
+        \\    const slots = Slot.init(ctx.allocator, 1);
+        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    var retval: Slot = .{};
+        \\
+        \\    try Slot.apply(.ret_safe, slots, 0, ctx, .{ .retval_ptr = &retval, .src = 5 });
+        \\    retval = retval;
+        \\    return retval;
         \\}
         \\
     ;
@@ -73,19 +140,23 @@ test "generateFunction generates correct output for alloc" {
     const data: []const Data = &.{.{ .no_op = {} }};
     // InternPool not used for alloc, so pass dummy pointer (aligned)
     const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
-    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, 0, "root.zig");
+    const extra: []const u32 = &.{};
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context) !void {
+        \\fn fn_0(ctx: *Context) !Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\
-        \\    var slots = Slot.init(ctx.allocator, 1);
+        \\    const slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    var retval: Slot = .{};
         \\
-        \\    slots[0] = try Slot.apply(.alloc, slots, ctx, .{});
+        \\    try Slot.apply(.alloc, slots, 0, ctx, .{});
+        \\    retval = retval;
+        \\    return retval;
         \\}
         \\
     ;
@@ -105,19 +176,23 @@ test "generateFunction generates correct output for load" {
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const data: []const Data = &.{.{ .ty_op = .{ .ty = .none, .operand = operand_ref } }};
     const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
-    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, 0, "root.zig");
+    const extra: []const u32 = &.{};
+    const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context) !void {
+        \\fn fn_0(ctx: *Context) !Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\
-        \\    var slots = Slot.init(ctx.allocator, 1);
+        \\    const slots = Slot.init(ctx.allocator, 1);
         \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    var retval: Slot = .{};
         \\
-        \\    slots[0] = try Slot.apply(.load, slots, ctx, .{ .ptr = 5 });
+        \\    try Slot.apply(.load, slots, 0, ctx, .{ .ptr = 5 });
+        \\    retval = retval;
+        \\    return retval;
         \\}
         \\
     ;
@@ -139,7 +214,7 @@ test "epilogue generates correct output" {
         \\pub fn main() void {
         \\    var ctx = Context.init(std.heap.page_allocator);
         \\    defer ctx.deinit();
-        \\    fn_123(&ctx) catch std.process.exit(1);
+        \\    _ = fn_123(&ctx) catch std.process.exit(1);
         \\}
         \\
     ;
