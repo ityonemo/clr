@@ -1,4 +1,5 @@
 const std = @import("std");
+const tag = @import("tag.zig");
 
 pub const Slot = struct {
     state: ?State = null,
@@ -17,63 +18,18 @@ pub const Slot = struct {
         var_name: ?[]const u8 = null,
     };
 
-    pub fn apply(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, args: anytype) !void {
-        switch (tag) {
-            .alloc => applyAlloc(tracked, index),
-            .arg => applyArg(tracked, index, args),
-            .store_safe => applyStoreSafe(tracked, args),
-            .load => try applyLoad(tracked, ctx, args),
-            .dbg_stmt => applyDbgStmt(ctx, args),
-            .ret_safe => applyRetSafe(tracked, args),
-            .call, .call_always_tail, .call_never_tail, .call_never_inline => try applyCall(args),
-            else => {},
+    pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: anytype) !void {
+        switch (any_tag) {
+            inline else => |t| try t.apply(tracked, index, ctx),
         }
     }
 
-    fn applyAlloc(tracked: []Slot, index: usize) void {
-        tracked[index] = .{ .state = .undefined };
-    }
-
-    fn applyArg(tracked: []Slot, index: usize, args: anytype) void {
-        tracked[index] = args[0];
-    }
-
-    fn applyStoreSafe(tracked: []Slot, args: anytype) void {
-        // Skip if ptr is null (global/interned pointer - TODO: handle these)
-        if (@TypeOf(args.ptr) == @TypeOf(null)) return;
-        const ptr = args.ptr;
-        if (args.is_undef) {
-            tracked[ptr].state = .undefined;
-        } else {
-            tracked[ptr].state = .defined;
-        }
-    }
-
-    fn applyLoad(tracked: []Slot, ctx: anytype, args: anytype) !void {
-        // Skip if ptr is null (global/interned pointer - TODO: handle these)
-        if (@TypeOf(args.ptr) == @TypeOf(null)) return;
-        const ptr = args.ptr;
-        const slot = tracked[ptr];
-        if (slot.state == .undefined) {
-            return ctx.reportUseBeforeAssign(slot.meta);
-        }
-    }
-
-    fn applyDbgStmt(ctx: anytype, args: anytype) void {
-        ctx.line = ctx.base_line + args.line + 1;
-        ctx.column = args.column;
-    }
-
-    fn applyRetSafe(tracked: []Slot, args: anytype) void {
-        if (@hasField(@TypeOf(args), "src")) {
-            args.retval_ptr.* = tracked[args.src];
-        }
-    }
-
-    fn applyCall(args: anytype) !void {
+    pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: anytype) !void {
+        _ = tracked;
+        _ = index;
         // Skip if called is null (indirect call through function pointer - TODO: handle these)
-        if (@TypeOf(args.called) == @TypeOf(null)) return;
-        _ = try @call(.auto, args.called, args.args);
+        if (@TypeOf(called) == @TypeOf(null)) return;
+        _ = try @call(.auto, called, .{ctx} ++ args);
     }
 };
 
@@ -99,8 +55,8 @@ test "alloc sets state to undefined" {
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
-    try Slot.apply(.dbg_stmt, list, 0, &ctx, .{ .line = 0, .column = 0 });
-    try Slot.apply(.alloc, list, 1, &ctx, .{});
+    try Slot.apply(.{ .dbg_stmt = .{ .line = 0, .column = 0 } }, list, 0, &ctx);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx);
 
     // dbg_stmt has no state
     try std.testing.expectEqual(null, list[0].state);
@@ -120,8 +76,8 @@ test "store_safe with undef keeps state undefined" {
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
-    try Slot.apply(.alloc, list, 1, &ctx, .{});
-    try Slot.apply(.store_safe, list, 2, &ctx, .{ .ptr = 1, .is_undef = true });
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .is_undef = true } }, list, 2, &ctx);
 
     // alloc slot stays undefined after store_safe with undef
     try std.testing.expectEqual(.undefined, list[1].state);
@@ -137,8 +93,8 @@ test "store_safe with value sets state to defined" {
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
-    try Slot.apply(.alloc, list, 1, &ctx, .{});
-    try Slot.apply(.store_safe, list, 2, &ctx, .{ .ptr = 1, .is_undef = false });
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .is_undef = false } }, list, 2, &ctx);
 
     // alloc slot becomes defined after store_safe with real value
     try std.testing.expectEqual(.defined, list[1].state);
@@ -146,6 +102,10 @@ test "store_safe with value sets state to defined" {
 
 // Mock context for testing load behavior
 const MockContext = struct {
+    line: u32 = 0,
+    column: u32 = 0,
+    base_line: u32 = 0,
+
     pub fn reportUseBeforeAssign(_: *MockContext, _: Slot.Meta) error{UseBeforeAssign} {
         return error.UseBeforeAssign;
     }
@@ -160,10 +120,10 @@ test "load from undefined slot reports use before assign" {
     defer clear_list(list, allocator);
 
     // Set up: alloc creates undefined slot
-    try Slot.apply(.alloc, list, 1, &mock_ctx, .{});
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx);
 
     // Load from undefined slot should return error
-    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.load, list, 2, &mock_ctx, .{ .ptr = 1 }));
+    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 2, &mock_ctx));
 }
 
 test "load from defined slot does not report error" {
@@ -175,9 +135,9 @@ test "load from defined slot does not report error" {
     defer clear_list(list, allocator);
 
     // Set up: alloc then store a real value
-    try Slot.apply(.alloc, list, 1, &mock_ctx, .{});
-    try Slot.apply(.store_safe, list, 2, &mock_ctx, .{ .ptr = 1, .is_undef = false });
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .is_undef = false } }, list, 2, &mock_ctx);
 
     // Load from defined slot should NOT return error
-    try Slot.apply(.load, list, 3, &mock_ctx, .{ .ptr = 1 });
+    try Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 3, &mock_ctx);
 }

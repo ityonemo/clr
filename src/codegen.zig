@@ -25,20 +25,23 @@ fn safeName(tag: Tag) []const u8 {
 }
 
 /// Returns the payload string for a given tag and data
+/// Note: call tags are handled separately in buildSlotLines via payloadCallParts
 fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data, inst_index: usize) []const u8 {
+    _ = extra;
+    _ = tags;
+    _ = data;
     return switch (tag) {
         .arg => payloadArg(arena, inst_index),
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store_safe => payloadStoreSafe(arena, ip, datum),
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
-        .call, .call_always_tail, .call_never_tail, .call_never_inline => payloadCall(arena, ip, datum, extra, tags, data),
         else => ".{}",
     };
 }
 
 fn payloadArg(arena: std.mem.Allocator, inst_index: usize) []const u8 {
-    return clr_allocator.allocPrint(arena, ".{{ arg{d} }}", .{inst_index}, null);
+    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d} }}", .{inst_index}, null);
 }
 
 fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -70,12 +73,17 @@ fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
 }
 
 fn payloadRetSafe(arena: std.mem.Allocator, datum: Data) []const u8 {
-    const operand_index = datum.un_op.toIndex() orelse return ".{ .retval_ptr = &retval }";
+    const operand_index = datum.un_op.toIndex() orelse return ".{ .retval_ptr = &retval, .src = null }";
     const ptr = @intFromEnum(operand_index);
     return clr_allocator.allocPrint(arena, ".{{ .retval_ptr = &retval, .src = {d} }}", .{ptr}, null);
 }
 
-fn payloadCall(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) []const u8 {
+const CallParts = struct {
+    called: []const u8,
+    args: []const u8,
+};
+
+fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) CallParts {
     _ = data; // TODO: may need for resolving callee
     // Call uses pl_op: operand is callee, payload indexes into extra
     // extra[payload] is args_len, followed by args_len Refs
@@ -95,9 +103,9 @@ fn payloadCall(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, ext
         break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
-    // Build args tuple string: .{ ctx, tracked[arg0], tracked[arg1], ... }
-    // ctx goes first, then the slot values for each argument
-    var args_str: []const u8 = ".{ ctx";
+    // Build args tuple string: .{ tracked[arg0], tracked[arg1], ... }
+    var args_str: []const u8 = ".{";
+    var first = true;
 
     var i: u32 = 0;
     while (i < args_len) : (i += 1) {
@@ -105,18 +113,28 @@ fn payloadCall(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, ext
         if (arg_ref.toIndex()) |idx| {
             // Runtime value from local instruction
             const slot_idx = @intFromEnum(idx);
-            args_str = clr_allocator.allocPrint(arena, "{s}, tracked[{d}]", .{ args_str, slot_idx }, null);
+            if (first) {
+                args_str = clr_allocator.allocPrint(arena, "{s} tracked[{d}]", .{ args_str, slot_idx }, null);
+                first = false;
+            } else {
+                args_str = clr_allocator.allocPrint(arena, "{s}, tracked[{d}]", .{ args_str, slot_idx }, null);
+            }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
             const val_type = ip.typeOf(interned_idx);
             if (isZeroSizedType(ip, val_type)) continue;
             // Runtime global/constant - pass empty Slot
-            args_str = clr_allocator.allocPrint(arena, "{s}, Slot{{}}", .{args_str}, null);
+            if (first) {
+                args_str = clr_allocator.allocPrint(arena, "{s} Slot{{}}", .{args_str}, null);
+                first = false;
+            } else {
+                args_str = clr_allocator.allocPrint(arena, "{s}, Slot{{}}", .{args_str}, null);
+            }
         }
     }
     args_str = clr_allocator.allocPrint(arena, "{s} }}", .{args_str}, null);
 
-    return clr_allocator.allocPrint(arena, ".{{ .called = {s}, .args = {s} }}", .{ called_str, args_str }, null);
+    return .{ .called = called_str, .args = args_str };
 }
 
 /// Detect if a Ref is an undefined value (typed or untyped).
@@ -216,16 +234,22 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
     var total_len: usize = 0;
 
     for (tags, data, 0..) |tag, datum, i| {
-        // Check if this is a call to a debug.* function - emit noop_pruned instead
-        const is_pruned_call = switch (tag) {
-            .call, .call_always_tail, .call_never_tail, .call_never_inline => isDebugCall(ip, datum),
-            else => false,
+        const line = switch (tag) {
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
+                // Check if this is a call to a debug.* function - emit noop_pruned_debug instead
+                if (isDebugCall(ip, datum)) {
+                    break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx);\n", .{i}, null);
+                }
+                // Generate Slot.call(called, args, tracked, index, ctx)
+                const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, i }, null);
+            },
+            else => blk: {
+                // Generate Slot.apply(.{ .tag = payload }, tracked, index, ctx)
+                const tag_payload = payload(arena, ip, tag, datum, extra, tags, data, i);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, i }, null);
+            },
         };
-
-        const effective_tag: []const u8 = if (is_pruned_call) "noop_pruned" else safeName(tag);
-        const effective_payload: []const u8 = if (is_pruned_call) ".{}" else payload(arena, ip, tag, datum, extra, tags, data, i);
-
-        const line = clr_allocator.allocPrint(arena, "    try Slot.apply(.{s}, tracked, {d}, ctx, {s});\n", .{ effective_tag, i, effective_payload }, null);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }

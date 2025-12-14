@@ -50,7 +50,7 @@ test "generateFunction generates correct output for dbg_stmt" {
     const result = codegen.generateFunction(42, "mymodule.myfunction", dummy_ip, tags, data, extra, 100, "test.zig");
 
     const expected =
-        \\fn fn_42(ctx: *Context) !Slot {
+        \\fn fn_42(ctx: *Context) anyerror!Slot {
         \\    ctx.file = "test.zig";
         \\    ctx.base_line = 100;
         \\    try ctx.push("mymodule.myfunction");
@@ -60,7 +60,7 @@ test "generateFunction generates correct output for dbg_stmt" {
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.dbg_stmt, tracked, 0, ctx, .{ .line = 10, .column = 5 });
+        \\    try Slot.apply(.{ .dbg_stmt = .{ .line = 10, .column = 5 } }, tracked, 0, ctx);
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -80,7 +80,7 @@ test "generateFunction generates correct output for arg" {
     const result = codegen.generateFunction(0, "root.add_one", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context, arg0: Slot) !Slot {
+        \\fn fn_0(ctx: *Context, arg0: Slot) anyerror!Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.add_one");
@@ -90,7 +90,7 @@ test "generateFunction generates correct output for arg" {
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.arg, tracked, 0, ctx, .{ arg0 });
+        \\    try Slot.apply(.{ .arg = .{ .value = arg0 } }, tracked, 0, ctx);
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -113,7 +113,7 @@ test "generateFunction generates correct output for ret_safe" {
     const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context) !Slot {
+        \\fn fn_0(ctx: *Context) anyerror!Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
@@ -123,7 +123,7 @@ test "generateFunction generates correct output for ret_safe" {
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.ret_safe, tracked, 0, ctx, .{ .retval_ptr = &retval, .src = 5 });
+        \\    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 5 } }, tracked, 0, ctx);
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -144,7 +144,7 @@ test "generateFunction generates correct output for alloc" {
     const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context) !Slot {
+        \\fn fn_0(ctx: *Context) anyerror!Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
@@ -154,7 +154,7 @@ test "generateFunction generates correct output for alloc" {
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.alloc, tracked, 0, ctx, .{});
+        \\    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx);
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -180,7 +180,7 @@ test "generateFunction generates correct output for load" {
     const result = codegen.generateFunction(0, "root.main", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context) !Slot {
+        \\fn fn_0(ctx: *Context) anyerror!Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.main");
@@ -190,7 +190,7 @@ test "generateFunction generates correct output for load" {
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.load, tracked, 0, ctx, .{ .ptr = 5 });
+        \\    try Slot.apply(.{ .load = .{ .ptr = 5 } }, tracked, 0, ctx);
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -209,10 +209,14 @@ test "epilogue generates correct output" {
         \\const std = @import("std");
         \\const clr = @import("clr");
         \\const Context = clr.Context;
-        \\const Slot = clr.Slot;
+        \\const slots = clr.slots;
+        \\const Slot = slots.Slot;
         \\
         \\pub fn main() void {
-        \\    var ctx = Context.init(std.heap.page_allocator);
+        \\    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+        \\    defer _ = gpa.deinit();
+        \\    const allocator = gpa.allocator();
+        \\    var ctx = Context.init(allocator);
         \\    defer ctx.deinit();
         \\    _ = fn_123(&ctx) catch std.process.exit(1);
         \\}

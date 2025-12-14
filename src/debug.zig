@@ -29,3 +29,12 @@ pub fn dumpAir(fqn: []const u8, func_index: u32, func_air: *const Air) void {
     }
     print("=== end AIR ===\n", .{});
 }
+
+const InternPool = compiler.InternPool;
+
+/// Debug an InternPool index - print what kind of entity it represents
+pub fn dumpInternPoolIndex(ip: *const InternPool, index: u32) void {
+    const ip_index: InternPool.Index = @enumFromInt(index);
+    const key = ip.indexToKey(ip_index);
+    print("InternPool[{d}] = {s}\n", .{ index, @tagName(key) });
+}
