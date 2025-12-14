@@ -8,4 +8,5 @@ pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
     _ = index;
     ctx.line = ctx.base_line + self.line + 1;
     ctx.column = self.column;
+    // splat intentionally disabled for this.
 }

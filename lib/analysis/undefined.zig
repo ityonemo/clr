@@ -1,3 +1,5 @@
+const Slot = @import("../slots.zig").Slot;
+
 pub const Meta = struct {
     file: ?[]const u8 = null,
     line: ?u32 = null,
@@ -8,6 +10,42 @@ pub const Meta = struct {
 pub const Undefined = union(enum) {
     defined: void,
     undefined: Meta,
+
+    pub fn implements(comptime tag: anytype) bool {
+        return switch (tag) {
+            .alloc, .store_safe, .load => true,
+            else => false,
+        };
+    }
+
+    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = ctx;
+        _ = payload;
+        tracked[index].undefined = .{ .undefined = .{} };
+    }
+
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        _ = ctx;
+        const ptr = payload.ptr orelse return;
+        if (payload.is_undef) {
+            tracked[ptr].undefined = .{ .undefined = .{} };
+        } else {
+            tracked[ptr].undefined = .{ .defined = {} };
+        }
+    }
+
+    pub fn load(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        const ptr = payload.ptr orelse return;
+        const slot = tracked[ptr];
+        if (slot.undefined) |undef| {
+            switch (undef) {
+                .undefined => return undef.reportUseBeforeAssign(ctx),
+                .defined => {},
+            }
+        }
+    }
 
     pub fn reportUseBeforeAssign(self: Undefined, ctx: anytype) error{UseBeforeAssign} {
         _ = self;

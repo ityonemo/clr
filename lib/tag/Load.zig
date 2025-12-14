@@ -1,15 +1,8 @@
 const Slot = @import("../slots.zig").Slot;
+const splat = @import("../tag.zig").splat;
 
 ptr: ?usize,
 
 pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-    _ = index;
-    const ptr = self.ptr orelse return;
-    const slot = tracked[ptr];
-    if (slot.undefined) |undef| {
-        switch (undef) {
-            .undefined => return undef.reportUseBeforeAssign(ctx),
-            .defined => {},
-        }
-    }
+    try splat(.load, tracked, index, ctx, self);
 }

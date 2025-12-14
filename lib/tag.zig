@@ -19,3 +19,15 @@ pub const AnyTag = union(enum) {
     unreach: Unimplemented,
     br: Unimplemented,
 };
+
+const Slot = @import("slots.zig").Slot;
+const Undefined = @import("analysis/undefined.zig").Undefined;
+const analyses = .{Undefined};
+
+pub fn splat(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    inline for (analyses) |Analysis| {
+        if (Analysis.implements(tag)) {
+            try @field(Analysis, @tagName(tag))(tracked, index, ctx, payload);
+        }
+    }
+}
