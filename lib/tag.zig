@@ -26,7 +26,7 @@ const analyses = .{Undefined};
 
 pub fn splat(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
     inline for (analyses) |Analysis| {
-        if (Analysis.implements(tag)) {
+        if (@hasDecl(Analysis, @tagName(tag))) {
             try @field(Analysis, @tagName(tag))(tracked, index, ctx, payload);
         }
     }

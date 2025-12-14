@@ -48,14 +48,14 @@ Test structure:
 # Build libclr first
 zig build
 
-# Run the custom compiler with the AIR backend on foo.zig
-./test.sh
+# Run a single test case (NOT ./test.sh - that doesn't exist)
+./run_one.sh test/cases/undefined/use_before_assign.zig
 
 # Or manually:
 zig/zig-out/bin/zig build-exe -fair-out=zig-out/lib/libclr.so -ofmt=air foo.zig
 ```
 
-The test file `foo.zig` contains a simple main function. Output goes to stderr.
+Output goes to stderr.
 
 ## Development Guidelines
 

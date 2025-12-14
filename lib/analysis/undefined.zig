@@ -11,13 +11,6 @@ pub const Undefined = union(enum) {
     defined: void,
     undefined: Meta,
 
-    pub fn implements(comptime tag: anytype) bool {
-        return switch (tag) {
-            .alloc, .store_safe, .load => true,
-            else => false,
-        };
-    }
-
     pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = ctx;
         _ = payload;
@@ -32,6 +25,10 @@ pub const Undefined = union(enum) {
             tracked[ptr].undefined = .{ .undefined = .{} };
         } else {
             tracked[ptr].undefined = .{ .defined = {} };
+            // Propagate defined status to caller's slot if this is an arg
+            if (tracked[ptr].arg_ptr) |arg_ptr| {
+                arg_ptr.undefined = .{ .defined = {} };
+            }
         }
     }
 

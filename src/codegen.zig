@@ -103,7 +103,7 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
         break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
-    // Build args tuple string: .{ tracked[arg0], tracked[arg1], ... }
+    // Build args tuple string: .{ &tracked[arg0], &tracked[arg1], ... }
     var args_str: []const u8 = ".{";
     var first = true;
 
@@ -111,24 +111,25 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
     while (i < args_len) : (i += 1) {
         const arg_ref: Ref = @enumFromInt(extra[payload_index + 1 + i]);
         if (arg_ref.toIndex()) |idx| {
-            // Runtime value from local instruction
+            // Runtime value from local instruction - pass pointer to slot
             const slot_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} tracked[{d}]", .{ args_str, slot_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} &tracked[{d}]", .{ args_str, slot_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, tracked[{d}]", .{ args_str, slot_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, &tracked[{d}]", .{ args_str, slot_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
             const val_type = ip.typeOf(interned_idx);
             if (isZeroSizedType(ip, val_type)) continue;
-            // Runtime global/constant - pass empty Slot
+            // Runtime global/constant - pass pointer to empty Slot
+            // TODO: This creates a temporary; may need better handling for constants
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} Slot{{}}", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} &Slot{{}}", .{args_str}, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, Slot{{}}", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, &Slot{{}}", .{args_str}, null);
             }
         }
     }
@@ -196,14 +197,14 @@ fn countArgs(tags: []const Tag) u32 {
     return count;
 }
 
-/// Generate parameter list string like "arg0: Slot, arg1: Slot"
+/// Generate parameter list string like "arg0: *Slot, arg1: *Slot"
 fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
     if (arg_count == 0) return "";
 
-    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: Slot", .{}, null);
+    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: *Slot", .{}, null);
     var i: u32 = 1;
     while (i < arg_count) : (i += 1) {
-        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: Slot", .{ result, i }, null);
+        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: *Slot", .{ result, i }, null);
     }
     return result;
 }
@@ -331,11 +332,11 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + arity Slot args
+    // Build parameter list: ctx + arity *Slot args
     var params: []const u8 = "ctx: *Context";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
-        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: Slot", .{params}, null);
+        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: *Slot", .{params}, null);
     }
 
     return clr_allocator.allocPrint(clr_allocator.allocator(),

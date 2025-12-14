@@ -80,7 +80,7 @@ test "generateFunction generates correct output for arg" {
     const result = codegen.generateFunction(0, "root.add_one", dummy_ip, tags, data, extra, 0, "root.zig");
 
     const expected =
-        \\fn fn_0(ctx: *Context, arg0: Slot) anyerror!Slot {
+        \\fn fn_0(ctx: *Context, arg0: *Slot) anyerror!Slot {
         \\    ctx.file = "root.zig";
         \\    ctx.base_line = 0;
         \\    try ctx.push("root.add_one");
