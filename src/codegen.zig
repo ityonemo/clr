@@ -24,12 +24,9 @@ fn safeName(tag: Tag) []const u8 {
     };
 }
 
-/// Returns the payload string for a given tag and data
-/// Note: call tags are handled separately in buildSlotLines via payloadCallParts
-fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data, inst_index: usize) []const u8 {
-    _ = extra;
-    _ = tags;
-    _ = data;
+/// Returns the payload string for a given tag and data.
+/// Note: call tags are handled separately in buildSlotLines via payloadCallParts.
+fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize) []const u8 {
     return switch (tag) {
         .arg => payloadArg(arena, inst_index),
         .dbg_stmt => payloadDbgStmt(arena, datum),
@@ -37,6 +34,24 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
         else => ".{}",
+    };
+}
+
+/// Generate a single slot line for a given tag and data.
+/// Exposed for testing with underscore prefix to indicate internal use.
+pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data) []const u8 {
+    return switch (tag) {
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
+            if (isDebugCall(ip, datum)) {
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx);\n", .{inst_index}, null);
+            }
+            const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
+            break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
+        },
+        else => blk: {
+            const tag_payload = payload(arena, ip, tag, datum, inst_index);
+            break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, inst_index }, null);
+        },
     };
 }
 
@@ -235,22 +250,7 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
     var total_len: usize = 0;
 
     for (tags, data, 0..) |tag, datum, i| {
-        const line = switch (tag) {
-            .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
-                // Check if this is a call to a debug.* function - emit noop_pruned_debug instead
-                if (isDebugCall(ip, datum)) {
-                    break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx);\n", .{i}, null);
-                }
-                // Generate Slot.call(called, args, tracked, index, ctx)
-                const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, i }, null);
-            },
-            else => blk: {
-                // Generate Slot.apply(.{ .tag = payload }, tracked, index, ctx)
-                const tag_payload = payload(arena, ip, tag, datum, extra, tags, data, i);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, i }, null);
-            },
-        };
+        const line = _slotLine(arena, ip, tag, datum, i, extra, tags, data);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }

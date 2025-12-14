@@ -63,6 +63,128 @@ Output goes to stderr.
 - **Do not modify the zig/ submodule** - Any changes to the Zig compiler must be made by humans, not AI
 - **Use debug.zig for debugging** - Use `src/debug.zig` for debug output. It uses `std.fmt.bufPrint` with raw Linux syscalls. Do not modify this file - it works correctly in the DLL context where `std.debug.print` does not.
 
+## TDD Procedure: Adding a New AIR Tag Handler
+
+Follow these steps to add support for a new AIR instruction tag:
+
+### 1. Add codegen unit test (`src/codegen_test.zig`)
+
+Write a test for the slot line that should be generated:
+
+```zig
+test "slotLine for my_new_tag" {
+    initTestAllocator();
+    defer clr_allocator.deinit();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ /* appropriate data for this tag */ };
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{});
+
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .my_new_tag = .{ /* expected payload */ } }, tracked, 0, ctx);\n", result);
+}
+```
+
+### 2. Add payload generator (`src/codegen.zig`)
+
+Add the tag to the `payload()` switch and create a `payloadMyNewTag()` function:
+
+```zig
+fn payload(...) []const u8 {
+    return switch (tag) {
+        // ...existing tags...
+        .my_new_tag => payloadMyNewTag(arena, datum),
+        else => ".{}",
+    };
+}
+
+fn payloadMyNewTag(arena: std.mem.Allocator, datum: Data) []const u8 {
+    // Extract fields from datum and format the payload
+    return clr_allocator.allocPrint(arena, ".{{ .field = {d} }}", .{datum.field}, null);
+}
+```
+
+### 3. Add tag to AnyTag union (`lib/tag.zig`)
+
+```zig
+pub const AnyTag = union(enum) {
+    // ...existing tags...
+    my_new_tag: @import("tag/MyNewTag.zig"),
+};
+```
+
+### 4. Create tag handler (`lib/tag/MyNewTag.zig`)
+
+```zig
+const Slot = @import("../slots.zig").Slot;
+const splat = @import("../tag.zig").splat;
+
+field: u32,  // fields matching the payload
+
+pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
+    // Tag-specific logic (if any) before analysis dispatch
+    try splat(.my_new_tag, tracked, index, ctx, self);
+}
+```
+
+### 5. Add analysis handler (if needed) (`lib/analysis/*.zig`)
+
+If the tag affects an analysis (e.g., undefined tracking), add a handler:
+
+```zig
+// In lib/analysis/undefined.zig (or other analysis module)
+pub fn my_new_tag(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    // Analysis logic - update tracked slots, report errors, etc.
+}
+```
+
+The `splat()` function in `lib/tag.zig` uses `@hasDecl` to automatically dispatch to any analysis that implements the tag.
+
+### 6. Run unit tests
+
+```sh
+zig build test
+```
+
+### 7. Add integration test (if needed)
+
+Create a test case in `test/cases/` and add a BATS test in `test/integration/`:
+
+```zig
+// test/cases/my_feature/my_test.zig
+pub fn main() u8 {
+    // Zig code that exercises the new tag
+}
+```
+
+```bash
+# test/integration/my_feature.bats
+@test "description of expected behavior" {
+    run compile_and_run "$TEST_CASES/my_feature/my_test.zig"
+    [ "$status" -eq 0 ]  # or check $output for expected errors
+}
+```
+
+### 8. Run integration tests
+
+```sh
+./run_integration.sh
+```
+
+### Key Files Reference
+
+| File | Purpose |
+|------|---------|
+| `src/codegen.zig` | Generates .air.zig source from AIR instructions |
+| `src/codegen_test.zig` | Unit tests for codegen |
+| `lib/tag.zig` | AnyTag union and splat dispatch |
+| `lib/tag/*.zig` | Individual tag handlers |
+| `lib/analysis/*.zig` | Analysis modules (undefined, etc.) |
+| `lib/slots.zig` | Slot struct and apply/call dispatch |
+| `test/cases/` | Integration test input files |
+| `test/integration/*.bats` | BATS integration tests |
+
 ## DLL Relocation Issues (IMPORTANT)
 
 libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of failures:
