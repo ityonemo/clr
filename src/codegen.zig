@@ -26,13 +26,14 @@ fn safeName(tag: Tag) []const u8 {
 
 /// Returns the payload string for a given tag and data.
 /// Note: call tags are handled separately in buildSlotLines via payloadCallParts.
-fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize) []const u8 {
+fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32) []const u8 {
     return switch (tag) {
         .arg => payloadArg(arena, inst_index),
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store_safe => payloadStoreSafe(arena, ip, datum),
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
+        .dbg_var_ptr, .dbg_var_val => payloadDbgVar(arena, datum, extra),
         else => ".{}",
     };
 }
@@ -49,7 +50,7 @@ pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
         },
         else => blk: {
-            const tag_payload = payload(arena, ip, tag, datum, inst_index);
+            const tag_payload = payload(arena, ip, tag, datum, inst_index, extra);
             break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, inst_index }, null);
         },
     };
@@ -91,6 +92,28 @@ fn payloadRetSafe(arena: std.mem.Allocator, datum: Data) []const u8 {
     const operand_index = datum.un_op.toIndex() orelse return ".{ .retval_ptr = &retval, .src = null }";
     const ptr = @intFromEnum(operand_index);
     return clr_allocator.allocPrint(arena, ".{{ .retval_ptr = &retval, .src = {d} }}", .{ptr}, null);
+}
+
+fn payloadDbgVar(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
+    const operand = datum.pl_op.operand;
+    const name_index = datum.pl_op.payload;
+
+    // Extract the slot being named
+    const slot: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
+
+    // Extract the variable name from extra as NullTerminatedString
+    const name = extractString(extra, name_index);
+
+    return clr_allocator.allocPrint(arena, ".{{ .slot = {?d}, .name = \"{s}\" }}", .{ slot, name }, null);
+}
+
+fn extractString(extra: []const u32, start: u32) []const u8 {
+    // Extra stores strings as sequences of u32s containing packed bytes
+    const bytes: [*]const u8 = @ptrCast(extra[start..].ptr);
+    // Find null terminator
+    var len: usize = 0;
+    while (bytes[len] != 0) : (len += 1) {}
+    return bytes[0..len];
 }
 
 const CallParts = struct {

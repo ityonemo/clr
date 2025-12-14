@@ -7,6 +7,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in use_before_assign.main" ]]
     [[ "$output" =~ "use_before_assign.zig:3:4)" ]]
+    [[ "$output" =~ "undefined value assigned to 'x' in use_before_assign.main" ]]
+    [[ "$output" =~ "use_before_assign.zig:2:4)" ]]
 }
 
 @test "no error when variable is assigned before use" {
@@ -22,7 +24,10 @@ load test_helper
 @test "detects undefined variable passed to function" {
     run compile_and_run "$TEST_CASES/undefined/call_with_undefined.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use of undefined value" ]]
+    [[ "$output" =~ "use of undefined value found in call_with_undefined.main" ]]
+    [[ "$output" =~ "call_with_undefined.zig:7:15)" ]]
+    [[ "$output" =~ "undefined value assigned to 'x' in call_with_undefined.main" ]]
+    [[ "$output" =~ "call_with_undefined.zig:6:4)" ]]
 }
 
 @test "no false positive when function sets value via pointer" {

@@ -8,9 +8,10 @@ pub const AnyTag = union(enum) {
     load: @import("tag/Load.zig"),
     dbg_stmt: @import("tag/DbgStmt.zig"),
     ret_safe: @import("tag/RetSafe.zig"),
+    dbg_var_ptr: @import("tag/DbgVarPtr.zig"),
+    dbg_var_val: @import("tag/DbgVarPtr.zig"), // Same handler as dbg_var_ptr
     noop_pruned_debug: Unimplemented,
     // Unimplemented tags encountered during integration tests
-    dbg_var_ptr: Unimplemented,
     block: Unimplemented,
     add_with_overflow: Unimplemented,
     struct_field_val: Unimplemented,
