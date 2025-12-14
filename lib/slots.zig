@@ -4,6 +4,7 @@ const Undefined = @import("analysis/undefined.zig").Undefined;
 
 pub const Slot = struct {
     undefined: ?Undefined = null,
+    reference_arg: ?usize = null,
 
     pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: anytype) !void {
         switch (any_tag) {
@@ -52,6 +53,10 @@ test "alloc sets state to undefined" {
     try std.testing.expectEqual(.undefined, std.meta.activeTag(list[1].undefined.?));
     // uninitialized slot has no undefined tracking
     try std.testing.expectEqual(null, list[2].undefined);
+
+    // reference_arg should remain null for non-arg operations
+    try std.testing.expectEqual(null, list[0].reference_arg);
+    try std.testing.expectEqual(null, list[1].reference_arg);
 }
 
 test "store_safe with undef keeps state undefined" {
@@ -131,4 +136,25 @@ test "load from defined slot does not report error" {
 
     // Load from defined slot should NOT return error
     try Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 3, &mock_ctx);
+}
+
+test "arg sets reference_arg to index" {
+    const allocator = std.testing.allocator;
+
+    var mock_ctx = MockContext{};
+
+    const list = make_list(allocator, 3);
+    defer clear_list(list, allocator);
+
+    // Create an arg with a defined value
+    const arg_slot = Slot{ .undefined = .{ .defined = {} } };
+    try Slot.apply(.{ .arg = .{ .value = arg_slot } }, list, 1, &mock_ctx);
+
+    // Arg should copy the slot value and set reference_arg
+    try std.testing.expectEqual(.defined, std.meta.activeTag(list[1].undefined.?));
+    try std.testing.expectEqual(@as(?usize, 1), list[1].reference_arg);
+
+    // Other slots should remain unaffected
+    try std.testing.expectEqual(null, list[0].reference_arg);
+    try std.testing.expectEqual(null, list[2].reference_arg);
 }
