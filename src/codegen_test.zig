@@ -56,11 +56,11 @@ test "generateFunction generates correct output for dbg_stmt" {
         \\    try ctx.push("mymodule.myfunction");
         \\    defer ctx.pop();
         \\
-        \\    const slots = Slot.init(ctx.allocator, 1);
-        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    const tracked = slots.make_list(ctx.allocator, 1);
+        \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.dbg_stmt, slots, 0, ctx, .{ .line = 10, .column = 5 });
+        \\    try Slot.apply(.dbg_stmt, tracked, 0, ctx, .{ .line = 10, .column = 5 });
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -86,11 +86,11 @@ test "generateFunction generates correct output for arg" {
         \\    try ctx.push("root.add_one");
         \\    defer ctx.pop();
         \\
-        \\    const slots = Slot.init(ctx.allocator, 1);
-        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    const tracked = slots.make_list(ctx.allocator, 1);
+        \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.arg, slots, 0, ctx, .{ arg0 });
+        \\    try Slot.apply(.arg, tracked, 0, ctx, .{ arg0 });
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -119,11 +119,11 @@ test "generateFunction generates correct output for ret_safe" {
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\
-        \\    const slots = Slot.init(ctx.allocator, 1);
-        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    const tracked = slots.make_list(ctx.allocator, 1);
+        \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.ret_safe, slots, 0, ctx, .{ .retval_ptr = &retval, .src = 5 });
+        \\    try Slot.apply(.ret_safe, tracked, 0, ctx, .{ .retval_ptr = &retval, .src = 5 });
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -150,11 +150,11 @@ test "generateFunction generates correct output for alloc" {
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\
-        \\    const slots = Slot.init(ctx.allocator, 1);
-        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    const tracked = slots.make_list(ctx.allocator, 1);
+        \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.alloc, slots, 0, ctx, .{});
+        \\    try Slot.apply(.alloc, tracked, 0, ctx, .{});
         \\    retval = retval;
         \\    return retval;
         \\}
@@ -186,11 +186,11 @@ test "generateFunction generates correct output for load" {
         \\    try ctx.push("root.main");
         \\    defer ctx.pop();
         \\
-        \\    const slots = Slot.init(ctx.allocator, 1);
-        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    const tracked = slots.make_list(ctx.allocator, 1);
+        \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.load, slots, 0, ctx, .{ .ptr = 5 });
+        \\    try Slot.apply(.load, tracked, 0, ctx, .{ .ptr = 5 });
         \\    retval = retval;
         \\    return retval;
         \\}

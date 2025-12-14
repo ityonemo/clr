@@ -17,18 +17,6 @@ pub const Slot = struct {
         var_name: ?[]const u8 = null,
     };
 
-    pub fn init(allocator: std.mem.Allocator, count: usize) []Slot {
-        const slots = allocator.alloc(Slot, count) catch @panic("out of memory");
-        for (slots) |*slot| {
-            slot.* = .{};
-        }
-        return slots;
-    }
-
-    pub fn deinit(slots: []Slot, allocator: std.mem.Allocator) void {
-        allocator.free(slots);
-    }
-
     pub fn apply(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, args: anytype) !void {
         switch (tag) {
             .alloc => applyAlloc(tracked, index),
@@ -89,6 +77,18 @@ pub const Slot = struct {
     }
 };
 
+pub fn make_list(allocator: std.mem.Allocator, count: usize) []Slot {
+    const list = allocator.alloc(Slot, count) catch @panic("out of memory");
+    for (list) |*slot| {
+        slot.* = .{};
+    }
+    return list;
+}
+
+pub fn clear_list(list: []Slot, allocator: std.mem.Allocator) void {
+    allocator.free(list);
+}
+
 test "alloc sets state to undefined" {
     const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
@@ -96,18 +96,18 @@ test "alloc sets state to undefined" {
     var ctx = Context.init(allocator);
     defer ctx.deinit();
 
-    const slots = Slot.init(allocator, 3);
-    defer Slot.deinit(slots, allocator);
+    const list = make_list(allocator, 3);
+    defer clear_list(list, allocator);
 
-    try Slot.apply(.dbg_stmt, slots, 0, &ctx, .{ .line = 0, .column = 0 });
-    try Slot.apply(.alloc, slots, 1, &ctx, .{});
+    try Slot.apply(.dbg_stmt, list, 0, &ctx, .{ .line = 0, .column = 0 });
+    try Slot.apply(.alloc, list, 1, &ctx, .{});
 
     // dbg_stmt has no state
-    try std.testing.expectEqual(null, slots[0].state);
+    try std.testing.expectEqual(null, list[0].state);
     // alloc marks slot as undefined
-    try std.testing.expectEqual(.undefined, slots[1].state);
+    try std.testing.expectEqual(.undefined, list[1].state);
     // uninitialized slot has no state
-    try std.testing.expectEqual(null, slots[2].state);
+    try std.testing.expectEqual(null, list[2].state);
 }
 
 test "store_safe with undef keeps state undefined" {
@@ -117,14 +117,14 @@ test "store_safe with undef keeps state undefined" {
     var ctx = Context.init(allocator);
     defer ctx.deinit();
 
-    const slots = Slot.init(allocator, 3);
-    defer Slot.deinit(slots, allocator);
+    const list = make_list(allocator, 3);
+    defer clear_list(list, allocator);
 
-    try Slot.apply(.alloc, slots, 1, &ctx, .{});
-    try Slot.apply(.store_safe, slots, 2, &ctx, .{ .ptr = 1, .is_undef = true });
+    try Slot.apply(.alloc, list, 1, &ctx, .{});
+    try Slot.apply(.store_safe, list, 2, &ctx, .{ .ptr = 1, .is_undef = true });
 
     // alloc slot stays undefined after store_safe with undef
-    try std.testing.expectEqual(.undefined, slots[1].state);
+    try std.testing.expectEqual(.undefined, list[1].state);
 }
 
 test "store_safe with value sets state to defined" {
@@ -134,14 +134,14 @@ test "store_safe with value sets state to defined" {
     var ctx = Context.init(allocator);
     defer ctx.deinit();
 
-    const slots = Slot.init(allocator, 3);
-    defer Slot.deinit(slots, allocator);
+    const list = make_list(allocator, 3);
+    defer clear_list(list, allocator);
 
-    try Slot.apply(.alloc, slots, 1, &ctx, .{});
-    try Slot.apply(.store_safe, slots, 2, &ctx, .{ .ptr = 1, .is_undef = false });
+    try Slot.apply(.alloc, list, 1, &ctx, .{});
+    try Slot.apply(.store_safe, list, 2, &ctx, .{ .ptr = 1, .is_undef = false });
 
     // alloc slot becomes defined after store_safe with real value
-    try std.testing.expectEqual(.defined, slots[1].state);
+    try std.testing.expectEqual(.defined, list[1].state);
 }
 
 // Mock context for testing load behavior
@@ -156,14 +156,14 @@ test "load from undefined slot reports use before assign" {
 
     var mock_ctx = MockContext{};
 
-    const slots = Slot.init(allocator, 3);
-    defer Slot.deinit(slots, allocator);
+    const list = make_list(allocator, 3);
+    defer clear_list(list, allocator);
 
     // Set up: alloc creates undefined slot
-    try Slot.apply(.alloc, slots, 1, &mock_ctx, .{});
+    try Slot.apply(.alloc, list, 1, &mock_ctx, .{});
 
     // Load from undefined slot should return error
-    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.load, slots, 2, &mock_ctx, .{ .ptr = 1 }));
+    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.load, list, 2, &mock_ctx, .{ .ptr = 1 }));
 }
 
 test "load from defined slot does not report error" {
@@ -171,13 +171,13 @@ test "load from defined slot does not report error" {
 
     var mock_ctx = MockContext{};
 
-    const slots = Slot.init(allocator, 4);
-    defer Slot.deinit(slots, allocator);
+    const list = make_list(allocator, 4);
+    defer clear_list(list, allocator);
 
     // Set up: alloc then store a real value
-    try Slot.apply(.alloc, slots, 1, &mock_ctx, .{});
-    try Slot.apply(.store_safe, slots, 2, &mock_ctx, .{ .ptr = 1, .is_undef = false });
+    try Slot.apply(.alloc, list, 1, &mock_ctx, .{});
+    try Slot.apply(.store_safe, list, 2, &mock_ctx, .{ .ptr = 1, .is_undef = false });
 
     // Load from defined slot should NOT return error
-    try Slot.apply(.load, slots, 3, &mock_ctx, .{ .ptr = 1 });
+    try Slot.apply(.load, list, 3, &mock_ctx, .{ .ptr = 1 });
 }

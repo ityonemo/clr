@@ -95,7 +95,7 @@ fn payloadCall(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, ext
         break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
-    // Build args tuple string: .{ ctx, slots[arg0], slots[arg1], ... }
+    // Build args tuple string: .{ ctx, tracked[arg0], tracked[arg1], ... }
     // ctx goes first, then the slot values for each argument
     var args_str: []const u8 = ".{ ctx";
 
@@ -105,7 +105,7 @@ fn payloadCall(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, ext
         if (arg_ref.toIndex()) |idx| {
             // Runtime value from local instruction
             const slot_idx = @intFromEnum(idx);
-            args_str = clr_allocator.allocPrint(arena, "{s}, slots[{d}]", .{ args_str, slot_idx }, null);
+            args_str = clr_allocator.allocPrint(arena, "{s}, tracked[{d}]", .{ args_str, slot_idx }, null);
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
             const val_type = ip.typeOf(interned_idx);
@@ -225,7 +225,7 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
         const effective_tag: []const u8 = if (is_pruned_call) "noop_pruned" else safeName(tag);
         const effective_payload: []const u8 = if (is_pruned_call) ".{}" else payload(arena, ip, tag, datum, extra, tags, data, i);
 
-        const line = clr_allocator.allocPrint(arena, "    try Slot.apply(.{s}, slots, {d}, ctx, {s});\n", .{ effective_tag, i, effective_payload }, null);
+        const line = clr_allocator.allocPrint(arena, "    try Slot.apply(.{s}, tracked, {d}, ctx, {s});\n", .{ effective_tag, i, effective_payload }, null);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
@@ -270,8 +270,8 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\    try ctx.push("{s}");
         \\    defer ctx.pop();
         \\
-        \\    const slots = Slot.init(ctx.allocator, {d});
-        \\    defer Slot.deinit(slots, ctx.allocator);
+        \\    const tracked = slots.make_list(ctx.allocator, {d});
+        \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{{}};
         \\
         \\{s}    retval = retval;
@@ -287,10 +287,10 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const std = @import("std");
         \\const clr = @import("clr");
         \\const Context = clr.Context;
-        \\const Slot = clr.Slot;
+        \\const slots = clr.slots;
+        \\const Slot = slots.Slot;
         \\
         \\pub fn main() void {{
-        \\    std.debug.print("main started\\n", .{{}});
         \\    var gpa = std.heap.GeneralPurposeAllocator(.{{}}){{}};
         \\    defer _ = gpa.deinit();
         \\    const allocator = gpa.allocator();

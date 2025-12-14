@@ -31,7 +31,7 @@ pub fn pop(self: *Context) void {
     _ = self.stacktrace.pop();
 }
 
-const Slot = @import("slot.zig").Slot;
+const Slot = @import("slots.zig").Slot;
 
 pub fn print(self: *Context, comptime fmt: []const u8, args: anytype) void {
     const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("out of memory");
