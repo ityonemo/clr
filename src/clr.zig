@@ -93,8 +93,8 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Generate Zig source for this function
     const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path);
 
-    // Extract call targets from AIR
-    const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), tags, data, extra);
+    // Extract call targets from AIR (skips debug.* calls)
+    const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), ip, tags, data, extra);
 
     const mir = clr_allocator.allocator().create(FuncMir) catch return null;
     mir.* = .{

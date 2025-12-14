@@ -190,6 +190,23 @@ fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
     return result;
 }
 
+/// Check if an interned function reference is a debug.* function that should be pruned
+fn isDebugCall(ip: *const InternPool, datum: Data) bool {
+    const callee_ref = datum.pl_op.operand;
+    const ip_idx = callee_ref.toInterned() orelse return false;
+
+    // Check if this is actually a function in the InternPool
+    const key = ip.indexToKey(ip_idx);
+    switch (key) {
+        .func => |func_key| {
+            const nav = ip.getNav(func_key.owner_nav);
+            const callee_fqn = nav.fqn.toSlice(ip);
+            return std.mem.startsWith(u8, callee_fqn, "debug.");
+        },
+        else => return false,
+    }
+}
+
 /// Build all slot apply lines into a single buffer (uses provided arena allocator)
 fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32) []const u8 {
     if (tags.len == 0) return "";
@@ -199,7 +216,16 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
     var total_len: usize = 0;
 
     for (tags, data, 0..) |tag, datum, i| {
-        const line = clr_allocator.allocPrint(arena, "    try Slot.apply(.{s}, slots, {d}, ctx, {s});\n", .{ safeName(tag), i, payload(arena, ip, tag, datum, extra, tags, data, i) }, null);
+        // Check if this is a call to a debug.* function - emit noop_pruned instead
+        const is_pruned_call = switch (tag) {
+            .call, .call_always_tail, .call_never_tail, .call_never_inline => isDebugCall(ip, datum),
+            else => false,
+        };
+
+        const effective_tag: []const u8 = if (is_pruned_call) "noop_pruned" else safeName(tag);
+        const effective_payload: []const u8 = if (is_pruned_call) ".{}" else payload(arena, ip, tag, datum, extra, tags, data, i);
+
+        const line = clr_allocator.allocPrint(arena, "    try Slot.apply(.{s}, slots, {d}, ctx, {s});\n", .{ effective_tag, i, effective_payload }, null);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
@@ -301,12 +327,16 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
 const CallTarget = @import("clr.zig").CallTarget;
 
 /// Extract all call targets (InternPool indices and arities) from AIR instructions
-pub fn extractCallTargets(allocator: std.mem.Allocator, tags: []const Tag, data: []const Data, extra: []const u32) []CallTarget {
+/// Skips calls to debug.* functions since they are pruned
+pub fn extractCallTargets(allocator: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32) []CallTarget {
     var targets = std.ArrayListUnmanaged(CallTarget){};
 
     for (tags, data) |tag, datum| {
         switch (tag) {
             .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+                // Skip debug.* calls - they are pruned
+                if (isDebugCall(ip, datum)) continue;
+
                 const callee_ref = datum.pl_op.operand;
                 const payload_index = datum.pl_op.payload;
                 const args_len = extra[payload_index];
