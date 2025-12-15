@@ -34,8 +34,16 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
         .dbg_var_ptr, .dbg_var_val => payloadDbgVar(arena, datum, extra),
+        .bitcast => payloadBitcast(arena, datum),
         else => ".{}",
     };
+}
+
+fn payloadBitcast(arena: std.mem.Allocator, datum: Data) []const u8 {
+    // bitcast uses ty_op: operand is the source value
+    const operand = datum.ty_op.operand;
+    const src: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(arena, ".{{ .src = {?d} }}", .{src}, null);
 }
 
 /// Generate a single slot line for a given tag and data.
@@ -162,12 +170,12 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
             const val_type = ip.typeOf(interned_idx);
             if (isZeroSizedType(ip, val_type)) continue;
             // Runtime global/constant - pass pointer to empty Slot
-            // TODO: This creates a temporary; may need better handling for constants
+            // Use @constCast since constants don't need state propagation back
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} &Slot{{}}", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} @constCast(&Slot{{}})", .{args_str}, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, &Slot{{}}", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, @constCast(&Slot{{}})", .{args_str}, null);
             }
         }
     }

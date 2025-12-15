@@ -1,9 +1,11 @@
 const std = @import("std");
 const tag = @import("tag.zig");
 const Undefined = @import("analysis/undefined.zig").Undefined;
+const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 
 pub const Slot = struct {
     undefined: ?Undefined = null,
+    memory_safety: ?MemorySafety = null,
     reference_arg: ?usize = null,
     arg_ptr: ?*Slot = null,
 
