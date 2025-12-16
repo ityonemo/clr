@@ -49,7 +49,7 @@ test "slotLine for dbg_stmt" {
     defer arena.deinit();
 
     const datum: Data = .{ .dbg_stmt = .{ .line = 10, .column = 5 } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{});
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqualStrings("    try Slot.apply(.{ .dbg_stmt = .{ .line = 10, .column = 5 } }, tracked, 0, ctx);\n", result);
 }
@@ -61,10 +61,10 @@ test "slotLine for arg" {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    const datum: Data = .{ .no_op = {} };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{});
+    const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"});
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0 } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"test_param\" } }, tracked, 0, ctx);\n", result);
 }
 
 test "slotLine for ret_safe with source" {
@@ -77,7 +77,7 @@ test "slotLine for ret_safe with source" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .un_op = operand_ref };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{});
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqualStrings("    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 5 } }, tracked, 0, ctx);\n", result);
 }
@@ -90,7 +90,7 @@ test "slotLine for alloc" {
     defer arena.deinit();
 
     const datum: Data = .{ .no_op = {} };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{});
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqualStrings("    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx);\n", result);
 }
@@ -106,9 +106,9 @@ test "slotLine for store_safe" {
     const ptr_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
     const val_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{});
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{});
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .store_safe = .{ .ptr = 3, .is_undef = false } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .store_safe = .{ .ptr = 3, .src = 4, .is_undef = false } }, tracked, 0, ctx);\n", result);
 }
 
 test "slotLine for load" {
@@ -121,7 +121,7 @@ test "slotLine for load" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{});
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{});
 
     try std.testing.expectEqualStrings("    try Slot.apply(.{ .load = .{ .ptr = 5 } }, tracked, 0, ctx);\n", result);
 }
@@ -140,7 +140,7 @@ test "generateFunction produces complete function" {
         .{ .ty_op = .{ .ty = .none, .operand = load_ref } },
         .{ .un_op = ret_ref },
     };
-    const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig");
+    const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig", &.{});
 
     const expected =
         \\fn fn_42(ctx: *Context) anyerror!Slot {

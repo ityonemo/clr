@@ -60,6 +60,29 @@ export fn init(avt: *const clr_allocator.AllocatorVTable) ?*const u8 {
 
 fn mirDeinit(_: c_anyopaque_t) callconv(.c) void {}
 
+/// Extract parameter names from ZIR for a function
+fn extractParamNames(_: *const Zcu, ip: *const InternPool, func: InternPool.Key.Func, file_scope: *Zcu.File) []const []const u8 {
+    const zir = file_scope.zir orelse return &.{};
+    const zir_inst = func.zir_body_inst.resolve(ip) orelse return &.{};
+
+    // Get the param body (list of param ZIR instructions)
+    const param_body = zir.getParamBody(zir_inst);
+    if (param_body.len == 0) return &.{};
+
+    // Allocate array for names
+    const names = clr_allocator.allocator().alloc([]const u8, param_body.len) catch return &.{};
+
+    for (param_body, 0..) |param_inst, i| {
+        if (zir.getParamName(param_inst)) |name_str| {
+            names[i] = zir.nullTerminatedString(name_str);
+        } else {
+            names[i] = "";
+        }
+    }
+
+    return names;
+}
+
 fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_t, func_index: u32, air_ptr: c_anyopaque_const_t, _: c_anyopaque_const_t) callconv(.c) c_anyopaque_const_t {
     const pt: *const Zcu.PerThread = @ptrCast(@alignCast(pt_ptr));
     const func_air: *const Air = @ptrCast(@alignCast(air_ptr));
@@ -90,8 +113,11 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const file_scope = zcu.navFileScope(func.owner_nav);
     const file_path = file_scope.path.toAbsolute(zcu.comp.dirs, clr_allocator.allocator()) catch return null;
 
+    // Extract parameter names from ZIR
+    const param_names = extractParamNames(zcu, ip, func, file_scope);
+
     // Generate Zig source for this function
-    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path);
+    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path, param_names);
 
     // Extract call targets from AIR (skips debug.* calls)
     const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), ip, tags, data, extra);

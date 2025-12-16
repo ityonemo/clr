@@ -26,14 +26,14 @@ fn safeName(tag: Tag) []const u8 {
 
 /// Returns the payload string for a given tag and data.
 /// Note: call tags are handled separately in buildSlotLines via payloadCallParts.
-fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32) []const u8 {
+fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, param_names: []const []const u8) []const u8 {
     return switch (tag) {
-        .arg => payloadArg(arena, inst_index),
+        .arg => payloadArg(arena, datum, param_names),
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store_safe => payloadStoreSafe(arena, ip, datum),
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
-        .dbg_var_ptr, .dbg_var_val => payloadDbgVar(arena, datum, extra),
+        .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbgVar(arena, datum, extra),
         .bitcast => payloadBitcast(arena, datum),
         else => ".{}",
     };
@@ -48,7 +48,7 @@ fn payloadBitcast(arena: std.mem.Allocator, datum: Data) []const u8 {
 
 /// Generate a single slot line for a given tag and data.
 /// Exposed for testing with underscore prefix to indicate internal use.
-pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data) []const u8 {
+pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8) []const u8 {
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
@@ -58,14 +58,17 @@ pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
         },
         else => blk: {
-            const tag_payload = payload(arena, ip, tag, datum, inst_index, extra);
+            const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names);
             break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, inst_index }, null);
         },
     };
 }
 
-fn payloadArg(arena: std.mem.Allocator, inst_index: usize) []const u8 {
-    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d} }}", .{inst_index}, null);
+fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []const u8) []const u8 {
+    const zir_param_index = datum.arg.zir_param_index;
+    const name = if (zir_param_index < param_names.len) param_names[zir_param_index] else "";
+    // We use the zir_param_index as the arg index for passing the actual value
+    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ zir_param_index, name }, null);
 }
 
 fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -76,14 +79,11 @@ fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
 }
 
 fn payloadStoreSafe(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
-    // TODO: handle global/interned pointers - for now emit null
+    // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(ip, datum.bin_op.rhs);
-    if (datum.bin_op.lhs.toIndex()) |idx| {
-        const ptr = @intFromEnum(idx);
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = {d}, .is_undef = {} }}", .{ ptr, is_undef }, null);
-    } else {
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .is_undef = {} }}", .{is_undef}, null);
-    }
+    const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
+    const src: ?usize = if (datum.bin_op.rhs.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {?d}, .is_undef = {} }}", .{ ptr, src, is_undef }, null);
 }
 
 fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -273,7 +273,7 @@ fn isDebugCall(ip: *const InternPool, datum: Data) bool {
 }
 
 /// Build all slot apply lines into a single buffer (uses provided arena allocator)
-fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32) []const u8 {
+fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, param_names: []const []const u8) []const u8 {
     if (tags.len == 0) return "";
 
     // Build lines into a list first
@@ -281,7 +281,7 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
     var total_len: usize = 0;
 
     for (tags, data, 0..) |tag, datum, i| {
-        const line = _slotLine(arena, ip, tag, datum, i, extra, tags, data);
+        const line = _slotLine(arena, ip, tag, datum, i, extra, tags, data, param_names);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
@@ -298,7 +298,7 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
 }
 
 /// Generate Zig source code for a function from AIR instructions
-pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, base_line: u32, file_path: []const u8) []u8 {
+pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, base_line: u32, file_path: []const u8, param_names: []const []const u8) []u8 {
     if (tags.len == 0) @panic("function with no instructions encountered");
 
     // Per-function arena for temporary allocations
@@ -314,7 +314,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         "";
 
     // Build slot lines first
-    const slot_lines = buildSlotLines(arena.allocator(), ip, tags, data, extra);
+    const slot_lines = buildSlotLines(arena.allocator(), ip, tags, data, extra, param_names);
 
     // Generate complete function with slot lines injected (use main arena for final result)
     // Size hint: slot_lines + template + margin

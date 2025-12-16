@@ -50,6 +50,21 @@ pub const Undefined = union(enum) {
         }
     }
 
+    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        _ = ctx;
+        const slot = payload.slot orelse return;
+        if (slot >= tracked.len) return;
+        if (tracked[slot].undefined) |*undef| {
+            switch (undef.*) {
+                .undefined => |*meta| {
+                    meta.var_name = payload.name;
+                },
+                .defined => {},
+            }
+        }
+    }
+
     pub fn reportUseBeforeAssign(self: Undefined, ctx: anytype) error{UseBeforeAssign} {
         const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
         ctx.print("use of undefined value found in {s} ({s}:{d}:{d})\n", .{ func_name, ctx.file, ctx.line, ctx.column });

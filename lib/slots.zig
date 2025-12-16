@@ -151,7 +151,7 @@ test "arg sets reference_arg and arg_ptr" {
 
     // Create a caller's slot that will be passed as an argument
     var caller_slot = Slot{ .undefined = .{ .defined = {} } };
-    try Slot.apply(.{ .arg = .{ .value = &caller_slot } }, list, 1, &mock_ctx);
+    try Slot.apply(.{ .arg = .{ .value = &caller_slot, .name = "test_param" } }, list, 1, &mock_ctx);
 
     // Arg should copy the slot value and set reference_arg and arg_ptr
     try std.testing.expectEqual(.defined, std.meta.activeTag(list[1].undefined.?));
@@ -173,7 +173,7 @@ test "store_safe propagates defined status through arg_ptr" {
 
     // Simulate caller's undefined slot passed as argument
     var caller_slot = Slot{ .undefined = .{ .undefined = .{} } };
-    try Slot.apply(.{ .arg = .{ .value = &caller_slot } }, list, 0, &mock_ctx);
+    try Slot.apply(.{ .arg = .{ .value = &caller_slot, .name = "test_param" } }, list, 0, &mock_ctx);
 
     // Callee allocates a slot that points to the arg
     try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx);

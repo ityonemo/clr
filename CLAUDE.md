@@ -63,6 +63,20 @@ Output goes to stderr.
 - **Do not modify the zig/ submodule** - Any changes to the Zig compiler must be made by humans, not AI
 - **Use debug.zig for debugging** - Use `src/debug.zig` for debug output. It uses `std.fmt.bufPrint` with raw Linux syscalls. Do not modify this file - it works correctly in the DLL context where `std.debug.print` does not.
 
+## Zig Language Reminders
+
+- **Pointer capture for optionals** - When you need to modify a value inside an optional, use `if (optional) |*ptr|` to capture a pointer to the payload:
+  ```zig
+  // Instead of this awkward pattern:
+  const meta = &(tracked[slot].memory_safety orelse return).stack_ptr;
+  meta.name = .{ .variable = name };
+
+  // Use pointer capture:
+  if (tracked[slot].memory_safety) |*ms| {
+      ms.stack_ptr.name = .{ .variable = name };
+  }
+  ```
+
 ## TDD Procedure: Adding a New AIR Tag Handler
 
 Follow these steps to add support for a new AIR instruction tag:
@@ -217,6 +231,65 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 3. **`allocPrint` needs size hints for large strings** - When formatting a large string (e.g., 18KB+ of slot lines) into a small buffer, `bufPrint` can crash instead of returning `NoSpaceLeft`. Pass a `size_hint` parameter when you know the approximate output size: `clr_allocator.allocPrint(alloc, fmt, args, size_hint)`.
 
 4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building slot lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
+
+## Known Issues / Future Work
+
+### Const vs Mutable Pointer Parameter Tracking
+
+**Issue**: The `arg_ptr` mechanism propagates analysis information backwards through pointer parameters to update the caller's slot state. Currently, this happens for ALL pointer parameters, but it should NOT happen for `*const` pointers since the callee cannot modify through them.
+
+**Current behavior** (in `lib/tag/Arg.zig`):
+```zig
+tracked[index].arg_ptr = self.value;  // Always set, regardless of const
+```
+
+**Problem**: In `lib/analysis/undefined.zig`'s `store_safe`, we propagate backwards unconditionally:
+```zig
+if (tracked[ptr].arg_ptr) |caller_slot| {
+    caller_slot.undefined = tracked[ptr].undefined;  // Wrong for *const!
+}
+```
+
+This could cause incorrect interprocedural analysis - information flowing backwards through const pointers when it shouldn't.
+
+**Fix needed**:
+1. In `src/codegen.zig`'s `payloadArg()`, check if `datum.arg.ty` is a const pointer type
+2. Add `is_const: bool` field to the arg payload
+3. In `lib/tag/Arg.zig`, only set `arg_ptr` when `!self.is_const`
+
+**Type checking approach**: Use the InternPool to check if the parameter type is a pointer with const pointee.
+
+### Slot Type Tracking
+
+**Issue**: Currently, slots don't track what type of value they contain. This makes it difficult to reason about:
+- Whether a slot holds a pointer vs a value type
+- Whether a pointer is const or mutable
+- Struct vs slice vs primitive types
+- How to correctly propagate analysis information through different type categories
+
+**Why this matters**:
+- Pointer types need different handling than value types (e.g., `&param` creates new stack memory)
+- Const pointers shouldn't allow backward propagation
+- Slices contain both a pointer and a length - the pointer part may escape but the length is a value
+- Structs may contain pointers that need tracking
+
+**Proposed approach**:
+1. Add a `type_info` field to `Slot` that captures relevant type categories
+2. During codegen, extract type information from AIR's `datum.*.ty` fields using InternPool
+3. Include type category in the generated payload (e.g., `.{ .value = arg0, .name = "x", .type = .ptr_const }`)
+4. Use type info in analysis handlers to make correct decisions about propagation
+
+**Type categories to consider**:
+- `.value` - primitive value types (integers, floats, bool, etc.)
+- `.ptr_const` - pointer to const data
+- `.ptr_mut` - pointer to mutable data
+- `.slice` - slice type (ptr + len)
+- `.struct_val` - struct by value
+- `.union_val` - union by value
+- `.optional` - optional types
+- `.array` - fixed-size arrays
+
+**InternPool type inspection**: See `zig/src/InternPool.zig` for `indexToKey()` which returns type information that can be pattern-matched to determine the category.
 
 ## AIR Backend Overview
 

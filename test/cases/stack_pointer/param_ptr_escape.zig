@@ -1,4 +1,4 @@
-fn escaped_param_ptr(param: u8) *const u8 {
+noinline fn escaped_param_ptr(param: u8) *const u8 {
     return &param;
 }
 
