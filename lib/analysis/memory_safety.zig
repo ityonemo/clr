@@ -46,7 +46,7 @@ pub const MemorySafety = union(enum) {
         _ = ctx;
         // Set the variable name on the stack_ptr metadata
         const slot = payload.slot orelse return;
-        if (slot >= tracked.len) @panic("improper slot value");
+        std.debug.assert(slot < tracked.len);
         if (tracked[slot].memory_safety) |*ms| {
             if (ms.stack_ptr.name == .other) {
                 ms.stack_ptr.name = .{.variable = payload.name};
@@ -59,7 +59,7 @@ pub const MemorySafety = union(enum) {
         // Bitcast just reinterprets the pointer type (e.g., *u8 -> *const u8)
         // Propagate stack_ptr metadata from source to result
         const src = payload.src orelse return;
-        if (src >= tracked.len) return;
+        std.debug.assert(src < tracked.len);
         if (tracked[src].memory_safety) |ms| {
             tracked[index].memory_safety = ms;
         }
@@ -70,7 +70,8 @@ pub const MemorySafety = union(enum) {
         _ = ctx;
         const ptr = payload.ptr orelse return;
         const src = payload.src orelse return;
-        if (ptr >= tracked.len or src >= tracked.len) return;
+        std.debug.assert(ptr < tracked.len);
+        std.debug.assert(src < tracked.len);
 
         // Check if storing from an arg slot to an alloc slot (parameter case)
         // Transfer the arg's param name/line to the alloc's stack_ptr
@@ -87,7 +88,7 @@ pub const MemorySafety = union(enum) {
     pub fn ret_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = index;
         const src = payload.src orelse return;
-        if (src >= tracked.len) return;
+        std.debug.assert(src < tracked.len);
 
         const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
         if (tracked[src].memory_safety) |ms| {

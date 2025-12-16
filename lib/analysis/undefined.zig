@@ -1,3 +1,4 @@
+const std = @import("std");
 const Slot = @import("../slots.zig").Slot;
 
 pub const Meta = struct {
@@ -54,7 +55,7 @@ pub const Undefined = union(enum) {
         _ = index;
         _ = ctx;
         const slot = payload.slot orelse return;
-        if (slot >= tracked.len) return;
+        std.debug.assert(slot < tracked.len);
         if (tracked[slot].undefined) |*undef| {
             switch (undef.*) {
                 .undefined => |*meta| {
