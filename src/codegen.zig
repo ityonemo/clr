@@ -673,6 +673,9 @@ pub fn extractCallTargets(allocator: std.mem.Allocator, ip: *const InternPool, t
             .call, .call_always_tail, .call_never_tail, .call_never_inline => {
                 // Skip debug.* calls - they are pruned
                 if (isDebugCall(ip, datum)) continue;
+                // Skip allocator create/destroy calls - they are transformed, not called
+                if (isAllocatorCreate(ip, datum)) continue;
+                if (isAllocatorDestroy(ip, datum)) continue;
 
                 const callee_ref = datum.pl_op.operand;
                 const payload_index = datum.pl_op.payload;

@@ -21,6 +21,31 @@ pub const Undefined = union(enum) {
         } };
     }
 
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = payload;
+        // Allocated memory contains undefined data until written to
+        tracked[index].undefined = .{ .undefined = .{
+            .file = ctx.file,
+            .line = ctx.line,
+            .column = ctx.column,
+        } };
+    }
+
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = ctx;
+        const src = payload.src orelse return;
+        // Propagate undefined state from the error union to the unwrapped payload
+        tracked[index].undefined = tracked[src].undefined;
+    }
+
+    pub fn br(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        _ = ctx;
+        const src = payload.src orelse return;
+        // Propagate undefined state from source to block destination
+        tracked[payload.block].undefined = tracked[src].undefined;
+    }
+
     pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = index;
         const ptr = payload.ptr orelse return;
@@ -134,6 +159,23 @@ test "alloc sets undefined state" {
     var tracked = [_]Slot{.{}} ** 3;
 
     try Undefined.alloc(&tracked, 1, &ctx, .{});
+
+    const undef = tracked[1].undefined.?;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
+    try std.testing.expectEqualStrings("test.zig", undef.undefined.file.?);
+    try std.testing.expectEqual(@as(?u32, 10), undef.undefined.line);
+    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.column);
+}
+
+test "alloc_create sets undefined state" {
+    const allocator = std.testing.allocator;
+
+    var ctx = MockContext.init(allocator);
+    defer ctx.deinit();
+
+    var tracked = [_]Slot{.{}} ** 3;
+
+    try Undefined.alloc_create(&tracked, 1, &ctx, .{ .allocator_type = "PageAllocator" });
 
     const undef = tracked[1].undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
