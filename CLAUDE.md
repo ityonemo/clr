@@ -347,3 +347,67 @@ const nav = ip.getNav(func.owner_nav);
 const name = nav.name.toSlice(ip);  // function name as []const u8
 const fqn = nav.fqn.toSlice(ip);    // fully qualified name
 ```
+
+## Allocator Type Identification
+
+When tracking allocator create/destroy for mismatched allocator detection, we need to identify which allocator TYPE is being used.
+
+### Comptime Allocators (e.g., `std.heap.page_allocator`)
+
+For comptime-known allocators, the allocator argument to `create`/`destroy` is an **interned aggregate**:
+
+```zig
+// In call args, arg[0] may be interned
+if (arg_ref.toInterned()) |ip_idx| {
+    const arg_key = ip.indexToKey(ip_idx);
+    switch (arg_key) {
+        .aggregate => |agg| {
+            // Allocator struct has 2 fields: ptr (undef) and vtable
+            const elems = agg.storage.elems;
+            const vtable_elem = elems[1];  // vtable pointer
+            const vtable_key = ip.indexToKey(vtable_elem);
+            switch (vtable_key) {
+                .ptr => |ptr| {
+                    switch (ptr.base_addr) {
+                        .nav => |nav_idx| {
+                            const nav = ip.getNav(nav_idx);
+                            // nav.fqn gives "heap.PageAllocator.vtable"
+                            // Extract "PageAllocator" to identify allocator type
+                        },
+                        else => {},
+                    }
+                },
+                else => {},
+            }
+        },
+        else => {},
+    }
+}
+```
+
+**Key insight**: The vtable pointer's nav FQN (e.g., `heap.PageAllocator.vtable`) uniquely identifies the allocator type.
+
+### Runtime Allocators (e.g., `gpa.allocator()`)
+
+For runtime allocators, the argument is an **inst_ref** pointing to an AIR instruction:
+
+```zig
+if (arg_ref.toIndex()) |inst_idx| {
+    // inst_idx points to an AIR instruction that produces the Allocator value
+    // Need to trace back through AIR to find the source
+}
+```
+
+To identify runtime allocator types, trace the inst_ref back through the AIR:
+1. The inst_ref points to a `load` or `call` instruction
+2. For `gpa.allocator()`, trace to the call to `.allocator()` method
+3. The receiver type of that call (e.g., `GeneralPurposeAllocator`) identifies the allocator type
+
+**Current Status**:
+- Comptime allocators (e.g., `std.heap.page_allocator`) work - we extract "PageAllocator" from the vtable FQN
+- Runtime allocators currently return "Allocator" (generic marker)
+
+**Future Improvements**:
+1. **Global/const allocator tracking**: If an allocator is stored in a global or const variable, trace through the store to find the vtable source
+2. **Allocator type tracking**: Track allocator types through the slot typing system - when a variable is declared as a specific allocator type (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), propagate that type label to any `Allocator` derived from it via `.allocator()`
+3. **Vtable field tracing**: Search for `struct_field_ptr_index_1` (vtable field) stores to find the vtable global for runtime-constructed Allocator structs

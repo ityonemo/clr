@@ -38,3 +38,25 @@ pub fn dumpInternPoolIndex(ip: *const InternPool, index: u32) void {
     const key = ip.indexToKey(ip_index);
     print("InternPool[{d}] = {s}\n", .{ index, @tagName(key) });
 }
+
+/// Debug a function from InternPool - print detailed info
+pub fn dumpFunc(ip: *const InternPool, index: u32) void {
+    const ip_index: InternPool.Index = @enumFromInt(index);
+    const key = ip.indexToKey(ip_index);
+    switch (key) {
+        .func => |func_key| {
+            const nav = ip.getNav(func_key.owner_nav);
+            const fqn = nav.fqn.toSlice(ip);
+            const name = nav.name.toSlice(ip);
+            print("Func[{d}]: fqn={s} name={s} owner_nav={d} ty={d} generic_owner={any}\n", .{
+                index,
+                fqn,
+                name,
+                @intFromEnum(func_key.owner_nav),
+                @intFromEnum(func_key.ty),
+                func_key.generic_owner,
+            });
+        },
+        else => print("Index {d} is not a func: {s}\n", .{ index, @tagName(key) }),
+    }
+}

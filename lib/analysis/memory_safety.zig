@@ -36,6 +36,7 @@ pub const MemorySafety = union(enum) {
         allocated: Meta,
         freed: ?Meta = null, // null = still allocated, has value = freed
         origin: usize, // The original slot where this allocation was created
+        allocator_type: []const u8, // Type of allocator that created this allocation
     };
 
     pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
@@ -50,6 +51,12 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn arg(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        // If the caller passed an allocation, preserve that metadata
+        // so the callee can free it (ownership transfer)
+        if (tracked[index].memory_safety) |ms| {
+            if (ms == .allocation) return;
+        }
+
         // Store parameter info with empty function name - this means returning it directly
         // won't be flagged as an escape (function won't match in ret_safe)
         tracked[index].memory_safety = .{ .stack_ptr = .{
@@ -88,6 +95,17 @@ pub const MemorySafety = union(enum) {
     pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = ctx;
         // Unwrapping an error union extracts the payload value
+        // Propagate memory_safety metadata from source to result
+        const src = payload.src orelse return;
+        std.debug.assert(src < tracked.len);
+        if (tracked[src].memory_safety) |ms| {
+            tracked[index].memory_safety = ms;
+        }
+    }
+
+    pub fn optional_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = ctx;
+        // Unwrapping an optional extracts the payload value
         // Propagate memory_safety metadata from source to result
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
@@ -175,10 +193,25 @@ pub const MemorySafety = union(enum) {
                 if (a.origin == origin) continue;
             }
             if (a.freed == null) {
+                // Before reporting leak, check if any slot with same origin was freed
+                // (handles case where callee freed via arg_ptr propagation)
+                if (isOriginFreed(tracked, a.origin)) continue;
                 // Still allocated after all paths = leak
                 return reportMemoryLeak(ctx, a.allocated);
             }
         }
+    }
+
+    /// Check if any slot with the given origin has been freed
+    fn isOriginFreed(tracked: []Slot, origin: usize) bool {
+        for (tracked) |slot| {
+            const ms = slot.memory_safety orelse continue;
+            if (ms != .allocation) continue;
+            if (ms.allocation.origin == origin and ms.allocation.freed != null) {
+                return true;
+            }
+        }
+        return false;
     }
 
     pub fn reportStackEscape(self: MemorySafety, ctx: anytype) error{StackPointerEscape} {
@@ -237,14 +270,14 @@ pub const MemorySafety = union(enum) {
 
     /// Handle allocator.create() - marks slot as allocated
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = payload;
         tracked[index].memory_safety = .{ .allocation = .{
             .allocated = makeMeta(ctx),
             .origin = index, // This slot is the origin of this allocation
+            .allocator_type = payload.allocator_type,
         } };
     }
 
-    /// Handle allocator.destroy() - marks as freed, detects double-free
+    /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator
     pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = index;
         const ptr = payload.ptr orelse return;
@@ -259,6 +292,7 @@ pub const MemorySafety = union(enum) {
                 .allocated = free_meta, // Use destroy site as placeholder
                 .freed = free_meta,
                 .origin = ptr,
+                .allocator_type = payload.allocator_type,
             } };
             return;
         };
@@ -269,7 +303,37 @@ pub const MemorySafety = union(enum) {
                 if (a.freed) |previous_free| {
                     return reportDoubleFree(ctx, a.allocated, previous_free);
                 }
+                // Check for mismatched allocator types
+                // If the pointer came from a parameter (has arg_ptr) or from another function,
+                // allow generic "Allocator" to match any type since we can't track allocator
+                // identity through parameters or return values.
+                // But if both are in the same function, require exact match (unless both generic).
+                const alloc_is_generic = std.mem.eql(u8, a.allocator_type, "Allocator");
+                const free_is_generic = std.mem.eql(u8, payload.allocator_type, "Allocator");
+                const came_from_param = tracked[ptr].arg_ptr != null;
+                const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+                const came_from_other_func = !std.mem.eql(u8, a.allocated.function, func_name);
+
+                const should_check = if (came_from_param or came_from_other_func)
+                    // From parameter or another function: only check if both are specific
+                    !alloc_is_generic and !free_is_generic
+                else
+                    // Local allocation: check unless both are generic
+                    !alloc_is_generic or !free_is_generic;
+
+                if (should_check and !std.mem.eql(u8, a.allocator_type, payload.allocator_type)) {
+                    return reportMismatchedAllocator(ctx, a, payload.allocator_type);
+                }
                 markAllocationFreed(tracked, a.origin, free_meta);
+
+                // Propagate freed state back to caller via arg_ptr
+                if (tracked[ptr].arg_ptr) |caller_slot| {
+                    if (caller_slot.memory_safety) |*caller_ms| {
+                        if (caller_ms.* == .allocation) {
+                            caller_ms.allocation.freed = free_meta;
+                        }
+                    }
+                }
             },
         }
     }
@@ -341,6 +405,22 @@ pub const MemorySafety = union(enum) {
             alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
         });
         return error.MemoryLeak;
+    }
+
+    fn reportMismatchedAllocator(ctx: anytype, allocation: Allocation, destroy_allocator: []const u8) error{MismatchedAllocator} {
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        ctx.print("allocator mismatch in {s} ({s}:{d}:{d})\n", .{
+            func_name, ctx.file, ctx.line, ctx.column,
+        });
+        ctx.print("allocated with {s} in {s} ({s}:{d}:{d})\n", .{
+            allocation.allocator_type,
+            allocation.allocated.function,
+            allocation.allocated.file,
+            allocation.allocated.line,
+            allocation.allocated.column orelse 0,
+        });
+        ctx.print("freed with {s}\n", .{destroy_allocator});
+        return error.MismatchedAllocator;
     }
 
     fn reportFreeStackMemory(ctx: anytype, stack_ptr: StackPtrMeta) error{FreeStackMemory} {

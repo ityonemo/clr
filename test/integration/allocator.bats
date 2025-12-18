@@ -30,3 +30,37 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "free of stack memory" ]]
 }
+
+@test "detects mismatched allocator for create/destroy" {
+    run compile_and_run "$TEST_CASES/allocator/mismatched_allocator.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "allocator mismatch" ]]
+}
+
+@test "no false positive when callee frees allocation from caller" {
+    run compile_and_run "$TEST_CASES/allocator/pass_to_callee_noleak.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects leak when callee doesn't free allocation from caller" {
+    run compile_and_run "$TEST_CASES/allocator/pass_to_callee_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+}
+
+@test "detects double-free across caller/callee boundary" {
+    run compile_and_run "$TEST_CASES/allocator/pass_to_callee_double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free" ]]
+}
+
+@test "no false positive when caller frees allocation from callee" {
+    run compile_and_run "$TEST_CASES/allocator/free_from_callee_noleak.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects leak when caller doesn't free allocation from callee" {
+    run compile_and_run "$TEST_CASES/allocator/free_from_callee_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+}

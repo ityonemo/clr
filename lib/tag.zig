@@ -36,7 +36,7 @@ pub const AnyTag = union(enum) {
     struct_field_ptr_index_1: Unimplemented,
     struct_field_ptr_index_3: Unimplemented,
     is_non_null: Unimplemented,
-    optional_payload: Unimplemented,
+    optional_payload: @import("tag/OptionalPayload.zig"),
     cmp_lte: Unimplemented,
     sub: Unimplemented,
     slice: Unimplemented,
@@ -49,6 +49,11 @@ pub const AnyTag = union(enum) {
     sub_with_overflow: Unimplemented,
     ret_addr: Unimplemented,
     dbg_arg_inline: @import("tag/DbgVarPtr.zig"), // Same structure as dbg_var_ptr
+    store: Unimplemented,
+    ret_ptr: Unimplemented,
+    ret_load: Unimplemented,
+    stack_trace_frames: Unimplemented,
+    struct_field_ptr_index_2: Unimplemented,
 };
 
 const Slot = @import("slots.zig").Slot;

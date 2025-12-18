@@ -34,7 +34,7 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbgVar(arena, datum, extra),
-        .bitcast, .unwrap_errunion_payload => payloadTransferOp(arena, datum),
+        .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, datum),
         .br => payloadBr(arena, datum),
         else => ".{}",
     };
@@ -69,12 +69,14 @@ pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             }
             if (isAllocatorCreate(ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_create = .{{}} }}, tracked, {d}, ctx);\n", .{inst_index}, null);
+                const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx);\n", .{ allocator_type, inst_index }, null);
             }
             if (isAllocatorDestroy(ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer slot
+                const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
                 const ptr_slot = extractDestroyPtrSlot(datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_destroy = .{{ .ptr = {?d} }} }}, tracked, {d}, ctx);\n", .{ ptr_slot, inst_index }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx);\n", .{ ptr_slot, allocator_type, inst_index }, null);
             }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
             break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
@@ -325,6 +327,192 @@ fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
         },
         else => return null,
     }
+}
+
+/// Extract allocator type from the first argument to create/destroy
+/// Returns FQN like "PageAllocator" for comptime allocators, or traces inst_ref for runtime
+fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) []const u8 {
+    const payload_index = datum.pl_op.payload;
+    const args_len = extra[payload_index];
+    if (args_len == 0) return "unknown";
+
+    // First argument is the allocator (self)
+    const arg_ref: Ref = @enumFromInt(extra[payload_index + 1]);
+
+    // Check if it's an interned value (comptime allocator)
+    if (arg_ref.toInterned()) |ip_idx| {
+        const arg_key = ip.indexToKey(ip_idx);
+        switch (arg_key) {
+            .aggregate => |agg| {
+                // Allocator struct: [ptr, vtable]
+                switch (agg.storage) {
+                    .elems => |elems| {
+                        if (elems.len >= 2) {
+                            const vtable_elem = elems[1];
+                            if (vtable_elem != .none) {
+                                const vtable_key = ip.indexToKey(vtable_elem);
+                                switch (vtable_key) {
+                                    .ptr => |ptr| {
+                                        switch (ptr.base_addr) {
+                                            .nav => |nav_idx| {
+                                                const nav = ip.getNav(nav_idx);
+                                                const fqn = nav.fqn.toSlice(ip);
+                                                // FQN is like "heap.PageAllocator.vtable"
+                                                // Extract "PageAllocator"
+                                                return extractAllocatorName(fqn);
+                                            },
+                                            else => {},
+                                        }
+                                    },
+                                    else => {},
+                                }
+                            }
+                        }
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+        return "comptime_unknown";
+    }
+
+    // It's an inst_ref - trace to find source
+    if (arg_ref.toIndex()) |inst_idx| {
+        return traceAllocatorType(tags, data, ip, @intFromEnum(inst_idx), 0);
+    }
+
+    return "unknown";
+}
+
+/// Extract allocator name from vtable FQN (e.g., "heap.PageAllocator.vtable" -> "PageAllocator")
+fn extractAllocatorName(fqn: []const u8) []const u8 {
+    // Find "heap." prefix and ".vtable" suffix
+    const heap_prefix = "heap.";
+    const vtable_suffix = ".vtable";
+
+    var start: usize = 0;
+    if (std.mem.indexOf(u8, fqn, heap_prefix)) |idx| {
+        start = idx + heap_prefix.len;
+    }
+
+    var end = fqn.len;
+    if (std.mem.indexOf(u8, fqn, vtable_suffix)) |idx| {
+        end = idx;
+    }
+
+    if (start < end) {
+        return fqn[start..end];
+    }
+    return fqn;
+}
+
+/// Trace through AIR to find allocator type from inst_ref
+fn traceAllocatorType(tags: []const Tag, data: []const Data, ip: *const InternPool, inst_idx: usize, depth: u32) []const u8 {
+    if (depth > 10) return "runtime_deep";
+    if (inst_idx >= tags.len) return "runtime_oob";
+
+    const tag = tags[inst_idx];
+    const datum = data[inst_idx];
+
+    switch (tag) {
+        .load => {
+            const ptr_ref = datum.ty_op.operand;
+            if (ptr_ref.toIndex()) |src_idx| {
+                return traceAllocatorType(tags, data, ip, @intFromEnum(src_idx), depth + 1);
+            }
+        },
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
+            // Check if this is a call to .allocator() method
+            const callee_ref = datum.pl_op.operand;
+            if (callee_ref.toInterned()) |ip_idx| {
+                const key = ip.indexToKey(ip_idx);
+                switch (key) {
+                    .func => |func_key| {
+                        const nav = ip.getNav(func_key.owner_nav);
+                        const fqn = nav.fqn.toSlice(ip);
+                        // Check for pattern like "GeneralPurposeAllocator(...).allocator"
+                        if (std.mem.indexOf(u8, fqn, ".allocator")) |_| {
+                            // Extract the type name before .allocator
+                            return extractTypeFromAllocatorMethod(fqn);
+                        }
+                    },
+                    else => {},
+                }
+            }
+        },
+        .struct_field_ptr_index_0, .struct_field_ptr_index_1 => {
+            // Trace through struct field access
+            const base_ref = datum.ty_op.operand;
+            if (base_ref.toIndex()) |src_idx| {
+                return traceAllocatorType(tags, data, ip, @intFromEnum(src_idx), depth + 1);
+            }
+        },
+        .bitcast => {
+            // Trace through bitcast
+            const src_ref = datum.ty_op.operand;
+            if (src_ref.toIndex()) |src_idx| {
+                return traceAllocatorType(tags, data, ip, @intFromEnum(src_idx), depth + 1);
+            }
+        },
+        .alloc => {
+            // We've reached a stack allocation - for runtime allocators, just mark as "Allocator"
+            // TODO: Track allocator type through the typing system for better detection
+            return "Allocator";
+        },
+        else => {},
+    }
+
+    return "runtime";
+}
+
+/// Extract allocator name from type FQN (e.g., "heap.GeneralPurposeAllocator(...)" -> "GeneralPurposeAllocator")
+/// For "mem.Allocator" wrapper type, returns "Allocator" to indicate runtime allocator
+fn extractAllocatorNameFromType(fqn: []const u8) []const u8 {
+    // Check for mem.Allocator - this is a runtime wrapper type
+    if (std.mem.eql(u8, fqn, "mem.Allocator")) {
+        return "Allocator"; // Generic runtime allocator
+    }
+
+    const heap_prefix = "heap.";
+    var start: usize = 0;
+    if (std.mem.indexOf(u8, fqn, heap_prefix)) |idx| {
+        start = idx + heap_prefix.len;
+    }
+
+    // Find the end - either "(" for generics or end of string
+    var end = fqn.len;
+    if (std.mem.indexOf(u8, fqn[start..], "(")) |idx| {
+        end = start + idx;
+    }
+
+    if (start < end) {
+        return fqn[start..end];
+    }
+    return fqn;
+}
+
+/// Extract type from allocator method FQN (e.g., "heap.GeneralPurposeAllocator(...).allocator" -> "GeneralPurposeAllocator")
+fn extractTypeFromAllocatorMethod(fqn: []const u8) []const u8 {
+    // Find the type name between "heap." and "(" or ".allocator"
+    const heap_prefix = "heap.";
+    var start: usize = 0;
+    if (std.mem.indexOf(u8, fqn, heap_prefix)) |idx| {
+        start = idx + heap_prefix.len;
+    }
+
+    // Find the end - either "(" for generics or ".allocator"
+    var end = fqn.len;
+    if (std.mem.indexOf(u8, fqn[start..], "(")) |idx| {
+        end = start + idx;
+    } else if (std.mem.indexOf(u8, fqn[start..], ".allocator")) |idx| {
+        end = start + idx;
+    }
+
+    if (start < end) {
+        return fqn[start..end];
+    }
+    return fqn;
 }
 
 /// Check if FQN is a debug.* function (testable without InternPool)

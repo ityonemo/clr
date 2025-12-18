@@ -16,11 +16,11 @@ pub const Slot = struct {
     }
 
     pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: anytype) !void {
-        _ = tracked;
-        _ = index;
         // Skip if called is null (indirect call through function pointer - TODO: handle these)
         if (@TypeOf(called) == @TypeOf(null)) return;
-        _ = try @call(.auto, called, .{ctx} ++ args);
+        const retval = try @call(.auto, called, .{ctx} ++ args);
+        // Propagate return value's analysis state to caller's slot
+        tracked[index] = retval;
     }
 };
 
