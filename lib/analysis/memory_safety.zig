@@ -4,7 +4,13 @@ const Slot = @import("../slots.zig").Slot;
 
 pub const MemorySafety = union(enum) {
     stack_ptr: StackPtrMeta,
+    allocation: Allocation,
 
+    // TODO: Refactor StackPtrMeta to use Meta and rename Name to Src:
+    //   pub const StackPtrMeta = struct {
+    //       meta: Meta,
+    //       src: Src,  // renamed from Name
+    //   };
     pub const StackPtrMeta = struct {
         function: []const u8,
         file: []const u8,
@@ -17,6 +23,19 @@ pub const MemorySafety = union(enum) {
             parameter: []const u8,
             other: void,
         };
+    };
+
+    pub const Meta = struct {
+        file: []const u8,
+        line: u32,
+        column: ?u32 = null,
+        function: []const u8,
+    };
+
+    pub const Allocation = struct {
+        allocated: Meta,
+        freed: ?Meta = null, // null = still allocated, has value = freed
+        origin: usize, // The original slot where this allocation was created
     };
 
     pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
@@ -48,8 +67,9 @@ pub const MemorySafety = union(enum) {
         const slot = payload.slot orelse return;
         std.debug.assert(slot < tracked.len);
         if (tracked[slot].memory_safety) |*ms| {
+            if (ms.* != .stack_ptr) return;
             if (ms.stack_ptr.name == .other) {
-                ms.stack_ptr.name = .{.variable = payload.name};
+                ms.stack_ptr.name = .{ .variable = payload.name };
             }
         }
     }
@@ -57,11 +77,35 @@ pub const MemorySafety = union(enum) {
     pub fn bitcast(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = ctx;
         // Bitcast just reinterprets the pointer type (e.g., *u8 -> *const u8)
-        // Propagate stack_ptr metadata from source to result
+        // Propagate memory_safety metadata from source to result
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
         if (tracked[src].memory_safety) |ms| {
             tracked[index].memory_safety = ms;
+        }
+    }
+
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = ctx;
+        // Unwrapping an error union extracts the payload value
+        // Propagate memory_safety metadata from source to result
+        const src = payload.src orelse return;
+        std.debug.assert(src < tracked.len);
+        if (tracked[src].memory_safety) |ms| {
+            tracked[index].memory_safety = ms;
+        }
+    }
+
+    pub fn br(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        _ = ctx;
+        // Branch to block with value - propagate state from src to target block
+        const src = payload.src orelse return;
+        const block = payload.block;
+        std.debug.assert(src < tracked.len);
+        std.debug.assert(block < tracked.len);
+        if (tracked[src].memory_safety) |ms| {
+            tracked[block].memory_safety = ms;
         }
     }
 
@@ -87,15 +131,52 @@ pub const MemorySafety = union(enum) {
 
     pub fn ret_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = index;
+
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
 
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        if (tracked[src].memory_safety) |ms| {
-            // Only flag as escape if stack_ptr is from this function
-            // Args have empty function name, so they won't match
-            if (std.mem.eql(u8, ms.stack_ptr.function, func_name)) {
-                return ms.reportStackEscape(ctx);
+        const ms = tracked[src].memory_safety orelse return;
+
+        // Check for stack pointer escape
+        switch (ms) {
+            .stack_ptr => |sp| {
+                const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+                // Only flag as escape if stack_ptr is from this function
+                // Args have empty function name, so they won't match
+                if (std.mem.eql(u8, sp.function, func_name)) {
+                    return ms.reportStackEscape(ctx);
+                }
+            },
+            .allocation => {},
+        }
+
+        // Merge state into retval for ownership transfer tracking.
+        // If we're returning an allocation, it's not a leak - ownership transfers to caller.
+        payload.retval_ptr.memory_safety = ms;
+    }
+
+    /// Called at the end of each function to check for memory leaks.
+    /// Deferred until after all slots are processed so success paths can free
+    /// allocations before we check for leaks.
+    pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: anytype) !void {
+        // Get the origin of any allocation being returned (ownership transfer)
+        const returned_origin: ?usize = if (retval.memory_safety) |ms| switch (ms) {
+            .allocation => |a| a.origin,
+            .stack_ptr => null,
+        } else null;
+
+        for (tracked) |slot| {
+            const ms = slot.memory_safety orelse continue;
+            if (ms != .allocation) continue;
+            const a = ms.allocation;
+
+            // Skip if this allocation is being returned (ownership transfer)
+            if (returned_origin) |origin| {
+                if (a.origin == origin) continue;
+            }
+            if (a.freed == null) {
+                // Still allocated after all paths = leak
+                return reportMemoryLeak(ctx, a.allocated);
             }
         }
     }
@@ -139,6 +220,135 @@ pub const MemorySafety = union(enum) {
             },
         }
         return error.StackPointerEscape;
+    }
+
+    // =========================================================================
+    // Allocation tracking (use-after-free, double-free, memory leak detection)
+    // =========================================================================
+
+    fn makeMeta(ctx: anytype) Meta {
+        return .{
+            .file = ctx.file,
+            .line = ctx.line,
+            .column = ctx.column,
+            .function = ctx.stacktrace.items[ctx.stacktrace.items.len - 1],
+        };
+    }
+
+    /// Handle allocator.create() - marks slot as allocated
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = payload;
+        tracked[index].memory_safety = .{ .allocation = .{
+            .allocated = makeMeta(ctx),
+            .origin = index, // This slot is the origin of this allocation
+        } };
+    }
+
+    /// Handle allocator.destroy() - marks as freed, detects double-free
+    pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        const ptr = payload.ptr orelse return;
+        std.debug.assert(ptr < tracked.len);
+
+        const free_meta = makeMeta(ctx);
+
+        if (tracked[ptr].memory_safety) |*ms| {
+            switch (ms.*) {
+                .allocation => |*a| {
+                    if (a.freed) |previous_free| {
+                        // Double free detected
+                        return reportDoubleFree(ctx, a.allocated, previous_free);
+                    }
+                    // Mark this slot and all slots with the same origin as freed
+                    markAllocationFreed(tracked, a.origin, free_meta);
+                },
+                .stack_ptr => {}, // Not heap allocation, ignore
+            }
+        } else {
+            // Slot wasn't tracked as allocated (allocation state didn't propagate)
+            // Mark it as freed anyway so we can detect use-after-free
+            tracked[ptr].memory_safety = .{ .allocation = .{
+                .allocated = free_meta, // Use destroy site as placeholder
+                .freed = free_meta,
+                .origin = ptr,
+            } };
+        }
+    }
+
+    /// Mark all slots with the given origin as freed.
+    /// This handles cases where allocation state was propagated to multiple slots.
+    /// SUSPICIOUS: This approach may not be correct - revisit after understanding
+    /// the Elixir implementation's pointer chasing approach better.
+    fn markAllocationFreed(tracked: []Slot, origin: usize, free_meta: Meta) void {
+        for (tracked) |*slot| {
+            if (slot.memory_safety) |*ms| {
+                switch (ms.*) {
+                    .allocation => |*a| {
+                        if (a.origin == origin) {
+                            a.freed = free_meta;
+                        }
+                    },
+                    .stack_ptr => {},
+                }
+            }
+        }
+    }
+
+    /// Handle load - detect use-after-free
+    pub fn load(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        const ptr = payload.ptr orelse return;
+        std.debug.assert(ptr < tracked.len);
+
+        if (tracked[ptr].memory_safety) |ms| {
+            switch (ms) {
+                .allocation => |a| {
+                    if (a.freed) |free_site| {
+                        return reportUseAfterFree(ctx, a.allocated, free_site);
+                    }
+                },
+                .stack_ptr => {}, // Not heap allocation, ignore
+            }
+        }
+    }
+
+    fn reportDoubleFree(ctx: anytype, alloc_site: Meta, previous_free: Meta) error{DoubleFree} {
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        ctx.print("double free in {s} ({s}:{d}:{d})\n", .{
+            func_name, ctx.file, ctx.line, ctx.column,
+        });
+        ctx.print("previously freed in {s} ({s}:{d}:{d})\n", .{
+            previous_free.function, previous_free.file, previous_free.line, previous_free.column orelse 0,
+        });
+        ctx.print("originally allocated in {s} ({s}:{d}:{d})\n", .{
+            alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
+        });
+        return error.DoubleFree;
+    }
+
+    fn reportUseAfterFree(ctx: anytype, alloc_site: Meta, free_site: Meta) error{UseAfterFree} {
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        ctx.print("use after free in {s} ({s}:{d}:{d})\n", .{
+            func_name, ctx.file, ctx.line, ctx.column,
+        });
+        ctx.print("freed in {s} ({s}:{d}:{d})\n", .{
+            free_site.function, free_site.file, free_site.line, free_site.column orelse 0,
+        });
+        ctx.print("allocated in {s} ({s}:{d}:{d})\n", .{
+            alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
+        });
+        return error.UseAfterFree;
+    }
+
+    fn reportMemoryLeak(ctx: anytype, alloc_site: Meta) error{MemoryLeak} {
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        ctx.print("memory leak in {s} ({s}:{d}:{d})\n", .{
+            func_name, ctx.file, ctx.line, ctx.column,
+        });
+        ctx.print("allocated in {s} ({s}:{d}:{d})\n", .{
+            alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
+        });
+        return error.MemoryLeak;
     }
 };
 

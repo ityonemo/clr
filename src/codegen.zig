@@ -26,49 +26,88 @@ fn safeName(tag: Tag) []const u8 {
 
 /// Returns the payload string for a given tag and data.
 /// Note: call tags are handled separately in buildSlotLines via payloadCallParts.
-fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, param_names: []const []const u8) []const u8 {
+fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
-        .arg => payloadArg(arena, datum, param_names),
+        .arg => payloadArg(arena, datum, param_names, arg_counter),
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store_safe => payloadStoreSafe(arena, ip, datum),
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbgVar(arena, datum, extra),
-        .bitcast => payloadBitcast(arena, datum),
+        .bitcast, .unwrap_errunion_payload => payloadTransferOp(arena, datum),
+        .br => payloadBr(arena, datum),
         else => ".{}",
     };
 }
 
-fn payloadBitcast(arena: std.mem.Allocator, datum: Data) []const u8 {
-    // bitcast uses ty_op: operand is the source value
+/// Payload for operations that transfer all properties from source to result.
+/// Used for bitcast, unwrap_errunion_payload, etc. where the result carries
+/// the same memory safety / allocation state as the source.
+fn payloadTransferOp(arena: std.mem.Allocator, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
     return clr_allocator.allocPrint(arena, ".{{ .src = {?d} }}", .{src}, null);
 }
 
+/// Payload for br (branch to block with value).
+/// Transfers properties from operand to target block.
+fn payloadBr(arena: std.mem.Allocator, datum: Data) []const u8 {
+    const block_inst = @intFromEnum(datum.br.block_inst);
+    const src: ?usize = if (datum.br.operand.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {?d} }}", .{ block_inst, src }, null);
+}
+
+
 /// Generate a single slot line for a given tag and data.
 /// Exposed for testing with underscore prefix to indicate internal use.
-pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8) []const u8 {
+/// arg_counter tracks sequential arg indices (may differ from zir_param_index).
+pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
                 break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx);\n", .{inst_index}, null);
             }
+            if (isAllocatorCreate(ip, datum)) {
+                // Prune allocator.create() - emit special tag for tracking
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_create = .{{}} }}, tracked, {d}, ctx);\n", .{inst_index}, null);
+            }
+            if (isAllocatorDestroy(ip, datum)) {
+                // Prune allocator.destroy() - emit special tag with pointer slot
+                const ptr_slot = extractDestroyPtrSlot(datum, extra, tags, data);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_destroy = .{{ .ptr = {?d} }} }}, tracked, {d}, ctx);\n", .{ ptr_slot, inst_index }, null);
+            }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
             break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
         },
         else => blk: {
-            const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names);
+            const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names, arg_counter);
             break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, inst_index }, null);
         },
     };
 }
 
-fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []const u8) []const u8 {
+/// Generate payload for .arg tag.
+///
+/// zir_param_index is the original ZIR parameter index, which may have gaps when
+/// comptime parameters are present (they don't become runtime args but keep their
+/// ZIR indices). For example, a function with 4 ZIR params where param 1 is comptime
+/// would have zir_param_index values of 0, 2, 3 for its 3 runtime .arg tags.
+///
+/// We use zir_param_index for name lookup (param_names is indexed by ZIR index),
+/// but arg_counter for the argN reference (sequential: arg0, arg1, arg2).
+///
+/// arg_counter is optional to support unit tests that test single tags in isolation
+/// without needing to set up a counter. When null, falls back to zir_param_index
+/// (works for tests since they typically use index 0).
+fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     const zir_param_index = datum.arg.zir_param_index;
     const name = if (zir_param_index < param_names.len) param_names[zir_param_index] else "";
-    // We use the zir_param_index as the arg index for passing the actual value
-    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ zir_param_index, name }, null);
+    const arg_index = if (arg_counter) |counter| blk: {
+        const idx = counter.*;
+        counter.* += 1;
+        break :blk idx;
+    } else zir_param_index;
+    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ arg_index, name }, null);
 }
 
 fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -257,19 +296,70 @@ fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
 
 /// Check if an interned function reference is a debug.* function that should be pruned
 fn isDebugCall(ip: *const InternPool, datum: Data) bool {
-    const callee_ref = datum.pl_op.operand;
-    const ip_idx = callee_ref.toInterned() orelse return false;
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isDebugFqn(fqn);
+}
 
-    // Check if this is actually a function in the InternPool
+/// Check if an interned function reference is an Allocator.create call
+fn isAllocatorCreate(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorCreateFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.destroy call
+fn isAllocatorDestroy(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorDestroyFqn(fqn);
+}
+
+/// Extract FQN from a call instruction's callee reference
+fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
+    const callee_ref = datum.pl_op.operand;
+    const ip_idx = callee_ref.toInterned() orelse return null;
+
     const key = ip.indexToKey(ip_idx);
     switch (key) {
         .func => |func_key| {
             const nav = ip.getNav(func_key.owner_nav);
-            const callee_fqn = nav.fqn.toSlice(ip);
-            return std.mem.startsWith(u8, callee_fqn, "debug.");
+            return nav.fqn.toSlice(ip);
         },
-        else => return false,
+        else => return null,
     }
+}
+
+/// Check if FQN is a debug.* function (testable without InternPool)
+pub fn isDebugFqn(fqn: []const u8) bool {
+    return std.mem.startsWith(u8, fqn, "debug.");
+}
+
+/// Check if FQN is an Allocator.create call (testable without InternPool)
+/// Matches patterns like "mem.Allocator.create__anon_*" or "std.mem.Allocator.create__anon_*"
+pub fn isAllocatorCreateFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.create") != null;
+}
+
+/// Check if FQN is an Allocator.destroy call (testable without InternPool)
+/// Matches patterns like "mem.Allocator.destroy__anon_*" or "std.mem.Allocator.destroy__anon_*"
+pub fn isAllocatorDestroyFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.destroy") != null;
+}
+
+/// Extract the pointer slot being destroyed from a destroy call.
+/// destroy(self, ptr) - the second argument (index 1) is the pointer.
+fn extractDestroyPtrSlot(datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) ?usize {
+    _ = tags;
+    _ = data;
+    const payload_index = datum.pl_op.payload;
+    const args_len = extra[payload_index];
+
+    // destroy has 2 args: (self, ptr) - we want arg index 1
+    if (args_len < 2) return null;
+
+    const ptr_arg_ref: Ref = @enumFromInt(extra[payload_index + 1 + 1]); // +1 for args_len, +1 for second arg
+    if (ptr_arg_ref.toIndex()) |idx| {
+        return @intFromEnum(idx);
+    }
+    return null;
 }
 
 /// Build all slot apply lines into a single buffer (uses provided arena allocator)
@@ -280,8 +370,11 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
     var lines: std.ArrayListUnmanaged([]const u8) = .empty;
     var total_len: usize = 0;
 
+    // Track sequential arg counter (separate from zir_param_index)
+    var arg_counter: u32 = 0;
+
     for (tags, data, 0..) |tag, datum, i| {
-        const line = _slotLine(arena, ip, tag, datum, i, extra, tags, data, param_names);
+        const line = _slotLine(arena, ip, tag, datum, i, extra, tags, data, param_names, &arg_counter);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
@@ -330,7 +423,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{{}};
         \\
-        \\{s}    retval = retval;
+        \\{s}    try slots.onFinish(tracked, &retval, ctx);
         \\    return retval;
         \\}}
         \\

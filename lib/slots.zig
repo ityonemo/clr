@@ -36,6 +36,10 @@ pub fn clear_list(list: []Slot, allocator: std.mem.Allocator) void {
     allocator.free(list);
 }
 
+pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: anytype) !void {
+    try tag.splatFinish(tracked, retval, ctx);
+}
+
 test "alloc sets state to undefined" {
     const Context = @import("Context.zig");
     const allocator = std.testing.allocator;

@@ -59,7 +59,11 @@ Output goes to stderr.
 
 ## Development Guidelines
 
-- **Test-Driven Development** - Write tests first, then implementation
+- **Test-Driven Development (STRICT)** - Tests MUST exist and fail BEFORE writing implementation code:
+  1. **New features**: Write integration tests FIRST, then unit tests for components
+  2. **Bug fixes**: Write a failing test that reproduces the bug, then fix it
+  3. **Never** propose or implement "testing" as a final phase - tests come first
+  4. Follow the TDD Procedure below for adding new AIR tag handlers
 - **Do not modify the zig/ submodule** - Any changes to the Zig compiler must be made by humans, not AI
 - **Use debug.zig for debugging** - Use `src/debug.zig` for debug output. It uses `std.fmt.bufPrint` with raw Linux syscalls. Do not modify this file - it works correctly in the DLL context where `std.debug.print` does not.
 
@@ -81,7 +85,28 @@ Output goes to stderr.
 
 Follow these steps to add support for a new AIR instruction tag:
 
-### 1. Add codegen unit test (`src/codegen_test.zig`)
+### 1. Write integration test FIRST (`test/integration/*.bats`)
+
+Create the end-to-end test that will fail until implementation is complete:
+
+```zig
+// test/cases/my_feature/my_test.zig
+pub fn main() u8 {
+    // Zig code that exercises the new tag
+}
+```
+
+```bash
+# test/integration/my_feature.bats
+@test "description of expected behavior" {
+    run compile_and_run "$TEST_CASES/my_feature/my_test.zig"
+    [ "$status" -eq 0 ]  # or check $output for expected errors
+}
+```
+
+Run `./run_integration.sh` - the new test should FAIL. This confirms the test is valid.
+
+### 2. Add codegen unit test (`src/codegen_test.zig`)
 
 Write a test for the slot line that should be generated:
 
@@ -100,7 +125,7 @@ test "slotLine for my_new_tag" {
 }
 ```
 
-### 2. Add payload generator (`src/codegen.zig`)
+### 3. Add payload generator (`src/codegen.zig`)
 
 Add the tag to the `payload()` switch and create a `payloadMyNewTag()` function:
 
@@ -119,7 +144,7 @@ fn payloadMyNewTag(arena: std.mem.Allocator, datum: Data) []const u8 {
 }
 ```
 
-### 3. Add tag to AnyTag union (`lib/tag.zig`)
+### 4. Add tag to AnyTag union (`lib/tag.zig`)
 
 ```zig
 pub const AnyTag = union(enum) {
@@ -128,7 +153,7 @@ pub const AnyTag = union(enum) {
 };
 ```
 
-### 4. Create tag handler (`lib/tag/MyNewTag.zig`)
+### 5. Create tag handler (`lib/tag/MyNewTag.zig`)
 
 ```zig
 const Slot = @import("../slots.zig").Slot;
@@ -142,7 +167,7 @@ pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
 }
 ```
 
-### 5. Add analysis handler (if needed) (`lib/analysis/*.zig`)
+### 6. Add analysis handler (if needed) (`lib/analysis/*.zig`)
 
 If the tag affects an analysis (e.g., undefined tracking), add a handler:
 
@@ -155,36 +180,19 @@ pub fn my_new_tag(tracked: []Slot, index: usize, ctx: anytype, payload: anytype)
 
 The `splat()` function in `lib/tag.zig` uses `@hasDecl` to automatically dispatch to any analysis that implements the tag.
 
-### 6. Run unit tests
+### 7. Run unit tests
 
 ```sh
 zig build test
 ```
 
-### 7. Add integration test (if needed)
-
-Create a test case in `test/cases/` and add a BATS test in `test/integration/`:
-
-```zig
-// test/cases/my_feature/my_test.zig
-pub fn main() u8 {
-    // Zig code that exercises the new tag
-}
-```
-
-```bash
-# test/integration/my_feature.bats
-@test "description of expected behavior" {
-    run compile_and_run "$TEST_CASES/my_feature/my_test.zig"
-    [ "$status" -eq 0 ]  # or check $output for expected errors
-}
-```
-
-### 8. Run integration tests
+### 8. Verify integration tests pass
 
 ```sh
 ./run_integration.sh
 ```
+
+The tests from step 1 should now pass.
 
 ### Key Files Reference
 
