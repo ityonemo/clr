@@ -252,19 +252,7 @@ pub const MemorySafety = union(enum) {
 
         const free_meta = makeMeta(ctx);
 
-        if (tracked[ptr].memory_safety) |*ms| {
-            switch (ms.*) {
-                .allocation => |*a| {
-                    if (a.freed) |previous_free| {
-                        // Double free detected
-                        return reportDoubleFree(ctx, a.allocated, previous_free);
-                    }
-                    // Mark this slot and all slots with the same origin as freed
-                    markAllocationFreed(tracked, a.origin, free_meta);
-                },
-                .stack_ptr => {}, // Not heap allocation, ignore
-            }
-        } else {
+        const ms = tracked[ptr].memory_safety orelse {
             // Slot wasn't tracked as allocated (allocation state didn't propagate)
             // Mark it as freed anyway so we can detect use-after-free
             tracked[ptr].memory_safety = .{ .allocation = .{
@@ -272,7 +260,14 @@ pub const MemorySafety = union(enum) {
                 .freed = free_meta,
                 .origin = ptr,
             } };
+            return;
+        };
+        if (ms != .allocation) return; // Not heap allocation, ignore
+
+        if (ms.allocation.freed) |previous_free| {
+            return reportDoubleFree(ctx, ms.allocation.allocated, previous_free);
         }
+        markAllocationFreed(tracked, ms.allocation.origin, free_meta);
     }
 
     /// Mark all slots with the given origin as freed.
@@ -281,14 +276,11 @@ pub const MemorySafety = union(enum) {
     /// the Elixir implementation's pointer chasing approach better.
     fn markAllocationFreed(tracked: []Slot, origin: usize, free_meta: Meta) void {
         for (tracked) |*slot| {
+            // Use pointer capture since we're modifying the allocation
             if (slot.memory_safety) |*ms| {
-                switch (ms.*) {
-                    .allocation => |*a| {
-                        if (a.origin == origin) {
-                            a.freed = free_meta;
-                        }
-                    },
-                    .stack_ptr => {},
+                if (ms.* != .allocation) continue;
+                if (ms.allocation.origin == origin) {
+                    ms.allocation.freed = free_meta;
                 }
             }
         }
@@ -300,15 +292,11 @@ pub const MemorySafety = union(enum) {
         const ptr = payload.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
-        if (tracked[ptr].memory_safety) |ms| {
-            switch (ms) {
-                .allocation => |a| {
-                    if (a.freed) |free_site| {
-                        return reportUseAfterFree(ctx, a.allocated, free_site);
-                    }
-                },
-                .stack_ptr => {}, // Not heap allocation, ignore
-            }
+        const ms = tracked[ptr].memory_safety orelse return;
+        if (ms != .allocation) return;
+        const a = ms.allocation;
+        if (a.freed) |free_site| {
+            return reportUseAfterFree(ctx, a.allocated, free_site);
         }
     }
 
