@@ -69,17 +69,42 @@ Output goes to stderr.
 
 ## Zig Language Reminders
 
-- **Pointer capture for optionals** - When you need to modify a value inside an optional, use `if (optional) |*ptr|` to capture a pointer to the payload:
+- **Flatten control flow** - Use Zig's tools to flatten imperative code instead of nesting logic. Early returns/continues with `orelse` and union checks keep the main logic at the top level:
   ```zig
-  // Instead of this awkward pattern:
-  const meta = &(tracked[slot].memory_safety orelse return).stack_ptr;
-  meta.name = .{ .variable = name };
+  // BAD: Deeply nested logic
+  for (tracked) |slot| {
+      if (slot.memory_safety) |ms| {
+          switch (ms) {
+              .allocation => |a| {
+                  if (a.freed == null) {
+                      // ... actual logic buried 4 levels deep
+                  }
+              },
+              .stack_ptr => {},
+          }
+      }
+  }
 
-  // Use pointer capture:
-  if (tracked[slot].memory_safety) |*ms| {
-      ms.stack_ptr.name = .{ .variable = name };
+  // GOOD: Flat logic with early continues
+  for (tracked) |slot| {
+      const ms = slot.memory_safety orelse continue;
+      if (ms != .allocation) continue;
+      const a = ms.allocation;
+      if (a.freed != null) continue;
+      // ... actual logic at top level
   }
   ```
+
+- **Pointer capture for modification** - When you need to modify a value inside an optional, use `if (optional) |*ptr|` to capture a pointer. This is one case where nesting is appropriate:
+  ```zig
+  // Need to modify, so use pointer capture
+  if (slot.memory_safety) |*ms| {
+      if (ms.* != .allocation) continue;
+      ms.allocation.freed = free_meta;  // modification requires pointer
+  }
+  ```
+
+- **Avoid `&(x orelse y)`** - This pattern is hard to read and may not work as expected (takes address of temporary). Prefer `if` with pointer capture when modification is needed.
 
 ## TDD Procedure: Adding a New AIR Tag Handler
 
