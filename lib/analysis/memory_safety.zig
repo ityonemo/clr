@@ -262,12 +262,16 @@ pub const MemorySafety = union(enum) {
             } };
             return;
         };
-        if (ms != .allocation) return; // Not heap allocation, ignore
 
-        if (ms.allocation.freed) |previous_free| {
-            return reportDoubleFree(ctx, ms.allocation.allocated, previous_free);
+        switch (ms) {
+            .stack_ptr => |sp| return reportFreeStackMemory(ctx, sp),
+            .allocation => |a| {
+                if (a.freed) |previous_free| {
+                    return reportDoubleFree(ctx, a.allocated, previous_free);
+                }
+                markAllocationFreed(tracked, a.origin, free_meta);
+            },
         }
-        markAllocationFreed(tracked, ms.allocation.origin, free_meta);
     }
 
     /// Mark all slots with the given origin as freed.
@@ -337,6 +341,31 @@ pub const MemorySafety = union(enum) {
             alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
         });
         return error.MemoryLeak;
+    }
+
+    fn reportFreeStackMemory(ctx: anytype, stack_ptr: StackPtrMeta) error{FreeStackMemory} {
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        ctx.print("free of stack memory in {s} ({s}:{d}:{d})\n", .{
+            func_name, ctx.file, ctx.line, ctx.column,
+        });
+        switch (stack_ptr.name) {
+            .variable => |name| {
+                ctx.print("pointer is to local variable '{s}' ({s}:{d}:{d})\n", .{
+                    name, stack_ptr.file, stack_ptr.line, stack_ptr.column orelse 0,
+                });
+            },
+            .parameter => |name| {
+                ctx.print("pointer is to parameter '{s}' ({s}:{d})\n", .{
+                    name, stack_ptr.file, stack_ptr.line + 1,
+                });
+            },
+            .other => {
+                ctx.print("pointer is to stack memory ({s}:{d}:{d})\n", .{
+                    stack_ptr.file, stack_ptr.line, stack_ptr.column orelse 0,
+                });
+            },
+        }
+        return error.FreeStackMemory;
     }
 };
 

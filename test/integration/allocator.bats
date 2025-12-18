@@ -24,3 +24,9 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator/correct_usage.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "detects freeing stack pointer with allocator" {
+    run compile_and_run "$TEST_CASES/allocator/free_stack_pointer.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of stack memory" ]]
+}
