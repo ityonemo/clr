@@ -4,6 +4,8 @@ const Slot = slots.Slot;
 const EntityList = slots.EntityList;
 const TypedPayload = slots.TypedPayload;
 const Meta = @import("../Meta.zig");
+const tag = @import("../tag.zig");
+const Context = @import("../Context.zig");
 
 pub const Undefined = union(enum) {
     defined: void,
@@ -12,14 +14,14 @@ pub const Undefined = union(enum) {
         var_name: ?[]const u8 = null,
     },
 
-    pub fn reportUseBeforeAssign(self: @This(), ctx: anytype) anyerror {
+    pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror {
         try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
         switch (self) {
-            .undefined => |payload| {
-                if (payload.var_name) |name| {
-                    try payload.meta.print(ctx.writer, "undefined value assigned to '{s}' in ", .{name});
+            .undefined => |p| {
+                if (p.var_name) |name| {
+                    try p.meta.print(ctx.writer, "undefined value assigned to '{s}' in ", .{name});
                 } else {
-                    try payload.meta.print(ctx.writer, "undefined value assigned in ", .{});
+                    try p.meta.print(ctx.writer, "undefined value assigned in ", .{});
                 }
             },
             .defined => {},
@@ -27,58 +29,58 @@ pub const Undefined = union(enum) {
         return error.UseBeforeAssign;
     }
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
-        _ = payload;
+    pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Alloc) !void {
+        _ = params;
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
-        _ = payload;
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.AllocCreate) !void {
+        _ = params;
         // Allocated memory contains undefined data until written to
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.UnwrapErrunionPayload) !void {
         _ = ctx;
-        const src = payload.src orelse return;
+        const src = params.src orelse return;
         const src_idx = tracked[src].typed_payload orelse return;
         // Propagate undefined state from the error union to the unwrapped payload
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
-        dst_analyte.undefined = entities.items[src_idx].immediate.undefined;
+        const dst_analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
+        dst_analyte.undefined = payloads.items[src_idx].immediate.undefined;
     }
 
-    pub fn br(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Br) !void {
         _ = index;
         _ = ctx;
-        const src = payload.src orelse return;
+        const src = params.src orelse return;
         const src_idx = tracked[src].typed_payload orelse return;
         // Propagate undefined state from source to block destination
-        if (tracked[payload.block].typed_payload == null) {
-            tracked[payload.block].typed_payload = TypedPayload.new(entities);
+        if (tracked[params.block].typed_payload == null) {
+            tracked[params.block].typed_payload = TypedPayload.new(payloads);
         }
-        const dst_analyte = &entities.items[tracked[payload.block].typed_payload.?].immediate;
-        dst_analyte.undefined = entities.items[src_idx].immediate.undefined;
+        const dst_analyte = &payloads.items[tracked[params.block].typed_payload.?].immediate;
+        dst_analyte.undefined = payloads.items[src_idx].immediate.undefined;
     }
 
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.StoreSafe) !void {
         _ = index;
-        const ptr = payload.ptr orelse return;
+        const ptr = params.ptr orelse return;
         if (tracked[ptr].typed_payload == null) {
-            tracked[ptr].typed_payload = TypedPayload.new(entities);
+            tracked[ptr].typed_payload = TypedPayload.new(payloads);
         }
-        const analyte = &entities.items[tracked[ptr].typed_payload.?].immediate;
-        if (payload.is_undef) {
+        const analyte = &payloads.items[tracked[ptr].typed_payload.?].immediate;
+        if (params.is_undef) {
             analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
         } else {
             analyte.undefined = .{ .defined = {} };
@@ -87,11 +89,11 @@ pub const Undefined = union(enum) {
         }
     }
 
-    pub fn load(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Load) !void {
         _ = index;
-        const ptr = payload.ptr orelse return;
+        const ptr = params.ptr orelse return;
         const idx = tracked[ptr].typed_payload orelse return;
-        if (entities.items[idx].immediate.undefined) |undef| {
+        if (payloads.items[idx].immediate.undefined) |undef| {
             switch (undef) {
                 .undefined => return undef.reportUseBeforeAssign(ctx),
                 .defined => {},
@@ -99,16 +101,16 @@ pub const Undefined = union(enum) {
         }
     }
 
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
-        const slot = payload.slot orelse return;
+        const slot = params.slot orelse return;
         std.debug.assert(slot < tracked.len);
         const idx = tracked[slot].typed_payload orelse return;
-        if (entities.items[idx].immediate.undefined) |*undef| {
+        if (payloads.items[idx].immediate.undefined) |*undef| {
             switch (undef.*) {
                 .undefined => |*meta| {
-                    meta.var_name = payload.name;
+                    meta.var_name = params.name;
                 },
                 .defined => {},
             }

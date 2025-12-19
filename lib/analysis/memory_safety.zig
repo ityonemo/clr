@@ -4,6 +4,8 @@ const Slot = slots.Slot;
 const EntityList = slots.EntityList;
 const TypedPayload = slots.TypedPayload;
 const Meta = @import("../Meta.zig");
+const tag = @import("../tag.zig");
+const Context = @import("../Context.zig");
 
 // =========================================================================
 // State types
@@ -31,20 +33,20 @@ pub const MemorySafety = union(enum) {
     stack_ptr: StackPtr,
     allocation: Allocation,
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
-        _ = payload;
+    pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Alloc) !void {
+        _ = params;
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         analyte.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
     }
 
-    pub fn arg(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn arg(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Arg) !void {
         // If the caller passed an allocation, preserve that metadata
         // so the callee can free it (ownership transfer)
         if (tracked[index].typed_payload) |idx| {
-            if (entities.items[idx].immediate.memory_safety) |ms| {
+            if (payloads.items[idx].immediate.memory_safety) |ms| {
                 if (ms == .allocation) return;
             }
         }
@@ -52,113 +54,113 @@ pub const MemorySafety = union(enum) {
         // Store parameter info with empty function name - this means returning it directly
         // won't be flagged as an escape (function won't match in ret_safe)
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         analyte.memory_safety = .{ .stack_ptr = .{
             .meta = .{
                 .function = "", // Empty = not from this function's stack
                 .file = ctx.meta.file,
                 .line = ctx.base_line,
             },
-            .name = .{ .parameter = payload.name },
+            .name = .{ .parameter = params.name },
         } };
     }
 
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
         // Set the variable name on the stack_ptr metadata
-        const slot = payload.slot orelse return;
+        const slot = params.slot orelse return;
         std.debug.assert(slot < tracked.len);
         const idx = tracked[slot].typed_payload orelse return;
-        const ms = entities.items[idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[idx].immediate.memory_safety orelse return;
         if (ms != .stack_ptr) return;
         if (ms.stack_ptr.name == .other) {
-            entities.items[idx].immediate.memory_safety.?.stack_ptr.name = .{ .variable = payload.name };
+            payloads.items[idx].immediate.memory_safety.?.stack_ptr.name = .{ .variable = params.name };
         }
     }
 
-    pub fn bitcast(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn bitcast(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Bitcast) !void {
         _ = ctx;
         // Bitcast just reinterprets the pointer type (e.g., *u8 -> *const u8)
         // Propagate memory_safety metadata from source to result
-        const src = payload.src orelse return;
+        const src = params.src orelse return;
         std.debug.assert(src < tracked.len);
         const src_idx = tracked[src].typed_payload orelse return;
-        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[src_idx].immediate.memory_safety orelse return;
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const dst_analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.UnwrapErrunionPayload) !void {
         _ = ctx;
         // Unwrapping an error union extracts the payload value
         // Propagate memory_safety metadata from source to result
-        const src = payload.src orelse return;
+        const src = params.src orelse return;
         std.debug.assert(src < tracked.len);
         const src_idx = tracked[src].typed_payload orelse return;
-        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[src_idx].immediate.memory_safety orelse return;
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const dst_analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn optional_payload(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn optional_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.OptionalPayload) !void {
         _ = ctx;
         // Unwrapping an optional extracts the payload value
         // Propagate memory_safety metadata from source to result
-        const src = payload.src orelse return;
+        const src = params.src orelse return;
         std.debug.assert(src < tracked.len);
         const src_idx = tracked[src].typed_payload orelse return;
-        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[src_idx].immediate.memory_safety orelse return;
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const dst_analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn br(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Br) !void {
         _ = index;
         _ = ctx;
         // Branch to block with value - propagate state from src to target block
-        const src = payload.src orelse return;
-        const block = payload.block;
+        const src = params.src orelse return;
+        const block = params.block;
         std.debug.assert(src < tracked.len);
         std.debug.assert(block < tracked.len);
         const src_idx = tracked[src].typed_payload orelse return;
-        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[src_idx].immediate.memory_safety orelse return;
         if (tracked[block].typed_payload == null) {
-            tracked[block].typed_payload = TypedPayload.new(entities);
+            tracked[block].typed_payload = TypedPayload.new(payloads);
         }
-        const dst_analyte = &entities.items[tracked[block].typed_payload.?].immediate;
+        const dst_analyte = &payloads.items[tracked[block].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.StoreSafe) !void {
         // TODO: Interprocedural parameter name propagation disabled during entity system refactoring.
         // Previously checked reference_arg to detect storing from arg slot to alloc slot.
         _ = tracked;
         _ = index;
         _ = ctx;
-        _ = entities;
-        _ = payload;
+        _ = payloads;
+        _ = params;
     }
 
-    pub fn ret_safe(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn ret_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.RetSafe) !void {
         _ = index;
 
-        const src = payload.src orelse return;
+        const src = params.src orelse return;
         std.debug.assert(src < tracked.len);
 
         const src_idx = tracked[src].typed_payload orelse return;
-        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[src_idx].immediate.memory_safety orelse return;
 
         // Check for stack pointer escape
         switch (ms) {
@@ -175,20 +177,20 @@ pub const MemorySafety = union(enum) {
 
         // TODO: Interprocedural propagation disabled during entity system refactoring
         // Merge state into retval for ownership transfer tracking.
-        _ = payload.retval_ptr;
+        _ = params.retval_ptr;
     }
 
     /// Called at the end of each function to check for memory leaks.
     /// Deferred until after all slots are processed so success paths can free
     /// allocations before we check for leaks.
-    pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: anytype, entities: *EntityList) !void {
+    pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *EntityList) !void {
         // TODO: Interprocedural ownership transfer disabled during entity system refactoring
         _ = retval;
         const returned_origin: ?usize = null;
 
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            const ms = entities.items[idx].immediate.memory_safety orelse continue;
+            const ms = payloads.items[idx].immediate.memory_safety orelse continue;
             if (ms != .allocation) continue;
             const a = ms.allocation;
 
@@ -199,7 +201,7 @@ pub const MemorySafety = union(enum) {
             if (a.freed == null) {
                 // Before reporting leak, check if any slot with same origin was freed
                 // (handles case where callee freed via arg_ptr propagation)
-                if (isOriginFreed(tracked, entities, a.origin)) continue;
+                if (isOriginFreed(tracked, payloads, a.origin)) continue;
                 // Still allocated after all paths = leak
                 return reportMemoryLeak(ctx, a.allocated);
             }
@@ -207,10 +209,10 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Check if any slot with the given origin has been freed
-    fn isOriginFreed(tracked: []Slot, entities: *EntityList, origin: usize) bool {
+    fn isOriginFreed(tracked: []Slot, payloads: *EntityList, origin: usize) bool {
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            const ms = entities.items[idx].immediate.memory_safety orelse continue;
+            const ms = payloads.items[idx].immediate.memory_safety orelse continue;
             if (ms != .allocation) continue;
             if (ms.allocation.origin == origin and ms.allocation.freed != null) {
                 return true;
@@ -224,46 +226,46 @@ pub const MemorySafety = union(enum) {
     // =========================================================================
 
     /// Handle allocator.create() - marks slot as allocated
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.AllocCreate) !void {
         if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(entities);
+            tracked[index].typed_payload = TypedPayload.new(payloads);
         }
-        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
+        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
         analyte.memory_safety = .{ .allocation = .{
             .allocated = ctx.meta,
             .origin = index, // This slot is the origin of this allocation
-            .allocator_type = payload.allocator_type,
+            .allocator_type = params.allocator_type,
         } };
     }
 
     /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator
-    pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.AllocDestroy) !void {
         _ = index;
-        const ptr = payload.ptr orelse return;
+        const ptr = params.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
         const idx = tracked[ptr].typed_payload orelse {
             // Slot wasn't tracked as allocated (allocation state didn't propagate)
             // Mark it as freed anyway so we can detect use-after-free
             if (tracked[ptr].typed_payload == null) {
-                tracked[ptr].typed_payload = TypedPayload.new(entities);
+                tracked[ptr].typed_payload = TypedPayload.new(payloads);
             }
-            const new_analyte = &entities.items[tracked[ptr].typed_payload.?].immediate;
+            const new_analyte = &payloads.items[tracked[ptr].typed_payload.?].immediate;
             new_analyte.memory_safety = .{ .allocation = .{
                 .allocated = ctx.meta, // Use destroy site as placeholder
                 .freed = ctx.meta,
                 .origin = ptr,
-                .allocator_type = payload.allocator_type,
+                .allocator_type = params.allocator_type,
             } };
             return;
         };
 
-        const ms = entities.items[idx].immediate.memory_safety orelse {
-            entities.items[idx].immediate.memory_safety = .{ .allocation = .{
+        const ms = payloads.items[idx].immediate.memory_safety orelse {
+            payloads.items[idx].immediate.memory_safety = .{ .allocation = .{
                 .allocated = ctx.meta,
                 .freed = ctx.meta,
                 .origin = ptr,
-                .allocator_type = payload.allocator_type,
+                .allocator_type = params.allocator_type,
             } };
             return;
         };
@@ -276,7 +278,7 @@ pub const MemorySafety = union(enum) {
                 }
                 // Check for mismatched allocator types
                 const alloc_is_generic = std.mem.eql(u8, a.allocator_type, "Allocator");
-                const free_is_generic = std.mem.eql(u8, payload.allocator_type, "Allocator");
+                const free_is_generic = std.mem.eql(u8, params.allocator_type, "Allocator");
                 // TODO: Interprocedural - previously used arg_ptr to detect came_from_param
                 const came_from_param = false;
                 const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
@@ -287,34 +289,34 @@ pub const MemorySafety = union(enum) {
                 else
                     !alloc_is_generic or !free_is_generic;
 
-                if (should_check and !std.mem.eql(u8, a.allocator_type, payload.allocator_type)) {
-                    return reportMismatchedAllocator(ctx, a, payload.allocator_type);
+                if (should_check and !std.mem.eql(u8, a.allocator_type, params.allocator_type)) {
+                    return reportMismatchedAllocator(ctx, a, params.allocator_type);
                 }
-                markAllocationFreed(tracked, entities, a.origin, ctx.meta);
+                markAllocationFreed(tracked, payloads, a.origin, ctx.meta);
             },
         }
     }
 
     /// Mark all slots with the given origin as freed.
-    fn markAllocationFreed(tracked: []Slot, entities: *EntityList, origin: usize, free_meta: Meta) void {
+    fn markAllocationFreed(tracked: []Slot, payloads: *EntityList, origin: usize, free_meta: Meta) void {
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            const ms = entities.items[idx].immediate.memory_safety orelse continue;
+            const ms = payloads.items[idx].immediate.memory_safety orelse continue;
             if (ms != .allocation) continue;
             if (ms.allocation.origin == origin) {
-                entities.items[idx].immediate.memory_safety.?.allocation.freed = free_meta;
+                payloads.items[idx].immediate.memory_safety.?.allocation.freed = free_meta;
             }
         }
     }
 
     /// Handle load - detect use-after-free
-    pub fn load(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+    pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Load) !void {
         _ = index;
-        const ptr = payload.ptr orelse return;
+        const ptr = params.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
         const idx = tracked[ptr].typed_payload orelse return;
-        const ms = entities.items[idx].immediate.memory_safety orelse return;
+        const ms = payloads.items[idx].immediate.memory_safety orelse return;
         if (ms != .allocation) return;
         const a = ms.allocation;
         if (a.freed) |free_site| {
@@ -326,7 +328,7 @@ pub const MemorySafety = union(enum) {
     // Error reporting
     // =========================================================================
 
-    fn reportStackEscape(ms: MemorySafety, ctx: anytype) anyerror {
+    fn reportStackEscape(ms: MemorySafety, ctx: *Context) anyerror {
         const sp = ms.stack_ptr;
         try ctx.meta.print(ctx.writer, "stack pointer escape in ", .{});
         switch (sp.name) {
@@ -347,27 +349,27 @@ pub const MemorySafety = union(enum) {
         return error.StackPointerEscape;
     }
 
-    fn reportDoubleFree(ctx: anytype, alloc_site: Meta, previous_free: Meta) anyerror {
+    fn reportDoubleFree(ctx: *Context, alloc_site: Meta, previous_free: Meta) anyerror {
         try ctx.meta.print(ctx.writer, "double free in ", .{});
         try previous_free.print(ctx.writer, "previously freed in ", .{});
         try alloc_site.print(ctx.writer, "originally allocated in ", .{});
         return error.DoubleFree;
     }
 
-    fn reportUseAfterFree(ctx: anytype, alloc_site: Meta, free_site: Meta) anyerror {
+    fn reportUseAfterFree(ctx: *Context, alloc_site: Meta, free_site: Meta) anyerror {
         try ctx.meta.print(ctx.writer, "use after free in ", .{});
         try free_site.print(ctx.writer, "freed in ", .{});
         try alloc_site.print(ctx.writer, "allocated in ", .{});
         return error.UseAfterFree;
     }
 
-    fn reportMemoryLeak(ctx: anytype, alloc_site: Meta) anyerror {
+    fn reportMemoryLeak(ctx: *Context, alloc_site: Meta) anyerror {
         try ctx.meta.print(ctx.writer, "memory leak in ", .{});
         try alloc_site.print(ctx.writer, "allocated in ", .{});
         return error.MemoryLeak;
     }
 
-    fn reportMismatchedAllocator(ctx: anytype, allocation: Allocation, destroy_allocator: []const u8) anyerror {
+    fn reportMismatchedAllocator(ctx: *Context, allocation: Allocation, destroy_allocator: []const u8) anyerror {
         try ctx.meta.print(ctx.writer, "allocator mismatch in ", .{});
         try allocation.allocated.print(ctx.writer, "allocated with {s} in ", .{allocation.allocator_type});
         var buf: [256]u8 = undefined;
@@ -376,7 +378,7 @@ pub const MemorySafety = union(enum) {
         return error.MismatchedAllocator;
     }
 
-    fn reportFreeStackMemory(ctx: anytype, sp: StackPtr) anyerror {
+    fn reportFreeStackMemory(ctx: *Context, sp: StackPtr) anyerror {
         try ctx.meta.print(ctx.writer, "free of stack memory in ", .{});
         switch (sp.name) {
             .variable => |name| {

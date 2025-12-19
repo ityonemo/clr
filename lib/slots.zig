@@ -1,5 +1,6 @@
 const std = @import("std");
 const tag = @import("tag.zig");
+const Context = @import("Context.zig");
 const Allocator = std.mem.Allocator;
 
 // Import state types from analyses
@@ -37,14 +38,14 @@ pub const TypedPayload = union(enum) {
 pub const Slot = struct {
     typed_payload: ?EIdx = null,
 
-    pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+    pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList) !void {
         switch (any_tag) {
-            inline else => |t| try t.apply(tracked, index, ctx, entities),
+            inline else => |t| try t.apply(tracked, index, ctx, payloads),
         }
     }
 
-    pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
-        _ = entities; // Each function has its own entity list, so caller's entities aren't passed
+    pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList) !void {
+        _ = payloads; // Each function has its own entity list, so caller's payloads aren't passed
         // Skip if called is null (indirect call through function pointer - TODO: handle these)
         if (@TypeOf(called) == @TypeOf(null)) return;
         const retval = try @call(.auto, called, .{ctx} ++ args);
@@ -65,12 +66,11 @@ pub fn clear_list(list: []Slot, allocator: std.mem.Allocator) void {
     allocator.free(list);
 }
 
-pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: anytype, entities: *EntityList) !void {
-    try tag.splatFinish(tracked, retval, ctx, entities);
+pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *EntityList) !void {
+    try tag.splatFinish(tracked, retval, ctx, payloads);
 }
 
 test "alloc sets state to undefined" {
-    const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -99,7 +99,6 @@ test "alloc sets state to undefined" {
 }
 
 test "store_safe with undef keeps state undefined" {
-    const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -122,7 +121,6 @@ test "store_safe with undef keeps state undefined" {
 }
 
 test "store_safe with value sets state to defined" {
-    const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
