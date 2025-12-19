@@ -2,19 +2,23 @@ const std = @import("std");
 
 allocator: std.mem.Allocator,
 stacktrace: std.ArrayListUnmanaged([]const u8),
-stdout: std.fs.File,
-file: []const u8 = "",
-line: u32 = 0,
-column: u32 = 0,
+meta: @import("Meta.zig"),
 base_line: u32 = 0,
+writer: *std.Io.Writer = undefined,
 
 const Context = @This();
 
-pub fn init(allocator: std.mem.Allocator) Context {
+pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
     return .{
         .allocator = allocator,
         .stacktrace = .empty,
-        .stdout = std.fs.File.stdout(),
+        .meta = .{
+            .function = "",
+            .file = "",
+            .line = 0,
+            .column = null,
+        },
+        .writer = writer,
     };
 }
 
@@ -31,15 +35,10 @@ pub fn pop(self: *Context) void {
     _ = self.stacktrace.pop();
 }
 
-pub fn print(self: *Context, comptime fmt: []const u8, args: anytype) void {
-    const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch @panic("out of memory");
-    defer self.allocator.free(msg);
-    self.stdout.writeAll(msg) catch @panic("failed to write to stdout");
-}
-
 pub fn dumpStackTrace(self: *Context) void {
-    const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.file) catch self.file;
-    self.print("Stack trace:\n", .{});
+    var buf: [1024]u8 = undefined;
+    const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.meta.file) catch self.meta.file;
+    self.writer.writeAll("Stack trace:\n") catch {};
     // Print frames in reverse order (most recent first)
     var i = self.stacktrace.items.len;
     while (i > 0) {
@@ -47,15 +46,19 @@ pub fn dumpStackTrace(self: *Context) void {
         const frame = self.stacktrace.items[i];
         if (i == self.stacktrace.items.len - 1) {
             // Most recent frame - include file/line info
-            self.print("  {s} ({s}:{d}:{d})\n", .{ frame, rel_path, self.line, self.column });
+            const msg = std.fmt.bufPrint(&buf, "  {s} ({s}:{d}:{d})\n", .{ frame, rel_path, self.meta.line, self.meta.column orelse 0 }) catch continue;
+            self.writer.writeAll(msg) catch {};
         } else {
-            self.print("  {s}\n", .{frame});
+            const msg = std.fmt.bufPrint(&buf, "  {s}\n", .{frame}) catch continue;
+            self.writer.writeAll(msg) catch {};
         }
     }
 }
 
 test "context stacktrace tracks calls" {
-    var ctx = Context.init(std.testing.allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
     defer ctx.deinit();
 
     try ctx.push("first");

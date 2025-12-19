@@ -602,7 +602,8 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     const size_hint = slot_lines.len + 1024;
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\fn fn_{d}(ctx: *Context{s}) anyerror!Slot {{
-        \\    ctx.file = "{s}";
+        \\    ctx.meta.file = "{s}";
+        \\    ctx.meta.function = "{s}";
         \\    ctx.base_line = {d};
         \\    try ctx.push("{s}");
         \\    defer ctx.pop();
@@ -615,7 +616,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\    return retval;
         \\}}
         \\
-    , .{ func_index, params, file_path, base_line, fqn, tags.len, slot_lines }, size_hint);
+    , .{ func_index, params, file_path, fqn, base_line, fqn, tags.len, slot_lines }, size_hint);
 }
 
 /// Generate epilogue with imports and main function
@@ -627,13 +628,21 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const slots = clr.slots;
         \\const Slot = slots.Slot;
         \\
+        \\var writer_buf: [4096]u8 = undefined;
+        \\var file_writer: std.fs.File.Writer = undefined;
+        \\
         \\pub fn main() void {{
         \\    var gpa = std.heap.GeneralPurposeAllocator(.{{}}){{}};
         \\    defer _ = gpa.deinit();
         \\    const allocator = gpa.allocator();
-        \\    var ctx = Context.init(allocator);
+        \\    file_writer = std.fs.File.stdout().writer(&writer_buf);
+        \\    defer file_writer.interface.flush() catch {{}};
+        \\    var ctx = Context.init(allocator, &file_writer.interface);
         \\    defer ctx.deinit();
-        \\    _ = fn_{d}(&ctx) catch std.process.exit(1);
+        \\    _ = fn_{d}(&ctx) catch {{
+        \\        file_writer.interface.flush() catch {{}};
+        \\        std.process.exit(1);
+        \\    }};
         \\}}
         \\
     , .{entrypoint_index}, null);

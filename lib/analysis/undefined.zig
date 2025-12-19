@@ -1,71 +1,40 @@
 const std = @import("std");
 const Slot = @import("../slots.zig").Slot;
+const Meta = @import("../Meta.zig");
 
-pub const Meta = struct {
-    file: ?[]const u8 = null,
-    line: ?u32 = null,
-    column: ?u32 = null,
-    var_name: ?[]const u8 = null,
-};
-
-/// State is the analysis state stored in Analyte.undefined
-pub const State = union(enum) {
+pub const Undefined = union(enum) {
     defined: void,
-    undefined: Meta,
+    undefined: struct {
+        meta: Meta,
+        var_name: ?[]const u8 = null,
+    },
 
-    pub fn reportUseBeforeAssign(self: State, ctx: anytype) error{UseBeforeAssign} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        ctx.print("use of undefined value found in {s} ({s}:{d}:{d})\n", .{ func_name, ctx.file, ctx.line, ctx.column });
+    pub fn reportUseBeforeAssign(self: @This(), ctx: anytype) anyerror {
+        try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
         switch (self) {
-            .undefined => |meta| {
-                if (meta.file) |file| {
-                    // Find the function where the undefined was assigned by walking the stacktrace
-                    const assign_func = ctx.stacktrace.items[0];
-                    if (meta.var_name) |name| {
-                        ctx.print("undefined value assigned to '{s}' in {s} ({s}:{d}:{d})\n", .{
-                            name,
-                            assign_func,
-                            file,
-                            meta.line orelse 0,
-                            meta.column orelse 0,
-                        });
-                    } else {
-                        ctx.print("undefined value assigned in {s} ({s}:{d}:{d})\n", .{
-                            assign_func,
-                            file,
-                            meta.line orelse 0,
-                            meta.column orelse 0,
-                        });
-                    }
+            .undefined => |payload| {
+                if (payload.var_name) |name| {
+                    try payload.meta.print(ctx.writer, "undefined value assigned to '{s}' in ", .{name});
+                } else {
+                    try payload.meta.print(ctx.writer, "undefined value assigned in ", .{});
                 }
             },
             .defined => {},
         }
         return error.UseBeforeAssign;
     }
-};
 
-/// Undefined analysis handlers - now accessed via typed_payload
-pub const Undefined = struct {
     pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = payload;
         const analyte = tracked[index].ensureImmediate();
-        analyte.undefined = .{ .undefined = .{
-            .file = ctx.file,
-            .line = ctx.line,
-            .column = ctx.column,
-        } };
+        analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = payload;
         // Allocated memory contains undefined data until written to
         const analyte = tracked[index].ensureImmediate();
-        analyte.undefined = .{ .undefined = .{
-            .file = ctx.file,
-            .line = ctx.line,
-            .column = ctx.column,
-        } };
+        analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
     pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
@@ -92,11 +61,7 @@ pub const Undefined = struct {
         const ptr = payload.ptr orelse return;
         const analyte = tracked[ptr].ensureImmediate();
         if (payload.is_undef) {
-            analyte.undefined = .{ .undefined = .{
-                .file = ctx.file,
-                .line = ctx.line,
-                .column = ctx.column,
-            } };
+            analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
         } else {
             analyte.undefined = .{ .defined = {} };
             // Propagate defined status to caller's slot if this is an arg
@@ -139,9 +104,16 @@ pub const Undefined = struct {
 
 // Mock context for testing
 const MockContext = struct {
+    meta: Meta = .{
+        .function = "test_func",
+        .file = "test.zig",
+        .line = 10,
+        .column = 5,
+    },
+    // Legacy fields for reporting functions that access ctx directly
+    file: []const u8 = "test.zig",
     line: u32 = 10,
     column: u32 = 5,
-    file: []const u8 = "test.zig",
     stacktrace: std.ArrayList([]const u8),
     output: std.ArrayList(u8),
 
@@ -177,9 +149,9 @@ test "alloc sets undefined state" {
     const analyte = &tracked[1].typed_payload.?.immediate;
     const undef = analyte.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
-    try std.testing.expectEqualStrings("test.zig", undef.undefined.file.?);
-    try std.testing.expectEqual(@as(?u32, 10), undef.undefined.line);
-    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.column);
+    try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
+    try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
+    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.meta.column);
 }
 
 test "alloc_create sets undefined state" {
@@ -195,9 +167,9 @@ test "alloc_create sets undefined state" {
     const analyte = &tracked[1].typed_payload.?.immediate;
     const undef = analyte.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
-    try std.testing.expectEqualStrings("test.zig", undef.undefined.file.?);
-    try std.testing.expectEqual(@as(?u32, 10), undef.undefined.line);
-    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.column);
+    try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
+    try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
+    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.meta.column);
 }
 
 test "store_safe with is_undef=true sets undefined" {
@@ -226,7 +198,11 @@ test "store_safe with is_undef=false sets defined" {
     var tracked = [_]Slot{.{}} ** 3;
 
     // First make it undefined
-    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{ .meta = .{
+        .function = "test_func",
+        .file = "test.zig",
+        .line = 1,
+    } } } } };
 
     try Undefined.store_safe(&tracked, 0, &ctx, .{ .ptr = 1, .src = null, .is_undef = false });
 
@@ -243,8 +219,16 @@ test "store_safe propagates defined through arg_ptr" {
     var tracked = [_]Slot{.{}} ** 3;
 
     // Set up caller slot
-    var caller_slot = Slot{ .typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } } };
-    tracked[0].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } };
+    var caller_slot = Slot{ .typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{ .meta = .{
+        .function = "test_func",
+        .file = "test.zig",
+        .line = 1,
+    } } } } } };
+    tracked[0].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{ .meta = .{
+        .function = "test_func",
+        .file = "test.zig",
+        .line = 1,
+    } } } } };
     tracked[0].arg_ptr = &caller_slot;
 
     try Undefined.store_safe(&tracked, 1, &ctx, .{ .ptr = 0, .src = null, .is_undef = false });
@@ -263,7 +247,11 @@ test "load from undefined slot returns error" {
     defer ctx.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{ .meta = .{
+        .function = "test_func",
+        .file = "test.zig",
+        .line = 1,
+    } } } } };
 
     try std.testing.expectError(
         error.UseBeforeAssign,
@@ -303,9 +291,12 @@ test "dbg_var_ptr sets var_name on undefined meta" {
 
     var tracked = [_]Slot{.{}} ** 3;
     tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{
-        .file = "test.zig",
-        .line = 5,
-        .column = 3,
+        .meta = .{
+            .function = "test_func",
+            .file = "test.zig",
+            .line = 5,
+            .column = 3,
+        },
     } } } };
 
     try Undefined.dbg_var_ptr(&tracked, 0, &ctx, .{ .slot = 1, .name = "my_var" });
@@ -348,10 +339,13 @@ test "reportUseBeforeAssign formats with var_name" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    const undef = State{ .undefined = .{
-        .file = "file.zig",
-        .line = 42,
-        .column = 8,
+    const undef = Undefined{ .undefined = .{
+        .meta = .{
+            .function = "test_func",
+            .file = "file.zig",
+            .line = 42,
+            .column = 8,
+        },
         .var_name = "my_var",
     } };
 
@@ -369,10 +363,13 @@ test "reportUseBeforeAssign formats without var_name" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    const undef = State{ .undefined = .{
-        .file = "file.zig",
-        .line = 42,
-        .column = 8,
+    const undef = Undefined{ .undefined = .{
+        .meta = .{
+            .function = "test_func",
+            .file = "file.zig",
+            .line = 42,
+            .column = 8,
+        },
     } };
 
     _ = undef.reportUseBeforeAssign(&ctx) catch {};

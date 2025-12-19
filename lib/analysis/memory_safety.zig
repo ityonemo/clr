@@ -1,16 +1,14 @@
 
 const std = @import("std");
 const Slot = @import("../slots.zig").Slot;
+const Meta = @import("../Meta.zig");
 
 // =========================================================================
 // State types
 // =========================================================================
 
-pub const StackPtrMeta = struct {
-    function: []const u8,
-    file: []const u8,
-    line: u32,
-    column: ?u32 = null,
+pub const StackPtr = struct {
+    meta: Meta,
     name: Name = .{ .other = {} },
 
     pub const Name = union(enum) {
@@ -20,13 +18,6 @@ pub const StackPtrMeta = struct {
     };
 };
 
-pub const Meta = struct {
-    file: []const u8,
-    line: u32,
-    column: ?u32 = null,
-    function: []const u8,
-};
-
 pub const Allocation = struct {
     allocated: Meta,
     freed: ?Meta = null, // null = still allocated, has value = freed
@@ -34,27 +25,14 @@ pub const Allocation = struct {
     allocator_type: []const u8, // Type of allocator that created this allocation
 };
 
-/// State is the analysis state stored in Analyte.memory_safety
-pub const State = union(enum) {
-    stack_ptr: StackPtrMeta,
+pub const MemorySafety = union(enum) {
+    stack_ptr: StackPtr,
     allocation: Allocation,
-};
 
-// =========================================================================
-// Analysis handlers
-// =========================================================================
-
-pub const MemorySafety = struct {
     pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         _ = payload;
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
         const analyte = tracked[index].ensureImmediate();
-        analyte.memory_safety = .{ .stack_ptr = .{
-            .function = func_name,
-            .file = ctx.file,
-            .line = ctx.line,
-            .column = ctx.column,
-        } };
+        analyte.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
     }
 
     pub fn arg(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
@@ -70,9 +48,11 @@ pub const MemorySafety = struct {
         // won't be flagged as an escape (function won't match in ret_safe)
         const analyte = tracked[index].ensureImmediate();
         analyte.memory_safety = .{ .stack_ptr = .{
-            .function = "", // Empty = not from this function's stack
-            .file = ctx.file,
-            .line = ctx.base_line,
+            .meta = .{
+                .function = "", // Empty = not from this function's stack
+                .file = ctx.meta.file,
+                .line = ctx.base_line,
+            },
             .name = .{ .parameter = payload.name },
         } };
     }
@@ -159,8 +139,8 @@ pub const MemorySafety = struct {
         if (dst_tp.immediate.memory_safety.? != .stack_ptr) return;
         // Keep dst's function (the current function) so it's detected as escape
         dst_tp.immediate.memory_safety.?.stack_ptr.name = src_ms.stack_ptr.name;
-        dst_tp.immediate.memory_safety.?.stack_ptr.line = src_ms.stack_ptr.line;
-        dst_tp.immediate.memory_safety.?.stack_ptr.column = null;
+        dst_tp.immediate.memory_safety.?.stack_ptr.meta.line = src_ms.stack_ptr.meta.line;
+        dst_tp.immediate.memory_safety.?.stack_ptr.meta.column = null;
     }
 
     pub fn ret_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
@@ -178,7 +158,7 @@ pub const MemorySafety = struct {
                 const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
                 // Only flag as escape if stack_ptr is from this function
                 // Args have empty function name, so they won't match
-                if (std.mem.eql(u8, sp.function, func_name)) {
+                if (std.mem.eql(u8, sp.meta.function, func_name)) {
                     return reportStackEscape(ms, ctx);
                 }
             },
@@ -242,20 +222,11 @@ pub const MemorySafety = struct {
     // Allocation tracking (use-after-free, double-free, memory leak detection)
     // =========================================================================
 
-    fn makeMeta(ctx: anytype) Meta {
-        return .{
-            .file = ctx.file,
-            .line = ctx.line,
-            .column = ctx.column,
-            .function = ctx.stacktrace.items[ctx.stacktrace.items.len - 1],
-        };
-    }
-
     /// Handle allocator.create() - marks slot as allocated
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
         const analyte = tracked[index].ensureImmediate();
         analyte.memory_safety = .{ .allocation = .{
-            .allocated = makeMeta(ctx),
+            .allocated = ctx.meta,
             .origin = index, // This slot is the origin of this allocation
             .allocator_type = payload.allocator_type,
         } };
@@ -267,15 +238,13 @@ pub const MemorySafety = struct {
         const ptr = payload.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
-        const free_meta = makeMeta(ctx);
-
         const tp = &(tracked[ptr].typed_payload orelse {
             // Slot wasn't tracked as allocated (allocation state didn't propagate)
             // Mark it as freed anyway so we can detect use-after-free
             const new_analyte = tracked[ptr].ensureImmediate();
             new_analyte.memory_safety = .{ .allocation = .{
-                .allocated = free_meta, // Use destroy site as placeholder
-                .freed = free_meta,
+                .allocated = ctx.meta, // Use destroy site as placeholder
+                .freed = ctx.meta,
                 .origin = ptr,
                 .allocator_type = payload.allocator_type,
             } };
@@ -284,8 +253,8 @@ pub const MemorySafety = struct {
 
         const ms = tp.immediate.memory_safety orelse {
             tp.immediate.memory_safety = .{ .allocation = .{
-                .allocated = free_meta,
-                .freed = free_meta,
+                .allocated = ctx.meta,
+                .freed = ctx.meta,
                 .origin = ptr,
                 .allocator_type = payload.allocator_type,
             } };
@@ -313,14 +282,14 @@ pub const MemorySafety = struct {
                 if (should_check and !std.mem.eql(u8, a.allocator_type, payload.allocator_type)) {
                     return reportMismatchedAllocator(ctx, a, payload.allocator_type);
                 }
-                markAllocationFreed(tracked, a.origin, free_meta);
+                markAllocationFreed(tracked, a.origin, ctx.meta);
 
                 // Propagate freed state back to caller via arg_ptr
                 if (tracked[ptr].arg_ptr) |caller_slot| {
                     if (caller_slot.typed_payload) |*caller_tp| {
                         if (caller_tp.immediate.memory_safety) |*caller_ms| {
                             if (caller_ms.* == .allocation) {
-                                caller_ms.allocation.freed = free_meta;
+                                caller_ms.allocation.freed = ctx.meta;
                             }
                         }
                     }
@@ -360,122 +329,67 @@ pub const MemorySafety = struct {
     // Error reporting
     // =========================================================================
 
-    fn reportStackEscape(ms: State, ctx: anytype) error{StackPointerEscape} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        const meta = ms.stack_ptr;
-        ctx.print("stack pointer escape in {s} ({s}:{d}:{d})\n", .{ func_name, ctx.file, ctx.line, ctx.column });
-        switch (meta.name) {
+    fn reportStackEscape(ms: MemorySafety, ctx: anytype) anyerror {
+        const sp = ms.stack_ptr;
+        try ctx.meta.print(ctx.writer, "stack pointer escape in ", .{});
+        switch (sp.name) {
             .variable => |name| {
-                ctx.print("pointer was for local variable '{s}' ({s}:{d}:{d})\n", .{
-                    name,
-                    meta.file,
-                    meta.line,
-                    meta.column orelse 0,
-                });
+                try sp.meta.print(ctx.writer, "pointer was for local variable '{s}' in ", .{name});
             },
             .parameter => |name| {
                 if (name.len > 0) {
-                    ctx.print("pointer was for parameter '{s}' created in {s} ({s}:{d})\n", .{
-                        name,
-                        meta.function,
-                        meta.file,
-                        meta.line + 1, // Convert 0-indexed to 1-indexed
-                    });
+                    try sp.meta.print(ctx.writer, "pointer was for parameter '{s}' created in ", .{name});
                 } else {
-                    ctx.print("pointer was for parameter created in {s} ({s}:{d})\n", .{
-                        meta.function,
-                        meta.file,
-                        meta.line + 1, // Convert 0-indexed to 1-indexed
-                    });
+                    try sp.meta.print(ctx.writer, "pointer was for parameter created in ", .{});
                 }
             },
             .other => {
-                ctx.print("pointer was for stack memory created in {s} ({s}:{d}:{d})\n", .{
-                    meta.function,
-                    meta.file,
-                    meta.line,
-                    meta.column orelse 0,
-                });
+                try sp.meta.print(ctx.writer, "pointer was for stack memory created in ", .{});
             },
         }
         return error.StackPointerEscape;
     }
 
-    fn reportDoubleFree(ctx: anytype, alloc_site: Meta, previous_free: Meta) error{DoubleFree} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        ctx.print("double free in {s} ({s}:{d}:{d})\n", .{
-            func_name, ctx.file, ctx.line, ctx.column,
-        });
-        ctx.print("previously freed in {s} ({s}:{d}:{d})\n", .{
-            previous_free.function, previous_free.file, previous_free.line, previous_free.column orelse 0,
-        });
-        ctx.print("originally allocated in {s} ({s}:{d}:{d})\n", .{
-            alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
-        });
+    fn reportDoubleFree(ctx: anytype, alloc_site: Meta, previous_free: Meta) anyerror {
+        try ctx.meta.print(ctx.writer, "double free in ", .{});
+        try previous_free.print(ctx.writer, "previously freed in ", .{});
+        try alloc_site.print(ctx.writer, "originally allocated in ", .{});
         return error.DoubleFree;
     }
 
-    fn reportUseAfterFree(ctx: anytype, alloc_site: Meta, free_site: Meta) error{UseAfterFree} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        ctx.print("use after free in {s} ({s}:{d}:{d})\n", .{
-            func_name, ctx.file, ctx.line, ctx.column,
-        });
-        ctx.print("freed in {s} ({s}:{d}:{d})\n", .{
-            free_site.function, free_site.file, free_site.line, free_site.column orelse 0,
-        });
-        ctx.print("allocated in {s} ({s}:{d}:{d})\n", .{
-            alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
-        });
+    fn reportUseAfterFree(ctx: anytype, alloc_site: Meta, free_site: Meta) anyerror {
+        try ctx.meta.print(ctx.writer, "use after free in ", .{});
+        try free_site.print(ctx.writer, "freed in ", .{});
+        try alloc_site.print(ctx.writer, "allocated in ", .{});
         return error.UseAfterFree;
     }
 
-    fn reportMemoryLeak(ctx: anytype, alloc_site: Meta) error{MemoryLeak} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        ctx.print("memory leak in {s} ({s}:{d}:{d})\n", .{
-            func_name, ctx.file, ctx.line, ctx.column,
-        });
-        ctx.print("allocated in {s} ({s}:{d}:{d})\n", .{
-            alloc_site.function, alloc_site.file, alloc_site.line, alloc_site.column orelse 0,
-        });
+    fn reportMemoryLeak(ctx: anytype, alloc_site: Meta) anyerror {
+        try ctx.meta.print(ctx.writer, "memory leak in ", .{});
+        try alloc_site.print(ctx.writer, "allocated in ", .{});
         return error.MemoryLeak;
     }
 
-    fn reportMismatchedAllocator(ctx: anytype, allocation: Allocation, destroy_allocator: []const u8) error{MismatchedAllocator} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        ctx.print("allocator mismatch in {s} ({s}:{d}:{d})\n", .{
-            func_name, ctx.file, ctx.line, ctx.column,
-        });
-        ctx.print("allocated with {s} in {s} ({s}:{d}:{d})\n", .{
-            allocation.allocator_type,
-            allocation.allocated.function,
-            allocation.allocated.file,
-            allocation.allocated.line,
-            allocation.allocated.column orelse 0,
-        });
-        ctx.print("freed with {s}\n", .{destroy_allocator});
+    fn reportMismatchedAllocator(ctx: anytype, allocation: Allocation, destroy_allocator: []const u8) anyerror {
+        try ctx.meta.print(ctx.writer, "allocator mismatch in ", .{});
+        try allocation.allocated.print(ctx.writer, "allocated with {s} in ", .{allocation.allocator_type});
+        var buf: [256]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "freed with {s}\n", .{destroy_allocator}) catch return error.FormatError;
+        try ctx.writer.writeAll(msg);
         return error.MismatchedAllocator;
     }
 
-    fn reportFreeStackMemory(ctx: anytype, stack_ptr: StackPtrMeta) error{FreeStackMemory} {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-        ctx.print("free of stack memory in {s} ({s}:{d}:{d})\n", .{
-            func_name, ctx.file, ctx.line, ctx.column,
-        });
-        switch (stack_ptr.name) {
+    fn reportFreeStackMemory(ctx: anytype, sp: StackPtr) anyerror {
+        try ctx.meta.print(ctx.writer, "free of stack memory in ", .{});
+        switch (sp.name) {
             .variable => |name| {
-                ctx.print("pointer is to local variable '{s}' ({s}:{d}:{d})\n", .{
-                    name, stack_ptr.file, stack_ptr.line, stack_ptr.column orelse 0,
-                });
+                try sp.meta.print(ctx.writer, "pointer is to local variable '{s}' in ", .{name});
             },
             .parameter => |name| {
-                ctx.print("pointer is to parameter '{s}' ({s}:{d})\n", .{
-                    name, stack_ptr.file, stack_ptr.line + 1,
-                });
+                try sp.meta.print(ctx.writer, "pointer is to parameter '{s}' in ", .{name});
             },
             .other => {
-                ctx.print("pointer is to stack memory ({s}:{d}:{d})\n", .{
-                    stack_ptr.file, stack_ptr.line, stack_ptr.column orelse 0,
-                });
+                try sp.meta.print(ctx.writer, "pointer is to stack memory in ", .{});
             },
         }
         return error.FreeStackMemory;
@@ -488,10 +402,17 @@ pub const MemorySafety = struct {
 
 // Mock context for testing
 const MockContext = struct {
+    meta: Meta = .{
+        .function = "test_func",
+        .file = "test.zig",
+        .line = 10,
+        .column = 5,
+    },
+    // Legacy fields for arg handler and reporting functions
+    file: []const u8 = "test.zig",
     line: u32 = 10,
     column: u32 = 5,
     base_line: u32 = 1,
-    file: []const u8 = "test.zig",
     stacktrace: std.ArrayList([]const u8),
     output: std.ArrayList(u8),
 
@@ -526,10 +447,10 @@ test "alloc sets stack_ptr metadata" {
 
     const analyte = &tracked[1].typed_payload.?.immediate;
     const ms = analyte.memory_safety.?;
-    try std.testing.expectEqualStrings("test_func", ms.stack_ptr.function);
-    try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.file);
-    try std.testing.expectEqual(@as(u32, 10), ms.stack_ptr.line);
-    try std.testing.expectEqual(@as(?u32, 5), ms.stack_ptr.column);
+    try std.testing.expectEqualStrings("test_func", ms.stack_ptr.meta.function);
+    try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.meta.file);
+    try std.testing.expectEqual(@as(u32, 10), ms.stack_ptr.meta.line);
+    try std.testing.expectEqual(@as(?u32, 5), ms.stack_ptr.meta.column);
     try std.testing.expectEqual(.other, std.meta.activeTag(ms.stack_ptr.name));
 }
 
@@ -545,9 +466,9 @@ test "arg sets stack_ptr with empty function and parameter name" {
 
     const analyte = &tracked[0].typed_payload.?.immediate;
     const ms = analyte.memory_safety.?;
-    try std.testing.expectEqualStrings("", ms.stack_ptr.function);
-    try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.file);
-    try std.testing.expectEqual(@as(u32, 1), ms.stack_ptr.line); // base_line
+    try std.testing.expectEqualStrings("", ms.stack_ptr.meta.function);
+    try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.meta.file);
+    try std.testing.expectEqual(@as(u32, 1), ms.stack_ptr.meta.line); // base_line
     try std.testing.expectEqual(.parameter, std.meta.activeTag(ms.stack_ptr.name));
     try std.testing.expectEqualStrings("my_param", ms.stack_ptr.name.parameter);
 }
@@ -583,10 +504,12 @@ test "bitcast propagates stack_ptr metadata" {
 
     // Set up source with stack_ptr
     tracked[0].typed_payload = .{ .immediate = .{ .memory_safety = .{ .stack_ptr = .{
-        .function = "source_func",
-        .file = "source.zig",
-        .line = 42,
-        .column = 7,
+        .meta = .{
+            .function = "source_func",
+            .file = "source.zig",
+            .line = 42,
+            .column = 7,
+        },
         .name = .{ .variable = "src_var" },
     } } } };
 
@@ -594,9 +517,9 @@ test "bitcast propagates stack_ptr metadata" {
 
     const analyte = &tracked[1].typed_payload.?.immediate;
     const ms = analyte.memory_safety.?;
-    try std.testing.expectEqualStrings("source_func", ms.stack_ptr.function);
-    try std.testing.expectEqualStrings("source.zig", ms.stack_ptr.file);
-    try std.testing.expectEqual(@as(u32, 42), ms.stack_ptr.line);
+    try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
+    try std.testing.expectEqualStrings("source.zig", ms.stack_ptr.meta.file);
+    try std.testing.expectEqual(@as(u32, 42), ms.stack_ptr.meta.line);
     try std.testing.expectEqualStrings("src_var", ms.stack_ptr.name.variable);
 }
 
@@ -611,9 +534,11 @@ test "ret_safe detects escape when returning stack pointer from same function" {
 
     // Slot with stack_ptr from test_func (current function)
     tracked[0].typed_payload = .{ .immediate = .{ .memory_safety = .{ .stack_ptr = .{
-        .function = "test_func",
-        .file = "test.zig",
-        .line = 5,
+        .meta = .{
+            .function = "test_func",
+            .file = "test.zig",
+            .line = 5,
+        },
         .name = .{ .variable = "local" },
     } } } };
 
@@ -634,9 +559,11 @@ test "ret_safe allows returning arg (empty function name)" {
 
     // Slot with empty function name (arg)
     tracked[0].typed_payload = .{ .immediate = .{ .memory_safety = .{ .stack_ptr = .{
-        .function = "",
-        .file = "test.zig",
-        .line = 5,
+        .meta = .{
+            .function = "",
+            .file = "test.zig",
+            .line = 5,
+        },
         .name = .{ .parameter = "param" },
     } } } };
 

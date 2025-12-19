@@ -59,7 +59,7 @@ pub const Br = struct {
     }
 };
 
-// DbgStmt is special: it updates the context's line/column for error reporting.
+// DbgStmt is special: it updates the context's meta line/column for error reporting.
 // It does NOT splat because no analysis needs to track debug statements.
 pub const DbgStmt = struct {
     line: u32,
@@ -68,8 +68,8 @@ pub const DbgStmt = struct {
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
         _ = tracked;
         _ = index;
-        ctx.line = ctx.base_line + self.line + 1;
-        ctx.column = self.column;
+        ctx.meta.line = ctx.base_line + self.line + 1;
+        ctx.meta.column = self.column;
     }
 };
 

@@ -9,8 +9,8 @@ const memory_safety_analysis = @import("analysis/memory_safety.zig");
 /// Analyte holds the analysis state for an immediate value.
 /// Each analysis contributes its state type here.
 pub const Analyte = struct {
-    undefined: ?undefined_analysis.State = null,
-    memory_safety: ?memory_safety_analysis.State = null,
+    undefined: ?undefined_analysis.Undefined = null,
+    memory_safety: ?memory_safety_analysis.MemorySafety = null,
 };
 
 /// TypedPayload tracks the type structure of a value along with analysis state.
@@ -97,7 +97,9 @@ test "alloc sets state to undefined" {
     const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
 
-    var ctx = Context.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
     const list = make_list(allocator, 3);
@@ -125,7 +127,9 @@ test "store_safe with undef keeps state undefined" {
     const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
 
-    var ctx = Context.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
     const list = make_list(allocator, 3);
@@ -143,7 +147,9 @@ test "store_safe with value sets state to defined" {
     const Context = @import("Context.zig");
     const allocator = std.testing.allocator;
 
-    var ctx = Context.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
     const list = make_list(allocator, 3);
@@ -159,7 +165,15 @@ test "store_safe with value sets state to defined" {
 
 // Mock context for testing load behavior
 // TODO: eliminate MockContext by using real Context with suppressed output
+const Meta = @import("Meta.zig");
 const MockContext = struct {
+    meta: Meta = .{
+        .function = "test_func",
+        .file = "test",
+        .line = 0,
+        .column = 0,
+    },
+    // Legacy fields
     line: u32 = 0,
     column: u32 = 0,
     base_line: u32 = 0,
@@ -232,7 +246,11 @@ test "store_safe propagates defined status through arg_ptr" {
     defer clear_list(list, allocator);
 
     // Simulate caller's undefined slot passed as argument
-    var caller_slot = Slot{ .typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } } };
+    var caller_slot = Slot{ .typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{ .meta = .{
+        .function = "test_func",
+        .file = "test",
+        .line = 1,
+    } } } } } };
     try Slot.apply(.{ .arg = .{ .value = &caller_slot, .name = "test_param" } }, list, 0, &mock_ctx);
 
     // Callee allocates a slot that points to the arg

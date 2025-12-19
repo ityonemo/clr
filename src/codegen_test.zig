@@ -207,7 +207,8 @@ test "generateFunction produces complete function" {
 
     const expected =
         \\fn fn_42(ctx: *Context) anyerror!Slot {
-        \\    ctx.file = "test.zig";
+        \\    ctx.meta.file = "test.zig";
+        \\    ctx.meta.function = "test.main";
         \\    ctx.base_line = 10;
         \\    try ctx.push("test.main");
         \\    defer ctx.pop();
@@ -241,13 +242,21 @@ test "epilogue generates correct output" {
         \\const slots = clr.slots;
         \\const Slot = slots.Slot;
         \\
+        \\var writer_buf: [4096]u8 = undefined;
+        \\var file_writer: std.fs.File.Writer = undefined;
+        \\
         \\pub fn main() void {
         \\    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
         \\    defer _ = gpa.deinit();
         \\    const allocator = gpa.allocator();
-        \\    var ctx = Context.init(allocator);
+        \\    file_writer = std.fs.File.stdout().writer(&writer_buf);
+        \\    defer file_writer.interface.flush() catch {};
+        \\    var ctx = Context.init(allocator, &file_writer.interface);
         \\    defer ctx.deinit();
-        \\    _ = fn_123(&ctx) catch std.process.exit(1);
+        \\    _ = fn_123(&ctx) catch {
+        \\        file_writer.interface.flush() catch {};
+        \\        std.process.exit(1);
+        \\    };
         \\}
         \\
     ;
