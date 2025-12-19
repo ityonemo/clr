@@ -8,90 +8,12 @@ pub const Meta = struct {
     var_name: ?[]const u8 = null,
 };
 
-pub const Undefined = union(enum) {
+/// State is the analysis state stored in Analyte.undefined
+pub const State = union(enum) {
     defined: void,
     undefined: Meta,
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = payload;
-        tracked[index].undefined = .{ .undefined = .{
-            .file = ctx.file,
-            .line = ctx.line,
-            .column = ctx.column,
-        } };
-    }
-
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = payload;
-        // Allocated memory contains undefined data until written to
-        tracked[index].undefined = .{ .undefined = .{
-            .file = ctx.file,
-            .line = ctx.line,
-            .column = ctx.column,
-        } };
-    }
-
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = ctx;
-        const src = payload.src orelse return;
-        // Propagate undefined state from the error union to the unwrapped payload
-        tracked[index].undefined = tracked[src].undefined;
-    }
-
-    pub fn br(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = index;
-        _ = ctx;
-        const src = payload.src orelse return;
-        // Propagate undefined state from source to block destination
-        tracked[payload.block].undefined = tracked[src].undefined;
-    }
-
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = index;
-        const ptr = payload.ptr orelse return;
-        if (payload.is_undef) {
-            tracked[ptr].undefined = .{ .undefined = .{
-                .file = ctx.file,
-                .line = ctx.line,
-                .column = ctx.column,
-            } };
-        } else {
-            tracked[ptr].undefined = .{ .defined = {} };
-            // Propagate defined status to caller's slot if this is an arg
-            if (tracked[ptr].arg_ptr) |arg_ptr| {
-                arg_ptr.undefined = .{ .defined = {} };
-            }
-        }
-    }
-
-    pub fn load(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = index;
-        const ptr = payload.ptr orelse return;
-        const slot = tracked[ptr];
-        if (slot.undefined) |undef| {
-            switch (undef) {
-                .undefined => return undef.reportUseBeforeAssign(ctx),
-                .defined => {},
-            }
-        }
-    }
-
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        _ = index;
-        _ = ctx;
-        const slot = payload.slot orelse return;
-        std.debug.assert(slot < tracked.len);
-        if (tracked[slot].undefined) |*undef| {
-            switch (undef.*) {
-                .undefined => |*meta| {
-                    meta.var_name = payload.name;
-                },
-                .defined => {},
-            }
-        }
-    }
-
-    pub fn reportUseBeforeAssign(self: Undefined, ctx: anytype) error{UseBeforeAssign} {
+    pub fn reportUseBeforeAssign(self: State, ctx: anytype) error{UseBeforeAssign} {
         const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
         ctx.print("use of undefined value found in {s} ({s}:{d}:{d})\n", .{ func_name, ctx.file, ctx.line, ctx.column });
         switch (self) {
@@ -120,6 +42,98 @@ pub const Undefined = union(enum) {
             .defined => {},
         }
         return error.UseBeforeAssign;
+    }
+};
+
+/// Undefined analysis handlers - now accessed via typed_payload
+pub const Undefined = struct {
+    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = payload;
+        const analyte = tracked[index].ensureImmediate();
+        analyte.undefined = .{ .undefined = .{
+            .file = ctx.file,
+            .line = ctx.line,
+            .column = ctx.column,
+        } };
+    }
+
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = payload;
+        // Allocated memory contains undefined data until written to
+        const analyte = tracked[index].ensureImmediate();
+        analyte.undefined = .{ .undefined = .{
+            .file = ctx.file,
+            .line = ctx.line,
+            .column = ctx.column,
+        } };
+    }
+
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = ctx;
+        const src = payload.src orelse return;
+        // Propagate undefined state from the error union to the unwrapped payload
+        const src_tp = tracked[src].typed_payload orelse return;
+        const dst_analyte = tracked[index].ensureImmediate();
+        dst_analyte.undefined = src_tp.immediate.undefined;
+    }
+
+    pub fn br(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        _ = ctx;
+        const src = payload.src orelse return;
+        // Propagate undefined state from source to block destination
+        const src_tp = tracked[src].typed_payload orelse return;
+        const dst_analyte = tracked[payload.block].ensureImmediate();
+        dst_analyte.undefined = src_tp.immediate.undefined;
+    }
+
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        const ptr = payload.ptr orelse return;
+        const analyte = tracked[ptr].ensureImmediate();
+        if (payload.is_undef) {
+            analyte.undefined = .{ .undefined = .{
+                .file = ctx.file,
+                .line = ctx.line,
+                .column = ctx.column,
+            } };
+        } else {
+            analyte.undefined = .{ .defined = {} };
+            // Propagate defined status to caller's slot if this is an arg
+            if (tracked[ptr].arg_ptr) |arg_ptr| {
+                if (arg_ptr.typed_payload) |*caller_tp| {
+                    caller_tp.immediate.undefined = .{ .defined = {} };
+                }
+            }
+        }
+    }
+
+    pub fn load(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        const ptr = payload.ptr orelse return;
+        const tp = tracked[ptr].typed_payload orelse return;
+        if (tp.immediate.undefined) |undef| {
+            switch (undef) {
+                .undefined => return undef.reportUseBeforeAssign(ctx),
+                .defined => {},
+            }
+        }
+    }
+
+    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+        _ = index;
+        _ = ctx;
+        const slot = payload.slot orelse return;
+        std.debug.assert(slot < tracked.len);
+        const tp = &(tracked[slot].typed_payload orelse return);
+        if (tp.immediate.undefined) |*undef| {
+            switch (undef.*) {
+                .undefined => |*meta| {
+                    meta.var_name = payload.name;
+                },
+                .defined => {},
+            }
+        }
     }
 };
 
@@ -160,7 +174,8 @@ test "alloc sets undefined state" {
 
     try Undefined.alloc(&tracked, 1, &ctx, .{});
 
-    const undef = tracked[1].undefined.?;
+    const analyte = &tracked[1].typed_payload.?.immediate;
+    const undef = analyte.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.file.?);
     try std.testing.expectEqual(@as(?u32, 10), undef.undefined.line);
@@ -177,7 +192,8 @@ test "alloc_create sets undefined state" {
 
     try Undefined.alloc_create(&tracked, 1, &ctx, .{ .allocator_type = "PageAllocator" });
 
-    const undef = tracked[1].undefined.?;
+    const analyte = &tracked[1].typed_payload.?.immediate;
+    const undef = analyte.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.file.?);
     try std.testing.expectEqual(@as(?u32, 10), undef.undefined.line);
@@ -193,11 +209,12 @@ test "store_safe with is_undef=true sets undefined" {
     var tracked = [_]Slot{.{}} ** 3;
 
     // First make it defined
-    tracked[1].undefined = .{ .defined = {} };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .defined = {} } } };
 
-    try Undefined.store_safe(&tracked, 0, &ctx, .{ .ptr = 1, .is_undef = true });
+    try Undefined.store_safe(&tracked, 0, &ctx, .{ .ptr = 1, .src = null, .is_undef = true });
 
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(tracked[1].undefined.?));
+    const analyte = &tracked[1].typed_payload.?.immediate;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
 }
 
 test "store_safe with is_undef=false sets defined" {
@@ -209,11 +226,12 @@ test "store_safe with is_undef=false sets defined" {
     var tracked = [_]Slot{.{}} ** 3;
 
     // First make it undefined
-    tracked[1].undefined = .{ .undefined = .{} };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } };
 
-    try Undefined.store_safe(&tracked, 0, &ctx, .{ .ptr = 1, .is_undef = false });
+    try Undefined.store_safe(&tracked, 0, &ctx, .{ .ptr = 1, .src = null, .is_undef = false });
 
-    try std.testing.expectEqual(.defined, std.meta.activeTag(tracked[1].undefined.?));
+    const analyte = &tracked[1].typed_payload.?.immediate;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(analyte.undefined.?));
 }
 
 test "store_safe propagates defined through arg_ptr" {
@@ -225,15 +243,17 @@ test "store_safe propagates defined through arg_ptr" {
     var tracked = [_]Slot{.{}} ** 3;
 
     // Set up caller slot
-    var caller_slot = Slot{ .undefined = .{ .undefined = .{} } };
-    tracked[0].undefined = .{ .undefined = .{} };
+    var caller_slot = Slot{ .typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } } };
+    tracked[0].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } };
     tracked[0].arg_ptr = &caller_slot;
 
-    try Undefined.store_safe(&tracked, 1, &ctx, .{ .ptr = 0, .is_undef = false });
+    try Undefined.store_safe(&tracked, 1, &ctx, .{ .ptr = 0, .src = null, .is_undef = false });
 
     // Both should be defined
-    try std.testing.expectEqual(.defined, std.meta.activeTag(tracked[0].undefined.?));
-    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_slot.undefined.?));
+    const local_analyte = &tracked[0].typed_payload.?.immediate;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(local_analyte.undefined.?));
+    const caller_analyte = &caller_slot.typed_payload.?.immediate;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_analyte.undefined.?));
 }
 
 test "load from undefined slot returns error" {
@@ -243,7 +263,7 @@ test "load from undefined slot returns error" {
     defer ctx.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].undefined = .{ .undefined = .{} };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{} } } };
 
     try std.testing.expectError(
         error.UseBeforeAssign,
@@ -258,7 +278,7 @@ test "load from defined slot does not return error" {
     defer ctx.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].undefined = .{ .defined = {} };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .defined = {} } } };
 
     try Undefined.load(&tracked, 0, &ctx, .{ .ptr = 1 });
 }
@@ -270,7 +290,7 @@ test "load from slot without undefined tracking does not return error" {
     defer ctx.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    // tracked[1].undefined is null
+    // tracked[1].typed_payload is null
 
     try Undefined.load(&tracked, 0, &ctx, .{ .ptr = 1 });
 }
@@ -282,15 +302,16 @@ test "dbg_var_ptr sets var_name on undefined meta" {
     defer ctx.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].undefined = .{ .undefined = .{
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .undefined = .{
         .file = "test.zig",
         .line = 5,
         .column = 3,
-    } };
+    } } } };
 
     try Undefined.dbg_var_ptr(&tracked, 0, &ctx, .{ .slot = 1, .name = "my_var" });
 
-    try std.testing.expectEqualStrings("my_var", tracked[1].undefined.?.undefined.var_name.?);
+    const analyte = &tracked[1].typed_payload.?.immediate;
+    try std.testing.expectEqualStrings("my_var", analyte.undefined.?.undefined.var_name.?);
 }
 
 test "dbg_var_ptr does not affect defined slot" {
@@ -300,12 +321,13 @@ test "dbg_var_ptr does not affect defined slot" {
     defer ctx.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].undefined = .{ .defined = {} };
+    tracked[1].typed_payload = .{ .immediate = .{ .undefined = .{ .defined = {} } } };
 
     try Undefined.dbg_var_ptr(&tracked, 0, &ctx, .{ .slot = 1, .name = "my_var" });
 
     // Should still be defined, no crash
-    try std.testing.expectEqual(.defined, std.meta.activeTag(tracked[1].undefined.?));
+    const analyte = &tracked[1].typed_payload.?.immediate;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(analyte.undefined.?));
 }
 
 test "dbg_var_ptr with null slot does nothing" {
@@ -326,7 +348,7 @@ test "reportUseBeforeAssign formats with var_name" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    const undef = Undefined{ .undefined = .{
+    const undef = State{ .undefined = .{
         .file = "file.zig",
         .line = 42,
         .column = 8,
@@ -347,7 +369,7 @@ test "reportUseBeforeAssign formats without var_name" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    const undef = Undefined{ .undefined = .{
+    const undef = State{ .undefined = .{
         .file = "file.zig",
         .line = 42,
         .column = 8,
