@@ -51,7 +51,7 @@ test "slotLine for dbg_stmt" {
     const datum: Data = .{ .dbg_stmt = .{ .line = 10, .column = 5 } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .dbg_stmt = .{ .line = 10, .column = 5 } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .dbg_stmt = .{ .line = 10, .column = 5 } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for arg" {
@@ -64,7 +64,7 @@ test "slotLine for arg" {
     const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"test_param\" } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"test_param\" } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for arg with sequential zir_param_index uses arg counter" {
@@ -82,17 +82,17 @@ test "slotLine for arg with sequential zir_param_index uses arg counter" {
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"a\" } }, tracked, 0, ctx);\n", result0);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"a\" } }, tracked, 0, ctx, &payloads);\n", result0);
 
     // Second arg: zir_param_index=1, should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
     const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"b\" } }, tracked, 1, ctx);\n", result1);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"b\" } }, tracked, 1, ctx, &payloads);\n", result1);
 
     // Third arg: zir_param_index=2, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"c\" } }, tracked, 2, ctx);\n", result2);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"c\" } }, tracked, 2, ctx, &payloads);\n", result2);
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
@@ -114,17 +114,17 @@ test "slotLine for arg with non-sequential zir_param_index uses sequential arg c
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"self\" } }, tracked, 0, ctx);\n", result0);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"self\" } }, tracked, 0, ctx, &payloads);\n", result0);
 
     // Second arg: zir_param_index=2 (skipped 1), should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"byte_count\" } }, tracked, 1, ctx);\n", result1);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"byte_count\" } }, tracked, 1, ctx, &payloads);\n", result1);
 
     // Third arg: zir_param_index=3, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
     const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"return_address\" } }, tracked, 2, ctx);\n", result2);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"return_address\" } }, tracked, 2, ctx, &payloads);\n", result2);
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
@@ -142,7 +142,7 @@ test "slotLine for ret_safe with source" {
     const datum: Data = .{ .un_op = operand_ref };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 5 } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 5 } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for alloc" {
@@ -155,7 +155,7 @@ test "slotLine for alloc" {
     const datum: Data = .{ .no_op = {} };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for store_safe" {
@@ -171,7 +171,7 @@ test "slotLine for store_safe" {
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .store_safe = .{ .ptr = 3, .src = 4, .is_undef = false } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .store_safe = .{ .ptr = 3, .src = 4, .is_undef = false } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for load" {
@@ -186,7 +186,7 @@ test "slotLine for load" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .load = .{ .ptr = 5 } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .load = .{ .ptr = 5 } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "generateFunction produces complete function" {
@@ -208,20 +208,22 @@ test "generateFunction produces complete function" {
     const expected =
         \\fn fn_42(ctx: *Context) anyerror!Slot {
         \\    ctx.meta.file = "test.zig";
-        \\    ctx.meta.function = "test.main";
         \\    ctx.base_line = 10;
-        \\    try ctx.push("test.main");
-        \\    defer ctx.pop();
+        \\    try ctx.push_fn("test.main");
+        \\    defer ctx.pop_fn();
+        \\
+        \\    var payloads = slots.EntityList.init(ctx.allocator);
+        \\    defer payloads.deinit();
         \\
         \\    const tracked = slots.make_list(ctx.allocator, 4);
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{};
         \\
-        \\    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx);
-        \\    try Slot.apply(.{ .dbg_stmt = .{ .line = 1, .column = 3 } }, tracked, 1, ctx);
-        \\    try Slot.apply(.{ .load = .{ .ptr = 0 } }, tracked, 2, ctx);
-        \\    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 2 } }, tracked, 3, ctx);
-        \\    try slots.onFinish(tracked, &retval, ctx);
+        \\    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx, &payloads);
+        \\    try Slot.apply(.{ .dbg_stmt = .{ .line = 1, .column = 3 } }, tracked, 1, ctx, &payloads);
+        \\    try Slot.apply(.{ .load = .{ .ptr = 0 } }, tracked, 2, ctx, &payloads);
+        \\    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 2 } }, tracked, 3, ctx, &payloads);
+        \\    try slots.onFinish(tracked, &retval, ctx, &payloads);
         \\    return retval;
         \\}
         \\
@@ -312,5 +314,5 @@ test "slotLine for br with block and operand" {
     } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .br, datum, 9, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .br = .{ .block = 3, .src = 8 } }, tracked, 9, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .br = .{ .block = 3, .src = 8 } }, tracked, 9, ctx, &payloads);\n", result);
 }

@@ -65,25 +65,25 @@ pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx);\n", .{inst_index}, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx, &payloads);\n", .{inst_index}, null);
             }
             if (isAllocatorCreate(ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx);\n", .{ allocator_type, inst_index }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx, &payloads);\n", .{ allocator_type, inst_index }, null);
             }
             if (isAllocatorDestroy(ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer slot
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
                 const ptr_slot = extractDestroyPtrSlot(datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx);\n", .{ ptr_slot, allocator_type, inst_index }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx, &payloads);\n", .{ ptr_slot, allocator_type, inst_index }, null);
             }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-            break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
+            break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx, &payloads);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
         },
         else => blk: {
             const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names, arg_counter);
-            break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx);\n", .{ safeName(tag), tag_payload, inst_index }, null);
+            break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx, &payloads);\n", .{ safeName(tag), tag_payload, inst_index }, null);
         },
     };
 }
@@ -603,20 +603,22 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\fn fn_{d}(ctx: *Context{s}) anyerror!Slot {{
         \\    ctx.meta.file = "{s}";
-        \\    ctx.meta.function = "{s}";
         \\    ctx.base_line = {d};
-        \\    try ctx.push("{s}");
-        \\    defer ctx.pop();
+        \\    try ctx.push_fn("{s}");
+        \\    defer ctx.pop_fn();
+        \\
+        \\    var payloads = slots.EntityList.init(ctx.allocator);
+        \\    defer payloads.deinit();
         \\
         \\    const tracked = slots.make_list(ctx.allocator, {d});
         \\    defer slots.clear_list(tracked, ctx.allocator);
         \\    var retval: Slot = .{{}};
         \\
-        \\{s}    try slots.onFinish(tracked, &retval, ctx);
+        \\{s}    try slots.onFinish(tracked, &retval, ctx, &payloads);
         \\    return retval;
         \\}}
         \\
-    , .{ func_index, params, file_path, fqn, base_line, fqn, tags.len, slot_lines }, size_hint);
+    , .{ func_index, params, file_path, base_line, fqn, tags.len, slot_lines }, size_hint);
 }
 
 /// Generate epilogue with imports and main function
@@ -653,8 +655,8 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + arity *Slot args
-    var params: []const u8 = "ctx: *Context";
+    // Build parameter list: ctx + entities + arity *Slot args
+    var params: []const u8 = "ctx: *Context, _: *slots.EntityList";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
         params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: *Slot", .{params}, null);

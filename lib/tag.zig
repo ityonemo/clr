@@ -1,4 +1,6 @@
-const Slot = @import("slots.zig").Slot;
+const slots = @import("slots.zig");
+const Slot = slots.Slot;
+const EntityList = slots.EntityList;
 const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 const analyses = .{ Undefined, MemorySafety };
@@ -6,16 +8,16 @@ const analyses = .{ Undefined, MemorySafety };
 // Tag payload types
 
 pub const Alloc = struct {
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.alloc, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.alloc, tracked, index, ctx, entities, self);
     }
 };
 
 pub const AllocCreate = struct {
     allocator_type: []const u8,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.alloc_create, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.alloc_create, tracked, index, ctx, entities, self);
     }
 };
 
@@ -23,30 +25,27 @@ pub const AllocDestroy = struct {
     ptr: ?usize,
     allocator_type: []const u8,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.alloc_destroy, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.alloc_destroy, tracked, index, ctx, entities, self);
     }
 };
 
-// Arg is special: it copies slot data from the caller before splatting.
-// This establishes the arg_ptr link for back-propagation of state changes.
+// Arg copies slot data from the caller before splatting.
 pub const Arg = struct {
     value: *Slot,
     name: []const u8,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
         tracked[index] = self.value.*;
-        tracked[index].reference_arg = index;
-        tracked[index].arg_ptr = self.value;
-        try splat(.arg, tracked, index, ctx, self);
+        try splat(.arg, tracked, index, ctx, entities, self);
     }
 };
 
 pub const Bitcast = struct {
     src: ?usize,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.bitcast, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.bitcast, tracked, index, ctx, entities, self);
     }
 };
 
@@ -54,8 +53,8 @@ pub const Br = struct {
     block: usize,
     src: ?usize,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.br, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.br, tracked, index, ctx, entities, self);
     }
 };
 
@@ -65,9 +64,10 @@ pub const DbgStmt = struct {
     line: u32,
     column: u32,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
         _ = tracked;
         _ = index;
+        _ = entities;
         ctx.meta.line = ctx.base_line + self.line + 1;
         ctx.meta.column = self.column;
     }
@@ -77,24 +77,24 @@ pub const DbgVarPtr = struct {
     slot: ?usize,
     name: []const u8,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.dbg_var_ptr, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.dbg_var_ptr, tracked, index, ctx, entities, self);
     }
 };
 
 pub const Load = struct {
     ptr: ?usize,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.load, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.load, tracked, index, ctx, entities, self);
     }
 };
 
 pub const OptionalPayload = struct {
     src: ?usize,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.optional_payload, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.optional_payload, tracked, index, ctx, entities, self);
     }
 };
 
@@ -102,8 +102,8 @@ pub const RetSafe = struct {
     retval_ptr: *Slot,
     src: ?usize,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.ret_safe, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.ret_safe, tracked, index, ctx, entities, self);
     }
 };
 
@@ -112,25 +112,26 @@ pub const StoreSafe = struct {
     src: ?usize,
     is_undef: bool,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.store_safe, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.store_safe, tracked, index, ctx, entities, self);
     }
 };
 
 pub const UnwrapErrunionPayload = struct {
     src: ?usize,
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-        try splat(.unwrap_errunion_payload, tracked, index, ctx, self);
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
+        try splat(.unwrap_errunion_payload, tracked, index, ctx, entities, self);
     }
 };
 
 pub const Unimplemented = struct {
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList) !void {
         _ = self;
         _ = tracked;
         _ = index;
         _ = ctx;
+        _ = entities;
     }
 };
 
@@ -190,10 +191,10 @@ pub const AnyTag = union(enum) {
     wrap_errunion_payload: Unimplemented,
 };
 
-pub fn splat(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+pub fn splat(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, @tagName(tag))) {
-            try @field(Analysis, @tagName(tag))(tracked, index, ctx, payload);
+            try @field(Analysis, @tagName(tag))(tracked, index, ctx, entities, payload);
         }
     }
 }
@@ -201,10 +202,10 @@ pub fn splat(comptime tag: anytype, tracked: []Slot, index: usize, ctx: anytype,
 /// Called at the end of each function to allow analyses to perform final checks.
 /// Each analysis can implement `onFinish` to do end-of-function processing
 /// (e.g., memory leak detection after all paths have been processed).
-pub fn splatFinish(tracked: []Slot, retval: *Slot, ctx: anytype) !void {
+pub fn splatFinish(tracked: []Slot, retval: *Slot, ctx: anytype, entities: *EntityList) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "onFinish")) {
-            try Analysis.onFinish(tracked, retval, ctx);
+            try Analysis.onFinish(tracked, retval, ctx, entities);
         }
     }
 }

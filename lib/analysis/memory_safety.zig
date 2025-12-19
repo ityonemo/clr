@@ -1,6 +1,8 @@
-
 const std = @import("std");
-const Slot = @import("../slots.zig").Slot;
+const slots = @import("../slots.zig");
+const Slot = slots.Slot;
+const EntityList = slots.EntityList;
+const TypedPayload = slots.TypedPayload;
 const Meta = @import("../Meta.zig");
 
 // =========================================================================
@@ -29,24 +31,30 @@ pub const MemorySafety = union(enum) {
     stack_ptr: StackPtr,
     allocation: Allocation,
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn alloc(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = payload;
-        const analyte = tracked[index].ensureImmediate();
+        if (tracked[index].typed_payload == null) {
+            tracked[index].typed_payload = TypedPayload.new(entities);
+        }
+        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
         analyte.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
     }
 
-    pub fn arg(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn arg(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         // If the caller passed an allocation, preserve that metadata
         // so the callee can free it (ownership transfer)
-        if (tracked[index].typed_payload) |tp| {
-            if (tp.immediate.memory_safety) |ms| {
+        if (tracked[index].typed_payload) |idx| {
+            if (entities.items[idx].immediate.memory_safety) |ms| {
                 if (ms == .allocation) return;
             }
         }
 
         // Store parameter info with empty function name - this means returning it directly
         // won't be flagged as an escape (function won't match in ret_safe)
-        const analyte = tracked[index].ensureImmediate();
+        if (tracked[index].typed_payload == null) {
+            tracked[index].typed_payload = TypedPayload.new(entities);
+        }
+        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
         analyte.memory_safety = .{ .stack_ptr = .{
             .meta = .{
                 .function = "", // Empty = not from this function's stack
@@ -57,57 +65,66 @@ pub const MemorySafety = union(enum) {
         } };
     }
 
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = index;
         _ = ctx;
         // Set the variable name on the stack_ptr metadata
         const slot = payload.slot orelse return;
         std.debug.assert(slot < tracked.len);
-        const tp = &(tracked[slot].typed_payload orelse return);
-        const ms = tp.immediate.memory_safety orelse return;
+        const idx = tracked[slot].typed_payload orelse return;
+        const ms = entities.items[idx].immediate.memory_safety orelse return;
         if (ms != .stack_ptr) return;
         if (ms.stack_ptr.name == .other) {
-            tp.immediate.memory_safety.?.stack_ptr.name = .{ .variable = payload.name };
+            entities.items[idx].immediate.memory_safety.?.stack_ptr.name = .{ .variable = payload.name };
         }
     }
 
-    pub fn bitcast(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn bitcast(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = ctx;
         // Bitcast just reinterprets the pointer type (e.g., *u8 -> *const u8)
         // Propagate memory_safety metadata from source to result
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
-        const src_tp = tracked[src].typed_payload orelse return;
-        const ms = src_tp.immediate.memory_safety orelse return;
-        const dst_analyte = tracked[index].ensureImmediate();
+        const src_idx = tracked[src].typed_payload orelse return;
+        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        if (tracked[index].typed_payload == null) {
+            tracked[index].typed_payload = TypedPayload.new(entities);
+        }
+        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = ctx;
         // Unwrapping an error union extracts the payload value
         // Propagate memory_safety metadata from source to result
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
-        const src_tp = tracked[src].typed_payload orelse return;
-        const ms = src_tp.immediate.memory_safety orelse return;
-        const dst_analyte = tracked[index].ensureImmediate();
+        const src_idx = tracked[src].typed_payload orelse return;
+        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        if (tracked[index].typed_payload == null) {
+            tracked[index].typed_payload = TypedPayload.new(entities);
+        }
+        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn optional_payload(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn optional_payload(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = ctx;
         // Unwrapping an optional extracts the payload value
         // Propagate memory_safety metadata from source to result
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
-        const src_tp = tracked[src].typed_payload orelse return;
-        const ms = src_tp.immediate.memory_safety orelse return;
-        const dst_analyte = tracked[index].ensureImmediate();
+        const src_idx = tracked[src].typed_payload orelse return;
+        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        if (tracked[index].typed_payload == null) {
+            tracked[index].typed_payload = TypedPayload.new(entities);
+        }
+        const dst_analyte = &entities.items[tracked[index].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn br(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn br(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = index;
         _ = ctx;
         // Branch to block with value - propagate state from src to target block
@@ -115,42 +132,33 @@ pub const MemorySafety = union(enum) {
         const block = payload.block;
         std.debug.assert(src < tracked.len);
         std.debug.assert(block < tracked.len);
-        const src_tp = tracked[src].typed_payload orelse return;
-        const ms = src_tp.immediate.memory_safety orelse return;
-        const dst_analyte = tracked[block].ensureImmediate();
+        const src_idx = tracked[src].typed_payload orelse return;
+        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
+        if (tracked[block].typed_payload == null) {
+            tracked[block].typed_payload = TypedPayload.new(entities);
+        }
+        const dst_analyte = &entities.items[tracked[block].typed_payload.?].immediate;
         dst_analyte.memory_safety = ms;
     }
 
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+        // TODO: Interprocedural parameter name propagation disabled during entity system refactoring.
+        // Previously checked reference_arg to detect storing from arg slot to alloc slot.
+        _ = tracked;
         _ = index;
         _ = ctx;
-        const ptr = payload.ptr orelse return;
-        const src = payload.src orelse return;
-        std.debug.assert(ptr < tracked.len);
-        std.debug.assert(src < tracked.len);
-
-        // Check if storing from an arg slot to an alloc slot (parameter case)
-        // Transfer the arg's param name/line to the alloc's stack_ptr
-        if (tracked[src].reference_arg == null) return;
-        const src_tp = tracked[src].typed_payload orelse return;
-        const src_ms = src_tp.immediate.memory_safety orelse return;
-        const dst_tp = &(tracked[ptr].typed_payload orelse return);
-        if (dst_tp.immediate.memory_safety == null) return;
-        if (dst_tp.immediate.memory_safety.? != .stack_ptr) return;
-        // Keep dst's function (the current function) so it's detected as escape
-        dst_tp.immediate.memory_safety.?.stack_ptr.name = src_ms.stack_ptr.name;
-        dst_tp.immediate.memory_safety.?.stack_ptr.meta.line = src_ms.stack_ptr.meta.line;
-        dst_tp.immediate.memory_safety.?.stack_ptr.meta.column = null;
+        _ = entities;
+        _ = payload;
     }
 
-    pub fn ret_safe(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn ret_safe(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = index;
 
         const src = payload.src orelse return;
         std.debug.assert(src < tracked.len);
 
-        const tp = tracked[src].typed_payload orelse return;
-        const ms = tp.immediate.memory_safety orelse return;
+        const src_idx = tracked[src].typed_payload orelse return;
+        const ms = entities.items[src_idx].immediate.memory_safety orelse return;
 
         // Check for stack pointer escape
         switch (ms) {
@@ -165,29 +173,22 @@ pub const MemorySafety = union(enum) {
             .allocation => {},
         }
 
+        // TODO: Interprocedural propagation disabled during entity system refactoring
         // Merge state into retval for ownership transfer tracking.
-        // If we're returning an allocation, it's not a leak - ownership transfers to caller.
-        const retval_analyte = payload.retval_ptr.ensureImmediate();
-        retval_analyte.memory_safety = ms;
+        _ = payload.retval_ptr;
     }
 
     /// Called at the end of each function to check for memory leaks.
     /// Deferred until after all slots are processed so success paths can free
     /// allocations before we check for leaks.
-    pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: anytype) !void {
-        // Get the origin of any allocation being returned (ownership transfer)
-        const returned_origin: ?usize = blk: {
-            const retval_tp = retval.typed_payload orelse break :blk null;
-            const ms = retval_tp.immediate.memory_safety orelse break :blk null;
-            break :blk switch (ms) {
-                .allocation => |a| a.origin,
-                .stack_ptr => null,
-            };
-        };
+    pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: anytype, entities: *EntityList) !void {
+        // TODO: Interprocedural ownership transfer disabled during entity system refactoring
+        _ = retval;
+        const returned_origin: ?usize = null;
 
         for (tracked) |slot| {
-            const tp = slot.typed_payload orelse continue;
-            const ms = tp.immediate.memory_safety orelse continue;
+            const idx = slot.typed_payload orelse continue;
+            const ms = entities.items[idx].immediate.memory_safety orelse continue;
             if (ms != .allocation) continue;
             const a = ms.allocation;
 
@@ -198,7 +199,7 @@ pub const MemorySafety = union(enum) {
             if (a.freed == null) {
                 // Before reporting leak, check if any slot with same origin was freed
                 // (handles case where callee freed via arg_ptr propagation)
-                if (isOriginFreed(tracked, a.origin)) continue;
+                if (isOriginFreed(tracked, entities, a.origin)) continue;
                 // Still allocated after all paths = leak
                 return reportMemoryLeak(ctx, a.allocated);
             }
@@ -206,10 +207,10 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Check if any slot with the given origin has been freed
-    fn isOriginFreed(tracked: []Slot, origin: usize) bool {
+    fn isOriginFreed(tracked: []Slot, entities: *EntityList, origin: usize) bool {
         for (tracked) |slot| {
-            const tp = slot.typed_payload orelse continue;
-            const ms = tp.immediate.memory_safety orelse continue;
+            const idx = slot.typed_payload orelse continue;
+            const ms = entities.items[idx].immediate.memory_safety orelse continue;
             if (ms != .allocation) continue;
             if (ms.allocation.origin == origin and ms.allocation.freed != null) {
                 return true;
@@ -223,8 +224,11 @@ pub const MemorySafety = union(enum) {
     // =========================================================================
 
     /// Handle allocator.create() - marks slot as allocated
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
-        const analyte = tracked[index].ensureImmediate();
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
+        if (tracked[index].typed_payload == null) {
+            tracked[index].typed_payload = TypedPayload.new(entities);
+        }
+        const analyte = &entities.items[tracked[index].typed_payload.?].immediate;
         analyte.memory_safety = .{ .allocation = .{
             .allocated = ctx.meta,
             .origin = index, // This slot is the origin of this allocation
@@ -233,15 +237,18 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator
-    pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = index;
         const ptr = payload.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
-        const tp = &(tracked[ptr].typed_payload orelse {
+        const idx = tracked[ptr].typed_payload orelse {
             // Slot wasn't tracked as allocated (allocation state didn't propagate)
             // Mark it as freed anyway so we can detect use-after-free
-            const new_analyte = tracked[ptr].ensureImmediate();
+            if (tracked[ptr].typed_payload == null) {
+                tracked[ptr].typed_payload = TypedPayload.new(entities);
+            }
+            const new_analyte = &entities.items[tracked[ptr].typed_payload.?].immediate;
             new_analyte.memory_safety = .{ .allocation = .{
                 .allocated = ctx.meta, // Use destroy site as placeholder
                 .freed = ctx.meta,
@@ -249,10 +256,10 @@ pub const MemorySafety = union(enum) {
                 .allocator_type = payload.allocator_type,
             } };
             return;
-        });
+        };
 
-        const ms = tp.immediate.memory_safety orelse {
-            tp.immediate.memory_safety = .{ .allocation = .{
+        const ms = entities.items[idx].immediate.memory_safety orelse {
+            entities.items[idx].immediate.memory_safety = .{ .allocation = .{
                 .allocated = ctx.meta,
                 .freed = ctx.meta,
                 .origin = ptr,
@@ -270,7 +277,8 @@ pub const MemorySafety = union(enum) {
                 // Check for mismatched allocator types
                 const alloc_is_generic = std.mem.eql(u8, a.allocator_type, "Allocator");
                 const free_is_generic = std.mem.eql(u8, payload.allocator_type, "Allocator");
-                const came_from_param = tracked[ptr].arg_ptr != null;
+                // TODO: Interprocedural - previously used arg_ptr to detect came_from_param
+                const came_from_param = false;
                 const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
                 const came_from_other_func = !std.mem.eql(u8, a.allocated.function, func_name);
 
@@ -282,42 +290,31 @@ pub const MemorySafety = union(enum) {
                 if (should_check and !std.mem.eql(u8, a.allocator_type, payload.allocator_type)) {
                     return reportMismatchedAllocator(ctx, a, payload.allocator_type);
                 }
-                markAllocationFreed(tracked, a.origin, ctx.meta);
-
-                // Propagate freed state back to caller via arg_ptr
-                if (tracked[ptr].arg_ptr) |caller_slot| {
-                    if (caller_slot.typed_payload) |*caller_tp| {
-                        if (caller_tp.immediate.memory_safety) |*caller_ms| {
-                            if (caller_ms.* == .allocation) {
-                                caller_ms.allocation.freed = ctx.meta;
-                            }
-                        }
-                    }
-                }
+                markAllocationFreed(tracked, entities, a.origin, ctx.meta);
             },
         }
     }
 
     /// Mark all slots with the given origin as freed.
-    fn markAllocationFreed(tracked: []Slot, origin: usize, free_meta: Meta) void {
-        for (tracked) |*slot| {
-            const tp = &(slot.typed_payload orelse continue);
-            const ms = tp.immediate.memory_safety orelse continue;
+    fn markAllocationFreed(tracked: []Slot, entities: *EntityList, origin: usize, free_meta: Meta) void {
+        for (tracked) |slot| {
+            const idx = slot.typed_payload orelse continue;
+            const ms = entities.items[idx].immediate.memory_safety orelse continue;
             if (ms != .allocation) continue;
             if (ms.allocation.origin == origin) {
-                tp.immediate.memory_safety.?.allocation.freed = free_meta;
+                entities.items[idx].immediate.memory_safety.?.allocation.freed = free_meta;
             }
         }
     }
 
     /// Handle load - detect use-after-free
-    pub fn load(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+    pub fn load(tracked: []Slot, index: usize, ctx: anytype, entities: *EntityList, payload: anytype) !void {
         _ = index;
         const ptr = payload.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
-        const tp = tracked[ptr].typed_payload orelse return;
-        const ms = tp.immediate.memory_safety orelse return;
+        const idx = tracked[ptr].typed_payload orelse return;
+        const ms = entities.items[idx].immediate.memory_safety orelse return;
         if (ms != .allocation) return;
         const a = ms.allocation;
         if (a.freed) |free_site| {
@@ -441,11 +438,14 @@ test "alloc sets stack_ptr metadata" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
+    var entities = EntityList.init(allocator);
+    defer entities.deinit();
+
     var tracked = [_]Slot{.{}} ** 3;
 
-    try MemorySafety.alloc(&tracked, 1, &ctx, .{});
+    try MemorySafety.alloc(&tracked, 1, &ctx, &entities, .{});
 
-    const analyte = &tracked[1].typed_payload.?.immediate;
+    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
     const ms = analyte.memory_safety.?;
     try std.testing.expectEqualStrings("test_func", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.meta.file);
@@ -460,11 +460,14 @@ test "arg sets stack_ptr with empty function and parameter name" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
+    var entities = EntityList.init(allocator);
+    defer entities.deinit();
+
     var tracked = [_]Slot{.{}} ** 3;
 
-    try MemorySafety.arg(&tracked, 0, &ctx, .{ .value = undefined, .name = "my_param" });
+    try MemorySafety.arg(&tracked, 0, &ctx, &entities, .{ .value = undefined, .name = "my_param" });
 
-    const analyte = &tracked[0].typed_payload.?.immediate;
+    const analyte = &entities.items[tracked[0].typed_payload.?].immediate;
     const ms = analyte.memory_safety.?;
     try std.testing.expectEqualStrings("", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.meta.file);
@@ -479,17 +482,20 @@ test "dbg_var_ptr sets variable name when name is other" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
+    var entities = EntityList.init(allocator);
+    defer entities.deinit();
+
     var tracked = [_]Slot{.{}} ** 3;
 
     // First alloc to set up stack_ptr with .other name
-    try MemorySafety.alloc(&tracked, 1, &ctx, .{});
-    const analyte1 = &tracked[1].typed_payload.?.immediate;
+    try MemorySafety.alloc(&tracked, 1, &ctx, &entities, .{});
+    const analyte1 = &entities.items[tracked[1].typed_payload.?].immediate;
     try std.testing.expectEqual(.other, std.meta.activeTag(analyte1.memory_safety.?.stack_ptr.name));
 
     // dbg_var_ptr should set the variable name
-    try MemorySafety.dbg_var_ptr(&tracked, 0, &ctx, .{ .slot = 1, .name = "foo" });
+    try MemorySafety.dbg_var_ptr(&tracked, 0, &ctx, &entities, .{ .slot = 1, .name = "foo" });
 
-    const analyte2 = &tracked[1].typed_payload.?.immediate;
+    const analyte2 = &entities.items[tracked[1].typed_payload.?].immediate;
     try std.testing.expectEqual(.variable, std.meta.activeTag(analyte2.memory_safety.?.stack_ptr.name));
     try std.testing.expectEqualStrings("foo", analyte2.memory_safety.?.stack_ptr.name.variable);
 }
@@ -500,10 +506,14 @@ test "bitcast propagates stack_ptr metadata" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
+    var entities = EntityList.init(allocator);
+    defer entities.deinit();
+
     var tracked = [_]Slot{.{}} ** 3;
 
     // Set up source with stack_ptr
-    tracked[0].typed_payload = .{ .immediate = .{ .memory_safety = .{ .stack_ptr = .{
+    tracked[0].typed_payload = TypedPayload.new(&entities);
+    entities.items[tracked[0].typed_payload.?].immediate.memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "source_func",
             .file = "source.zig",
@@ -511,11 +521,11 @@ test "bitcast propagates stack_ptr metadata" {
             .column = 7,
         },
         .name = .{ .variable = "src_var" },
-    } } } };
+    } };
 
-    try MemorySafety.bitcast(&tracked, 1, &ctx, .{ .src = 0 });
+    try MemorySafety.bitcast(&tracked, 1, &ctx, &entities, .{ .src = 0 });
 
-    const analyte = &tracked[1].typed_payload.?.immediate;
+    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
     const ms = analyte.memory_safety.?;
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("source.zig", ms.stack_ptr.meta.file);
@@ -529,22 +539,26 @@ test "ret_safe detects escape when returning stack pointer from same function" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
+    var entities = EntityList.init(allocator);
+    defer entities.deinit();
+
     var tracked = [_]Slot{.{}} ** 3;
     var retval = Slot{};
 
     // Slot with stack_ptr from test_func (current function)
-    tracked[0].typed_payload = .{ .immediate = .{ .memory_safety = .{ .stack_ptr = .{
+    tracked[0].typed_payload = TypedPayload.new(&entities);
+    entities.items[tracked[0].typed_payload.?].immediate.memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "test_func",
             .file = "test.zig",
             .line = 5,
         },
         .name = .{ .variable = "local" },
-    } } } };
+    } };
 
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(&tracked, 1, &ctx, .{ .src = 0, .retval_ptr = &retval }),
+        MemorySafety.ret_safe(&tracked, 1, &ctx, &entities, .{ .src = 0, .retval_ptr = &retval }),
     );
 }
 
@@ -554,19 +568,23 @@ test "ret_safe allows returning arg (empty function name)" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
+    var entities = EntityList.init(allocator);
+    defer entities.deinit();
+
     var tracked = [_]Slot{.{}} ** 3;
     var retval = Slot{};
 
     // Slot with empty function name (arg)
-    tracked[0].typed_payload = .{ .immediate = .{ .memory_safety = .{ .stack_ptr = .{
+    tracked[0].typed_payload = TypedPayload.new(&entities);
+    entities.items[tracked[0].typed_payload.?].immediate.memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "",
             .file = "test.zig",
             .line = 5,
         },
         .name = .{ .parameter = "param" },
-    } } } };
+    } };
 
     // Should NOT error - returning arg is fine
-    try MemorySafety.ret_safe(&tracked, 1, &ctx, .{ .src = 0, .retval_ptr = &retval });
+    try MemorySafety.ret_safe(&tracked, 1, &ctx, &entities, .{ .src = 0, .retval_ptr = &retval });
 }

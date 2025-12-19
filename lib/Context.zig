@@ -26,11 +26,12 @@ pub fn deinit(self: *Context) void {
     self.stacktrace.deinit(self.allocator);
 }
 
-pub fn push(self: *Context, frame: []const u8) !void {
-    try self.stacktrace.append(self.allocator, frame);
+pub fn push_fn(self: *Context, func_name: []const u8) !void {
+    self.meta.function = func_name;
+    try self.stacktrace.append(self.allocator, func_name);
 }
 
-pub fn pop(self: *Context) void {
+pub fn pop_fn(self: *Context) void {
     if (self.stacktrace.items.len == 0) @panic("you busted the stacktrace");
     _ = self.stacktrace.pop();
 }
@@ -61,13 +62,13 @@ test "context stacktrace tracks calls" {
     var ctx = Context.init(std.testing.allocator, &discarding.writer);
     defer ctx.deinit();
 
-    try ctx.push("first");
-    try ctx.push("second");
+    try ctx.push_fn("first");
+    try ctx.push_fn("second");
 
     try std.testing.expectEqual(@as(usize, 2), ctx.stacktrace.items.len);
     try std.testing.expectEqualStrings("first", ctx.stacktrace.items[0]);
     try std.testing.expectEqualStrings("second", ctx.stacktrace.items[1]);
 
-    ctx.pop();
+    ctx.pop_fn();
     try std.testing.expectEqual(@as(usize, 1), ctx.stacktrace.items.len);
 }
