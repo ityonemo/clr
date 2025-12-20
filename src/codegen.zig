@@ -138,9 +138,9 @@ fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
 }
 
 fn payloadRetSafe(arena: std.mem.Allocator, datum: Data) []const u8 {
-    const operand_index = datum.un_op.toIndex() orelse return ".{ .retval_ptr = &retval, .src = null }";
-    const ptr = @intFromEnum(operand_index);
-    return clr_allocator.allocPrint(arena, ".{{ .retval_ptr = &retval, .src = {d} }}", .{ptr}, null);
+    const operand_index = datum.un_op.toIndex() orelse return ".{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = null }";
+    const src = @intFromEnum(operand_index);
+    return clr_allocator.allocPrint(arena, ".{{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = {d} }}", .{src}, null);
 }
 
 fn payloadDbgVar(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
@@ -601,7 +601,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     // Size hint: slot_lines + template + margin
     const size_hint = slot_lines.len + 1024;
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}(ctx: *Context{s}) anyerror!Slot {{
+        \\fn fn_{d}(ctx: *Context, caller_payloads: ?*slots.Payloads{s}) anyerror!slots.EIdx {{
         \\    ctx.meta.file = "{s}";
         \\    ctx.base_line = {d};
         \\    try ctx.push_fn("{s}");
@@ -612,10 +612,10 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\
         \\    const tracked = slots.make_list(ctx.allocator, {d});
         \\    defer slots.clear_list(tracked, ctx.allocator);
-        \\    var retval: Slot = .{{}};
+        \\    const return_eidx: slots.EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
         \\
-        \\{s}    try slots.onFinish(tracked, &retval, ctx, &payloads);
-        \\    return retval;
+        \\{s}    try slots.onFinish(tracked, ctx, &payloads);
+        \\    return return_eidx;
         \\}}
         \\
     , .{ func_index, params, file_path, base_line, fqn, tags.len, slot_lines }, size_hint);
@@ -641,7 +641,7 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\    defer file_writer.interface.flush() catch {{}};
         \\    var ctx = Context.init(allocator, &file_writer.interface);
         \\    defer ctx.deinit();
-        \\    _ = fn_{d}(&ctx) catch {{
+        \\    _ = fn_{d}(&ctx, null) catch {{
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);
         \\    }};
@@ -655,18 +655,18 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + payloads + arity *Slot args
-    var params: []const u8 = "ctx: *Context, _: *slots.Payloads";
+    // Build parameter list: ctx + caller_payloads + arity *Slot args
+    var params: []const u8 = "ctx: *Context, caller_payloads: ?*slots.Payloads";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
         params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: *Slot", .{params}, null);
     }
 
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}({s}) anyerror!Slot {{
+        \\fn fn_{d}({s}) anyerror!slots.EIdx {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    return .{{}};
+        \\    return if (caller_payloads) |cp| try cp.initEntity() else 0;
         \\}}
         \\
     , .{ func_index, params, func_index }, null);

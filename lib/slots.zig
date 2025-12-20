@@ -31,6 +31,7 @@ pub const Payloads = struct {
     }
 
     /// Initialize a slot with a new scalar payload. Crashes if slot already initialized.
+    // TODO: Make initSlot generic, not just scalar.
     pub fn initSlot(self: *@This(), tracked: []Slot, index: usize) !EIdx {
         if (tracked[index].typed_payload) |_| @panic("slot already initialized");
         const idx: EIdx = @intCast(self.list.items.len);
@@ -46,6 +47,51 @@ pub const Payloads = struct {
         const idx: EIdx = @intCast(self.list.items.len);
         try self.list.append(value);
         tracked[index].typed_payload = idx;
+        return idx;
+    }
+
+    /// Allocate a new unset_retval entity and return its index.
+    /// Used for pre-allocating return value entities in caller's payloads.
+    pub fn initEntity(self: *@This()) !EIdx {
+        const idx: EIdx = @intCast(self.list.items.len);
+        try self.list.append(.unset_retval);
+        return idx;
+    }
+
+    /// Append a new entity with the given value and return its index.
+    pub fn appendEntity(self: *@This(), value: TypedPayload) !EIdx {
+        const idx: EIdx = @intCast(self.list.items.len);
+        try self.list.append(value);
+        return idx;
+    }
+
+    /// Recursively copy a TypedPayload from another Payloads list into an existing slot in this one.
+    /// Handles EIdx references by recursively copying referenced entities.
+    pub fn copyInto(self: *@This(), dest_idx: EIdx, src_payloads: *Payloads, src_idx: EIdx) !void {
+        const src = src_payloads.list.items[src_idx];
+        self.list.items[dest_idx] = switch (src) {
+            .pointer => |eidx| .{ .pointer = try self.copyEntityRecursive(src_payloads, eidx) },
+            .optional => |eidx| .{ .optional = try self.copyEntityRecursive(src_payloads, eidx) },
+            .region => |eidx| .{ .region = try self.copyEntityRecursive(src_payloads, eidx) },
+            // These don't contain EIdx references, copy directly
+            .scalar, .unset_retval, .@"struct", .@"union", .unimplemented, .void => src,
+        };
+    }
+
+    /// Recursively copy a TypedPayload, appending to this list. Returns new index.
+    // TODO: Make this non-recursive to avoid stack overflow with deeply nested structures.
+    pub fn copyEntityRecursive(self: *@This(), src_payloads: *Payloads, src_idx: EIdx) !EIdx {
+        const src = src_payloads.list.items[src_idx];
+        // First recursively copy any referenced entities, then append this entity
+        const copied = switch (src) {
+            .pointer => |eidx| TypedPayload{ .pointer = try self.copyEntityRecursive(src_payloads, eidx) },
+            .optional => |eidx| TypedPayload{ .optional = try self.copyEntityRecursive(src_payloads, eidx) },
+            .region => |eidx| TypedPayload{ .region = try self.copyEntityRecursive(src_payloads, eidx) },
+            .scalar, .unset_retval, .@"struct", .@"union", .unimplemented, .void => src,
+        };
+        // Compute idx AFTER recursive calls, since they may have appended entities
+        const idx: EIdx = @intCast(self.list.items.len);
+        try self.list.append(copied);
         return idx;
     }
 
@@ -69,6 +115,7 @@ pub const TypedPayload = union(enum) {
     scalar: Analyte,
     pointer: EIdx,
     optional: EIdx,
+    unset_retval: void, // special-case for retval slots before a return has been called.
     region: EIdx, // unused, for now, will represent slices (maybe)
     @"struct": void, // temporary. Will be a slice of EIdx.
     @"union": void, // temporary. Will be a slice EIdx.
@@ -91,12 +138,12 @@ pub const Slot = struct {
     }
 
     pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        _ = payloads; // Each function has its own payloads, so caller's aren't passed
         // Skip if called is null (indirect call through function pointer - TODO: handle these)
         if (@TypeOf(called) == @TypeOf(null)) return;
-        const retval = try @call(.auto, called, .{ctx} ++ args);
-        // Propagate return value's analysis state to caller's slot
-        tracked[index] = retval;
+        // Pass caller's payloads so callee can write return value into it
+        const return_eidx = try @call(.auto, called, .{ ctx, payloads } ++ args);
+        // Deposit returned entity index into caller's slot
+        tracked[index].typed_payload = return_eidx;
     }
 };
 
@@ -112,8 +159,8 @@ pub fn clear_list(list: []Slot, allocator: std.mem.Allocator) void {
     allocator.free(list);
 }
 
-pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *Payloads) !void {
-    try tag.splatFinish(tracked, retval, ctx, payloads);
+pub fn onFinish(tracked: []Slot, ctx: *Context, payloads: *Payloads) !void {
+    try tag.splatFinish(tracked, ctx, payloads);
 }
 
 test "alloc sets state to undefined" {
@@ -271,6 +318,94 @@ test "all slots get valid payloads after operations" {
     payloads.assertAllValid(list);
 }
 
-// TODO: Interprocedural tests disabled during entity system refactoring.
-// These tests require caller/callee slots to share entity lists, which
-// needs a redesigned interprocedural analysis approach.
+test "ret_safe copies scalar return value to caller_payloads" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Callee's payloads and tracked slots
+    var callee_payloads = Payloads.init(allocator);
+    defer callee_payloads.deinit();
+    const callee_tracked = make_list(allocator, 3);
+    defer clear_list(callee_tracked, allocator);
+
+    // Caller's payloads - pre-allocate return entity
+    var caller_payloads = Payloads.init(allocator);
+    defer caller_payloads.deinit();
+    const return_eidx = try caller_payloads.initEntity();
+
+    // Verify return entity is initially unset
+    try std.testing.expectEqual(.unset_retval, std.meta.activeTag(caller_payloads.at(return_eidx).*));
+
+    // In callee: allocate and store a value
+    try Slot.apply(.{ .alloc = .{} }, callee_tracked, 0, &ctx, &callee_payloads);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, callee_tracked, 1, &ctx, &callee_payloads);
+
+    // Return the value from slot 0
+    try Slot.apply(.{ .ret_safe = .{
+        .caller_payloads = &caller_payloads,
+        .return_eidx = return_eidx,
+        .src = 0,
+    } }, callee_tracked, 2, &ctx, &callee_payloads);
+
+    // Verify return entity in caller's payloads is now a scalar
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(caller_payloads.at(return_eidx).*));
+}
+
+test "ret_safe with null src sets caller return to void" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Callee's payloads and tracked slots
+    var callee_payloads = Payloads.init(allocator);
+    defer callee_payloads.deinit();
+    const callee_tracked = make_list(allocator, 1);
+    defer clear_list(callee_tracked, allocator);
+
+    // Caller's payloads - pre-allocate return entity
+    var caller_payloads = Payloads.init(allocator);
+    defer caller_payloads.deinit();
+    const return_eidx = try caller_payloads.initEntity();
+
+    // Return void (src = null)
+    try Slot.apply(.{ .ret_safe = .{
+        .caller_payloads = &caller_payloads,
+        .return_eidx = return_eidx,
+        .src = null,
+    } }, callee_tracked, 0, &ctx, &callee_payloads);
+
+    // Verify return entity in caller's payloads is now void
+    try std.testing.expectEqual(.void, std.meta.activeTag(caller_payloads.at(return_eidx).*));
+}
+
+test "ret_safe with null caller_payloads (entrypoint) succeeds" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
+    const tracked = make_list(allocator, 2);
+    defer clear_list(tracked, allocator);
+
+    // Allocate a value
+    try Slot.apply(.{ .alloc = .{} }, tracked, 0, &ctx, &payloads);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, tracked, 1, &ctx, &payloads);
+
+    // Return with null caller_payloads (entrypoint case) - should just succeed without error
+    try Slot.apply(.{ .ret_safe = .{
+        .caller_payloads = null,
+        .return_eidx = 0, // doesn't matter when caller_payloads is null
+        .src = 0,
+    } }, tracked, 1, &ctx, &payloads);
+}

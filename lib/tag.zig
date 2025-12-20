@@ -1,6 +1,7 @@
 const slots = @import("slots.zig");
 const Slot = slots.Slot;
 const Payloads = slots.Payloads;
+const EIdx = slots.EIdx;
 const Context = @import("Context.zig");
 const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
@@ -10,7 +11,10 @@ const analyses = .{ Undefined, MemorySafety };
 
 pub const Alloc = struct {
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        _ = try payloads.initSlot(tracked, index);
+        // Create the pointed-to scalar entity (the stack memory)
+        const pointee_idx = try payloads.appendEntity(.{ .scalar = .{} });
+        // Create pointer entity pointing to the scalar
+        _ = try payloads.clobberSlot(tracked, index, .{ .pointer = pointee_idx });
         try splat(.alloc, tracked, index, ctx, payloads, self);
     }
 };
@@ -19,7 +23,10 @@ pub const AllocCreate = struct {
     allocator_type: []const u8,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        _ = try payloads.initSlot(tracked, index);
+        // Create the pointed-to scalar entity (the allocated memory)
+        const pointee_idx = try payloads.appendEntity(.{ .scalar = .{} });
+        // Create pointer entity pointing to the scalar
+        _ = try payloads.clobberSlot(tracked, index, .{ .pointer = pointee_idx });
         try splat(.alloc_create, tracked, index, ctx, payloads, self);
     }
 };
@@ -59,8 +66,18 @@ pub const Br = struct {
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        // TODO: This should be a merge, not a clobber
-        _ = try payloads.clobberSlot(tracked, self.block, .{ .scalar = .{} });
+        // Copy source slot's payload to block slot (TODO: should be merge for multiple branches)
+        if (self.src) |src| {
+            if (tracked[src].typed_payload) |src_idx| {
+                // Copy the source payload to a new entity for the block
+                const new_idx = try payloads.copyEntityRecursive(payloads, src_idx);
+                tracked[self.block].typed_payload = new_idx;
+            } else {
+                _ = try payloads.clobberSlot(tracked, self.block, .{ .scalar = .{} });
+            }
+        } else {
+            _ = try payloads.clobberSlot(tracked, self.block, .void);
+        }
         try splat(.br, tracked, index, ctx, payloads, self);
     }
 };
@@ -107,12 +124,33 @@ pub const OptionalPayload = struct {
 };
 
 pub const RetSafe = struct {
-    retval_ptr: *Slot,
+    caller_payloads: ?*Payloads,
+    return_eidx: EIdx,
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
         _ = try payloads.clobberSlot(tracked, index, .void);
         try splat(.ret_safe, tracked, index, ctx, payloads, self);
+
+        // Copy return value to caller's payloads
+        const caller_payloads = self.caller_payloads orelse return; // entrypoint, skip
+
+        const return_eidx = self.return_eidx;
+        if (self.src) |src| {
+            const src_idx = tracked[src].typed_payload orelse @panic("return function requested uninitialized slot value");
+            switch (caller_payloads.at(return_eidx).*) {
+                .unset_retval => {
+                    try caller_payloads.copyInto(return_eidx, payloads, src_idx);
+                },
+                else => @panic("merge operation not implemented yet"),
+            }
+        } else {
+            switch (caller_payloads.at(return_eidx).*) {
+                .unset_retval => caller_payloads.at(return_eidx).* = .void,
+                .void => {},
+                else => @panic("void function retval incorrectly set to some value"),
+            }
+        }
     }
 };
 
@@ -123,7 +161,10 @@ pub const StoreSafe = struct {
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
         _ = try payloads.clobberSlot(tracked, index, .void);
-        if (self.ptr) |ptr| _ = try payloads.clobberSlot(tracked, ptr, .{ .scalar = .{} });
+        // Note: We do NOT clobber the ptr slot here. The ptr slot represents the pointer
+        // and already has its TypedPayload (e.g., from alloc_create, br, etc).
+        // Storing to memory doesn't change the pointer itself.
+        // Analyses update their fields via splat on the existing payload.
         try splat(.store_safe, tracked, index, ctx, payloads, self);
     }
 };
@@ -132,7 +173,17 @@ pub const UnwrapErrunionPayload = struct {
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+        // Copy the source's type structure (e.g., if source is pointer, dest is pointer too)
+        if (self.src) |src| {
+            if (tracked[src].typed_payload) |src_idx| {
+                const new_idx = try payloads.copyEntityRecursive(payloads, src_idx);
+                tracked[index].typed_payload = new_idx;
+            } else {
+                _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+            }
+        } else {
+            _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+        }
         try splat(.unwrap_errunion_payload, tracked, index, ctx, payloads, self);
     }
 };
@@ -219,10 +270,10 @@ pub fn splat(comptime tag: anytype, tracked: []Slot, index: usize, ctx: *Context
 /// Called at the end of each function to allow analyses to perform final checks.
 /// Each analysis can implement `onFinish` to do end-of-function processing
 /// (e.g., memory leak detection after all paths have been processed).
-pub fn splatFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *Payloads) !void {
+pub fn splatFinish(tracked: []Slot, ctx: *Context, payloads: *Payloads) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "onFinish")) {
-            try Analysis.onFinish(tracked, retval, ctx, payloads);
+            try Analysis.onFinish(tracked, ctx, payloads);
         }
     }
 }

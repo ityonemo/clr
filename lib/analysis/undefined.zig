@@ -31,59 +31,72 @@ pub const Undefined = union(enum) {
 
     pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
         _ = params;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        payloads.at(idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Slot contains .pointer = pointee_idx, get the pointee
+        const ptr_idx = tracked[index].typed_payload.?;
+        const pointee_idx = payloads.at(ptr_idx).pointer;
+        payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
         _ = params;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        payloads.at(idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Slot contains .pointer = pointee_idx, get the pointee
+        const ptr_idx = tracked[index].typed_payload.?;
+        const pointee_idx = payloads.at(ptr_idx).pointer;
+        payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
     pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.UnwrapErrunionPayload) !void {
+        // Entity structure and analysis state already copied by tag handler
+        _ = tracked;
+        _ = index;
         _ = ctx;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        const src = params.src orelse return;
-        const src_idx = tracked[src].typed_payload orelse return;
-        payloads.at(idx).scalar.undefined = payloads.at(src_idx).scalar.undefined;
+        _ = payloads;
+        _ = params;
     }
 
     pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Br) !void {
+        // Entity structure and analysis state already copied by tag handler
+        _ = tracked;
         _ = index;
         _ = ctx;
-        // Slot created by tag handler before splat
-        const idx = tracked[params.block].typed_payload.?;
-        const src = params.src orelse return;
-        const src_idx = tracked[src].typed_payload orelse return;
-        switch (payloads.at(src_idx).*) {
-            .scalar => |imm| payloads.at(idx).scalar.undefined = imm.undefined,
-            .unimplemented => {},
-            else => @panic("unexpected payload type in br"),
-        }
+        _ = payloads;
+        _ = params;
     }
 
     pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
         _ = index;
         const ptr = params.ptr orelse return;
-        // Slot created by tag handler before splat
-        const idx = tracked[ptr].typed_payload.?;
+        // Follow pointer to get to pointee
+        const ptr_idx = tracked[ptr].typed_payload orelse return;
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |idx| idx,
+            .scalar => ptr_idx, // For non-pointer types (like alloc slots), update directly
+            .unimplemented => return,
+            else => return,
+        };
         const undef_state: Undefined = if (params.is_undef)
             .{ .undefined = .{ .meta = ctx.meta } }
         else
             .{ .defined = {} };
         // TODO: Interprocedural propagation disabled during entity system refactoring
         // if (tracked[ptr].arg_ptr) |arg_ptr| { ... }
-        payloads.at(idx).scalar.undefined = undef_state;
+        switch (payloads.at(pointee_idx).*) {
+            .scalar => |*imm| imm.undefined = undef_state,
+            else => {},
+        }
     }
 
     pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Load) !void {
         const ptr = params.ptr orelse return;
         const ptr_idx = tracked[ptr].typed_payload orelse return;
-        switch (payloads.at(ptr_idx).*) {
+        // Follow pointer to get to pointee
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |idx| idx,
+            .scalar => ptr_idx, // For non-pointer types, check directly
+            .unimplemented => return,
+            else => return,
+        };
+        switch (payloads.at(pointee_idx).*) {
             .scalar => |imm| {
                 const undef = imm.undefined orelse return;
                 switch (undef) {
@@ -95,8 +108,7 @@ pub const Undefined = union(enum) {
                     },
                 }
             },
-            .unimplemented => {},
-            else => @panic("unexpected payload type in load"),
+            else => {},
         }
     }
 
@@ -105,8 +117,15 @@ pub const Undefined = union(enum) {
         _ = ctx;
         const slot = params.slot orelse return;
         std.debug.assert(slot < tracked.len);
-        const idx = tracked[slot].typed_payload orelse return;
-        switch (payloads.at(idx).*) {
+        const ptr_idx = tracked[slot].typed_payload orelse return;
+        // Follow pointer to get to pointee
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |idx| idx,
+            .scalar => ptr_idx, // For non-pointer types, use directly
+            .unimplemented => return,
+            else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
+        };
+        switch (payloads.at(pointee_idx).*) {
             .scalar => |*imm| {
                 const undef = &(imm.undefined orelse return);
                 switch (undef.*) {
@@ -115,7 +134,7 @@ pub const Undefined = union(enum) {
                 }
             },
             .unimplemented => {},
-            else => @panic("unexpected payload type in dbg_var_ptr"),
+            else => @panic("unexpected payload type in dbg_var_ptr (pointee)"),
         }
     }
 };

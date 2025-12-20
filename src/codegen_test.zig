@@ -142,7 +142,7 @@ test "slotLine for ret_safe with source" {
     const datum: Data = .{ .un_op = operand_ref };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 5 } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .ret_safe = .{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = 5 } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for alloc" {
@@ -206,7 +206,7 @@ test "generateFunction produces complete function" {
     const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig", &.{});
 
     const expected =
-        \\fn fn_42(ctx: *Context) anyerror!Slot {
+        \\fn fn_42(ctx: *Context, caller_payloads: ?*slots.Payloads) anyerror!slots.EIdx {
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
@@ -217,14 +217,14 @@ test "generateFunction produces complete function" {
         \\
         \\    const tracked = slots.make_list(ctx.allocator, 4);
         \\    defer slots.clear_list(tracked, ctx.allocator);
-        \\    var retval: Slot = .{};
+        \\    const return_eidx: slots.EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
         \\
         \\    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx, &payloads);
         \\    try Slot.apply(.{ .dbg_stmt = .{ .line = 1, .column = 3 } }, tracked, 1, ctx, &payloads);
         \\    try Slot.apply(.{ .load = .{ .ptr = 0 } }, tracked, 2, ctx, &payloads);
-        \\    try Slot.apply(.{ .ret_safe = .{ .retval_ptr = &retval, .src = 2 } }, tracked, 3, ctx, &payloads);
-        \\    try slots.onFinish(tracked, &retval, ctx, &payloads);
-        \\    return retval;
+        \\    try Slot.apply(.{ .ret_safe = .{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = 2 } }, tracked, 3, ctx, &payloads);
+        \\    try slots.onFinish(tracked, ctx, &payloads);
+        \\    return return_eidx;
         \\}
         \\
     ;
@@ -255,7 +255,7 @@ test "epilogue generates correct output" {
         \\    defer file_writer.interface.flush() catch {};
         \\    var ctx = Context.init(allocator, &file_writer.interface);
         \\    defer ctx.deinit();
-        \\    _ = fn_123(&ctx) catch {
+        \\    _ = fn_123(&ctx, null) catch {
         \\        file_writer.interface.flush() catch {};
         \\        std.process.exit(1);
         \\    };

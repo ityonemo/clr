@@ -35,9 +35,10 @@ pub const MemorySafety = union(enum) {
 
     pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
         _ = params;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        payloads.at(idx).scalar.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
+        // Slot contains .pointer = pointee_idx, get the pointee
+        const ptr_idx = tracked[index].typed_payload.?;
+        const pointee_idx = payloads.at(ptr_idx).pointer;
+        payloads.at(pointee_idx).scalar.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
     }
 
     pub fn arg(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Arg) !void {
@@ -73,8 +74,15 @@ pub const MemorySafety = union(enum) {
         // Set the variable name on the stack_ptr metadata
         const slot = params.slot orelse return;
         std.debug.assert(slot < tracked.len);
-        const idx = tracked[slot].typed_payload orelse return;
-        switch (payloads.at(idx).*) {
+        const ptr_idx = tracked[slot].typed_payload orelse return;
+        // Follow pointer to get to pointee
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |idx| idx,
+            .scalar => ptr_idx, // For non-pointer types, use directly
+            .unimplemented => return,
+            else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
+        };
+        switch (payloads.at(pointee_idx).*) {
             .scalar => |*imm| {
                 const ms = &(imm.memory_safety orelse return);
                 if (ms.* != .stack_ptr) return;
@@ -83,7 +91,7 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .unimplemented => {},
-            else => @panic("unexpected payload type in dbg_var_ptr"),
+            else => @panic("unexpected payload type in dbg_var_ptr (pointee)"),
         }
     }
 
@@ -102,17 +110,12 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.UnwrapErrunionPayload) !void {
+        // Entity structure and analysis state already copied by tag handler
+        _ = tracked;
+        _ = index;
         _ = ctx;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        const src = params.src orelse return;
-        std.debug.assert(src < tracked.len);
-        const src_idx = tracked[src].typed_payload orelse return;
-        switch (payloads.at(src_idx).*) {
-            .scalar => |imm| payloads.at(idx).scalar.memory_safety = imm.memory_safety,
-            .unimplemented => {},
-            else => @panic("unexpected payload type in unwrap_errunion_payload"),
-        }
+        _ = payloads;
+        _ = params;
     }
 
     pub fn optional_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.OptionalPayload) !void {
@@ -130,20 +133,12 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Br) !void {
+        // Entity structure and analysis state already copied by tag handler
+        _ = tracked;
         _ = index;
         _ = ctx;
-        // Slot created by tag handler before splat
-        const idx = tracked[params.block].typed_payload.?;
-        const src = params.src orelse return;
-        const block = params.block;
-        std.debug.assert(src < tracked.len);
-        std.debug.assert(block < tracked.len);
-        const src_idx = tracked[src].typed_payload orelse return;
-        switch (payloads.at(src_idx).*) {
-            .scalar => |imm| payloads.at(idx).scalar.memory_safety = imm.memory_safety,
-            .unimplemented => {},
-            else => @panic("unexpected payload type in br"),
-        }
+        _ = payloads;
+        _ = params;
     }
 
     pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
@@ -180,25 +175,29 @@ pub const MemorySafety = union(enum) {
             .allocation => {},
         }
 
-        // TODO: Interprocedural propagation disabled during entity system refactoring
-        // Merge state into retval for ownership transfer tracking.
-        _ = params.retval_ptr;
+        // Note: Interprocedural propagation is now handled in RetSafe.apply in tag.zig
+        // via caller_payloads and return_eidx. Memory safety state is copied along with
+        // the TypedPayload when return values are propagated to the caller.
     }
 
     /// Called at the end of each function to check for memory leaks.
     /// Deferred until after all slots are processed so success paths can free
     /// allocations before we check for leaks.
-    pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *Payloads) !void {
+    pub fn onFinish(tracked: []Slot, ctx: *Context, payloads: *Payloads) !void {
         // TODO: Interprocedural ownership transfer disabled during entity system refactoring
-        _ = retval;
         const returned_origin: ?usize = null;
 
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            const imm = switch (payloads.at(idx).*) {
+            // Follow pointer to get to scalar
+            const pointee_idx = switch (payloads.at(idx).*) {
+                .pointer => |pidx| pidx,
+                .unimplemented, .void, .scalar => continue,
+                else => continue,
+            };
+            const imm = switch (payloads.at(pointee_idx).*) {
                 .scalar => |imm| imm,
-                .unimplemented, .void => continue,
-                else => @panic("unexpected payload type in onFinish"),
+                else => continue,
             };
             const ms = imm.memory_safety orelse continue;
             if (ms != .allocation) continue;
@@ -222,10 +221,15 @@ pub const MemorySafety = union(enum) {
     fn isOriginFreed(tracked: []Slot, payloads: *Payloads, origin: usize) bool {
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            const imm = switch (payloads.at(idx).*) {
+            // Follow pointer to get to scalar
+            const pointee_idx = switch (payloads.at(idx).*) {
+                .pointer => |pidx| pidx,
+                .unimplemented, .void, .scalar => continue,
+                else => continue,
+            };
+            const imm = switch (payloads.at(pointee_idx).*) {
                 .scalar => |imm| imm,
-                .unimplemented, .void => continue,
-                else => @panic("unexpected payload type in isOriginFreed"),
+                else => continue,
             };
             const ms = imm.memory_safety orelse continue;
             if (ms != .allocation) continue;
@@ -240,11 +244,12 @@ pub const MemorySafety = union(enum) {
     // Allocation tracking (use-after-free, double-free, memory leak detection)
     // =========================================================================
 
-    /// Handle allocator.create() - marks slot as allocated
+    /// Handle allocator.create() - marks pointed-to memory as allocated
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        payloads.at(idx).scalar.memory_safety = .{ .allocation = .{
+        // Slot contains .pointer = pointee_idx, get the pointee
+        const ptr_idx = tracked[index].typed_payload.?;
+        const pointee_idx = payloads.at(ptr_idx).pointer;
+        payloads.at(pointee_idx).scalar.memory_safety = .{ .allocation = .{
             .allocated = ctx.meta,
             .origin = index, // This slot is the origin of this allocation
             .allocator_type = params.allocator_type,
@@ -257,13 +262,19 @@ pub const MemorySafety = union(enum) {
         const ptr = params.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
-        const idx = tracked[ptr].typed_payload orelse @panic("alloc_destroy: slot has no typed_payload");
-        const imm = switch (payloads.at(idx).*) {
+        // Follow the pointer to get the pointee
+        const ptr_idx = tracked[ptr].typed_payload orelse @panic("alloc_destroy: slot has no typed_payload");
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |idx| idx,
+            .unimplemented => return,
+            else => @panic("alloc_destroy: expected pointer type"),
+        };
+        const imm = switch (payloads.at(pointee_idx).*) {
             .scalar => |imm| imm,
             .unimplemented => return,
-            else => @panic("unexpected payload type in alloc_destroy"),
+            else => @panic("alloc_destroy: pointee is not scalar"),
         };
-        const ms = imm.memory_safety orelse @panic("alloc_destroy: slot has no memory_safety");
+        const ms = imm.memory_safety orelse @panic("alloc_destroy: pointee has no memory_safety");
 
         switch (ms) {
             .stack_ptr => |sp| return reportFreeStackMemory(ctx, sp),
@@ -296,10 +307,15 @@ pub const MemorySafety = union(enum) {
     fn markAllocationFreed(tracked: []Slot, payloads: *Payloads, origin: usize, free_meta: Meta) void {
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            const imm = switch (payloads.at(idx).*) {
+            // Follow pointer to get to scalar
+            const pointee_idx = switch (payloads.at(idx).*) {
+                .pointer => |pidx| pidx,
+                .unimplemented, .void, .scalar => continue,
+                else => continue,
+            };
+            const imm = switch (payloads.at(pointee_idx).*) {
                 .scalar => |*imm| imm,
-                .unimplemented, .void => continue,
-                else => @panic("unexpected payload type in markAllocationFreed"),
+                else => continue,
             };
             const ms = &(imm.memory_safety orelse continue);
             if (ms.* != .allocation) continue;
@@ -315,8 +331,14 @@ pub const MemorySafety = union(enum) {
         const ptr = params.ptr orelse return;
         std.debug.assert(ptr < tracked.len);
 
-        const idx = tracked[ptr].typed_payload orelse return;
-        switch (payloads.at(idx).*) {
+        // Follow the pointer to get the pointee
+        const ptr_idx = tracked[ptr].typed_payload orelse return;
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |idx| idx,
+            .unimplemented => return,
+            else => return, // Not a pointer type, nothing to check
+        };
+        switch (payloads.at(pointee_idx).*) {
             .scalar => |imm| {
                 const ms = imm.memory_safety orelse return;
                 if (ms != .allocation) return;
@@ -325,8 +347,7 @@ pub const MemorySafety = union(enum) {
                     return reportUseAfterFree(ctx, a.allocated, free_site);
                 }
             },
-            .unimplemented => {},
-            else => @panic("unexpected payload type in load"),
+            else => {},
         }
     }
 
@@ -547,21 +568,20 @@ test "ret_safe detects escape when returning stack pointer from same function" {
     defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    var retval = Slot{};
 
     // Slot with stack_ptr from test_func (current function)
-    _ = try payloads.clobberSlot(&tracked, 0, .{ .memory_safety = .{ .stack_ptr = .{
+    _ = try payloads.clobberSlot(&tracked, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "test_func",
             .file = "test.zig",
             .line = 5,
         },
         .name = .{ .variable = "local" },
-    } } });
+    } } } });
 
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(&tracked, 1, &ctx, &payloads, .{ .src = 0, .retval_ptr = &retval }),
+        MemorySafety.ret_safe(&tracked, 1, &ctx, &payloads, .{ .caller_payloads = null, .return_eidx = 0, .src = 0 }),
     );
 }
 
@@ -575,18 +595,17 @@ test "ret_safe allows returning arg (empty function name)" {
     defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    var retval = Slot{};
 
     // Slot with empty function name (arg)
-    _ = try payloads.clobberSlot(&tracked, 0, .{ .memory_safety = .{ .stack_ptr = .{
+    _ = try payloads.clobberSlot(&tracked, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "",
             .file = "test.zig",
             .line = 5,
         },
         .name = .{ .parameter = "param" },
-    } } });
+    } } } });
 
     // Should NOT error - returning arg is fine
-    try MemorySafety.ret_safe(&tracked, 1, &ctx, &payloads, .{ .src = 0, .retval_ptr = &retval });
+    try MemorySafety.ret_safe(&tracked, 1, &ctx, &payloads, .{ .caller_payloads = null, .return_eidx = 0, .src = 0 });
 }
