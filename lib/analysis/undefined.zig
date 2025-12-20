@@ -1,8 +1,8 @@
 const std = @import("std");
 const slots = @import("../slots.zig");
 const Slot = slots.Slot;
-const EntityList = slots.EntityList;
-const TypedPayload = slots.TypedPayload;
+const Payloads = slots.Payloads;
+const EIdx = slots.EIdx;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
@@ -29,91 +29,93 @@ pub const Undefined = union(enum) {
         return error.UseBeforeAssign;
     }
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Alloc) !void {
+    pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
         _ = params;
-        if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(payloads);
-        }
-        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
-        analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Slot created by tag handler before splat
+        const idx = tracked[index].typed_payload.?;
+        payloads.at(idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.AllocCreate) !void {
+    pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
         _ = params;
-        // Allocated memory contains undefined data until written to
-        if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(payloads);
-        }
-        const analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
-        analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Slot created by tag handler before splat
+        const idx = tracked[index].typed_payload.?;
+        payloads.at(idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.UnwrapErrunionPayload) !void {
+    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.UnwrapErrunionPayload) !void {
         _ = ctx;
+        // Slot created by tag handler before splat
+        const idx = tracked[index].typed_payload.?;
         const src = params.src orelse return;
         const src_idx = tracked[src].typed_payload orelse return;
-        // Propagate undefined state from the error union to the unwrapped payload
-        if (tracked[index].typed_payload == null) {
-            tracked[index].typed_payload = TypedPayload.new(payloads);
-        }
-        const dst_analyte = &payloads.items[tracked[index].typed_payload.?].immediate;
-        dst_analyte.undefined = payloads.items[src_idx].immediate.undefined;
+        payloads.at(idx).scalar.undefined = payloads.at(src_idx).scalar.undefined;
     }
 
-    pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Br) !void {
+    pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Br) !void {
         _ = index;
         _ = ctx;
+        // Slot created by tag handler before splat
+        const idx = tracked[params.block].typed_payload.?;
         const src = params.src orelse return;
         const src_idx = tracked[src].typed_payload orelse return;
-        // Propagate undefined state from source to block destination
-        if (tracked[params.block].typed_payload == null) {
-            tracked[params.block].typed_payload = TypedPayload.new(payloads);
+        switch (payloads.at(src_idx).*) {
+            .scalar => |imm| payloads.at(idx).scalar.undefined = imm.undefined,
+            .unimplemented => {},
+            else => @panic("unexpected payload type in br"),
         }
-        const dst_analyte = &payloads.items[tracked[params.block].typed_payload.?].immediate;
-        dst_analyte.undefined = payloads.items[src_idx].immediate.undefined;
     }
 
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.StoreSafe) !void {
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
         _ = index;
         const ptr = params.ptr orelse return;
-        if (tracked[ptr].typed_payload == null) {
-            tracked[ptr].typed_payload = TypedPayload.new(payloads);
-        }
-        const analyte = &payloads.items[tracked[ptr].typed_payload.?].immediate;
-        if (params.is_undef) {
-            analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
-        } else {
-            analyte.undefined = .{ .defined = {} };
-            // TODO: Interprocedural propagation disabled during entity system refactoring
-            // if (tracked[ptr].arg_ptr) |arg_ptr| { ... }
-        }
+        // Slot created by tag handler before splat
+        const idx = tracked[ptr].typed_payload.?;
+        const undef_state: Undefined = if (params.is_undef)
+            .{ .undefined = .{ .meta = ctx.meta } }
+        else
+            .{ .defined = {} };
+        // TODO: Interprocedural propagation disabled during entity system refactoring
+        // if (tracked[ptr].arg_ptr) |arg_ptr| { ... }
+        payloads.at(idx).scalar.undefined = undef_state;
     }
 
-    pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.Load) !void {
-        _ = index;
+    pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Load) !void {
         const ptr = params.ptr orelse return;
-        const idx = tracked[ptr].typed_payload orelse return;
-        if (payloads.items[idx].immediate.undefined) |undef| {
-            switch (undef) {
-                .undefined => return undef.reportUseBeforeAssign(ctx),
-                .defined => {},
-            }
+        const ptr_idx = tracked[ptr].typed_payload orelse return;
+        switch (payloads.at(ptr_idx).*) {
+            .scalar => |imm| {
+                const undef = imm.undefined orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .defined => {
+                        // Propagate defined state to the loaded value
+                        const idx = tracked[index].typed_payload.?;
+                        payloads.at(idx).scalar.undefined = .{ .defined = {} };
+                    },
+                }
+            },
+            .unimplemented => {},
+            else => @panic("unexpected payload type in load"),
         }
     }
 
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList, params: tag.DbgVarPtr) !void {
+    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
         const slot = params.slot orelse return;
         std.debug.assert(slot < tracked.len);
         const idx = tracked[slot].typed_payload orelse return;
-        if (payloads.items[idx].immediate.undefined) |*undef| {
-            switch (undef.*) {
-                .undefined => |*meta| {
-                    meta.var_name = params.name;
-                },
-                .defined => {},
-            }
+        switch (payloads.at(idx).*) {
+            .scalar => |*imm| {
+                const undef = &(imm.undefined orelse return);
+                switch (undef.*) {
+                    .undefined => |*meta| meta.var_name = params.name,
+                    .defined => {},
+                }
+            },
+            .unimplemented => {},
+            else => @panic("unexpected payload type in dbg_var_ptr"),
         }
     }
 };
@@ -158,15 +160,14 @@ test "alloc sets undefined state" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
 
-    try Undefined.alloc(&tracked, 1, &ctx, &entities, .{});
+    try Undefined.alloc(&tracked, 1, &ctx, &payloads, .{});
 
-    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
-    const undef = analyte.undefined.?;
+    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
     try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
@@ -179,15 +180,14 @@ test "alloc_create sets undefined state" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
 
-    try Undefined.alloc_create(&tracked, 1, &ctx, &entities, .{ .allocator_type = "PageAllocator" });
+    try Undefined.alloc_create(&tracked, 1, &ctx, &payloads, .{ .allocator_type = "PageAllocator" });
 
-    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
-    const undef = analyte.undefined.?;
+    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
     try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
@@ -200,19 +200,16 @@ test "store_safe with is_undef=true sets undefined" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
 
-    // First make it defined
-    tracked[1].typed_payload = TypedPayload.new(&entities);
-    entities.items[tracked[1].typed_payload.?].immediate.undefined = .{ .defined = {} };
+    // store_safe clobbers with the new state
+    try Undefined.store_safe(&tracked, 0, &ctx, &payloads, .{ .ptr = 1, .src = null, .is_undef = true });
 
-    try Undefined.store_safe(&tracked, 0, &ctx, &entities, .{ .ptr = 1, .src = null, .is_undef = true });
-
-    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
+    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
 
 test "store_safe with is_undef=false sets defined" {
@@ -221,23 +218,16 @@ test "store_safe with is_undef=false sets defined" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
 
-    // First make it undefined
-    tracked[1].typed_payload = TypedPayload.new(&entities);
-    entities.items[tracked[1].typed_payload.?].immediate.undefined = .{ .undefined = .{ .meta = .{
-        .function = "test_func",
-        .file = "test.zig",
-        .line = 1,
-    } } };
+    // store_safe clobbers with the new state
+    try Undefined.store_safe(&tracked, 0, &ctx, &payloads, .{ .ptr = 1, .src = null, .is_undef = false });
 
-    try Undefined.store_safe(&tracked, 0, &ctx, &entities, .{ .ptr = 1, .src = null, .is_undef = false });
-
-    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(analyte.undefined.?));
+    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
 // TODO: Interprocedural tests disabled during entity system refactoring.
@@ -249,20 +239,19 @@ test "load from undefined slot returns error" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].typed_payload = TypedPayload.new(&entities);
-    entities.items[tracked[1].typed_payload.?].immediate.undefined = .{ .undefined = .{ .meta = .{
+    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .undefined = .{ .meta = .{
         .function = "test_func",
         .file = "test.zig",
         .line = 1,
-    } } };
+    } } } });
 
     try std.testing.expectError(
         error.UseBeforeAssign,
-        Undefined.load(&tracked, 0, &ctx, &entities, .{ .ptr = 1 }),
+        Undefined.load(&tracked, 0, &ctx, &payloads, .{ .ptr = 1 }),
     );
 }
 
@@ -272,14 +261,13 @@ test "load from defined slot does not return error" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].typed_payload = TypedPayload.new(&entities);
-    entities.items[tracked[1].typed_payload.?].immediate.undefined = .{ .defined = {} };
+    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .defined = {} } });
 
-    try Undefined.load(&tracked, 0, &ctx, &entities, .{ .ptr = 1 });
+    try Undefined.load(&tracked, 0, &ctx, &payloads, .{ .ptr = 1 });
 }
 
 test "load from slot without undefined tracking does not return error" {
@@ -288,13 +276,13 @@ test "load from slot without undefined tracking does not return error" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
     // tracked[1].typed_payload is null
 
-    try Undefined.load(&tracked, 0, &ctx, &entities, .{ .ptr = 1 });
+    try Undefined.load(&tracked, 0, &ctx, &payloads, .{ .ptr = 1 });
 }
 
 test "dbg_var_ptr sets var_name on undefined meta" {
@@ -303,24 +291,23 @@ test "dbg_var_ptr sets var_name on undefined meta" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].typed_payload = TypedPayload.new(&entities);
-    entities.items[tracked[1].typed_payload.?].immediate.undefined = .{ .undefined = .{
+    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .undefined = .{
         .meta = .{
             .function = "test_func",
             .file = "test.zig",
             .line = 5,
             .column = 3,
         },
-    } };
+    } } });
 
-    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &entities, .{ .slot = 1, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = 1, .name = "my_var" });
 
-    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
-    try std.testing.expectEqualStrings("my_var", analyte.undefined.?.undefined.var_name.?);
+    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    try std.testing.expectEqualStrings("my_var", undef.undefined.var_name.?);
 }
 
 test "dbg_var_ptr does not affect defined slot" {
@@ -329,18 +316,17 @@ test "dbg_var_ptr does not affect defined slot" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
-    tracked[1].typed_payload = TypedPayload.new(&entities);
-    entities.items[tracked[1].typed_payload.?].immediate.undefined = .{ .defined = {} };
+    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .defined = {} } });
 
-    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &entities, .{ .slot = 1, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = 1, .name = "my_var" });
 
     // Should still be defined, no crash
-    const analyte = &entities.items[tracked[1].typed_payload.?].immediate;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(analyte.undefined.?));
+    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
 test "dbg_var_ptr with null slot does nothing" {
@@ -349,13 +335,13 @@ test "dbg_var_ptr with null slot does nothing" {
     var ctx = MockContext.init(allocator);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     var tracked = [_]Slot{.{}} ** 3;
 
     // Should not crash with null slot
-    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &entities, .{ .slot = null, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = null, .name = "my_var" });
 }
 
 test "reportUseBeforeAssign formats with var_name" {

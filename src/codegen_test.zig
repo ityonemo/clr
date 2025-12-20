@@ -212,7 +212,7 @@ test "generateFunction produces complete function" {
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
         \\
-        \\    var payloads = slots.EntityList.init(ctx.allocator);
+        \\    var payloads = slots.Payloads.init(ctx.allocator);
         \\    defer payloads.deinit();
         \\
         \\    const tracked = slots.make_list(ctx.allocator, 4);

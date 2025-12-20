@@ -607,7 +607,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\    try ctx.push_fn("{s}");
         \\    defer ctx.pop_fn();
         \\
-        \\    var payloads = slots.EntityList.init(ctx.allocator);
+        \\    var payloads = slots.Payloads.init(ctx.allocator);
         \\    defer payloads.deinit();
         \\
         \\    const tracked = slots.make_list(ctx.allocator, {d});
@@ -655,8 +655,8 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + entities + arity *Slot args
-    var params: []const u8 = "ctx: *Context, _: *slots.EntityList";
+    // Build parameter list: ctx + payloads + arity *Slot args
+    var params: []const u8 = "ctx: *Context, _: *slots.Payloads";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
         params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: *Slot", .{params}, null);

@@ -7,45 +7,91 @@ const Allocator = std.mem.Allocator;
 const undefined_analysis = @import("analysis/undefined.zig");
 const memory_safety_analysis = @import("analysis/memory_safety.zig");
 
-/// Analyte holds the analysis state for an immediate value.
+/// Analyte holds the analysis state for a scalar value.
 /// Each analysis contributes its state type here.
 pub const Analyte = struct {
     undefined: ?undefined_analysis.Undefined = null,
     memory_safety: ?memory_safety_analysis.MemorySafety = null,
 };
 
-pub const EntityList = std.array_list.AlignedManaged(TypedPayload, null);
+pub const Payloads = struct {
+    list: std.array_list.AlignedManaged(TypedPayload, null),
+
+    pub fn init(allocator: Allocator) Payloads {
+        return .{ .list = std.array_list.AlignedManaged(TypedPayload, null).init(allocator) };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        self.list.deinit();
+    }
+
+    /// Get TypedPayload by index. Crashes if index is out of bounds.
+    pub fn at(self: *@This(), index: EIdx) *TypedPayload {
+        return &self.list.items[index];
+    }
+
+    /// Initialize a slot with a new scalar payload. Crashes if slot already initialized.
+    pub fn initSlot(self: *@This(), tracked: []Slot, index: usize) !EIdx {
+        if (tracked[index].typed_payload) |_| @panic("slot already initialized");
+        const idx: EIdx = @intCast(self.list.items.len);
+        try self.list.append(.{ .scalar = .{} });
+        tracked[index].typed_payload = idx;
+        return idx;
+    }
+
+    /// Overwrite a slot with a new scalar payload. Creates new entity regardless of prior state.
+    /// Call this in tag handlers before splat() so analyses can set their respective fields.
+    /// For conditional keep-of-previous-value semantics, use merge (not yet implemented).
+    pub fn clobberSlot(self: *@This(), tracked: []Slot, index: usize, value: TypedPayload) !EIdx {
+        const idx: EIdx = @intCast(self.list.items.len);
+        try self.list.append(value);
+        tracked[index].typed_payload = idx;
+        return idx;
+    }
+
+    /// Assert all payloads are valid (non-null typed_payload for all tracked slots that have one).
+    pub fn assertAllValid(self: *@This(), tracked: []const Slot) void {
+        for (tracked, 0..) |slot, i| {
+            if (slot.typed_payload) |idx| {
+                if (idx >= self.list.items.len) {
+                    std.debug.panic("slot {} has invalid typed_payload index {}", .{ i, idx });
+                }
+            }
+        }
+    }
+};
 
 pub const EIdx = u32;
 
 /// TypedPayload tracks the type structure of a value along with analysis state.
 /// EIdx is used for anything that needs indirection (pointers, optionals, etc).
 pub const TypedPayload = union(enum) {
-    immediate: Analyte,
+    scalar: Analyte,
     pointer: EIdx,
     optional: EIdx,
+    region: EIdx, // unused, for now, will represent slices (maybe)
     @"struct": void, // temporary. Will be a slice of EIdx.
     @"union": void, // temporary. Will be a slice EIdx.
-
-    /// Allocate a new immediate entity in the list, return its index.
-    pub fn new(entities: *EntityList) EIdx {
-        const idx: EIdx = @intCast(entities.items.len);
-        entities.append(.{ .immediate = .{} }) catch @panic("out of memory");
-        return idx;
-    }
+    unimplemented: void, // this means we have an operation that is unimplemented but will carry a value.
+    void: void // any instructions that don't store anything.
 };
 
 pub const Slot = struct {
     typed_payload: ?EIdx = null,
 
-    pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList) !void {
+    /// Get this slot's TypedPayload. Crashes if slot has no payload.
+    pub fn payload(self: *Slot, payloads: *Payloads) *TypedPayload {
+        return payloads.at(self.typed_payload.?);
+    }
+
+    pub fn apply(any_tag: tag.AnyTag, tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
         switch (any_tag) {
             inline else => |t| try t.apply(tracked, index, ctx, payloads),
         }
     }
 
-    pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: *Context, payloads: *EntityList) !void {
-        _ = payloads; // Each function has its own entity list, so caller's payloads aren't passed
+    pub fn call(called: anytype, args: anytype, tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
+        _ = payloads; // Each function has its own payloads, so caller's aren't passed
         // Skip if called is null (indirect call through function pointer - TODO: handle these)
         if (@TypeOf(called) == @TypeOf(null)) return;
         const retval = try @call(.auto, called, .{ctx} ++ args);
@@ -66,7 +112,7 @@ pub fn clear_list(list: []Slot, allocator: std.mem.Allocator) void {
     allocator.free(list);
 }
 
-pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *EntityList) !void {
+pub fn onFinish(tracked: []Slot, retval: *Slot, ctx: *Context, payloads: *Payloads) !void {
     try tag.splatFinish(tracked, retval, ctx, payloads);
 }
 
@@ -78,23 +124,24 @@ test "alloc sets state to undefined" {
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
-    try Slot.apply(.{ .dbg_stmt = .{ .line = 0, .column = 0 } }, list, 0, &ctx, &entities);
-    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &entities);
+    try Slot.apply(.{ .dbg_stmt = .{ .line = 0, .column = 0 } }, list, 0, &ctx, &payloads);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &payloads);
 
-    // dbg_stmt has no undefined tracking
-    try std.testing.expectEqual(null, list[0].typed_payload);
+    // dbg_stmt sets slot to void (no analysis tracking)
+    try std.testing.expect(list[0].typed_payload != null);
+    try std.testing.expectEqual(.void, std.meta.activeTag(list[0].payload(&payloads).*));
     // alloc marks slot as undefined
     try std.testing.expect(list[1].typed_payload != null);
-    const analyte = &entities.items[list[1].typed_payload.?].immediate;
+    const analyte = &list[1].payload(&payloads).scalar;
     try std.testing.expect(analyte.undefined != null);
     try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
-    // uninitialized slot has no undefined tracking
+    // uninitialized slot has no payload yet
     try std.testing.expectEqual(null, list[2].typed_payload);
 }
 
@@ -106,17 +153,17 @@ test "store_safe with undef keeps state undefined" {
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
-    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &entities);
-    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = true } }, list, 2, &ctx, &entities);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &payloads);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = true } }, list, 2, &ctx, &payloads);
 
     // alloc slot stays undefined after store_safe with undef
-    const analyte = &entities.items[list[1].typed_payload.?].immediate;
+    const analyte = &list[1].payload(&payloads).scalar;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
 }
 
@@ -128,17 +175,17 @@ test "store_safe with value sets state to defined" {
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
-    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &entities);
-    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, list, 2, &ctx, &entities);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &payloads);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, list, 2, &ctx, &payloads);
 
     // alloc slot becomes defined after store_safe with real value
-    const analyte = &entities.items[list[1].typed_payload.?].immediate;
+    const analyte = &list[1].payload(&payloads).scalar;
     try std.testing.expectEqual(.defined, std.meta.activeTag(analyte.undefined.?));
 }
 
@@ -168,35 +215,60 @@ test "load from undefined slot reports use before assign" {
     const allocator = std.testing.allocator;
 
     var mock_ctx = MockContext{};
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     const list = make_list(allocator, 3);
     defer clear_list(list, allocator);
 
     // Set up: alloc creates undefined slot
-    try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx, &entities);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx, &payloads);
 
     // Load from undefined slot should return error
-    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 2, &mock_ctx, &entities));
+    try std.testing.expectError(error.UseBeforeAssign, Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 2, &mock_ctx, &payloads));
 }
 
 test "load from defined slot does not report error" {
     const allocator = std.testing.allocator;
 
     var mock_ctx = MockContext{};
-    var entities = EntityList.init(allocator);
-    defer entities.deinit();
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
 
     const list = make_list(allocator, 4);
     defer clear_list(list, allocator);
 
     // Set up: alloc then store a real value
-    try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx, &entities);
-    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, list, 2, &mock_ctx, &entities);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &mock_ctx, &payloads);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, list, 2, &mock_ctx, &payloads);
 
     // Load from defined slot should NOT return error
-    try Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 3, &mock_ctx, &entities);
+    try Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 3, &mock_ctx, &payloads);
+}
+
+test "all slots get valid payloads after operations" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var payloads = Payloads.init(allocator);
+    defer payloads.deinit();
+
+    const list = make_list(allocator, 5);
+    defer clear_list(list, allocator);
+
+    // Apply various operations that should all set payloads
+    try Slot.apply(.{ .dbg_stmt = .{ .line = 0, .column = 0 } }, list, 0, &ctx, &payloads);
+    try Slot.apply(.{ .alloc = .{} }, list, 1, &ctx, &payloads);
+    try Slot.apply(.{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, list, 2, &ctx, &payloads);
+    try Slot.apply(.{ .load = .{ .ptr = 1 } }, list, 3, &ctx, &payloads);
+    try Slot.apply(.{ .block = .{} }, list, 4, &ctx, &payloads);
+
+    // All slots should have valid payloads
+    payloads.assertAllValid(list);
 }
 
 // TODO: Interprocedural tests disabled during entity system refactoring.
