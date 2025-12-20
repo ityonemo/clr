@@ -64,7 +64,7 @@ test "slotLine for arg" {
     const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"test_param\" } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"test_param\", .caller_payloads = caller_payloads } }, tracked, 0, ctx, &payloads);\n", result);
 }
 
 test "slotLine for arg with sequential zir_param_index uses arg counter" {
@@ -82,17 +82,17 @@ test "slotLine for arg with sequential zir_param_index uses arg counter" {
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"a\" } }, tracked, 0, ctx, &payloads);\n", result0);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"a\", .caller_payloads = caller_payloads } }, tracked, 0, ctx, &payloads);\n", result0);
 
     // Second arg: zir_param_index=1, should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
     const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"b\" } }, tracked, 1, ctx, &payloads);\n", result1);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"b\", .caller_payloads = caller_payloads } }, tracked, 1, ctx, &payloads);\n", result1);
 
     // Third arg: zir_param_index=2, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"c\" } }, tracked, 2, ctx, &payloads);\n", result2);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"c\", .caller_payloads = caller_payloads } }, tracked, 2, ctx, &payloads);\n", result2);
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
@@ -114,17 +114,17 @@ test "slotLine for arg with non-sequential zir_param_index uses sequential arg c
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"self\" } }, tracked, 0, ctx, &payloads);\n", result0);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"self\", .caller_payloads = caller_payloads } }, tracked, 0, ctx, &payloads);\n", result0);
 
     // Second arg: zir_param_index=2 (skipped 1), should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"byte_count\" } }, tracked, 1, ctx, &payloads);\n", result1);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"byte_count\", .caller_payloads = caller_payloads } }, tracked, 1, ctx, &payloads);\n", result1);
 
     // Third arg: zir_param_index=3, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
     const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"return_address\" } }, tracked, 2, ctx, &payloads);\n", result2);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"return_address\", .caller_payloads = caller_payloads } }, tracked, 2, ctx, &payloads);\n", result2);
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);

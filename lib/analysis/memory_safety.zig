@@ -44,20 +44,28 @@ pub const MemorySafety = union(enum) {
     pub fn arg(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Arg) !void {
         // If the caller passed an allocation, preserve that metadata
         // so the callee can free it (ownership transfer)
-        if (tracked[index].typed_payload) |idx| {
-            switch (payloads.at(idx).*) {
+        if (tracked[index].typed_payload) |ptr_idx| {
+            // Follow pointer to check pointee for allocation
+            const pointee_idx = switch (payloads.at(ptr_idx).*) {
+                .pointer => |idx| idx,
+                .scalar => ptr_idx, // Non-pointer, check directly
+                .unimplemented => return,
+                else => return, // void, etc - nothing to check
+            };
+            switch (payloads.at(pointee_idx).*) {
                 .scalar => |imm| {
                     if (imm.memory_safety) |ms| {
-                        if (ms == .allocation) return;
+                        if (ms == .allocation) return; // Preserve allocation metadata
                     }
                 },
-                .unimplemented => {},
-                else => @panic("unexpected payload type in arg"),
+                else => {},
             }
+            // Entity was copied from caller but doesn't have allocation - keep it as-is
+            return;
         }
 
-        // Store parameter info with empty function name - this means returning it directly
-        // won't be flagged as an escape (function won't match in ret_safe)
+        // No entity from caller - create stack_ptr for this parameter
+        // Empty function name means returning it directly won't be flagged as an escape
         _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
             .meta = .{
                 .function = "", // Empty = not from this function's stack
@@ -101,21 +109,18 @@ pub const MemorySafety = union(enum) {
         const idx = tracked[index].typed_payload.?;
         const src = params.src orelse return;
         std.debug.assert(src < tracked.len);
-        const src_idx = tracked[src].typed_payload orelse return;
-        switch (payloads.at(src_idx).*) {
+        const src_ptr_idx = tracked[src].typed_payload orelse return;
+        // Follow pointer to get to pointee
+        const src_pointee_idx = switch (payloads.at(src_ptr_idx).*) {
+            .pointer => |eidx| eidx,
+            .scalar => src_ptr_idx, // Non-pointer, use directly
+            .unimplemented => return,
+            else => return,
+        };
+        switch (payloads.at(src_pointee_idx).*) {
             .scalar => |imm| payloads.at(idx).scalar.memory_safety = imm.memory_safety,
-            .unimplemented => {},
-            else => @panic("unexpected payload type in bitcast"),
+            else => {},
         }
-    }
-
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.UnwrapErrunionPayload) !void {
-        // Entity structure and analysis state already copied by tag handler
-        _ = tracked;
-        _ = index;
-        _ = ctx;
-        _ = payloads;
-        _ = params;
     }
 
     pub fn optional_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.OptionalPayload) !void {
@@ -130,25 +135,6 @@ pub const MemorySafety = union(enum) {
             .unimplemented => {},
             else => @panic("unexpected payload type in optional_payload"),
         }
-    }
-
-    pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Br) !void {
-        // Entity structure and analysis state already copied by tag handler
-        _ = tracked;
-        _ = index;
-        _ = ctx;
-        _ = payloads;
-        _ = params;
-    }
-
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
-        // TODO: Interprocedural parameter name propagation disabled during entity system refactoring.
-        // Previously checked reference_arg to detect storing from arg slot to alloc slot.
-        _ = tracked;
-        _ = index;
-        _ = ctx;
-        _ = payloads;
-        _ = params;
     }
 
     pub fn ret_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.RetSafe) !void {

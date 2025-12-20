@@ -45,24 +45,6 @@ pub const Undefined = union(enum) {
         payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn unwrap_errunion_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.UnwrapErrunionPayload) !void {
-        // Entity structure and analysis state already copied by tag handler
-        _ = tracked;
-        _ = index;
-        _ = ctx;
-        _ = payloads;
-        _ = params;
-    }
-
-    pub fn br(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Br) !void {
-        // Entity structure and analysis state already copied by tag handler
-        _ = tracked;
-        _ = index;
-        _ = ctx;
-        _ = payloads;
-        _ = params;
-    }
-
     pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
         _ = index;
         const ptr = params.ptr orelse return;

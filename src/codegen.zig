@@ -109,7 +109,7 @@ fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []cons
         counter.* += 1;
         break :blk idx;
     } else zir_param_index;
-    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ arg_index, name }, null);
+    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\", .caller_payloads = caller_payloads }}", .{ arg_index, name }, null);
 }
 
 fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {

@@ -41,13 +41,23 @@ pub const AllocDestroy = struct {
     }
 };
 
-// Arg copies slot data from the caller before splatting.
+// Arg copies entity data from the caller's payloads to the callee's payloads.
 pub const Arg = struct {
     value: *Slot,
     name: []const u8,
+    caller_payloads: ?*Payloads,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        tracked[index] = self.value.*;
+        // Copy entity from caller's payloads to callee's payloads
+        if (self.caller_payloads) |cp| {
+            if (self.value.typed_payload) |caller_idx| {
+                const new_idx = try payloads.copyEntityRecursive(cp, caller_idx);
+                tracked[index].typed_payload = new_idx;
+            }
+        } else {
+            // Entrypoint - no caller payloads
+            tracked[index] = self.value.*;
+        }
         try splat(.arg, tracked, index, ctx, payloads, self);
     }
 };
