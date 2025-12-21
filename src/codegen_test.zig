@@ -206,24 +206,25 @@ test "generateFunction produces complete function" {
     const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig", &.{});
 
     const expected =
-        \\fn fn_42(ctx: *Context, caller_payloads: ?*slots.Payloads) anyerror!slots.EIdx {
+        \\fn fn_42(ctx: *Context, caller_payloads: ?*Payloads) anyerror!EIdx {
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
         \\
-        \\    var payloads = slots.Payloads.init(ctx.allocator);
+        \\    var payloads = Payloads.init(ctx.allocator);
         \\    defer payloads.deinit();
         \\
         \\    const tracked = slots.make_list(ctx.allocator, 4);
         \\    defer slots.clear_list(tracked, ctx.allocator);
-        \\    const return_eidx: slots.EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
+        \\    const return_eidx: EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
         \\
         \\    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx, &payloads);
         \\    try Slot.apply(.{ .dbg_stmt = .{ .line = 1, .column = 3 } }, tracked, 1, ctx, &payloads);
         \\    try Slot.apply(.{ .load = .{ .ptr = 0 } }, tracked, 2, ctx, &payloads);
         \\    try Slot.apply(.{ .ret_safe = .{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = 2 } }, tracked, 3, ctx, &payloads);
         \\    try slots.onFinish(tracked, ctx, &payloads);
+        \\    slots.backPropagate(tracked, &payloads, caller_payloads);
         \\    return return_eidx;
         \\}
         \\

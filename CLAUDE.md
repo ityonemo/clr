@@ -114,6 +114,22 @@ Output goes to stderr.
 
 - **Avoid `&(x orelse y)`** - This pattern is hard to read and may not work as expected (takes address of temporary). Prefer `if` with pointer capture when modification is needed.
 
+- **Panic on unexpected types, don't silently return** - In analysis handlers, if an operation expects a specific type (e.g., `store_safe` expects a pointer), panic on unexpected types rather than silently returning. This catches bugs early:
+  ```zig
+  // BAD: Silently ignores unexpected types
+  const pointee_idx = switch (payloads.at(ptr_idx).*) {
+      .pointer => |ind| ind.to,
+      else => return,  // Bug hidden - we expected a pointer!
+  };
+
+  // GOOD: Panic on unexpected types, explicit handling for known cases
+  const pointee_idx = switch (payloads.at(ptr_idx).*) {
+      .pointer => |ind| ind.to,
+      .unimplemented => return,  // TODO: explicit handling
+      else => |t| std.debug.panic("store_safe: expected pointer, got {s}", .{@tagName(t)}),
+  };
+  ```
+
 ## TDD Procedure: Adding a New AIR Tag Handler
 
 Follow these steps to add support for a new AIR instruction tag:
@@ -270,37 +286,64 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 
 4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building slot lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
 
-## Known Issues / Future Work
+## Interprocedural Analysis Architecture
+
+### AIR Arg Semantics (IMPORTANT)
+
+AIR arg slots contain VALUES directly, NOT pointers to stack locations:
+
+- If the parameter type is `*u8`, the slot contains the pointer value itself
+- If the parameter type is `u8`, the slot contains the scalar value itself
+- Taking `&param` in source code generates explicit `alloc` + `store_safe` in AIR
+
+This means the Arg handler does NOT wrap entities in a pointer. It copies the caller's entity directly into local payloads.
+
+**Example**: For `fn set_value(ptr: *u8) { ptr.* = 5; }`:
+1. Caller passes pointer entity P1 → scalar S1 (undefined)
+2. Arg copies P1 → P1' and S1 → S1' in local payloads
+3. Slot 0 contains P1' directly (the pointer entity, NOT a pointer to it)
+4. `store_safe(ptr=0)` follows P1' to S1', marks S1' as defined
+5. `onFinish` propagates S1'.undefined back to S1.undefined
+
+### Local-Only Updates, Propagate on Close
+
+When a callee modifies state through a pointer argument, we do NOT update the caller's state directly during the operation. Instead:
+
+1. **Arg handler**: Copies the caller's entity into local payloads (deep copy via copyEntityRecursive). Sets `caller_ref` for backward propagation.
+2. **During execution**: All operations (store_safe, load, etc.) only update the LOCAL copy
+3. **On function close**: `onFinish` propagates final state back to the caller via `caller_ref`
+
+**Why this architecture?**
+
+The callee's slot table must remain "clean" during execution. As we implement conditionals and loops, we'll need to merge multiple copies of slot tables (e.g., merging the "then" and "else" branches of an if statement). If operations directly modified the caller's state, we'd be making partial updates that couldn't be cleanly merged.
+
+By deferring propagation until function close, we ensure:
+- Each branch maintains its own complete view of the state
+- Merging happens on fully-resolved states, not partial updates
+- The caller only sees the final result after all paths are considered
+
+### Slot.caller_ref
+
+For arguments, `Slot.caller_ref` stores:
+- `payloads`: Pointer to the caller's Payloads
+- `entity_idx`: The caller's entity index (EIdx)
+
+This allows `onFinish` to find the caller's entity, follow it (if it's a pointer), and update the final state.
+
+## Not going to do
 
 ### Slot Type Tracking
 
-**Issue**: Currently, slots don't track what type of value they contain. This makes it difficult to reason about:
-- Whether a slot holds a pointer vs a value type
-- Whether a pointer is const or mutable
-- Struct vs slice vs primitive types
-- How to correctly propagate analysis information through different type categories
+**Issue**: Currently, slots don't and should not track what type of value they contain. 
+- Type safety is the responsibility of the compiler so all generated AIR should already
+  conform to type correctness
+- Const correctness is enforced at the compiler level, so any AIR operation that might
+  clobber a const variable or a pointer-to-const simply shouldn't happen.
+- Type flexibility is important.  If you are for example converting a pointer to an integer
+  it is useful to continue to track that integer *as if it were a pointer*.  Though this
+  is not supported at the moment.
 
-**Why this matters**:
-- Pointer types need different handling than value types (e.g., `&param` creates new stack memory)
-- Const pointers shouldn't allow backward propagation
-- Slices contain both a pointer and a length - the pointer part may escape but the length is a value
-- Structs may contain pointers that need tracking
-
-**Proposed approach**:
-1. Add a `type_info` field to `Slot` that captures relevant type categories
-2. During codegen, extract type information from AIR's `datum.*.ty` fields using InternPool
-3. Include type category in the generated payload (e.g., `.{ .value = arg0, .name = "x", .type = .ptr_const }`)
-4. Use type info in analysis handlers to make correct decisions about propagation
-
-**Type categories to consider**:
-- `.value` - primitive value types (integers, floats, bool, etc.)
-- `.ptr_const` - pointer to const data
-- `.ptr_mut` - pointer to mutable data
-- `.slice` - slice type (ptr + len)
-- `.struct_val` - struct by value
-- `.union_val` - union by value
-- `.optional` - optional types
-- `.array` - fixed-size arrays
+## Known Issues / Future Work
 
 **InternPool type inspection**: See `zig/src/InternPool.zig` for `indexToKey()` which returns type information that can be pattern-matched to determine the category.
 

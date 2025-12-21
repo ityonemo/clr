@@ -207,16 +207,12 @@ pub const MemorySafety = union(enum) {
         // the TypedPayload when return values are propagated to the caller.
     }
 
-    /// Called at the end of each function to check for memory leaks.
-    /// Deferred until after all slots are processed so success paths can free
-    /// allocations before we check for leaks.
+    /// Called on function close to check for memory leaks.
+    /// Backward propagation is handled centrally by slots.backPropagate().
     pub fn onFinish(tracked: []Slot, ctx: *Context, payloads: *Payloads) !void {
-        // TODO: Interprocedural ownership transfer disabled during entity system refactoring
-        const returned_origin: ?usize = null;
-
+        // Check for memory leaks
         for (tracked) |slot| {
             const idx = slot.typed_payload orelse continue;
-            // Follow pointer to get to scalar
             const pointee_idx = switch (payloads.at(idx).*) {
                 .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
@@ -230,15 +226,8 @@ pub const MemorySafety = union(enum) {
             if (ms != .allocation) continue;
             const a = ms.allocation;
 
-            // Skip if this allocation is being returned (ownership transfer)
-            if (returned_origin) |origin| {
-                if (a.origin == origin) continue;
-            }
             if (a.freed == null) {
-                // Before reporting leak, check if any slot with same origin was freed
-                // (handles case where callee freed via arg_ptr propagation)
                 if (isOriginFreed(tracked, payloads, a.origin)) continue;
-                // Still allocated after all paths = leak
                 return reportMemoryLeak(ctx, a.allocated);
             }
         }

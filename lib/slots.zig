@@ -144,6 +144,11 @@ pub const TypedPayload = union(enum) {
 
 pub const Slot = struct {
     typed_payload: ?EIdx = null,
+    /// For pointer args: enables backward propagation to the caller's entity.
+    caller_ref: ?struct {
+        payloads: *Payloads,
+        entity_idx: EIdx,
+    } = null,
 
     /// Get this slot's TypedPayload. Crashes if slot has no payload.
     pub fn payload(self: *Slot, payloads: *Payloads) *TypedPayload {
@@ -180,6 +185,38 @@ pub fn clear_list(list: []Slot, allocator: std.mem.Allocator) void {
 
 pub fn onFinish(tracked: []Slot, ctx: *Context, payloads: *Payloads) !void {
     try tag.splatFinish(tracked, ctx, payloads);
+}
+
+/// Propagate analysis state back to callers via caller_ref.
+/// Called after onFinish to copy pointee state back to the caller's entity.
+pub fn backPropagate(tracked: []Slot, payloads: *Payloads, caller_payloads: ?*Payloads) void {
+    const cp = caller_payloads orelse return; // entrypoint, nothing to propagate
+    for (tracked) |slot| {
+        const caller_ref = slot.caller_ref orelse continue;
+        const local_idx = slot.typed_payload orelse continue;
+
+        // Get local pointee's Analyte (following pointer if needed)
+        const local_analyte: ?*const Analyte = switch (payloads.at(local_idx).*) {
+            .scalar => |*imm| imm,
+            .pointer => |ind| switch (payloads.at(ind.to).*) {
+                .scalar => |*imm| imm,
+                else => null,
+            },
+            else => null,
+        };
+        const src = local_analyte orelse continue;
+
+        // Update caller's pointee's Analyte (same structure)
+        const caller_entity = cp.at(caller_ref.entity_idx);
+        switch (caller_entity.*) {
+            .scalar => |*imm| imm.* = src.*,
+            .pointer => |ind| switch (cp.at(ind.to).*) {
+                .scalar => |*imm| imm.* = src.*,
+                else => {},
+            },
+            else => {},
+        }
+    }
 }
 
 test "alloc sets state to undefined" {

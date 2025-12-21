@@ -48,35 +48,34 @@ pub const Undefined = union(enum) {
     pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
         _ = index;
         const ptr = params.ptr orelse return;
-        // Follow pointer to get to pointee
-        const ptr_idx = tracked[ptr].typed_payload orelse return;
+        // Follow pointer to get to pointee (local only - propagation happens on function close)
+        const ptr_idx = tracked[ptr].typed_payload orelse @panic("store_safe: ptr slot has no typed_payload");
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
-            .scalar => ptr_idx, // For non-pointer types (like alloc slots), update directly
-            .unimplemented => return,
-            else => return,
+            .unimplemented => return, // TODO: handle unimplemented types
+            else => |t| std.debug.panic("store_safe: expected pointer, got {s}", .{@tagName(t)}),
         };
         const undef_state: Undefined = if (params.is_undef)
             .{ .undefined = .{ .meta = ctx.meta } }
         else
             .{ .defined = {} };
-        // TODO: Interprocedural propagation disabled during entity system refactoring
-        // if (tracked[ptr].arg_ptr) |arg_ptr| { ... }
         switch (payloads.at(pointee_idx).*) {
             .scalar => |*imm| imm.undefined = undef_state,
-            else => {},
+            // Storing to pointer/struct/etc - nothing to track for undefined analysis
+            .pointer, .optional, .region, .@"struct", .@"union" => {},
+            .unimplemented => {},
+            else => |t| std.debug.panic("store_safe: unexpected pointee type {s}", .{@tagName(t)}),
         }
     }
 
     pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Load) !void {
         const ptr = params.ptr orelse return;
-        const ptr_idx = tracked[ptr].typed_payload orelse return;
+        const ptr_idx = tracked[ptr].typed_payload orelse @panic("load: ptr slot has no typed_payload");
         // Follow pointer to get to pointee
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
-            .scalar => ptr_idx, // For non-pointer types, check directly
-            .unimplemented => return,
-            else => return,
+            .unimplemented => return, // TODO: handle unimplemented types
+            else => |t| std.debug.panic("load: expected pointer, got {s}", .{@tagName(t)}),
         };
         switch (payloads.at(pointee_idx).*) {
             .scalar => |imm| {
@@ -90,7 +89,10 @@ pub const Undefined = union(enum) {
                     },
                 }
             },
-            else => {},
+            // Loading pointer/struct/etc - nothing to track for undefined analysis
+            .pointer, .optional, .region, .@"struct", .@"union" => {},
+            .unimplemented => {},
+            else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
         }
     }
 
@@ -103,7 +105,7 @@ pub const Undefined = union(enum) {
         // Follow pointer to get to pointee
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
-            .scalar => ptr_idx, // For non-pointer types, use directly
+            .scalar => ptr_idx,
             .unimplemented, .unset_retval, .void => return,
             else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
         };
@@ -119,6 +121,8 @@ pub const Undefined = union(enum) {
             else => @panic("unexpected payload type in dbg_var_ptr (pointee)"),
         }
     }
+
+    // Backward propagation is handled centrally by slots.backPropagate()
 };
 
 // Mock context for testing

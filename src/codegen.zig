@@ -615,6 +615,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\    const return_eidx: EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
         \\
         \\{s}    try slots.onFinish(tracked, ctx, &payloads);
+        \\    slots.backPropagate(tracked, &payloads, caller_payloads);
         \\    return return_eidx;
         \\}}
         \\
