@@ -104,7 +104,7 @@ pub const Undefined = union(enum) {
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types, use directly
-            .unimplemented => return,
+            .unimplemented, .unset_retval, .void => return,
             else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
         };
         switch (payloads.at(pointee_idx).*) {

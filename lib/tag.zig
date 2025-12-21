@@ -43,20 +43,18 @@ pub const AllocDestroy = struct {
 
 // Arg copies entity data from the caller's payloads to the callee's payloads.
 pub const Arg = struct {
-    value: *Slot,
+    value: EIdx,
     name: []const u8,
     caller_payloads: ?*Payloads,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
         // Copy entity from caller's payloads to callee's payloads
         if (self.caller_payloads) |cp| {
-            if (self.value.typed_payload) |caller_idx| {
-                const new_idx = try payloads.copyEntityRecursive(cp, caller_idx);
-                tracked[index].typed_payload = new_idx;
-            }
+            const new_idx = try payloads.copyEntityRecursive(cp, self.value);
+            tracked[index].typed_payload = new_idx;
         } else {
-            // Entrypoint - no caller payloads
-            tracked[index] = self.value.*;
+            // Entrypoint - no caller payloads, shouldn't have args
+            unreachable;
         }
         try splat(.arg, tracked, index, ctx, payloads, self);
     }

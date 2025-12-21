@@ -42,29 +42,32 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn arg(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Arg) !void {
+        const ptr_idx = tracked[index].typed_payload orelse return setParamStackPtr(tracked, index, ctx, payloads, params.name);
+
+        // Check if caller passed a meaningful entity
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |ind| ind.to,
+            .scalar => ptr_idx, // Non-pointer, check directly
+            // Caller passed an interned constant - no meaningful entity
+            .unimplemented, .unset_retval => return setParamStackPtr(tracked, index, ctx, payloads, params.name),
+            else => return, // void, etc - nothing to check
+        };
+
         // If the caller passed an allocation, preserve that metadata
         // so the callee can free it (ownership transfer)
-        if (tracked[index].typed_payload) |ptr_idx| {
-            // Follow pointer to check pointee for allocation
-            const pointee_idx = switch (payloads.at(ptr_idx).*) {
-                .pointer => |ind| ind.to,
-                .scalar => ptr_idx, // Non-pointer, check directly
-                .unimplemented => return,
-                else => return, // void, etc - nothing to check
-            };
-            switch (payloads.at(pointee_idx).*) {
-                .scalar => |imm| {
-                    if (imm.memory_safety) |ms| {
-                        if (ms == .allocation) return; // Preserve allocation metadata
-                    }
-                },
-                else => {},
-            }
-            // Entity was copied from caller but doesn't have allocation - keep it as-is
-            return;
+        switch (payloads.at(pointee_idx).*) {
+            .scalar => |imm| {
+                if (imm.memory_safety) |ms| {
+                    if (ms == .allocation) return; // Preserve allocation metadata
+                }
+            },
+            else => {},
         }
+        // Entity was copied from caller but doesn't have allocation - keep it as-is
+    }
 
-        // No entity from caller - create stack_ptr for this parameter
+    fn setParamStackPtr(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, name: []const u8) !void {
+        // Create stack_ptr for this parameter
         // Empty function name means returning it directly won't be flagged as an escape
         _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
             .meta = .{
@@ -72,7 +75,7 @@ pub const MemorySafety = union(enum) {
                 .file = ctx.meta.file,
                 .line = ctx.base_line + 1, // +1 for 1-indexed line numbers
             },
-            .name = .{ .parameter = params.name },
+            .name = .{ .parameter = name },
         } } } });
     }
 
@@ -129,7 +132,7 @@ pub const MemorySafety = union(enum) {
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types, use directly
-            .unimplemented => return,
+            .unimplemented, .unset_retval, .void => return,
             else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
         };
         switch (payloads.at(pointee_idx).*) {
