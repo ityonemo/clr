@@ -9,9 +9,9 @@
   - slots.zig removed (functions moved to Inst.zig)
 - [x] Rename across codebase
 
-## Review slots.zig (now Inst.zig)
-- [x] backPropagate function
-- [x] Slot/Payload copying functions (now in Inst.zig and Refinements.zig)
+## Review Inst.zig
+- [ ] backPropagate function
+- [ ] Slot/Payload copying functions (now in Inst.zig and Refinements.zig)
 
 ## Review tag.zig types
 - [ ] tag.Alloc
@@ -50,5 +50,7 @@
 
 ## Other
 - [x] Review CLAUDE.md - documentation accuracy (updated for refactoring)
-- [x] Dead code - unused imports, stale comments (slots.zig removed)
+- [x] Dead code - unused imports, stale comments
+  - slots.zig removed
+  - Renamed: _slotLine→_instLine, buildSlotLines→buildInstLines, extractDestroyPtrSlot→extractDestroyPtrInst
 - [ ] Test coverage - unit tests for new code

@@ -53,7 +53,7 @@ fn deinitTestAllocator() void {
 // Dummy InternPool pointer for tests that don't need it
 const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
 
-test "slotLine for dbg_stmt" {
+test "instLine for dbg_stmt" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -61,12 +61,12 @@ test "slotLine for dbg_stmt" {
     defer arena.deinit();
 
     const datum: Data = .{ .dbg_stmt = .{ .line = 10, .column = 5 } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .dbg_stmt = .{ .line = 10, .column = 5 } }, results, ctx, &refinements);\n", result);
 }
 
-test "slotLine for arg" {
+test "instLine for arg" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -74,12 +74,12 @@ test "slotLine for arg" {
     defer arena.deinit();
 
     const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"test_param\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result);
 }
 
-test "slotLine for arg with sequential zir_param_index uses arg counter" {
+test "instLine for arg with sequential zir_param_index uses arg counter" {
     // Normal case: zir_param_index values are sequential (0, 1, 2).
     // The arg_counter should track these correctly.
     initTestAllocator();
@@ -93,23 +93,23 @@ test "slotLine for arg with sequential zir_param_index uses arg counter" {
 
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
-    const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
+    const result0 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"a\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result0);
 
     // Second arg: zir_param_index=1, should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
-    const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
+    const result1 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
     try std.testing.expectEqualStrings("    try Inst.apply(1, .{ .arg = .{ .value = arg1, .name = \"b\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result1);
 
     // Third arg: zir_param_index=2, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
-    const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
+    const result2 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
     try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .arg = .{ .value = arg2, .name = \"c\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result2);
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
 
-test "slotLine for arg with non-sequential zir_param_index uses sequential arg counter" {
+test "instLine for arg with non-sequential zir_param_index uses sequential arg counter" {
     // When comptime params are present, zir_param_index can have gaps (e.g., 0, 2, 3).
     // The arg_counter ensures we generate sequential arg references (arg0, arg1, arg2)
     // while still using zir_param_index for name lookup.
@@ -125,24 +125,24 @@ test "slotLine for arg with non-sequential zir_param_index uses sequential arg c
 
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
-    const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
+    const result0 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"self\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result0);
 
     // Second arg: zir_param_index=2 (skipped 1), should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
-    const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
+    const result1 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
     try std.testing.expectEqualStrings("    try Inst.apply(1, .{ .arg = .{ .value = arg1, .name = \"byte_count\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result1);
 
     // Third arg: zir_param_index=3, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
-    const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
+    const result2 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
     try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .arg = .{ .value = arg2, .name = \"return_address\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result2);
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
 
-test "slotLine for ret_safe with source" {
+test "instLine for ret_safe with source" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -152,12 +152,12 @@ test "slotLine for ret_safe with source" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .un_op = operand_ref };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = 5 } }, results, ctx, &refinements);\n", result);
 }
 
-test "slotLine for alloc" {
+test "instLine for alloc" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -165,12 +165,12 @@ test "slotLine for alloc" {
     defer arena.deinit();
 
     const datum: Data = .{ .no_op = {} };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);\n", result);
 }
 
-test "slotLine for store_safe" {
+test "instLine for store_safe" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -181,12 +181,12 @@ test "slotLine for store_safe" {
     const ptr_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
     const val_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .store_safe = .{ .ptr = 3, .src = 4, .is_undef = false } }, results, ctx, &refinements);\n", result);
 }
 
-test "slotLine for load" {
+test "instLine for load" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -196,7 +196,7 @@ test "slotLine for load" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .load = .{ .ptr = 5 } }, results, ctx, &refinements);\n", result);
 }
@@ -312,7 +312,7 @@ test "isAllocatorDestroyFqn matches Allocator.destroy patterns" {
     try std.testing.expect(!codegen.isAllocatorDestroyFqn("foo.destroy"));
 }
 
-test "slotLine for br with block and operand" {
+test "instLine for br with block and operand" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -326,7 +326,7 @@ test "slotLine for br with block and operand" {
         .block_inst = @enumFromInt(3),
         .operand = operand_ref,
     } };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .br, datum, 9, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .br, datum, 9, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(9, .{ .br = .{ .block = 3, .src = 8 } }, results, ctx, &refinements);\n", result);
 }

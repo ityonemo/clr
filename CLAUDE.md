@@ -160,7 +160,7 @@ Run `./run_integration.sh` - the new test should FAIL. This confirms the test is
 Write a test for the instruction line that should be generated:
 
 ```zig
-test "slotLine for my_new_tag" {
+test "instLine for my_new_tag" {
     initTestAllocator();
     defer clr_allocator.deinit();
 
@@ -168,7 +168,7 @@ test "slotLine for my_new_tag" {
     defer arena.deinit();
 
     const datum: Data = .{ /* appropriate data for this tag */ };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .my_new_tag = .{ /* expected payload */ } }, results, ctx, &refinements);\n", result);
 }
@@ -283,9 +283,9 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 
 2. **Use `clr_allocator.allocPrint` instead of `std.fmt.allocPrint`** - The stdlib version uses internal Writer vtables that crash. Our version uses `bufPrint` which has no vtables.
 
-3. **`allocPrint` needs size hints for large strings** - When formatting a large string (e.g., 18KB+ of slot lines) into a small buffer, `bufPrint` can crash instead of returning `NoSpaceLeft`. Pass a `size_hint` parameter when you know the approximate output size: `clr_allocator.allocPrint(alloc, fmt, args, size_hint)`. Note: Complex generics (like `GeneralPurposeAllocator`) have very long FQNs (hundreds of characters), so use generous margins (4096+ bytes) for function templates.
+3. **`allocPrint` needs size hints for large strings** - When formatting a large string (e.g., 18KB+ of inst lines) into a small buffer, `bufPrint` can crash instead of returning `NoSpaceLeft`. Pass a `size_hint` parameter when you know the approximate output size: `clr_allocator.allocPrint(alloc, fmt, args, size_hint)`. Note: Complex generics (like `GeneralPurposeAllocator`) have very long FQNs (hundreds of characters), so use generous margins (4096+ bytes) for function templates.
 
-4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building slot lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
+4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building inst lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
 
 ## Interprocedural Analysis Architecture
 

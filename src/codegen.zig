@@ -25,7 +25,7 @@ fn safeName(tag: Tag) []const u8 {
 }
 
 /// Returns the payload string for a given tag and data.
-/// Note: call tags are handled separately in buildSlotLines via payloadCallParts.
+/// Note: call tags are handled separately in buildInstLines via payloadCallParts.
 fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
         .arg => payloadArg(arena, datum, param_names, arg_counter),
@@ -60,7 +60,7 @@ fn payloadBr(arena: std.mem.Allocator, datum: Data) []const u8 {
 /// Generate a single inst line for a given tag and data.
 /// Exposed for testing with underscore prefix to indicate internal use.
 /// arg_counter tracks sequential arg indices (may differ from zir_param_index).
-pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
+pub fn _instLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
@@ -74,7 +74,7 @@ pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             if (isAllocatorDestroy(ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                const ptr_inst = extractDestroyPtrSlot(datum, extra, tags, data);
+                const ptr_inst = extractDestroyPtrInst(datum, extra, tags, data);
                 break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, ptr_inst, allocator_type }, null);
             }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
@@ -533,7 +533,7 @@ pub fn isAllocatorDestroyFqn(fqn: []const u8) bool {
 
 /// Extract the pointer slot being destroyed from a destroy call.
 /// destroy(self, ptr) - the second argument (index 1) is the pointer.
-fn extractDestroyPtrSlot(datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) ?usize {
+fn extractDestroyPtrInst(datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) ?usize {
     _ = tags;
     _ = data;
     const payload_index = datum.pl_op.payload;
@@ -550,7 +550,7 @@ fn extractDestroyPtrSlot(datum: Data, extra: []const u32, tags: []const Tag, dat
 }
 
 /// Build all slot apply lines into a single buffer (uses provided arena allocator)
-fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, param_names: []const []const u8) []const u8 {
+fn buildInstLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, param_names: []const []const u8) []const u8 {
     if (tags.len == 0) return "";
 
     // Build lines into a list first
@@ -561,7 +561,7 @@ fn buildSlotLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const
     var arg_counter: u32 = 0;
 
     for (tags, data, 0..) |tag, datum, i| {
-        const line = _slotLine(arena, ip, tag, datum, i, extra, tags, data, param_names, &arg_counter);
+        const line = _instLine(arena, ip, tag, datum, i, extra, tags, data, param_names, &arg_counter);
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
@@ -594,7 +594,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         "";
 
     // Build inst lines first
-    const inst_lines = buildSlotLines(arena.allocator(), ip, tags, data, extra, param_names);
+    const inst_lines = buildInstLines(arena.allocator(), ip, tags, data, extra, param_names);
 
     // Generate complete function with inst lines injected (use main arena for final result)
     // Size hint: inst_lines + template + margin
