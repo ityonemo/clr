@@ -34,6 +34,12 @@ pub fn push_fn(self: *Context, func_name: []const u8) !void {
 pub fn pop_fn(self: *Context) void {
     if (self.stacktrace.items.len == 0) @panic("you busted the stacktrace");
     _ = self.stacktrace.pop();
+    // Restore meta.function to the caller's function name
+    if (self.stacktrace.items.len > 0) {
+        self.meta.function = self.stacktrace.items[self.stacktrace.items.len - 1];
+    } else {
+        self.meta.function = "";
+    }
 }
 
 pub fn dumpStackTrace(self: *Context) void {
