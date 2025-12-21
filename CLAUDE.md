@@ -144,9 +144,9 @@ test "slotLine for my_new_tag" {
     defer arena.deinit();
 
     const datum: Data = .{ /* appropriate data for this tag */ };
-    const result = codegen._slotLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{});
+    const result = codegen._slotLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .my_new_tag = .{ /* expected payload */ } }, tracked, 0, ctx);\n", result);
+    try std.testing.expectEqualStrings("    try Slot.apply(.{ .my_new_tag = .{ /* expected payload */ } }, tracked, 0, ctx, &payloads);\n", result);
 }
 ```
 
@@ -171,47 +171,45 @@ fn payloadMyNewTag(arena: std.mem.Allocator, datum: Data) []const u8 {
 
 ### 4. Add tag to AnyTag union (`lib/tag.zig`)
 
+Tags are defined inline in `lib/tag.zig`. Add a new struct type and include it in the `AnyTag` union:
+
 ```zig
+// Define the tag struct (in lib/tag.zig)
+pub const MyNewTag = struct {
+    field: u32,  // fields matching the payload
+
+    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, payloads: *Payloads) !void {
+        // Tag-specific logic (if any) before analysis dispatch
+        try splat(.my_new_tag, tracked, index, ctx, payloads, self);
+    }
+};
+
 pub const AnyTag = union(enum) {
     // ...existing tags...
-    my_new_tag: @import("tag/MyNewTag.zig"),
+    my_new_tag: MyNewTag,
 };
 ```
 
-### 5. Create tag handler (`lib/tag/MyNewTag.zig`)
-
-```zig
-const Slot = @import("../slots.zig").Slot;
-const splat = @import("../tag.zig").splat;
-
-field: u32,  // fields matching the payload
-
-pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype) !void {
-    // Tag-specific logic (if any) before analysis dispatch
-    try splat(.my_new_tag, tracked, index, ctx, self);
-}
-```
-
-### 6. Add analysis handler (if needed) (`lib/analysis/*.zig`)
+### 5. Add analysis handler (if needed) (`lib/analysis/*.zig`)
 
 If the tag affects an analysis (e.g., undefined tracking), add a handler:
 
 ```zig
 // In lib/analysis/undefined.zig (or other analysis module)
-pub fn my_new_tag(tracked: []Slot, index: usize, ctx: anytype, payload: anytype) !void {
+pub fn my_new_tag(tracked: []Slot, index: usize, ctx: anytype, payloads: *Payloads, payload: anytype) !void {
     // Analysis logic - update tracked slots, report errors, etc.
 }
 ```
 
 The `splat()` function in `lib/tag.zig` uses `@hasDecl` to automatically dispatch to any analysis that implements the tag.
 
-### 7. Run unit tests
+### 6. Run unit tests
 
 ```sh
 zig build test
 ```
 
-### 8. Verify integration tests pass
+### 7. Verify integration tests pass
 
 ```sh
 ./run_integration.sh
@@ -225,10 +223,9 @@ The tests from step 1 should now pass.
 |------|---------|
 | `src/codegen.zig` | Generates .air.zig source from AIR instructions |
 | `src/codegen_test.zig` | Unit tests for codegen |
-| `lib/tag.zig` | AnyTag union and splat dispatch |
-| `lib/tag/*.zig` | Individual tag handlers |
-| `lib/analysis/*.zig` | Analysis modules (undefined, etc.) |
-| `lib/slots.zig` | Slot struct and apply/call dispatch |
+| `lib/tag.zig` | AnyTag union, tag structs, and splat dispatch |
+| `lib/analysis/*.zig` | Analysis modules (undefined, memory_safety) |
+| `lib/slots.zig` | Slot struct, Payloads, and entity system |
 | `test/cases/` | Integration test input files |
 | `test/integration/*.bats` | BATS integration tests |
 
@@ -261,36 +258,11 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 
 2. **Use `clr_allocator.allocPrint` instead of `std.fmt.allocPrint`** - The stdlib version uses internal Writer vtables that crash. Our version uses `bufPrint` which has no vtables.
 
-3. **`allocPrint` needs size hints for large strings** - When formatting a large string (e.g., 18KB+ of slot lines) into a small buffer, `bufPrint` can crash instead of returning `NoSpaceLeft`. Pass a `size_hint` parameter when you know the approximate output size: `clr_allocator.allocPrint(alloc, fmt, args, size_hint)`.
+3. **`allocPrint` needs size hints for large strings** - When formatting a large string (e.g., 18KB+ of slot lines) into a small buffer, `bufPrint` can crash instead of returning `NoSpaceLeft`. Pass a `size_hint` parameter when you know the approximate output size: `clr_allocator.allocPrint(alloc, fmt, args, size_hint)`. Note: Complex generics (like `GeneralPurposeAllocator`) have very long FQNs (hundreds of characters), so use generous margins (4096+ bytes) for function templates.
 
 4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building slot lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
 
 ## Known Issues / Future Work
-
-### Const vs Mutable Pointer Parameter Tracking
-
-**Issue**: The `arg_ptr` mechanism propagates analysis information backwards through pointer parameters to update the caller's slot state. Currently, this happens for ALL pointer parameters, but it should NOT happen for `*const` pointers since the callee cannot modify through them.
-
-**Current behavior** (in `lib/tag/Arg.zig`):
-```zig
-tracked[index].arg_ptr = self.value;  // Always set, regardless of const
-```
-
-**Problem**: In `lib/analysis/undefined.zig`'s `store_safe`, we propagate backwards unconditionally:
-```zig
-if (tracked[ptr].arg_ptr) |caller_slot| {
-    caller_slot.undefined = tracked[ptr].undefined;  // Wrong for *const!
-}
-```
-
-This could cause incorrect interprocedural analysis - information flowing backwards through const pointers when it shouldn't.
-
-**Fix needed**:
-1. In `src/codegen.zig`'s `payloadArg()`, check if `datum.arg.ty` is a const pointer type
-2. Add `is_const: bool` field to the arg payload
-3. In `lib/tag/Arg.zig`, only set `arg_ptr` when `!self.is_const`
-
-**Type checking approach**: Use the InternPool to check if the parameter type is a pointer with const pointee.
 
 ### Slot Type Tracking
 
