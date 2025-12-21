@@ -601,18 +601,18 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     // Size hint: slot_lines + template + margin
     const size_hint = slot_lines.len + 4096;
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}(ctx: *Context, caller_payloads: ?*slots.Payloads{s}) anyerror!slots.EIdx {{
+        \\fn fn_{d}(ctx: *Context, caller_payloads: ?*Payloads{s}) anyerror!EIdx {{
         \\    ctx.meta.file = "{s}";
         \\    ctx.base_line = {d};
         \\    try ctx.push_fn("{s}");
         \\    defer ctx.pop_fn();
         \\
-        \\    var payloads = slots.Payloads.init(ctx.allocator);
+        \\    var payloads = Payloads.init(ctx.allocator);
         \\    defer payloads.deinit();
         \\
         \\    const tracked = slots.make_list(ctx.allocator, {d});
         \\    defer slots.clear_list(tracked, ctx.allocator);
-        \\    const return_eidx: slots.EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
+        \\    const return_eidx: EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
         \\
         \\{s}    try slots.onFinish(tracked, ctx, &payloads);
         \\    return return_eidx;
@@ -629,6 +629,8 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const Context = clr.Context;
         \\const slots = clr.slots;
         \\const Slot = slots.Slot;
+        \\const Payloads = slots.Payloads;
+        \\const EIdx = slots.EIdx;
         \\
         \\var writer_buf: [4096]u8 = undefined;
         \\var file_writer: std.fs.File.Writer = undefined;
@@ -656,14 +658,14 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     defer arena.deinit();
 
     // Build parameter list: ctx + caller_payloads + arity *Slot args
-    var params: []const u8 = "ctx: *Context, caller_payloads: ?*slots.Payloads";
+    var params: []const u8 = "ctx: *Context, caller_payloads: ?*Payloads";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
         params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: *Slot", .{params}, null);
     }
 
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}({s}) anyerror!slots.EIdx {{
+        \\fn fn_{d}({s}) anyerror!EIdx {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
         \\    return if (caller_payloads) |cp| try cp.initEntity() else 0;
