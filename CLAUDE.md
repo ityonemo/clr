@@ -80,8 +80,8 @@ Output goes to stderr.
 - **Flatten control flow** - Use Zig's tools to flatten imperative code instead of nesting logic. Early returns/continues with `orelse` and union checks keep the main logic at the top level:
   ```zig
   // BAD: Deeply nested logic
-  for (tracked) |slot| {
-      if (slot.memory_safety) |ms| {
+  for (results) |inst| {
+      if (inst.memory_safety) |ms| {
           switch (ms) {
               .allocation => |a| {
                   if (a.freed == null) {
@@ -94,8 +94,8 @@ Output goes to stderr.
   }
 
   // GOOD: Flat logic with early continues
-  for (tracked) |slot| {
-      const ms = slot.memory_safety orelse continue;
+  for (results) |inst| {
+      const ms = inst.memory_safety orelse continue;
       if (ms != .allocation) continue;
       const a = ms.allocation;
       if (a.freed != null) continue;
@@ -106,7 +106,7 @@ Output goes to stderr.
 - **Pointer capture for modification** - When you need to modify a value inside an optional, use `if (optional) |*ptr|` to capture a pointer. This is one case where nesting is appropriate:
   ```zig
   // Need to modify, so use pointer capture
-  if (slot.memory_safety) |*ms| {
+  if (inst.memory_safety) |*ms| {
       if (ms.* != .allocation) continue;
       ms.allocation.freed = free_meta;  // modification requires pointer
   }
@@ -117,13 +117,13 @@ Output goes to stderr.
 - **Panic on unexpected types, don't silently return** - In analysis handlers, if an operation expects a specific type (e.g., `store_safe` expects a pointer), panic on unexpected types rather than silently returning. This catches bugs early:
   ```zig
   // BAD: Silently ignores unexpected types
-  const pointee_idx = switch (payloads.at(ptr_idx).*) {
+  const pointee_idx = switch (refinements.at(ptr_idx).*) {
       .pointer => |ind| ind.to,
       else => return,  // Bug hidden - we expected a pointer!
   };
 
   // GOOD: Panic on unexpected types, explicit handling for known cases
-  const pointee_idx = switch (payloads.at(ptr_idx).*) {
+  const pointee_idx = switch (refinements.at(ptr_idx).*) {
       .pointer => |ind| ind.to,
       .unimplemented => return,  // TODO: explicit handling
       else => |t| std.debug.panic("store_safe: expected pointer, got {s}", .{@tagName(t)}),
@@ -157,7 +157,7 @@ Run `./run_integration.sh` - the new test should FAIL. This confirms the test is
 
 ### 2. Add codegen unit test (`src/codegen_test.zig`)
 
-Write a test for the slot line that should be generated:
+Write a test for the instruction line that should be generated:
 
 ```zig
 test "slotLine for my_new_tag" {
@@ -170,7 +170,7 @@ test "slotLine for my_new_tag" {
     const datum: Data = .{ /* appropriate data for this tag */ };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .my_new_tag = .{ /* expected payload */ } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .my_new_tag = .{ /* expected payload */ } }, results, ctx, &refinements);\n", result);
 }
 ```
 
@@ -202,9 +202,9 @@ Tags are defined inline in `lib/tag.zig`. Add a new struct type and include it i
 pub const MyNewTag = struct {
     field: u32,  // fields matching the payload
 
-    pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: anytype, payloads: *Payloads) !void {
+    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         // Tag-specific logic (if any) before analysis dispatch
-        try splat(.my_new_tag, tracked, index, ctx, payloads, self);
+        try splat(.my_new_tag, results, index, ctx, refinements, self);
     }
 };
 
@@ -220,8 +220,8 @@ If the tag affects an analysis (e.g., undefined tracking), add a handler:
 
 ```zig
 // In lib/analysis/undefined.zig (or other analysis module)
-pub fn my_new_tag(tracked: []Slot, index: usize, ctx: anytype, payloads: *Payloads, payload: anytype) !void {
-    // Analysis logic - update tracked slots, report errors, etc.
+pub fn my_new_tag(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, payload: anytype) !void {
+    // Analysis logic - update results, report errors, etc.
 }
 ```
 
@@ -249,7 +249,8 @@ The tests from step 1 should now pass.
 | `src/codegen_test.zig` | Unit tests for codegen |
 | `lib/tag.zig` | AnyTag union, tag structs, and splat dispatch |
 | `lib/analysis/*.zig` | Analysis modules (undefined, memory_safety) |
-| `lib/slots.zig` | Slot struct, Payloads, and entity system |
+| `lib/Inst.zig` | Inst struct, results list management, and entity helpers |
+| `lib/Refinements.zig` | Refinements table and Refinement union |
 | `test/cases/` | Integration test input files |
 | `test/integration/*.bats` | BATS integration tests |
 
@@ -290,51 +291,49 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 
 ### AIR Arg Semantics (IMPORTANT)
 
-AIR arg slots contain VALUES directly, NOT pointers to stack locations:
+AIR arg instructions contain VALUES directly, NOT pointers to stack locations:
 
-- If the parameter type is `*u8`, the slot contains the pointer value itself
-- If the parameter type is `u8`, the slot contains the scalar value itself
+- If the parameter type is `*u8`, the instruction contains the pointer value itself
+- If the parameter type is `u8`, the instruction contains the scalar value itself
 - Taking `&param` in source code generates explicit `alloc` + `store_safe` in AIR
 
-This means the Arg handler does NOT wrap entities in a pointer. It copies the caller's entity directly into local payloads.
+This means the Arg handler does NOT wrap entities in a pointer. It copies the caller's entity directly into local refinements.
 
 **Example**: For `fn set_value(ptr: *u8) { ptr.* = 5; }`:
 1. Caller passes pointer entity P1 → scalar S1 (undefined)
-2. Arg copies P1 → P1' and S1 → S1' in local payloads
-3. Slot 0 contains P1' directly (the pointer entity, NOT a pointer to it)
+2. Arg copies P1 → P1' and S1 → S1' in local refinements
+3. Inst 0 contains P1' directly (the pointer entity, NOT a pointer to it)
 4. `store_safe(ptr=0)` follows P1' to S1', marks S1' as defined
-5. `onFinish` propagates S1'.undefined back to S1.undefined
+5. `backPropagate` propagates S1'.undefined back to S1.undefined
 
 ### Local-Only Updates, Propagate on Close
 
 When a callee modifies state through a pointer argument, we do NOT update the caller's state directly during the operation. Instead:
 
-1. **Arg handler**: Copies the caller's entity into local payloads (deep copy via copyEntityRecursive). Sets `caller_ref` for backward propagation.
+1. **Arg handler**: Copies the caller's entity into local refinements (deep copy via copyEntityRecursive). Sets `caller_ref` for backward propagation.
 2. **During execution**: All operations (store_safe, load, etc.) only update the LOCAL copy
-3. **On function close**: `onFinish` propagates final state back to the caller via `caller_ref`
+3. **On function close**: `backPropagate` propagates final state back to the caller via `caller_ref`
 
 **Why this architecture?**
 
-The callee's slot table must remain "clean" during execution. As we implement conditionals and loops, we'll need to merge multiple copies of slot tables (e.g., merging the "then" and "else" branches of an if statement). If operations directly modified the caller's state, we'd be making partial updates that couldn't be cleanly merged.
+The callee's results table must remain "clean" during execution. As we implement conditionals and loops, we'll need to merge multiple copies of results tables (e.g., merging the "then" and "else" branches of an if statement). If operations directly modified the caller's state, we'd be making partial updates that couldn't be cleanly merged.
 
 By deferring propagation until function close, we ensure:
 - Each branch maintains its own complete view of the state
 - Merging happens on fully-resolved states, not partial updates
 - The caller only sees the final result after all paths are considered
 
-### Slot.caller_ref
+### Inst.caller_ref
 
-For arguments, `Slot.caller_ref` stores:
-- `payloads`: Pointer to the caller's Payloads
-- `entity_idx`: The caller's entity index (EIdx)
+For arguments, `Inst.caller_ref` stores the caller's entity index (EIdx).
 
-This allows `onFinish` to find the caller's entity, follow it (if it's a pointer), and update the final state.
+This allows `backPropagate` to find the caller's entity, follow it (if it's a pointer), and update the final state.
 
 ## Not going to do
 
-### Slot Type Tracking
+### Inst Type Tracking
 
-**Issue**: Currently, slots don't and should not track what type of value they contain. 
+**Issue**: Currently, instructions don't and should not track what type of value they contain.
 - Type safety is the responsibility of the compiler so all generated AIR should already
   conform to type correctness
 - Const correctness is enforced at the compiler level, so any AIR operation that might
@@ -432,5 +431,5 @@ To identify runtime allocator types, trace the inst_ref back through the AIR:
 
 **Future Improvements**:
 1. **Global/const allocator tracking**: If an allocator is stored in a global or const variable, trace through the store to find the vtable source
-2. **Allocator type tracking**: Track allocator types through the slot typing system - when a variable is declared as a specific allocator type (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), propagate that type label to any `Allocator` derived from it via `.allocator()`
+2. **Allocator type tracking**: Track allocator types through the inst typing system - when a variable is declared as a specific allocator type (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), propagate that type label to any `Allocator` derived from it via `.allocator()`
 3. **Vtable field tracing**: Search for `struct_field_ptr_index_1` (vtable field) stores to find the vtable global for runtime-constructed Allocator structs

@@ -7,24 +7,26 @@ const InternPool = compiler.InternPool;
 const Tag = Air.Inst.Tag;
 const Data = Air.Inst.Data;
 
-// Test AllocatorVTable that wraps testing.allocator for unit testing.
-// This enables leak detection in tests.
-const testing_allocator = std.testing.allocator;
+// Test AllocatorVTable that wraps page_allocator for unit testing.
+// We use page_allocator instead of testing.allocator because:
+// 1. Tests may run in parallel with shared global allocator state
+// 2. The clr_allocator manages its own arena lifetime
+const page_allocator = std.heap.page_allocator;
 
 fn testAlloc(_: ?[*]u8, len: usize, alignment: usize, ret_addr: usize) callconv(.c) ?[*]u8 {
-    return @ptrCast(testing_allocator.rawAlloc(len, @enumFromInt(alignment), ret_addr));
+    return @ptrCast(page_allocator.rawAlloc(len, @enumFromInt(alignment), ret_addr));
 }
 
 fn testResize(_: ?[*]u8, ptr: ?[*]u8, len: usize, alignment: usize, new_len: usize, ret_addr: usize) callconv(.c) bool {
-    return testing_allocator.rawResize(ptr.?[0..len], @enumFromInt(alignment), new_len, ret_addr);
+    return page_allocator.rawResize(ptr.?[0..len], @enumFromInt(alignment), new_len, ret_addr);
 }
 
 fn testRemap(_: ?[*]u8, ptr: ?[*]u8, len: usize, alignment: usize, new_len: usize, ret_addr: usize) callconv(.c) ?[*]u8 {
-    return testing_allocator.rawRemap(ptr.?[0..len], @enumFromInt(alignment), new_len, ret_addr);
+    return page_allocator.rawRemap(ptr.?[0..len], @enumFromInt(alignment), new_len, ret_addr);
 }
 
 fn testFree(_: ?[*]u8, ptr: ?[*]u8, len: usize, alignment: usize, ret_addr: usize) callconv(.c) void {
-    return testing_allocator.rawFree(ptr.?[0..len], @enumFromInt(alignment), ret_addr);
+    return page_allocator.rawFree(ptr.?[0..len], @enumFromInt(alignment), ret_addr);
 }
 
 const test_avt: clr_allocator.AllocatorVTable = .{
@@ -34,8 +36,18 @@ const test_avt: clr_allocator.AllocatorVTable = .{
     .free = testFree,
 };
 
+var test_allocator_initialized: std.atomic.Value(bool) = .init(false);
+
 fn initTestAllocator() void {
-    clr_allocator.init(&test_avt);
+    // Use compare-exchange for thread-safe initialization
+    if (test_allocator_initialized.cmpxchgStrong(false, true, .acquire, .monotonic) == null) {
+        clr_allocator.init(&test_avt);
+    }
+}
+
+fn deinitTestAllocator() void {
+    // No-op: Don't deinit since tests may run in parallel sharing the allocator.
+    // Memory will be reclaimed when the test process exits.
 }
 
 // Dummy InternPool pointer for tests that don't need it
@@ -43,7 +55,7 @@ const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
 
 test "slotLine for dbg_stmt" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -51,12 +63,12 @@ test "slotLine for dbg_stmt" {
     const datum: Data = .{ .dbg_stmt = .{ .line = 10, .column = 5 } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .dbg_stmt = .{ .line = 10, .column = 5 } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .dbg_stmt = .{ .line = 10, .column = 5 } }, results, ctx, &refinements);\n", result);
 }
 
 test "slotLine for arg" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -64,14 +76,14 @@ test "slotLine for arg" {
     const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"test_param\", .caller_payloads = caller_payloads } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"test_param\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result);
 }
 
 test "slotLine for arg with sequential zir_param_index uses arg counter" {
     // Normal case: zir_param_index values are sequential (0, 1, 2).
     // The arg_counter should track these correctly.
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -82,17 +94,17 @@ test "slotLine for arg with sequential zir_param_index uses arg counter" {
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"a\", .caller_payloads = caller_payloads } }, tracked, 0, ctx, &payloads);\n", result0);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"a\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result0);
 
     // Second arg: zir_param_index=1, should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
     const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"b\", .caller_payloads = caller_payloads } }, tracked, 1, ctx, &payloads);\n", result1);
+    try std.testing.expectEqualStrings("    try Inst.apply(1, .{ .arg = .{ .value = arg1, .name = \"b\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result1);
 
     // Third arg: zir_param_index=2, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"c\", .caller_payloads = caller_payloads } }, tracked, 2, ctx, &payloads);\n", result2);
+    try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .arg = .{ .value = arg2, .name = \"c\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result2);
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
@@ -102,7 +114,7 @@ test "slotLine for arg with non-sequential zir_param_index uses sequential arg c
     // The arg_counter ensures we generate sequential arg references (arg0, arg1, arg2)
     // while still using zir_param_index for name lookup.
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -114,17 +126,17 @@ test "slotLine for arg with non-sequential zir_param_index uses sequential arg c
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg0, .name = \"self\", .caller_payloads = caller_payloads } }, tracked, 0, ctx, &payloads);\n", result0);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"self\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result0);
 
     // Second arg: zir_param_index=2 (skipped 1), should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result1 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg1, .name = \"byte_count\", .caller_payloads = caller_payloads } }, tracked, 1, ctx, &payloads);\n", result1);
+    try std.testing.expectEqualStrings("    try Inst.apply(1, .{ .arg = .{ .value = arg1, .name = \"byte_count\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result1);
 
     // Third arg: zir_param_index=3, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
     const result2 = codegen._slotLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .arg = .{ .value = arg2, .name = \"return_address\", .caller_payloads = caller_payloads } }, tracked, 2, ctx, &payloads);\n", result2);
+    try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .arg = .{ .value = arg2, .name = \"return_address\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result2);
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
@@ -132,7 +144,7 @@ test "slotLine for arg with non-sequential zir_param_index uses sequential arg c
 
 test "slotLine for ret_safe with source" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -142,12 +154,12 @@ test "slotLine for ret_safe with source" {
     const datum: Data = .{ .un_op = operand_ref };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .ret_safe = .{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = 5 } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = 5 } }, results, ctx, &refinements);\n", result);
 }
 
 test "slotLine for alloc" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -155,12 +167,12 @@ test "slotLine for alloc" {
     const datum: Data = .{ .no_op = {} };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);\n", result);
 }
 
 test "slotLine for store_safe" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -171,12 +183,12 @@ test "slotLine for store_safe" {
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .store_safe = .{ .ptr = 3, .src = 4, .is_undef = false } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .store_safe = .{ .ptr = 3, .src = 4, .is_undef = false } }, results, ctx, &refinements);\n", result);
 }
 
 test "slotLine for load" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
@@ -186,12 +198,12 @@ test "slotLine for load" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .load = .{ .ptr = 5 } }, tracked, 0, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .load = .{ .ptr = 5 } }, results, ctx, &refinements);\n", result);
 }
 
 test "generateFunction produces complete function" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     const Ref = Air.Inst.Ref;
     const tags: []const Tag = &.{ .alloc, .dbg_stmt, .load, .ret_safe };
@@ -206,25 +218,25 @@ test "generateFunction produces complete function" {
     const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig", &.{});
 
     const expected =
-        \\fn fn_42(ctx: *Context, caller_payloads: ?*Payloads) anyerror!EIdx {
+        \\fn fn_42(ctx: *Context, caller_refinements: ?*Refinements) anyerror!EIdx {
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
         \\
-        \\    var payloads = Payloads.init(ctx.allocator);
-        \\    defer payloads.deinit();
+        \\    var refinements = Refinements.init(ctx.allocator);
+        \\    defer refinements.deinit();
         \\
-        \\    const tracked = slots.make_list(ctx.allocator, 4);
-        \\    defer slots.clear_list(tracked, ctx.allocator);
-        \\    const return_eidx: EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
+        \\    const results = Inst.make_results_list(ctx.allocator, 4);
+        \\    defer Inst.clear_results_list(results, ctx.allocator);
+        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.initEntity() else 0;
         \\
-        \\    try Slot.apply(.{ .alloc = .{} }, tracked, 0, ctx, &payloads);
-        \\    try Slot.apply(.{ .dbg_stmt = .{ .line = 1, .column = 3 } }, tracked, 1, ctx, &payloads);
-        \\    try Slot.apply(.{ .load = .{ .ptr = 0 } }, tracked, 2, ctx, &payloads);
-        \\    try Slot.apply(.{ .ret_safe = .{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = 2 } }, tracked, 3, ctx, &payloads);
-        \\    try slots.onFinish(tracked, ctx, &payloads);
-        \\    slots.backPropagate(tracked, &payloads, caller_payloads);
+        \\    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);
+        \\    try Inst.apply(1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } }, results, ctx, &refinements);
+        \\    try Inst.apply(2, .{ .load = .{ .ptr = 0 } }, results, ctx, &refinements);
+        \\    try Inst.apply(3, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = 2 } }, results, ctx, &refinements);
+        \\    try Inst.onFinish(results, ctx, &refinements);
+        \\    Inst.backPropagate(results, &refinements, caller_refinements);
         \\    return return_eidx;
         \\}
         \\
@@ -234,7 +246,7 @@ test "generateFunction produces complete function" {
 
 test "epilogue generates correct output" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     const result = codegen.epilogue(123);
 
@@ -242,8 +254,9 @@ test "epilogue generates correct output" {
         \\const std = @import("std");
         \\const clr = @import("clr");
         \\const Context = clr.Context;
-        \\const slots = clr.slots;
-        \\const Slot = slots.Slot;
+        \\const Inst = clr.Inst;
+        \\const Refinements = clr.Refinements;
+        \\const EIdx = clr.EIdx;
         \\
         \\var writer_buf: [4096]u8 = undefined;
         \\var file_writer: std.fs.File.Writer = undefined;
@@ -301,12 +314,12 @@ test "isAllocatorDestroyFqn matches Allocator.destroy patterns" {
 
 test "slotLine for br with block and operand" {
     initTestAllocator();
-    defer clr_allocator.deinit();
+    defer deinitTestAllocator();
 
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // br: block_inst = 3, operand = slot 8
+    // br: block_inst = 3, operand = inst 8
     // Ref encoding: high bit set = instruction index, lower 31 bits = index
     const operand_ref: Air.Inst.Ref = @enumFromInt((1 << 31) | 8);
     const datum: Data = .{ .br = .{
@@ -315,5 +328,5 @@ test "slotLine for br with block and operand" {
     } };
     const result = codegen._slotLine(arena.allocator(), dummy_ip, .br, datum, 9, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Slot.apply(.{ .br = .{ .block = 3, .src = 8 } }, tracked, 9, ctx, &payloads);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(9, .{ .br = .{ .block = 3, .src = 8 } }, results, ctx, &refinements);\n", result);
 }

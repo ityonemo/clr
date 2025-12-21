@@ -57,33 +57,32 @@ fn payloadBr(arena: std.mem.Allocator, datum: Data) []const u8 {
     return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {?d} }}", .{ block_inst, src }, null);
 }
 
-
-/// Generate a single slot line for a given tag and data.
+/// Generate a single inst line for a given tag and data.
 /// Exposed for testing with underscore prefix to indicate internal use.
 /// arg_counter tracks sequential arg indices (may differ from zir_param_index).
 pub fn _slotLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .noop_pruned_debug = .{{}} }}, tracked, {d}, ctx, &payloads);\n", .{inst_index}, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .noop_pruned_debug = .{{}} }}, results, ctx, &refinements);\n", .{inst_index}, null);
             }
             if (isAllocatorCreate(ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx, &payloads);\n", .{ allocator_type, inst_index }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, allocator_type }, null);
             }
             if (isAllocatorDestroy(ip, datum)) {
-                // Prune allocator.destroy() - emit special tag with pointer slot
+                // Prune allocator.destroy() - emit special tag with pointer inst
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                const ptr_slot = extractDestroyPtrSlot(datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, tracked, {d}, ctx, &payloads);\n", .{ ptr_slot, allocator_type, inst_index }, null);
+                const ptr_inst = extractDestroyPtrSlot(datum, extra, tags, data);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, ptr_inst, allocator_type }, null);
             }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-            break :blk clr_allocator.allocPrint(arena, "    try Slot.call({s}, {s}, tracked, {d}, ctx, &payloads);\n", .{ call_parts.called, call_parts.args, inst_index }, null);
+            break :blk clr_allocator.allocPrint(arena, "    try Inst.call({d}, {s}, {s}, results, ctx, &refinements);\n", .{ inst_index, call_parts.called, call_parts.args }, null);
         },
         else => blk: {
             const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names, arg_counter);
-            break :blk clr_allocator.allocPrint(arena, "    try Slot.apply(.{{ .{s} = {s} }}, tracked, {d}, ctx, &payloads);\n", .{ safeName(tag), tag_payload, inst_index }, null);
+            break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .{s} = {s} }}, results, ctx, &refinements);\n", .{ inst_index, safeName(tag), tag_payload }, null);
         },
     };
 }
@@ -109,7 +108,7 @@ fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []cons
         counter.* += 1;
         break :blk idx;
     } else zir_param_index;
-    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\", .caller_payloads = caller_payloads }}", .{ arg_index, name }, null);
+    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\", .caller_refinements = caller_refinements }}", .{ arg_index, name }, null);
 }
 
 fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -138,9 +137,9 @@ fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
 }
 
 fn payloadRetSafe(arena: std.mem.Allocator, datum: Data) []const u8 {
-    const operand_index = datum.un_op.toIndex() orelse return ".{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = null }";
+    const operand_index = datum.un_op.toIndex() orelse return ".{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = null }";
     const src = @intFromEnum(operand_index);
-    return clr_allocator.allocPrint(arena, ".{{ .caller_payloads = caller_payloads, .return_eidx = return_eidx, .src = {d} }}", .{src}, null);
+    return clr_allocator.allocPrint(arena, ".{{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = {d} }}", .{src}, null);
 }
 
 fn payloadDbgVar(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
@@ -190,7 +189,7 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
         break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
-    // Build args tuple string: .{ tracked[arg0].typed_payload.?, ... }
+    // Build args tuple string: .{ results[arg0].refinement.?, ... }
     var args_str: []const u8 = ".{";
     var first = true;
 
@@ -199,12 +198,12 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
         const arg_ref: Ref = @enumFromInt(extra[payload_index + 1 + i]);
         if (arg_ref.toIndex()) |idx| {
             // Runtime value from local instruction - pass entity index
-            const slot_idx = @intFromEnum(idx);
+            const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} tracked[{d}].typed_payload.?", .{ args_str, slot_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} results[{d}].refinement.?", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, tracked[{d}].typed_payload.?", .{ args_str, slot_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, results[{d}].refinement.?", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
@@ -213,10 +212,10 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
             // Interned constant - create a new entity for it
             // TODO: Handle interned args properly
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} try payloads.initEntity()", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} try refinements.initEntity()", .{args_str}, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, try payloads.initEntity()", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, try refinements.initEntity()", .{args_str}, null);
             }
         }
     }
@@ -594,32 +593,32 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     else
         "";
 
-    // Build slot lines first
-    const slot_lines = buildSlotLines(arena.allocator(), ip, tags, data, extra, param_names);
+    // Build inst lines first
+    const inst_lines = buildSlotLines(arena.allocator(), ip, tags, data, extra, param_names);
 
-    // Generate complete function with slot lines injected (use main arena for final result)
-    // Size hint: slot_lines + template + margin
-    const size_hint = slot_lines.len + 4096;
+    // Generate complete function with inst lines injected (use main arena for final result)
+    // Size hint: inst_lines + template + margin
+    const size_hint = inst_lines.len + 4096;
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}(ctx: *Context, caller_payloads: ?*Payloads{s}) anyerror!EIdx {{
+        \\fn fn_{d}(ctx: *Context, caller_refinements: ?*Refinements{s}) anyerror!EIdx {{
         \\    ctx.meta.file = "{s}";
         \\    ctx.base_line = {d};
         \\    try ctx.push_fn("{s}");
         \\    defer ctx.pop_fn();
         \\
-        \\    var payloads = Payloads.init(ctx.allocator);
-        \\    defer payloads.deinit();
+        \\    var refinements = Refinements.init(ctx.allocator);
+        \\    defer refinements.deinit();
         \\
-        \\    const tracked = slots.make_list(ctx.allocator, {d});
-        \\    defer slots.clear_list(tracked, ctx.allocator);
-        \\    const return_eidx: EIdx = if (caller_payloads) |cp| try cp.initEntity() else 0;
+        \\    const results = Inst.make_results_list(ctx.allocator, {d});
+        \\    defer Inst.clear_results_list(results, ctx.allocator);
+        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.initEntity() else 0;
         \\
-        \\{s}    try slots.onFinish(tracked, ctx, &payloads);
-        \\    slots.backPropagate(tracked, &payloads, caller_payloads);
+        \\{s}    try Inst.onFinish(results, ctx, &refinements);
+        \\    Inst.backPropagate(results, &refinements, caller_refinements);
         \\    return return_eidx;
         \\}}
         \\
-    , .{ func_index, params, file_path, base_line, fqn, tags.len, slot_lines }, size_hint);
+    , .{ func_index, params, file_path, base_line, fqn, tags.len, inst_lines }, size_hint);
 }
 
 /// Generate epilogue with imports and main function
@@ -628,10 +627,9 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const std = @import("std");
         \\const clr = @import("clr");
         \\const Context = clr.Context;
-        \\const slots = clr.slots;
-        \\const Slot = slots.Slot;
-        \\const Payloads = slots.Payloads;
-        \\const EIdx = slots.EIdx;
+        \\const Inst = clr.Inst;
+        \\const Refinements = clr.Refinements;
+        \\const EIdx = clr.EIdx;
         \\
         \\var writer_buf: [4096]u8 = undefined;
         \\var file_writer: std.fs.File.Writer = undefined;
@@ -658,8 +656,8 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + caller_payloads + arity EIdx args
-    var params: []const u8 = "ctx: *Context, caller_payloads: ?*Payloads";
+    // Build parameter list: ctx + caller_refinements + arity EIdx args
+    var params: []const u8 = "ctx: *Context, caller_refinements: ?*Refinements";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
         params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: EIdx", .{params}, null);
@@ -669,7 +667,7 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
         \\fn fn_{d}({s}) anyerror!EIdx {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    return if (caller_payloads) |cp| try cp.initEntity() else 0;
+        \\    return if (caller_refinements) |cp| try cp.initEntity() else 0;
         \\}}
         \\
     , .{ func_index, params, func_index }, null);

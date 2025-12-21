@@ -1,8 +1,7 @@
 const std = @import("std");
-const slots = @import("../slots.zig");
-const Slot = slots.Slot;
-const Payloads = slots.Payloads;
-const EIdx = slots.EIdx;
+const Inst = @import("../Inst.zig");
+const Refinements = @import("../Refinements.zig");
+const EIdx = Inst.EIdx;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
@@ -33,29 +32,29 @@ pub const MemorySafety = union(enum) {
     stack_ptr: StackPtr,
     allocation: Allocation,
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
+    pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
         _ = params;
-        // Slot contains .pointer = Indirected, get the pointee
-        const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer.to;
-        payloads.at(pointee_idx).scalar.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
+        // Inst contains .pointer = Indirected, get the pointee
+        const ptr_idx = results[index].refinement.?;
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        refinements.at(pointee_idx).scalar.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
     }
 
-    pub fn arg(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Arg) !void {
-        const ptr_idx = tracked[index].typed_payload orelse return setParamStackPtr(tracked, index, ctx, payloads, params.name);
+    pub fn arg(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Arg) !void {
+        const ptr_idx = results[index].refinement orelse return setParamStackPtr(results, index, ctx, refinements, params.name);
 
         // Check if caller passed a meaningful entity
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx, // Non-pointer, check directly
             // Caller passed an interned constant - no meaningful entity
-            .unimplemented, .unset_retval => return setParamStackPtr(tracked, index, ctx, payloads, params.name),
+            .unimplemented, .unset_retval => return setParamStackPtr(results, index, ctx, refinements, params.name),
             else => return, // void, etc - nothing to check
         };
 
         // If the caller passed an allocation, preserve that metadata
         // so the callee can free it (ownership transfer)
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |imm| {
                 if (imm.memory_safety) |ms| {
                     if (ms == .allocation) return; // Preserve allocation metadata
@@ -66,10 +65,10 @@ pub const MemorySafety = union(enum) {
         // Entity was copied from caller but doesn't have allocation - keep it as-is
     }
 
-    fn setParamStackPtr(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, name: []const u8) !void {
+    fn setParamStackPtr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, name: []const u8) !void {
         // Create stack_ptr for this parameter
         // Empty function name means returning it directly won't be flagged as an escape
-        _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
+        _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
             .meta = .{
                 .function = "", // Empty = not from this function's stack
                 .file = ctx.meta.file,
@@ -79,14 +78,14 @@ pub const MemorySafety = union(enum) {
         } } } });
     }
 
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
+    pub fn store_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.StoreSafe) !void {
         _ = index;
         const ptr = params.ptr orelse return;
         const src = params.src orelse return;
 
-        // If storing from a slot with parameter name to a stack pointer, propagate the name and meta
-        const src_idx = tracked[src].typed_payload orelse return;
-        const src_ms = switch (payloads.at(src_idx).*) {
+        // If storing from an inst with parameter name to a stack pointer, propagate the name and meta
+        const src_idx = results[src].refinement orelse return;
+        const src_ms = switch (refinements.at(src_idx).*) {
             .scalar => |imm| imm.memory_safety orelse return,
             else => return,
         };
@@ -98,12 +97,12 @@ pub const MemorySafety = union(enum) {
         };
 
         // Get the target's pointee and update its stack_ptr name and meta
-        const ptr_idx = tracked[ptr].typed_payload orelse return;
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const ptr_idx = results[ptr].refinement orelse return;
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             else => return,
         };
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |*imm| {
                 const ms = &(imm.memory_safety orelse return);
                 if (ms.* != .stack_ptr) return;
@@ -121,21 +120,21 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.DbgVarPtr) !void {
+    pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
         // Set the variable name on the stack_ptr metadata
-        const slot = params.slot orelse return;
-        std.debug.assert(slot < tracked.len);
-        const ptr_idx = tracked[slot].typed_payload orelse return;
+        const inst = params.slot orelse return;
+        std.debug.assert(inst < results.len);
+        const ptr_idx = results[inst].refinement orelse return;
         // Follow pointer to get to pointee
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types, use directly
             .unimplemented, .unset_retval, .void => return,
-            else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
+            else => @panic("unexpected refinement type in dbg_var_ptr (outer)"),
         };
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |*imm| {
                 const ms = &(imm.memory_safety orelse return);
                 if (ms.* != .stack_ptr) return;
@@ -144,47 +143,47 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .unimplemented => {},
-            else => @panic("unexpected payload type in dbg_var_ptr (pointee)"),
+            else => @panic("unexpected refinement type in dbg_var_ptr (pointee)"),
         }
     }
 
-    pub fn bitcast(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Bitcast) !void {
+    pub fn bitcast(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Bitcast) !void {
         // Since we now share entities intraprocedrually, no copying needed.
-        // The entity is already shared between source and destination slots.
-        _ = tracked;
+        // The entity is already shared between source and destination insts.
+        _ = results;
         _ = index;
         _ = ctx;
-        _ = payloads;
+        _ = refinements;
         _ = params;
     }
 
-    pub fn optional_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.OptionalPayload) !void {
+    pub fn optional_payload(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.OptionalPayload) !void {
         // Since we now share entities intraprocedrually, no copying needed.
-        // The entity is already shared between source and destination slots.
-        _ = tracked;
+        // The entity is already shared between source and destination insts.
+        _ = results;
         _ = index;
         _ = ctx;
-        _ = payloads;
+        _ = refinements;
         _ = params;
     }
 
-    pub fn ret_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.RetSafe) !void {
+    pub fn ret_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetSafe) !void {
         _ = index;
 
         const src = params.src orelse return;
-        std.debug.assert(src < tracked.len);
+        std.debug.assert(src < results.len);
 
-        const src_idx = tracked[src].typed_payload orelse return;
+        const src_idx = results[src].refinement orelse return;
 
         // Follow pointer to get to pointee's memory_safety
-        const pointee_idx = switch (payloads.at(src_idx).*) {
+        const pointee_idx = switch (refinements.at(src_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => src_idx, // Non-pointer, check directly
             .unimplemented => return,
             else => return, // void, etc - nothing to check
         };
 
-        const ms = switch (payloads.at(pointee_idx).*) {
+        const ms = switch (refinements.at(pointee_idx).*) {
             .scalar => |imm| imm.memory_safety orelse return,
             else => return,
         };
@@ -203,22 +202,22 @@ pub const MemorySafety = union(enum) {
         }
 
         // Note: Interprocedural propagation is now handled in RetSafe.apply in tag.zig
-        // via caller_payloads and return_eidx. Memory safety state is copied along with
-        // the TypedPayload when return values are propagated to the caller.
+        // via caller_refinements and return_eidx. Memory safety state is copied along with
+        // the Refinement when return values are propagated to the caller.
     }
 
     /// Called on function close to check for memory leaks.
-    /// Backward propagation is handled centrally by slots.backPropagate().
-    pub fn onFinish(tracked: []Slot, ctx: *Context, payloads: *Payloads) !void {
+    /// Backward propagation is handled centrally by Inst.backPropagate().
+    pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
         // Check for memory leaks
-        for (tracked) |slot| {
-            const idx = slot.typed_payload orelse continue;
-            const pointee_idx = switch (payloads.at(idx).*) {
+        for (results) |inst| {
+            const idx = inst.refinement orelse continue;
+            const pointee_idx = switch (refinements.at(idx).*) {
                 .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
                 else => continue,
             };
-            const imm = switch (payloads.at(pointee_idx).*) {
+            const imm = switch (refinements.at(pointee_idx).*) {
                 .scalar => |imm| imm,
                 else => continue,
             };
@@ -227,23 +226,23 @@ pub const MemorySafety = union(enum) {
             const a = ms.allocation;
 
             if (a.freed == null) {
-                if (isOriginFreed(tracked, payloads, a.origin)) continue;
+                if (isOriginFreed(results, refinements, a.origin)) continue;
                 return reportMemoryLeak(ctx, a.allocated);
             }
         }
     }
 
-    /// Check if any slot with the given origin has been freed
-    fn isOriginFreed(tracked: []Slot, payloads: *Payloads, origin: usize) bool {
-        for (tracked) |slot| {
-            const idx = slot.typed_payload orelse continue;
+    /// Check if any inst with the given origin has been freed
+    fn isOriginFreed(results: []Inst, refinements: *Refinements, origin: usize) bool {
+        for (results) |inst| {
+            const idx = inst.refinement orelse continue;
             // Follow pointer to get to scalar
-            const pointee_idx = switch (payloads.at(idx).*) {
+            const pointee_idx = switch (refinements.at(idx).*) {
                 .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
                 else => continue,
             };
-            const imm = switch (payloads.at(pointee_idx).*) {
+            const imm = switch (refinements.at(pointee_idx).*) {
                 .scalar => |imm| imm,
                 else => continue,
             };
@@ -261,31 +260,31 @@ pub const MemorySafety = union(enum) {
     // =========================================================================
 
     /// Handle allocator.create() - marks pointed-to memory as allocated
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
-        // Slot contains .pointer = Indirected, get the pointee
-        const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer.to;
-        payloads.at(pointee_idx).scalar.memory_safety = .{ .allocation = .{
+    pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
+        // Inst contains .pointer = Indirected, get the pointee
+        const ptr_idx = results[index].refinement.?;
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        refinements.at(pointee_idx).scalar.memory_safety = .{ .allocation = .{
             .allocated = ctx.meta,
-            .origin = index, // This slot is the origin of this allocation
+            .origin = index, // This inst is the origin of this allocation
             .allocator_type = params.allocator_type,
         } };
     }
 
     /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator
-    pub fn alloc_destroy(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocDestroy) !void {
+    pub fn alloc_destroy(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocDestroy) !void {
         _ = index;
         const ptr = params.ptr orelse return;
-        std.debug.assert(ptr < tracked.len);
+        std.debug.assert(ptr < results.len);
 
         // Follow the pointer to get the pointee
-        const ptr_idx = tracked[ptr].typed_payload orelse @panic("alloc_destroy: slot has no typed_payload");
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const ptr_idx = results[ptr].refinement orelse @panic("alloc_destroy: inst has no refinement");
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .unimplemented => return,
             else => @panic("alloc_destroy: expected pointer type"),
         };
-        const imm = switch (payloads.at(pointee_idx).*) {
+        const imm = switch (refinements.at(pointee_idx).*) {
             .scalar => |imm| imm,
             .unimplemented => return,
             else => @panic("alloc_destroy: pointee is not scalar"),
@@ -314,22 +313,22 @@ pub const MemorySafety = union(enum) {
                 if (should_check and !std.mem.eql(u8, a.allocator_type, params.allocator_type)) {
                     return reportMismatchedAllocator(ctx, a, params.allocator_type);
                 }
-                markAllocationFreed(tracked, payloads, a.origin, ctx.meta);
+                markAllocationFreed(results, refinements, a.origin, ctx.meta);
             },
         }
     }
 
-    /// Mark all slots with the given origin as freed.
-    fn markAllocationFreed(tracked: []Slot, payloads: *Payloads, origin: usize, free_meta: Meta) void {
-        for (tracked) |slot| {
-            const idx = slot.typed_payload orelse continue;
+    /// Mark all insts with the given origin as freed.
+    fn markAllocationFreed(results: []Inst, refinements: *Refinements, origin: usize, free_meta: Meta) void {
+        for (results) |inst| {
+            const idx = inst.refinement orelse continue;
             // Follow pointer to get to scalar
-            const pointee_idx = switch (payloads.at(idx).*) {
+            const pointee_idx = switch (refinements.at(idx).*) {
                 .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
                 else => continue,
             };
-            const imm = switch (payloads.at(pointee_idx).*) {
+            const imm = switch (refinements.at(pointee_idx).*) {
                 .scalar => |*imm| imm,
                 else => continue,
             };
@@ -342,19 +341,19 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Handle load - detect use-after-free
-    pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Load) !void {
+    pub fn load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Load) !void {
         _ = index;
         const ptr = params.ptr orelse return;
-        std.debug.assert(ptr < tracked.len);
+        std.debug.assert(ptr < results.len);
 
         // Follow the pointer to get the pointee
-        const ptr_idx = tracked[ptr].typed_payload orelse return;
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const ptr_idx = results[ptr].refinement orelse return;
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .unimplemented => return,
             else => return, // Not a pointer type, nothing to check
         };
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |imm| {
                 const ms = imm.memory_safety orelse return;
                 if (ms != .allocation) return;
@@ -442,55 +441,33 @@ pub const MemorySafety = union(enum) {
 // Tests
 // =========================================================================
 
-// Mock context for testing
-const MockContext = struct {
-    meta: Meta = .{
-        .function = "test_func",
-        .file = "test.zig",
-        .line = 10,
-        .column = 5,
-    },
-    // Legacy fields for arg handler and reporting functions
-    file: []const u8 = "test.zig",
-    line: u32 = 10,
-    column: u32 = 5,
-    base_line: u32 = 1,
-    stacktrace: std.ArrayList([]const u8),
-    output: std.ArrayList(u8),
-
-    pub fn init(allocator: std.mem.Allocator) MockContext {
-        var ctx = MockContext{
-            .stacktrace = std.ArrayList([]const u8).init(allocator),
-            .output = std.ArrayList(u8).init(allocator),
-        };
-        ctx.stacktrace.append("test_func") catch unreachable;
-        return ctx;
-    }
-
-    pub fn deinit(self: *MockContext) void {
-        self.stacktrace.deinit();
-        self.output.deinit();
-    }
-
-    pub fn print(self: *MockContext, comptime fmt: []const u8, args: anytype) void {
-        std.fmt.format(self.output.writer(), fmt, args) catch unreachable;
-    }
-};
+/// Helper to create a test context with specific meta values
+fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Discarding, file: []const u8, line: u32, column: ?u32, base_line: u32) Context {
+    var ctx = Context.init(allocator, &discarding.writer);
+    ctx.meta.file = file;
+    ctx.meta.line = line;
+    ctx.meta.column = column;
+    ctx.meta.function = "test_func";
+    ctx.base_line = base_line;
+    return ctx;
+}
 
 test "alloc sets stack_ptr metadata" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
-    try MemorySafety.alloc(&tracked, 1, &ctx, &payloads, .{});
+    try MemorySafety.alloc(&results, 1, &ctx, &refinements, .{});
 
-    const ms = payloads.at(tracked[1].typed_payload.?).scalar.memory_safety.?;
+    const ms = refinements.at(results[1].refinement.?).scalar.memory_safety.?;
     try std.testing.expectEqualStrings("test_func", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.meta.file);
     try std.testing.expectEqual(@as(u32, 10), ms.stack_ptr.meta.line);
@@ -501,20 +478,22 @@ test "alloc sets stack_ptr metadata" {
 test "arg sets stack_ptr with empty function and parameter name" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 1);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
-    try MemorySafety.arg(&tracked, 0, &ctx, &payloads, .{ .value = undefined, .name = "my_param" });
+    try MemorySafety.arg(&results, 0, &ctx, &refinements, .{ .value = undefined, .name = "my_param", .caller_refinements = null });
 
-    const ms = payloads.at(tracked[0].typed_payload.?).scalar.memory_safety.?;
+    const ms = refinements.at(results[0].refinement.?).scalar.memory_safety.?;
     try std.testing.expectEqualStrings("", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("test.zig", ms.stack_ptr.meta.file);
-    try std.testing.expectEqual(@as(u32, 1), ms.stack_ptr.meta.line); // base_line
+    try std.testing.expectEqual(@as(u32, 2), ms.stack_ptr.meta.line); // base_line + 1
     try std.testing.expectEqual(.parameter, std.meta.activeTag(ms.stack_ptr.name));
     try std.testing.expectEqualStrings("my_param", ms.stack_ptr.name.parameter);
 }
@@ -522,23 +501,25 @@ test "arg sets stack_ptr with empty function and parameter name" {
 test "dbg_var_ptr sets variable name when name is other" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
     // First alloc to set up stack_ptr with .other name
-    try MemorySafety.alloc(&tracked, 1, &ctx, &payloads, .{});
-    const ms1 = payloads.at(tracked[1].typed_payload.?).scalar.memory_safety.?;
+    try MemorySafety.alloc(&results, 1, &ctx, &refinements, .{});
+    const ms1 = refinements.at(results[1].refinement.?).scalar.memory_safety.?;
     try std.testing.expectEqual(.other, std.meta.activeTag(ms1.stack_ptr.name));
 
     // dbg_var_ptr should set the variable name
-    try MemorySafety.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = 1, .name = "foo" });
+    try MemorySafety.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = 1, .name = "foo" });
 
-    const ms2 = payloads.at(tracked[1].typed_payload.?).scalar.memory_safety.?;
+    const ms2 = refinements.at(results[1].refinement.?).scalar.memory_safety.?;
     try std.testing.expectEqual(.variable, std.meta.activeTag(ms2.stack_ptr.name));
     try std.testing.expectEqualStrings("foo", ms2.stack_ptr.name.variable);
 }
@@ -546,16 +527,18 @@ test "dbg_var_ptr sets variable name when name is other" {
 test "bitcast propagates stack_ptr metadata" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
     // Set up source with stack_ptr
-    _ = try payloads.clobberSlot(&tracked, 0, .{ .memory_safety = .{ .stack_ptr = .{
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "source_func",
             .file = "source.zig",
@@ -563,11 +546,11 @@ test "bitcast propagates stack_ptr metadata" {
             .column = 7,
         },
         .name = .{ .variable = "src_var" },
-    } } });
+    } } } });
 
-    try MemorySafety.bitcast(&tracked, 1, &ctx, &payloads, .{ .src = 0 });
+    try MemorySafety.bitcast(&results, 1, &ctx, &refinements, .{ .src = 0 });
 
-    const ms = payloads.at(tracked[1].typed_payload.?).scalar.memory_safety.?;
+    const ms = refinements.at(results[1].refinement.?).scalar.memory_safety.?;
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("source.zig", ms.stack_ptr.meta.file);
     try std.testing.expectEqual(@as(u32, 42), ms.stack_ptr.meta.line);
@@ -577,16 +560,19 @@ test "bitcast propagates stack_ptr metadata" {
 test "ret_safe detects escape when returning stack pointer from same function" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    ctx.meta.function = "test_func";
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
-    // Slot with stack_ptr from test_func (current function)
-    _ = try payloads.clobberSlot(&tracked, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
+    // Inst with stack_ptr from test_func (current function)
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "test_func",
             .file = "test.zig",
@@ -597,23 +583,26 @@ test "ret_safe detects escape when returning stack pointer from same function" {
 
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(&tracked, 1, &ctx, &payloads, .{ .caller_payloads = null, .return_eidx = 0, .src = 0 }),
+        MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = 0 }),
     );
 }
 
 test "ret_safe allows returning arg (empty function name)" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    ctx.meta.function = "test_func";
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
-    // Slot with empty function name (arg)
-    _ = try payloads.clobberSlot(&tracked, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
+    // Inst with empty function name (arg)
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .memory_safety = .{ .stack_ptr = .{
         .meta = .{
             .function = "",
             .file = "test.zig",
@@ -623,5 +612,5 @@ test "ret_safe allows returning arg (empty function name)" {
     } } } });
 
     // Should NOT error - returning arg is fine
-    try MemorySafety.ret_safe(&tracked, 1, &ctx, &payloads, .{ .caller_payloads = null, .return_eidx = 0, .src = 0 });
+    try MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = 0 });
 }

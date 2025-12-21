@@ -1,8 +1,7 @@
 const std = @import("std");
-const slots = @import("../slots.zig");
-const Slot = slots.Slot;
-const Payloads = slots.Payloads;
-const EIdx = slots.EIdx;
+const Inst = @import("../Inst.zig");
+const Refinements = @import("../Refinements.zig");
+const EIdx = Inst.EIdx;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
@@ -29,28 +28,28 @@ pub const Undefined = union(enum) {
         return error.UseBeforeAssign;
     }
 
-    pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
+    pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
         _ = params;
-        // Slot contains .pointer = Indirected, get the pointee
-        const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer.to;
-        payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Inst contains .pointer = Indirected, get the pointee
+        const ptr_idx = results[index].refinement.?;
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        refinements.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
+    pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
         _ = params;
-        // Slot contains .pointer = Indirected, get the pointee
-        const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer.to;
-        payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Inst contains .pointer = Indirected, get the pointee
+        const ptr_idx = results[index].refinement.?;
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        refinements.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
+    pub fn store_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.StoreSafe) !void {
         _ = index;
         const ptr = params.ptr orelse return;
         // Follow pointer to get to pointee (local only - propagation happens on function close)
-        const ptr_idx = tracked[ptr].typed_payload orelse @panic("store_safe: ptr slot has no typed_payload");
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const ptr_idx = results[ptr].refinement orelse @panic("store_safe: ptr inst has no refinement");
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .unimplemented => return, // TODO: handle unimplemented types
             else => |t| std.debug.panic("store_safe: expected pointer, got {s}", .{@tagName(t)}),
@@ -59,7 +58,7 @@ pub const Undefined = union(enum) {
             .{ .undefined = .{ .meta = ctx.meta } }
         else
             .{ .defined = {} };
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |*imm| imm.undefined = undef_state,
             // Storing to pointer/struct/etc - nothing to track for undefined analysis
             .pointer, .optional, .region, .@"struct", .@"union" => {},
@@ -68,24 +67,24 @@ pub const Undefined = union(enum) {
         }
     }
 
-    pub fn load(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Load) !void {
+    pub fn load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Load) !void {
         const ptr = params.ptr orelse return;
-        const ptr_idx = tracked[ptr].typed_payload orelse @panic("load: ptr slot has no typed_payload");
+        const ptr_idx = results[ptr].refinement orelse @panic("load: ptr inst has no refinement");
         // Follow pointer to get to pointee
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .unimplemented => return, // TODO: handle unimplemented types
             else => |t| std.debug.panic("load: expected pointer, got {s}", .{@tagName(t)}),
         };
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |imm| {
                 const undef = imm.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .defined => {
                         // Propagate defined state to the loaded value
-                        const idx = tracked[index].typed_payload.?;
-                        payloads.at(idx).scalar.undefined = .{ .defined = {} };
+                        const idx = results[index].refinement.?;
+                        refinements.at(idx).scalar.undefined = .{ .defined = {} };
                     },
                 }
             },
@@ -96,20 +95,20 @@ pub const Undefined = union(enum) {
         }
     }
 
-    pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.DbgVarPtr) !void {
+    pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
-        const slot = params.slot orelse return;
-        std.debug.assert(slot < tracked.len);
-        const ptr_idx = tracked[slot].typed_payload orelse return;
+        const inst = params.slot orelse return;
+        std.debug.assert(inst < results.len);
+        const ptr_idx = results[inst].refinement orelse return;
         // Follow pointer to get to pointee
-        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx,
             .unimplemented, .unset_retval, .void => return,
-            else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
+            else => @panic("unexpected refinement type in dbg_var_ptr (outer)"),
         };
-        switch (payloads.at(pointee_idx).*) {
+        switch (refinements.at(pointee_idx).*) {
             .scalar => |*imm| {
                 const undef = &(imm.undefined orelse return);
                 switch (undef.*) {
@@ -118,61 +117,39 @@ pub const Undefined = union(enum) {
                 }
             },
             .unimplemented => {},
-            else => @panic("unexpected payload type in dbg_var_ptr (pointee)"),
+            else => @panic("unexpected refinement type in dbg_var_ptr (pointee)"),
         }
     }
 
-    // Backward propagation is handled centrally by slots.backPropagate()
+    // Backward propagation is handled centrally by Inst.backPropagate()
 };
 
-// Mock context for testing
-const MockContext = struct {
-    meta: Meta = .{
-        .function = "test_func",
-        .file = "test.zig",
-        .line = 10,
-        .column = 5,
-    },
-    // Legacy fields for reporting functions that access ctx directly
-    file: []const u8 = "test.zig",
-    line: u32 = 10,
-    column: u32 = 5,
-    stacktrace: std.ArrayList([]const u8),
-    output: std.ArrayList(u8),
-
-    pub fn init(allocator: std.mem.Allocator) MockContext {
-        var ctx = MockContext{
-            .stacktrace = std.ArrayList([]const u8).init(allocator),
-            .output = std.ArrayList(u8).init(allocator),
-        };
-        ctx.stacktrace.append("test_func") catch unreachable;
-        return ctx;
-    }
-
-    pub fn deinit(self: *MockContext) void {
-        self.stacktrace.deinit();
-        self.output.deinit();
-    }
-
-    pub fn print(self: *MockContext, comptime fmt: []const u8, args: anytype) void {
-        std.fmt.format(self.output.writer(), fmt, args) catch unreachable;
-    }
-};
+/// Helper to create a test context with specific meta values
+fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Discarding, file: []const u8, line: u32, column: ?u32) Context {
+    var ctx = Context.init(allocator, &discarding.writer);
+    ctx.meta.file = file;
+    ctx.meta.line = line;
+    ctx.meta.column = column;
+    ctx.meta.function = "test_func";
+    return ctx;
+}
 
 test "alloc sets undefined state" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
-    try Undefined.alloc(&tracked, 1, &ctx, &payloads, .{});
+    try Undefined.alloc(&results, 1, &ctx, &refinements, .{});
 
-    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
     try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
@@ -182,17 +159,19 @@ test "alloc sets undefined state" {
 test "alloc_create sets undefined state" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
-    try Undefined.alloc_create(&tracked, 1, &ctx, &payloads, .{ .allocator_type = "PageAllocator" });
+    try Undefined.alloc_create(&results, 1, &ctx, &refinements, .{ .allocator_type = "PageAllocator" });
 
-    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
     try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
@@ -202,157 +181,176 @@ test "alloc_create sets undefined state" {
 test "store_safe with is_undef=true sets undefined" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
     // store_safe clobbers with the new state
-    try Undefined.store_safe(&tracked, 0, &ctx, &payloads, .{ .ptr = 1, .src = null, .is_undef = true });
+    try Undefined.store_safe(&results, 0, &ctx, &refinements, .{ .ptr = 1, .src = null, .is_undef = true });
 
-    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
 
 test "store_safe with is_undef=false sets defined" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
     // store_safe clobbers with the new state
-    try Undefined.store_safe(&tracked, 0, &ctx, &payloads, .{ .ptr = 1, .src = null, .is_undef = false });
+    try Undefined.store_safe(&results, 0, &ctx, &refinements, .{ .ptr = 1, .src = null, .is_undef = false });
 
-    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
 // TODO: Interprocedural tests disabled during entity system refactoring.
 // test "store_safe propagates defined through arg_ptr" { ... }
 
-test "load from undefined slot returns error" {
+test "load from undefined inst returns error" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
-    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .undefined = .{ .meta = .{
+    var results = [_]Inst{.{}} ** 3;
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .undefined = .{ .meta = .{
         .function = "test_func",
         .file = "test.zig",
         .line = 1,
-    } } } });
+    } } } } });
 
     try std.testing.expectError(
         error.UseBeforeAssign,
-        Undefined.load(&tracked, 0, &ctx, &payloads, .{ .ptr = 1 }),
+        Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1 }),
     );
 }
 
-test "load from defined slot does not return error" {
+test "load from defined inst does not return error" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
-    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .defined = {} } });
+    var results = [_]Inst{.{}} ** 3;
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
 
-    try Undefined.load(&tracked, 0, &ctx, &payloads, .{ .ptr = 1 });
+    try Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1 });
 }
 
-test "load from slot without undefined tracking does not return error" {
+test "load from inst without undefined tracking does not return error" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
-    // tracked[1].typed_payload is null
+    var results = [_]Inst{.{}} ** 3;
+    // results[1].refinement is null
 
-    try Undefined.load(&tracked, 0, &ctx, &payloads, .{ .ptr = 1 });
+    try Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1 });
 }
 
 test "dbg_var_ptr sets var_name on undefined meta" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
-    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .undefined = .{
+    var results = [_]Inst{.{}} ** 3;
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .undefined = .{
         .meta = .{
             .function = "test_func",
             .file = "test.zig",
             .line = 5,
             .column = 3,
         },
-    } } });
+    } } } });
 
-    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = 1, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = 1, .name = "my_var" });
 
-    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqualStrings("my_var", undef.undefined.var_name.?);
 }
 
-test "dbg_var_ptr does not affect defined slot" {
+test "dbg_var_ptr does not affect defined inst" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
-    _ = try payloads.clobberSlot(&tracked, 1, .{ .undefined = .{ .defined = {} } });
+    var results = [_]Inst{.{}} ** 3;
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
 
-    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = 1, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = 1, .name = "my_var" });
 
     // Should still be defined, no crash
-    const undef = payloads.at(tracked[1].typed_payload.?).scalar.undefined.?;
+    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
 test "dbg_var_ptr with null slot does nothing" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
 
-    var payloads = Payloads.init(allocator);
-    defer payloads.deinit();
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var tracked = [_]Slot{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 3;
 
     // Should not crash with null slot
-    try Undefined.dbg_var_ptr(&tracked, 0, &ctx, &payloads, .{ .slot = null, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = null, .name = "my_var" });
 }
 
-test "reportUseBeforeAssign formats with var_name" {
+test "reportUseBeforeAssign with var_name returns error" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    ctx.meta.function = "test_func";
     defer ctx.deinit();
 
     const undef = Undefined{ .undefined = .{
@@ -365,18 +363,16 @@ test "reportUseBeforeAssign formats with var_name" {
         .var_name = "my_var",
     } };
 
-    _ = undef.reportUseBeforeAssign(&ctx) catch {};
-
-    const output = ctx.output.items;
-    try std.testing.expect(std.mem.indexOf(u8, output, "use of undefined value found in test_func") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "undefined value assigned to 'my_var'") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "file.zig:42:8") != null);
+    try std.testing.expectError(error.UseBeforeAssign, undef.reportUseBeforeAssign(&ctx));
 }
 
-test "reportUseBeforeAssign formats without var_name" {
+test "reportUseBeforeAssign without var_name returns error" {
     const allocator = std.testing.allocator;
 
-    var ctx = MockContext.init(allocator);
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    ctx.meta.function = "test_func";
     defer ctx.deinit();
 
     const undef = Undefined{ .undefined = .{
@@ -388,10 +384,5 @@ test "reportUseBeforeAssign formats without var_name" {
         },
     } };
 
-    _ = undef.reportUseBeforeAssign(&ctx) catch {};
-
-    const output = ctx.output.items;
-    try std.testing.expect(std.mem.indexOf(u8, output, "use of undefined value found in test_func") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "undefined value assigned in test_func") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output, "file.zig:42:8") != null);
+    try std.testing.expectError(error.UseBeforeAssign, undef.reportUseBeforeAssign(&ctx));
 }

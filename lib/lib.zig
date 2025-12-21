@@ -1,5 +1,8 @@
+// these exports comprise all the types directly used by the generated code.
 pub const Context = @import("Context.zig");
-pub const slots = @import("slots.zig");
+pub const Inst = @import("Inst.zig");
+pub const Refinements = @import("Refinements.zig");
+pub const EIdx = Inst.EIdx;
 
 test {
     @import("std").testing.refAllDecls(@This());
