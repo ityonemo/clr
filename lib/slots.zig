@@ -69,13 +69,27 @@ pub const Payloads = struct {
     /// Handles EIdx references by recursively copying referenced entities.
     pub fn copyInto(self: *@This(), dest_idx: EIdx, src_payloads: *Payloads, src_idx: EIdx) !void {
         const src = src_payloads.list.items[src_idx];
-        self.list.items[dest_idx] = switch (src) {
-            .pointer => |eidx| .{ .pointer = try self.copyEntityRecursive(src_payloads, eidx) },
-            .optional => |eidx| .{ .optional = try self.copyEntityRecursive(src_payloads, eidx) },
-            .region => |eidx| .{ .region = try self.copyEntityRecursive(src_payloads, eidx) },
+
+        // IMPORTANT: We must compute the new value BEFORE assigning to self.list.items[dest_idx]
+        // because copyEntityRecursive may append to self.list, which could reallocate the backing
+        // array and invalidate any pointers/slices we're holding.
+        const copied: TypedPayload = switch (src) {
+            .pointer => |ind| blk: {
+                const new_to = try self.copyEntityRecursive(src_payloads, ind.to);
+                break :blk .{ .pointer = .{ .analyte = ind.analyte, .to = new_to } };
+            },
+            .optional => |ind| blk: {
+                const new_to = try self.copyEntityRecursive(src_payloads, ind.to);
+                break :blk .{ .optional = .{ .analyte = ind.analyte, .to = new_to } };
+            },
+            .region => |ind| blk: {
+                const new_to = try self.copyEntityRecursive(src_payloads, ind.to);
+                break :blk .{ .region = .{ .analyte = ind.analyte, .to = new_to } };
+            },
             // These don't contain EIdx references, copy directly
             .scalar, .unset_retval, .@"struct", .@"union", .unimplemented, .void => src,
         };
+        self.list.items[dest_idx] = copied;
     }
 
     /// Recursively copy a TypedPayload, appending to this list. Returns new index.
@@ -83,10 +97,10 @@ pub const Payloads = struct {
     pub fn copyEntityRecursive(self: *@This(), src_payloads: *Payloads, src_idx: EIdx) !EIdx {
         const src = src_payloads.list.items[src_idx];
         // First recursively copy any referenced entities, then append this entity
-        const copied = switch (src) {
-            .pointer => |eidx| TypedPayload{ .pointer = try self.copyEntityRecursive(src_payloads, eidx) },
-            .optional => |eidx| TypedPayload{ .optional = try self.copyEntityRecursive(src_payloads, eidx) },
-            .region => |eidx| TypedPayload{ .region = try self.copyEntityRecursive(src_payloads, eidx) },
+        const copied: TypedPayload = switch (src) {
+            .pointer => |ind| .{ .pointer = .{ .analyte = ind.analyte, .to = try self.copyEntityRecursive(src_payloads, ind.to) } },
+            .optional => |ind| .{ .optional = .{ .analyte = ind.analyte, .to = try self.copyEntityRecursive(src_payloads, ind.to) } },
+            .region => |ind| .{ .region = .{ .analyte = ind.analyte, .to = try self.copyEntityRecursive(src_payloads, ind.to) } },
             .scalar, .unset_retval, .@"struct", .@"union", .unimplemented, .void => src,
         };
         // Compute idx AFTER recursive calls, since they may have appended entities
@@ -112,15 +126,20 @@ pub const EIdx = u32;
 /// TypedPayload tracks the type structure of a value along with analysis state.
 /// EIdx is used for anything that needs indirection (pointers, optionals, etc).
 pub const TypedPayload = union(enum) {
+    const Indirected = struct {
+        analyte: Analyte,
+        to: EIdx,
+    };
+
     scalar: Analyte,
-    pointer: EIdx,
-    optional: EIdx,
+    pointer: Indirected,
+    optional: Indirected,
     unset_retval: void, // special-case for retval slots before a return has been called.
-    region: EIdx, // unused, for now, will represent slices (maybe)
-    @"struct": void, // temporary. Will be a slice of EIdx.
-    @"union": void, // temporary. Will be a slice EIdx.
-    unimplemented: void, // this means we have an operation that is unimplemented but will carry a value.
-    void: void // any instructions that don't store anything.
+    region: Indirected, // unused, for now, will represent slices (maybe)
+    @"struct": void, // unused, for now, temporarily void. Will be a slice of EIdx.
+    @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
+    unimplemented: void, // this means we have an operation that is unimplemented but does carry a value.
+    void: void, // any instructions that don't store anything.
 };
 
 pub const Slot = struct {
@@ -403,9 +422,11 @@ test "ret_safe with null caller_payloads (entrypoint) succeeds" {
     try Slot.apply(.{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, tracked, 1, &ctx, &payloads);
 
     // Return with null caller_payloads (entrypoint case) - should just succeed without error
-    try Slot.apply(.{ .ret_safe = .{
-        .caller_payloads = null,
-        .return_eidx = 0, // doesn't matter when caller_payloads is null
-        .src = 0,
-    } }, tracked, 1, &ctx, &payloads);
+    try Slot.apply(.{
+        .ret_safe = .{
+            .caller_payloads = null,
+            .return_eidx = 0, // doesn't matter when caller_payloads is null
+            .src = 0,
+        },
+    }, tracked, 1, &ctx, &payloads);
 }

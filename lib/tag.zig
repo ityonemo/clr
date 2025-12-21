@@ -14,7 +14,7 @@ pub const Alloc = struct {
         // Create the pointed-to scalar entity (the stack memory)
         const pointee_idx = try payloads.appendEntity(.{ .scalar = .{} });
         // Create pointer entity pointing to the scalar
-        _ = try payloads.clobberSlot(tracked, index, .{ .pointer = pointee_idx });
+        _ = try payloads.clobberSlot(tracked, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
         try splat(.alloc, tracked, index, ctx, payloads, self);
     }
 };
@@ -26,7 +26,7 @@ pub const AllocCreate = struct {
         // Create the pointed-to scalar entity (the allocated memory)
         const pointee_idx = try payloads.appendEntity(.{ .scalar = .{} });
         // Create pointer entity pointing to the scalar
-        _ = try payloads.clobberSlot(tracked, index, .{ .pointer = pointee_idx });
+        _ = try payloads.clobberSlot(tracked, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
         try splat(.alloc_create, tracked, index, ctx, payloads, self);
     }
 };
@@ -66,7 +66,14 @@ pub const Bitcast = struct {
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+        // Share source slot's entity (intraprocedural - no copy needed).
+        // TODO: When we add analyte fields to pointer entities, we may need to
+        // copy/merge analyte data from the source entity to the destination here.
+        if (self.src) |src| {
+            tracked[index].typed_payload = tracked[src].typed_payload;
+        } else {
+            _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+        }
         try splat(.bitcast, tracked, index, ctx, payloads, self);
     }
 };
@@ -76,12 +83,12 @@ pub const Br = struct {
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        // Copy source slot's payload to block slot (TODO: should be merge for multiple branches)
+        // Share source slot's entity with block slot (intraprocedural - no copy needed).
+        // TODO: Need a way to merge types/analytes when multiple branches target the same block.
+        // Currently we just overwrite, but we should union the analysis states.
         if (self.src) |src| {
             if (tracked[src].typed_payload) |src_idx| {
-                // Copy the source payload to a new entity for the block
-                const new_idx = try payloads.copyEntityRecursive(payloads, src_idx);
-                tracked[self.block].typed_payload = new_idx;
+                tracked[self.block].typed_payload = src_idx;
             } else {
                 _ = try payloads.clobberSlot(tracked, self.block, .{ .scalar = .{} });
             }
@@ -128,7 +135,12 @@ pub const OptionalPayload = struct {
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+        // Share source slot's entity (intraprocedural - no copy needed)
+        if (self.src) |src| {
+            tracked[index].typed_payload = tracked[src].typed_payload;
+        } else {
+            _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
+        }
         try splat(.optional_payload, tracked, index, ctx, payloads, self);
     }
 };
@@ -183,14 +195,9 @@ pub const UnwrapErrunionPayload = struct {
     src: ?usize,
 
     pub fn apply(self: @This(), tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads) !void {
-        // Copy the source's type structure (e.g., if source is pointer, dest is pointer too)
+        // Share source slot's entity (intraprocedural - no copy needed)
         if (self.src) |src| {
-            if (tracked[src].typed_payload) |src_idx| {
-                const new_idx = try payloads.copyEntityRecursive(payloads, src_idx);
-                tracked[index].typed_payload = new_idx;
-            } else {
-                _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
-            }
+            tracked[index].typed_payload = tracked[src].typed_payload;
         } else {
             _ = try payloads.clobberSlot(tracked, index, .{ .scalar = .{} });
         }

@@ -35,9 +35,9 @@ pub const MemorySafety = union(enum) {
 
     pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
         _ = params;
-        // Slot contains .pointer = pointee_idx, get the pointee
+        // Slot contains .pointer = Indirected, get the pointee
         const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer;
+        const pointee_idx = payloads.at(ptr_idx).pointer.to;
         payloads.at(pointee_idx).scalar.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
     }
 
@@ -47,7 +47,7 @@ pub const MemorySafety = union(enum) {
         if (tracked[index].typed_payload) |ptr_idx| {
             // Follow pointer to check pointee for allocation
             const pointee_idx = switch (payloads.at(ptr_idx).*) {
-                .pointer => |idx| idx,
+                .pointer => |ind| ind.to,
                 .scalar => ptr_idx, // Non-pointer, check directly
                 .unimplemented => return,
                 else => return, // void, etc - nothing to check
@@ -70,10 +70,52 @@ pub const MemorySafety = union(enum) {
             .meta = .{
                 .function = "", // Empty = not from this function's stack
                 .file = ctx.meta.file,
-                .line = ctx.base_line,
+                .line = ctx.base_line + 1, // +1 for 1-indexed line numbers
             },
             .name = .{ .parameter = params.name },
         } } } });
+    }
+
+    pub fn store_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.StoreSafe) !void {
+        _ = index;
+        const ptr = params.ptr orelse return;
+        const src = params.src orelse return;
+
+        // If storing from a slot with parameter name to a stack pointer, propagate the name and meta
+        const src_idx = tracked[src].typed_payload orelse return;
+        const src_ms = switch (payloads.at(src_idx).*) {
+            .scalar => |imm| imm.memory_safety orelse return,
+            else => return,
+        };
+        if (src_ms != .stack_ptr) return;
+        const src_sp = src_ms.stack_ptr;
+        const param_name = switch (src_sp.name) {
+            .parameter => |name| name,
+            else => return,
+        };
+
+        // Get the target's pointee and update its stack_ptr name and meta
+        const ptr_idx = tracked[ptr].typed_payload orelse return;
+        const pointee_idx = switch (payloads.at(ptr_idx).*) {
+            .pointer => |ind| ind.to,
+            else => return,
+        };
+        switch (payloads.at(pointee_idx).*) {
+            .scalar => |*imm| {
+                const ms = &(imm.memory_safety orelse return);
+                if (ms.* != .stack_ptr) return;
+                if (ms.stack_ptr.name == .other) {
+                    // Copy the parameter name and update the function to the current one
+                    ms.stack_ptr.name = .{ .parameter = param_name };
+                    // Use the current function name and the source's file/line
+                    ms.stack_ptr.meta.function = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+                    ms.stack_ptr.meta.file = src_sp.meta.file;
+                    ms.stack_ptr.meta.line = src_sp.meta.line;
+                    ms.stack_ptr.meta.column = null; // Parameters don't have specific column
+                }
+            },
+            else => {},
+        }
     }
 
     pub fn dbg_var_ptr(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.DbgVarPtr) !void {
@@ -85,7 +127,7 @@ pub const MemorySafety = union(enum) {
         const ptr_idx = tracked[slot].typed_payload orelse return;
         // Follow pointer to get to pointee
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
-            .pointer => |idx| idx,
+            .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types, use directly
             .unimplemented => return,
             else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
@@ -104,37 +146,23 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn bitcast(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Bitcast) !void {
+        // Since we now share entities intraprocedrually, no copying needed.
+        // The entity is already shared between source and destination slots.
+        _ = tracked;
+        _ = index;
         _ = ctx;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        const src = params.src orelse return;
-        std.debug.assert(src < tracked.len);
-        const src_ptr_idx = tracked[src].typed_payload orelse return;
-        // Follow pointer to get to pointee
-        const src_pointee_idx = switch (payloads.at(src_ptr_idx).*) {
-            .pointer => |eidx| eidx,
-            .scalar => src_ptr_idx, // Non-pointer, use directly
-            .unimplemented => return,
-            else => return,
-        };
-        switch (payloads.at(src_pointee_idx).*) {
-            .scalar => |imm| payloads.at(idx).scalar.memory_safety = imm.memory_safety,
-            else => {},
-        }
+        _ = payloads;
+        _ = params;
     }
 
     pub fn optional_payload(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.OptionalPayload) !void {
+        // Since we now share entities intraprocedrually, no copying needed.
+        // The entity is already shared between source and destination slots.
+        _ = tracked;
+        _ = index;
         _ = ctx;
-        // Slot created by tag handler before splat
-        const idx = tracked[index].typed_payload.?;
-        const src = params.src orelse return;
-        std.debug.assert(src < tracked.len);
-        const src_idx = tracked[src].typed_payload orelse return;
-        switch (payloads.at(src_idx).*) {
-            .scalar => |imm| payloads.at(idx).scalar.memory_safety = imm.memory_safety,
-            .unimplemented => {},
-            else => @panic("unexpected payload type in optional_payload"),
-        }
+        _ = payloads;
+        _ = params;
     }
 
     pub fn ret_safe(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.RetSafe) !void {
@@ -144,9 +172,19 @@ pub const MemorySafety = union(enum) {
         std.debug.assert(src < tracked.len);
 
         const src_idx = tracked[src].typed_payload orelse return;
-        const typed_payload = payloads.at(src_idx);
-        if (typed_payload.* != .scalar) return;
-        const ms = typed_payload.scalar.memory_safety orelse return;
+
+        // Follow pointer to get to pointee's memory_safety
+        const pointee_idx = switch (payloads.at(src_idx).*) {
+            .pointer => |ind| ind.to,
+            .scalar => src_idx, // Non-pointer, check directly
+            .unimplemented => return,
+            else => return, // void, etc - nothing to check
+        };
+
+        const ms = switch (payloads.at(pointee_idx).*) {
+            .scalar => |imm| imm.memory_safety orelse return,
+            else => return,
+        };
 
         // Check for stack pointer escape
         switch (ms) {
@@ -177,7 +215,7 @@ pub const MemorySafety = union(enum) {
             const idx = slot.typed_payload orelse continue;
             // Follow pointer to get to scalar
             const pointee_idx = switch (payloads.at(idx).*) {
-                .pointer => |pidx| pidx,
+                .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
                 else => continue,
             };
@@ -209,7 +247,7 @@ pub const MemorySafety = union(enum) {
             const idx = slot.typed_payload orelse continue;
             // Follow pointer to get to scalar
             const pointee_idx = switch (payloads.at(idx).*) {
-                .pointer => |pidx| pidx,
+                .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
                 else => continue,
             };
@@ -232,9 +270,9 @@ pub const MemorySafety = union(enum) {
 
     /// Handle allocator.create() - marks pointed-to memory as allocated
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
-        // Slot contains .pointer = pointee_idx, get the pointee
+        // Slot contains .pointer = Indirected, get the pointee
         const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer;
+        const pointee_idx = payloads.at(ptr_idx).pointer.to;
         payloads.at(pointee_idx).scalar.memory_safety = .{ .allocation = .{
             .allocated = ctx.meta,
             .origin = index, // This slot is the origin of this allocation
@@ -251,7 +289,7 @@ pub const MemorySafety = union(enum) {
         // Follow the pointer to get the pointee
         const ptr_idx = tracked[ptr].typed_payload orelse @panic("alloc_destroy: slot has no typed_payload");
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
-            .pointer => |idx| idx,
+            .pointer => |ind| ind.to,
             .unimplemented => return,
             else => @panic("alloc_destroy: expected pointer type"),
         };
@@ -295,7 +333,7 @@ pub const MemorySafety = union(enum) {
             const idx = slot.typed_payload orelse continue;
             // Follow pointer to get to scalar
             const pointee_idx = switch (payloads.at(idx).*) {
-                .pointer => |pidx| pidx,
+                .pointer => |ind| ind.to,
                 .unimplemented, .void, .scalar => continue,
                 else => continue,
             };
@@ -320,7 +358,7 @@ pub const MemorySafety = union(enum) {
         // Follow the pointer to get the pointee
         const ptr_idx = tracked[ptr].typed_payload orelse return;
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
-            .pointer => |idx| idx,
+            .pointer => |ind| ind.to,
             .unimplemented => return,
             else => return, // Not a pointer type, nothing to check
         };

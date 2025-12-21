@@ -31,17 +31,17 @@ pub const Undefined = union(enum) {
 
     pub fn alloc(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.Alloc) !void {
         _ = params;
-        // Slot contains .pointer = pointee_idx, get the pointee
+        // Slot contains .pointer = Indirected, get the pointee
         const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer;
+        const pointee_idx = payloads.at(ptr_idx).pointer.to;
         payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
     pub fn alloc_create(tracked: []Slot, index: usize, ctx: *Context, payloads: *Payloads, params: tag.AllocCreate) !void {
         _ = params;
-        // Slot contains .pointer = pointee_idx, get the pointee
+        // Slot contains .pointer = Indirected, get the pointee
         const ptr_idx = tracked[index].typed_payload.?;
-        const pointee_idx = payloads.at(ptr_idx).pointer;
+        const pointee_idx = payloads.at(ptr_idx).pointer.to;
         payloads.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
@@ -51,7 +51,7 @@ pub const Undefined = union(enum) {
         // Follow pointer to get to pointee
         const ptr_idx = tracked[ptr].typed_payload orelse return;
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
-            .pointer => |idx| idx,
+            .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types (like alloc slots), update directly
             .unimplemented => return,
             else => return,
@@ -73,7 +73,7 @@ pub const Undefined = union(enum) {
         const ptr_idx = tracked[ptr].typed_payload orelse return;
         // Follow pointer to get to pointee
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
-            .pointer => |idx| idx,
+            .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types, check directly
             .unimplemented => return,
             else => return,
@@ -102,7 +102,7 @@ pub const Undefined = union(enum) {
         const ptr_idx = tracked[slot].typed_payload orelse return;
         // Follow pointer to get to pointee
         const pointee_idx = switch (payloads.at(ptr_idx).*) {
-            .pointer => |idx| idx,
+            .pointer => |ind| ind.to,
             .scalar => ptr_idx, // For non-pointer types, use directly
             .unimplemented => return,
             else => @panic("unexpected payload type in dbg_var_ptr (outer)"),
