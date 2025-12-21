@@ -599,7 +599,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
 
     // Generate complete function with slot lines injected (use main arena for final result)
     // Size hint: slot_lines + template + margin
-    const size_hint = slot_lines.len + 1024;
+    const size_hint = slot_lines.len + 4096;
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\fn fn_{d}(ctx: *Context, caller_payloads: ?*slots.Payloads{s}) anyerror!slots.EIdx {{
         \\    ctx.meta.file = "{s}";
