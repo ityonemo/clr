@@ -308,7 +308,7 @@ test "ret_safe copies scalar return value to caller_refinements" {
     // Caller's refinements - pre-allocate return entity
     var caller_refinements = Refinements.init(allocator);
     defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.initEntity();
+    const return_eidx = try caller_refinements.appendEntity(.{ .unset_retval = {} });
 
     // Verify return entity is initially unset
     try std.testing.expectEqual(.unset_retval, std.meta.activeTag(caller_refinements.at(return_eidx).*));
@@ -346,7 +346,7 @@ test "ret_safe with null src sets caller return to void" {
     // Caller's refinements - pre-allocate return entity
     var caller_refinements = Refinements.init(allocator);
     defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.initEntity();
+    const return_eidx = try caller_refinements.appendEntity(.{ .unset_retval = {} });
 
     // Return void (src = null)
     try Inst.apply(0, .{ .ret_safe = .{

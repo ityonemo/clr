@@ -229,7 +229,7 @@ test "generateFunction produces complete function" {
         \\
         \\    const results = Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
-        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.initEntity() else 0;
+        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .unset_retval = {} }) else 0;
         \\
         \\    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);
         \\    try Inst.apply(1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } }, results, ctx, &refinements);

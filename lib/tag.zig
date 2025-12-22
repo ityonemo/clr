@@ -70,7 +70,7 @@ pub const Arg = struct {
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         const cp = self.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
         // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
-        const local_copy_idx = try refinements.copyEntityRecursive(cp, self.value);
+        const local_copy_idx = try cp.at(self.value).*.copy_to(cp, refinements);
         results[index].refinement = local_copy_idx;
         // Set argument info for backward propagation on function close
         results[index].argument = .{ .caller_ref = self.value, .name = self.name };
@@ -226,10 +226,13 @@ pub const RetSafe = struct {
             const return_eidx = self.return_eidx;
             if (self.src) |src| {
                 const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
+                if (refinements.at(src_idx).* == .unset_retval) @panic("cannot return an unset_retval");
                 switch (caller_refinements.at(return_eidx).*) {
                     .unset_retval, .void => {
                         // .void can be overwritten - it's from an error path return
-                        try caller_refinements.copyInto(return_eidx, refinements, src_idx);
+                        // Copy return value from callee to caller's return slot
+                        const new_idx = try refinements.at(src_idx).*.copy_to(refinements, caller_refinements);
+                        caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
                     },
                     else => {
                         // TODO: implement proper merge for multiple return paths

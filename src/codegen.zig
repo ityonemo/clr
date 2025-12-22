@@ -213,13 +213,12 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
             // Skip zero-sized types - they have no runtime representation
             const val_type = ip.typeOf(interned_idx);
             if (isZeroSizedType(ip, val_type)) continue;
-            // Interned constant - create a new entity for it
-            // TODO: Handle interned args properly
+            // Interned constant - create a defined scalar entity for it
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} try refinements.initEntity()", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} try refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, try refinements.initEntity()", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, try refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
             }
         }
     }
@@ -615,7 +614,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         \\
         \\    const results = Inst.make_results_list(ctx.allocator, {d});
         \\    defer Inst.clear_results_list(results, ctx.allocator);
-        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.initEntity() else 0;
+        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{{ .unset_retval = {{}} }}) else 0;
         \\
         \\{s}    try Inst.onFinish(results, ctx, &refinements);
         \\    Inst.backPropagate(results, &refinements, caller_refinements);
@@ -671,7 +670,7 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
         \\fn fn_{d}({s}) anyerror!EIdx {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    return if (caller_refinements) |cp| try cp.initEntity() else 0;
+        \\    return if (caller_refinements) |cp| try cp.appendEntity(.{{ .unset_retval = {{}} }}) else 0;
         \\}}
         \\
     , .{ func_index, params, func_index }, null);

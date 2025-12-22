@@ -18,12 +18,84 @@ pub const Refinement = union(enum) {
     scalar: Analyte,
     pointer: Indirected,
     optional: Indirected,
-    unset_retval: void, // special-case for retval slots before a return has been called.
     region: Indirected, // unused, for now, will represent slices (maybe)
     @"struct": void, // unused, for now, temporarily void. Will be a slice of EIdx.
     @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
+    unset_retval: void, // special-case for retval slots before a return has been called.
     unimplemented: void, // this means we have an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
+
+    /// clobbers one refinement over another.  The dst structure must be identical.
+    /// TODO: In some cases, "deeper specification" may be added.
+    pub fn clobber_structured(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements) void {
+        switch (dst.*) {
+            .scalar => {
+                if (src != .scalar) std.debug.panic("clobber mismatch: src is .{} and dst is .scalar", .{@tagName(src)});
+                dst.scalar = src.scalar;
+            },
+            .pointer => recurse_indirected(dst, dst_list, src, src_list, .pointer),
+            .optional => recurse_indirected(dst, dst_list, src, src_list, .optional),
+            .unset_retval => @panic("cannot use unset_retvals as data sources"),
+            .region => recurse_indirected(dst, dst_list, src, src_list, .region),
+            .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
+            .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
+            // following two types don't have any metadata associated with it.
+            .unimplemented => if (src != .unimplemented) std.debug.panic("clobber mismatch: src is .{} and dst is .unimplemented", .{@tagName(src)}),
+            .void => if (src != .void) std.debug.panic("clobber mismatch: src is .{} and dst is .void", .{@tagName(src)}),
+        }
+    }
+
+    fn recurse_indirected(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
+        if (src != tag) std.debug.panic("clobber mismatch: src is .{} and dst is .{}", .{ @tagName(src), tag });
+        // copy over analytes.
+        @field(dst, @tagName(tag)).analyte = @field(src, @tagName(tag)).analyte;
+        const new_dst = dst_list.at(@field(dst, @tagName(tag)).to);
+        const new_src = src_list.at(@field(src, @tagName(tag)).to);
+        clobber_structured(new_dst, dst_list, new_src.*, src_list);
+    }
+
+    fn recurse_fields(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
+        // currently do nothing, since struct and union fields aren't implemented.
+        _ = dst;
+        _ = dst_list;
+        _ = src;
+        _ = src_list;
+        _ = tag;
+    }
+
+    /// Recursively copies a refinement into dst_list.  Returns the entity index of the result.
+    pub fn copy_to(src: Refinement, src_list: *Refinements, dst_list: *Refinements) !EIdx {
+        return switch (src) {
+            .scalar => try dst_list.appendEntity(src),
+            .pointer => try src.copy_to_indirected(src_list, dst_list, .pointer),
+            .optional => try src.copy_to_indirected(src_list, dst_list, .optional),
+            .unset_retval => @panic("cannot use unset_retvals as data sources"),
+            .region => try src.copy_to_indirected(src_list, dst_list, .region),
+            .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),
+            .@"union" => try src.copy_to_fields(src_list, dst_list, .@"union"),
+            // following two types don't have any metadata associated with it.
+            .unimplemented => try dst_list.appendEntity(.{ .unimplemented = {} }),
+            .void => try dst_list.appendEntity(.{ .void = {} }),
+        };
+    }
+
+    fn copy_to_indirected(src: Refinement, src_list: *Refinements, dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
+        const src_inner_idx = @field(src, @tagName(tag)).to;
+        const dst_inner_idx = try copy_to(src_list.at(src_inner_idx).*, src_list, dst_list);
+        const to_insert: Refinement = @unionInit(Refinement, @tagName(tag), .{
+            .to = dst_inner_idx,
+            .analyte = @field(src, @tagName(tag)).analyte,
+        });
+        return dst_list.appendEntity(to_insert);
+    }
+
+    fn copy_to_fields(src: Refinement, src_list: *Refinements, dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
+        // this is just a placeholder for what will be an actual implementation when fielded refinements are implemented
+        _ = src;
+        _ = src_list;
+        const to_insert: Refinement = @unionInit(Refinement, @tagName(tag), {});
+        return dst_list.appendEntity(to_insert);
+    }
 };
 
 const Refinements = @This();
@@ -46,61 +118,9 @@ pub fn at(self: *Refinements, index: EIdx) *Refinement {
     return &self.list.items[index];
 }
 
-/// Allocate a new unset_retval entity and return its index.
-/// Used for pre-allocating return value entities in caller's refinements.
-pub fn initEntity(self: *Refinements) !EIdx {
-    const idx: EIdx = @intCast(self.list.items.len);
-    try self.list.append(.unset_retval);
-    return idx;
-}
-
 /// Append a new entity with the given value and return its index.
 pub fn appendEntity(self: *Refinements, value: Refinement) !EIdx {
     const idx: EIdx = @intCast(self.list.items.len);
     try self.list.append(value);
-    return idx;
-}
-
-/// Recursively copy a Refinement from another Refinements table into an existing slot in this one.
-/// Handles EIdx references by recursively copying referenced entities.
-pub fn copyInto(self: *Refinements, dest_idx: EIdx, src_refinements: *Refinements, src_idx: EIdx) !void {
-    const src = src_refinements.list.items[src_idx];
-
-    // IMPORTANT: We must compute the new value BEFORE assigning to self.list.items[dest_idx]
-    // because copyEntityRecursive may append to self.list, which could reallocate the backing
-    // array and invalidate any pointers/slices we're holding.
-    const copied: Refinement = switch (src) {
-        .pointer => |ind| blk: {
-            const new_to = try self.copyEntityRecursive(src_refinements, ind.to);
-            break :blk .{ .pointer = .{ .analyte = ind.analyte, .to = new_to } };
-        },
-        .optional => |ind| blk: {
-            const new_to = try self.copyEntityRecursive(src_refinements, ind.to);
-            break :blk .{ .optional = .{ .analyte = ind.analyte, .to = new_to } };
-        },
-        .region => |ind| blk: {
-            const new_to = try self.copyEntityRecursive(src_refinements, ind.to);
-            break :blk .{ .region = .{ .analyte = ind.analyte, .to = new_to } };
-        },
-        // These don't contain EIdx references, copy directly
-        .scalar, .unset_retval, .@"struct", .@"union", .unimplemented, .void => src,
-    };
-    self.list.items[dest_idx] = copied;
-}
-
-/// Recursively copy a Refinement, appending to this table. Returns new entity index.
-// TODO: Make this non-recursive to avoid stack overflow with deeply nested structures.
-pub fn copyEntityRecursive(self: *Refinements, src_refinements: *Refinements, src_idx: EIdx) !EIdx {
-    const src = src_refinements.list.items[src_idx];
-    // First recursively copy any referenced entities, then append this entity
-    const copied: Refinement = switch (src) {
-        .pointer => |ind| .{ .pointer = .{ .analyte = ind.analyte, .to = try self.copyEntityRecursive(src_refinements, ind.to) } },
-        .optional => |ind| .{ .optional = .{ .analyte = ind.analyte, .to = try self.copyEntityRecursive(src_refinements, ind.to) } },
-        .region => |ind| .{ .region = .{ .analyte = ind.analyte, .to = try self.copyEntityRecursive(src_refinements, ind.to) } },
-        .scalar, .unset_retval, .@"struct", .@"union", .unimplemented, .void => src,
-    };
-    // Compute idx AFTER recursive calls, since they may have appended entities
-    const idx: EIdx = @intCast(self.list.items.len);
-    try self.list.append(copied);
     return idx;
 }
