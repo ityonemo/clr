@@ -3,7 +3,7 @@
 load test_helper
 
 @test "detects undefined variable used before assignment" {
-    run compile_and_run "$TEST_CASES/undefined/use_before_assign.zig"
+    run compile_and_run "$TEST_CASES/undefined/basic/use_before_assign.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in use_before_assign.main" ]]
     [[ "$output" =~ "use_before_assign.zig:3:4)" ]]
@@ -12,17 +12,17 @@ load test_helper
 }
 
 @test "no error when variable is assigned before use" {
-    run compile_and_run "$TEST_CASES/undefined/assigned_before_use.zig"
+    run compile_and_run "$TEST_CASES/undefined/basic/assigned_before_use.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "no error when variable is initialized with value" {
-    run compile_and_run "$TEST_CASES/undefined/initialized_with_value.zig"
+    run compile_and_run "$TEST_CASES/undefined/basic/initialized_with_value.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects undefined variable passed to function" {
-    run compile_and_run "$TEST_CASES/undefined/call_with_undefined.zig"
+    run compile_and_run "$TEST_CASES/undefined/basic/call_with_undefined.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in call_with_undefined.main" ]]
     [[ "$output" =~ "call_with_undefined.zig:7:15)" ]]
@@ -31,6 +31,6 @@ load test_helper
 }
 
 @test "no false positive when function sets value via pointer" {
-    run compile_and_run "$TEST_CASES/undefined/call_sets_via_pointer.zig"
+    run compile_and_run "$TEST_CASES/undefined/basic/call_sets_via_pointer.zig"
     [ "$status" -eq 0 ]
 }
