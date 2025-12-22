@@ -78,3 +78,26 @@ test "context stacktrace tracks calls" {
     ctx.pop_fn();
     try std.testing.expectEqual(@as(usize, 1), ctx.stacktrace.items.len);
 }
+
+test "pop_fn restores meta.function to caller" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Push first function
+    try ctx.push_fn("caller_func");
+    try std.testing.expectEqualStrings("caller_func", ctx.meta.function);
+
+    // Push second function
+    try ctx.push_fn("callee_func");
+    try std.testing.expectEqualStrings("callee_func", ctx.meta.function);
+
+    // Pop callee - meta.function should restore to caller
+    ctx.pop_fn();
+    try std.testing.expectEqualStrings("caller_func", ctx.meta.function);
+
+    // Pop caller - meta.function should be empty
+    ctx.pop_fn();
+    try std.testing.expectEqualStrings("", ctx.meta.function);
+}

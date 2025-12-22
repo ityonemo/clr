@@ -16,9 +16,21 @@
 
 ### Unit Tests
 
+There are TWO sets of unit tests in different locations:
+
+**1. Codegen/DLL tests (`src/`)** - Run with:
 ```sh
 zig build test
 ```
+These test the code generation and DLL infrastructure.
+
+**2. Runtime library tests (`lib/`)** - Run with:
+```sh
+zig test lib/lib.zig
+```
+These test the runtime analysis logic (tag handlers, memory_safety, undefined tracking).
+
+**IMPORTANT**: `zig build test` only runs `src/` tests. Always run BOTH when modifying analysis logic.
 
 ### Integration Tests (BATS)
 
@@ -341,6 +353,50 @@ This allows `backPropagate` to find the caller's entity, follow it (if it's a po
 - Type flexibility is important.  If you are for example converting a pointer to an integer
   it is useful to continue to track that integer *as if it were a pointer*.  Though this
   is not supported at the moment.
+
+## Known Limitations
+
+### Load creates fresh scalar (breaks `**T` tracking)
+
+The `Load` tag currently always creates a fresh scalar entity for its result. This is incorrect for pointer-to-pointer types like `**u8`. When loading from a `**u8`, we should get the inner pointer entity, not a fresh scalar.
+
+**Impact**: Multi-level pointer dereferences lose tracking. For example:
+```zig
+var x: u8 = undefined;
+var ptr: *u8 = &x;
+var ptr_ptr: **u8 = &ptr;
+var inner = ptr_ptr.*;  // Load here creates fresh scalar, loses pointer tracking
+inner.* = 5;  // This store won't be tracked back to x
+```
+
+**Fix**: Load should follow the pointer and share the pointee's entity instead of creating a fresh scalar.
+
+**Test needed**: `test/cases/undefined/double_pointer.zig`
+
+### Setting a pointer to undefined
+
+Need to investigate what happens when a pointer itself is set to undefined (e.g., `var ptr: *u8 = undefined;`). Currently we set `pointer.analyte.undefined = undef_state`, but this needs testing and verification.
+
+We may need to make `pointer.to` an optional value - an undefined pointer doesn't point to anything valid.
+
+### Simple tags need BinOp/UnOp refinement
+
+The `Simple` type currently just produces a scalar without tracking operands. For proper data flow analysis, we'll need to:
+- Split into `BinOp` (binary operations like `bit_and`, `cmp_*`, `sub`) and `UnOp` (unary operations like `ctz`)
+- Pass operand parameters to track where values flow from
+- Currently affects: `bit_and`, `cmp_eq`, `cmp_gt`, `cmp_lte`, `ctz`, `sub`
+
+### `dbg_inline_block` not implemented
+
+The `dbg_inline_block` instruction is used for inlined function calls. This needs investigation to understand how it affects data flow tracking - inlined code may need special handling to maintain correct interprocedural analysis.
+
+### Other return instructions not implemented
+
+Only `ret_safe` is implemented. The following return variants are marked as `Unimplemented` and need proper handling:
+
+- **`ret_addr`**: Returns the return address (used for stack traces). Probably safe to leave as unimplemented since it's metadata, not data flow.
+- **`ret_load`**: Returns by loading from a pointer (used for large return values that don't fit in registers). **TODO**: This affects data flow and needs implementation.
+- **`ret_ptr`**: Returns the pointer where the return value should be stored (caller provides storage). **TODO**: This affects data flow and needs implementation.
 
 ## Known Issues / Future Work
 

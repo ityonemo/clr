@@ -30,10 +30,10 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
     return switch (tag) {
         .arg => payloadArg(arena, datum, param_names, arg_counter),
         .dbg_stmt => payloadDbgStmt(arena, datum),
-        .store_safe => payloadStoreSafe(arena, ip, datum),
+        .store, .store_safe => payloadStore(arena, ip, datum),
         .load => payloadLoad(arena, datum),
         .ret_safe => payloadRetSafe(arena, datum),
-        .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbgVar(arena, datum, extra),
+        .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
         .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, datum),
         .br => payloadBr(arena, datum),
         else => ".{}",
@@ -73,9 +73,13 @@ pub fn _instLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             }
             if (isAllocatorDestroy(ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
+                const ptr_inst = extractDestroyPtrInst(datum, extra, tags, data) orelse {
+                    // Can't determine ptr instruction, fall through to regular call
+                    const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
+                    break :blk clr_allocator.allocPrint(arena, "    try Inst.call({d}, {s}, {s}, results, ctx, &refinements);\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+                };
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                const ptr_inst = extractDestroyPtrInst(datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_destroy = .{{ .ptr = {?d}, .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, ptr_inst, allocator_type }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, ptr_inst, allocator_type }, null);
             }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
             break :blk clr_allocator.allocPrint(arena, "    try Inst.call({d}, {s}, {s}, results, ctx, &refinements);\n", .{ inst_index, call_parts.called, call_parts.args }, null);
@@ -118,7 +122,7 @@ fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
     }, null);
 }
 
-fn payloadStoreSafe(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(ip, datum.bin_op.rhs);
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
@@ -142,17 +146,17 @@ fn payloadRetSafe(arena: std.mem.Allocator, datum: Data) []const u8 {
     return clr_allocator.allocPrint(arena, ".{{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = {d} }}", .{src}, null);
 }
 
-fn payloadDbgVar(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
+fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
     const operand = datum.pl_op.operand;
     const name_index = datum.pl_op.payload;
 
-    // Extract the slot being named
-    const slot: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
+    // Extract the pointer instruction being named
+    const ptr: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
 
     // Extract the variable name from extra as NullTerminatedString
     const name = extractString(extra, name_index);
 
-    return clr_allocator.allocPrint(arena, ".{{ .slot = {?d}, .name = \"{s}\" }}", .{ slot, name }, null);
+    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .name = \"{s}\" }}", .{ ptr, name }, null);
 }
 
 fn extractString(extra: []const u32, start: u32) []const u8 {

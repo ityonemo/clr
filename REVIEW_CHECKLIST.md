@@ -14,39 +14,40 @@
 - [ ] Slot/Payload copying functions (now in Inst.zig and Refinements.zig)
 
 ## Review tag.zig types
-- [ ] tag.Alloc
-- [ ] tag.AllocCreate
-- [ ] tag.AllocDestroy
-- [ ] tag.Arg
-- [ ] tag.Bitcast
-- [ ] tag.Br
-- [ ] tag.DbgStmt
-- [ ] tag.DbgVarPtr
-- [ ] tag.Load
-- [ ] tag.OptionalPayload
-- [ ] tag.RetSafe
-- [ ] tag.StoreSafe
-- [ ] tag.UnwrapErrunionPayload
-- [ ] tag.AnyTag
+- [x] tag.Alloc
+- [x] tag.AllocCreate
+- [x] tag.AllocDestroy
+- [x] tag.Arg
+- [x] tag.Bitcast
+- [x] tag.Br
+- [x] tag.DbgStmt
+- [x] tag.DbgVarPtr
+- [x] tag.DbgVarVal (split from DbgVarPtr - values don't need pointer tracking)
+- [x] tag.Load
+- [x] tag.OptionalPayload
+- [x] tag.RetSafe
+- [x] tag.Store (renamed from StoreSafe, used for both store and store_safe)
+- [x] tag.UnwrapErrunionPayload
+- [x] tag.AnyTag
 
 ## Review analysis/undefined.zig operators
-- [ ] undefined.alloc
-- [ ] undefined.alloc_create
-- [ ] undefined.store_safe
-- [ ] undefined.load
-- [ ] undefined.dbg_var_ptr
+- [x] undefined.alloc
+- [x] undefined.alloc_create
+- [x] undefined.store
+- [x] undefined.load
+- [x] undefined.dbg_var_ptr
 
 ## Review analysis/memory_safety.zig operators
-- [ ] memory_safety.alloc
-- [ ] memory_safety.arg
-- [ ] memory_safety.store_safe
-- [ ] memory_safety.dbg_var_ptr
-- [ ] memory_safety.bitcast
-- [ ] memory_safety.optional_payload
-- [ ] memory_safety.ret_safe
-- [ ] memory_safety.alloc_create
-- [ ] memory_safety.alloc_destroy
-- [ ] memory_safety.load
+- [x] memory_safety.alloc
+- [x] memory_safety.store (handles parameter name/location propagation)
+- [x] memory_safety.dbg_var_ptr
+- [x] memory_safety.bitcast (removed - entities shared intraprocedrually)
+- [x] memory_safety.optional_payload (removed - entities shared intraprocedrually)
+- [x] memory_safety.ret_safe (refactored to flat control flow)
+- [x] memory_safety.alloc_create (moved to pointer's analyte)
+- [x] memory_safety.alloc_destroy (simplified, removed origin tracking)
+- [x] memory_safety.load (moved to pointer's analyte)
+- [x] memory_safety.onFinish (refactored, checks pointer's analyte)
 
 ## Other
 - [x] Review CLAUDE.md - documentation accuracy (updated for refactoring)

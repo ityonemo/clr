@@ -32,7 +32,8 @@ pub const AllocCreate = struct {
 };
 
 pub const AllocDestroy = struct {
-    ptr: ?usize,
+    /// Index into results[] array for the pointer being freed
+    ptr: usize,
     allocator_type: []const u8,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
@@ -61,22 +62,27 @@ pub const AllocDestroy = struct {
 /// - store_safe(ptr=0) follows P1' to S1', marks S1' as defined
 /// - backPropagate: propagates S1'.undefined back to S1.undefined
 pub const Arg = struct {
-    value: EIdx,
     name: []const u8,
     caller_refinements: ?*Refinements,
+    // value is an index into the caller_refinements array.
+    value: EIdx,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         const cp = self.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
         // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
         const local_copy_idx = try refinements.copyEntityRecursive(cp, self.value);
         results[index].refinement = local_copy_idx;
-        // Set caller_ref for backward propagation on function close
-        results[index].caller_ref = self.value;
+        // Set argument info for backward propagation on function close
+        results[index].argument = .{ .caller_ref = self.value, .name = self.name };
         try splat(.arg, results, index, ctx, refinements, self);
     }
 };
 
 pub const Bitcast = struct {
+    /// Index into results[] array. `null` when source is a comptime value
+    /// (no instruction to trace), in which case we create a fresh scalar.
+    /// TODO: oWe MAY have to turn this into some sort of union if other bitcast-ing 
+    /// options are possible.
     src: ?usize,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
@@ -86,14 +92,20 @@ pub const Bitcast = struct {
         if (self.src) |src| {
             results[index].refinement = results[src].refinement;
         } else {
+            // Comptime source - create fresh scalar
             _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
         }
         try splat(.bitcast, results, index, ctx, refinements, self);
     }
 };
 
+/// Br (break) transfers control to a block, optionally carrying a value.
+/// - `break :blk value` → src is the instruction producing the value
+/// - `break :blk` (void) → src is null, block result is void
 pub const Br = struct {
     block: usize,
+    /// Index into results[] for the value being passed to the block.
+    /// Null for void breaks (no value passed).
     src: ?usize,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
@@ -126,8 +138,13 @@ pub const DbgStmt = struct {
     }
 };
 
+/// DbgVarPtr associates a variable name with a pointer instruction.
+/// Unlike DbgStmt, this IS splatted to analyses because they use the variable
+/// name for meaningful error messages (e.g., "variable 'x' used before initialization"
+/// instead of "instruction 5 used before initialization").
 pub const DbgVarPtr = struct {
-    slot: ?usize,
+    /// Index into results[] array for the pointer. Null when the pointer is comptime.
+    ptr: ?usize,
     name: []const u8,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
@@ -136,16 +153,46 @@ pub const DbgVarPtr = struct {
     }
 };
 
+/// DbgVarVal associates a variable name with a value (non-pointer) instruction.
+/// Unlike DbgVarPtr, this is NOT used for stack pointer tracking since values
+/// don't have memory locations that can escape. Analyses that only care about
+/// pointers (like memory_safety) can ignore this.
+pub const DbgVarVal = struct {
+    /// Index into results[] array for the value. Null when the value is comptime.
+    ptr: ?usize,
+    name: []const u8,
+
+    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+        _ = try Inst.clobberInst(refinements, results, index, .void);
+        try splat(.dbg_var_val, results, index, ctx, refinements, self);
+    }
+};
+
+/// Load dereferences a pointer and produces the value stored at that memory location.
+///
+/// LIMITATION: Currently always creates a fresh scalar, which is incorrect for
+/// pointer-to-pointer types (e.g., `**u8`). Loading from a `**u8` should produce
+/// the inner pointer entity, not a fresh scalar. This breaks tracking for multi-level
+/// pointer dereferences. See CLAUDE.md "Known Limitations" section.
 pub const Load = struct {
+    /// Index into results[] array. Null when loading from a global or constant
+    /// pointer (interned value with no instruction to trace).
+    /// TODO: We'll need to track globals/constants to properly analyze loads from them.
     ptr: ?usize,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+        // TODO: Should follow pointer and share pointee's entity, not create fresh scalar
         _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
         try splat(.load, results, index, ctx, refinements, self);
     }
 };
 
+/// OptionalPayload extracts the inner value from an optional (e.g., `x.?` or `x orelse`).
+/// The result shares the source's entity - unwrapping doesn't create a copy of the value,
+/// it just accesses what's already there.
 pub const OptionalPayload = struct {
+    /// Index into results[] array. Null when source is a comptime value
+    /// (no instruction to trace), in which case we create a fresh scalar.
     src: ?usize,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
@@ -159,38 +206,52 @@ pub const OptionalPayload = struct {
     }
 };
 
+/// RetSafe returns a value from a function. "Safe" refers to safety-checked returns
+/// (as opposed to naked/inline assembly returns).
+///
+/// This handles copying the return value's entity back to the caller's refinements,
+/// enabling interprocedural tracking of returned values.
 pub const RetSafe = struct {
     caller_refinements: ?*Refinements,
     return_eidx: EIdx,
+    /// Index into results[] array for the value being returned.
+    /// Null for void returns (function returns nothing).
     src: ?usize,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         _ = try Inst.clobberInst(refinements, results, index, .void);
-        try splat(.ret_safe, results, index, ctx, refinements, self);
 
         // Copy return value to caller's refinements
-        const caller_refinements = self.caller_refinements orelse return; // entrypoint, skip
-
-        const return_eidx = self.return_eidx;
-        if (self.src) |src| {
-            const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-            switch (caller_refinements.at(return_eidx).*) {
-                .unset_retval => {
-                    try caller_refinements.copyInto(return_eidx, refinements, src_idx);
-                },
-                else => @panic("merge operation not implemented yet"),
-            }
-        } else {
-            switch (caller_refinements.at(return_eidx).*) {
-                .unset_retval => caller_refinements.at(return_eidx).* = .void,
-                .void => {},
-                else => @panic("void function retval incorrectly set to some value"),
+        if (self.caller_refinements) |caller_refinements| {
+            const return_eidx = self.return_eidx;
+            if (self.src) |src| {
+                const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
+                switch (caller_refinements.at(return_eidx).*) {
+                    .unset_retval, .void => {
+                        // .void can be overwritten - it's from an error path return
+                        try caller_refinements.copyInto(return_eidx, refinements, src_idx);
+                    },
+                    else => {
+                        // TODO: implement proper merge for multiple return paths
+                    },
+                }
+            } else {
+                switch (caller_refinements.at(return_eidx).*) {
+                    .unset_retval => caller_refinements.at(return_eidx).* = .void,
+                    .void => {},
+                    else => @panic("void function retval incorrectly set to some value"),
+                }
             }
         }
+
+        // Splat runs last - analyses see state after copy is complete
+        try splat(.ret_safe, results, index, ctx, refinements, self);
     }
 };
 
-/// StoreSafe writes a value through a pointer. The store_safe instruction itself is void.
+/// Store writes a value through a pointer. The store instruction itself is void.
+/// Used for both `store` and `store_safe` AIR instructions (semantically identical
+/// for our analysis - the difference is only runtime safety checks).
 ///
 /// AIR Semantics:
 /// - `ptr` is the instruction containing a pointer entity (from alloc, arg, etc.)
@@ -210,19 +271,28 @@ pub const RetSafe = struct {
 ///
 /// We do NOT modify the ptr instruction's refinement - it still points to the same
 /// pointer entity. We only update the pointee's analysis state.
-pub const StoreSafe = struct {
+pub const Store = struct {
+    /// Index into results[] for the pointer being stored through.
+    /// Null when storing to a global or constant pointer (interned value).
     ptr: ?usize,
+    /// Index into results[] for the value being stored.
+    /// Null when storing a comptime constant.
     src: ?usize,
     is_undef: bool,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         _ = try Inst.clobberInst(refinements, results, index, .void);
         // The ptr instruction's entity is unchanged - we only update the pointee's analysis state
-        try splat(.store_safe, results, index, ctx, refinements, self);
+        try splat(.store, results, index, ctx, refinements, self);
     }
 };
 
+/// UnwrapErrunionPayload extracts the success value from an error union (e.g., `try x` or `x catch`).
+/// The result shares the source's entity - unwrapping doesn't create a copy of the value,
+/// it just accesses what's already there.
 pub const UnwrapErrunionPayload = struct {
+    /// Index into results[] array. Null when source is a comptime value
+    /// (no instruction to trace), in which case we create a fresh scalar.
     src: ?usize,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
@@ -236,8 +306,17 @@ pub const UnwrapErrunionPayload = struct {
     }
 };
 
+pub fn Simple(comptime instr: anytype) type {
+    return struct {
+        pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+            _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+            try splat(instr, results, index, ctx, refinements, self);
+        }
+    };
+}
+
 pub fn Unimplemented(comptime opts: anytype) type {
-    const known_void = if (@hasField(@TypeOf(opts), "known_void")) opts.known_void else false;
+    const known_void = if (@hasField(@TypeOf(opts), "void")) opts.void else false;
     return struct {
         pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
             _ = self;
@@ -260,31 +339,36 @@ pub const AnyTag = union(enum) {
     bitcast: Bitcast,
     br: Br,
     dbg_stmt: DbgStmt,
-    dbg_var_ptr: DbgVarPtr,
-    dbg_var_val: DbgVarPtr, // Same structure as dbg_var_ptr
+    dbg_var_ptr: DbgVarPtr, // Names a pointer variable (for stack pointer tracking)
+    dbg_var_val: DbgVarVal, // Names a value variable (no pointer tracking needed)
     dbg_arg_inline: DbgVarPtr, // Same structure as dbg_var_ptr
     load: Load,
     optional_payload: OptionalPayload,
     ret_safe: RetSafe,
-    store_safe: StoreSafe,
+    store: Store,
+    store_safe: Store, // Same as store, just with runtime safety checks
     unwrap_errunion_payload: UnwrapErrunionPayload,
+
+    // Simple tags - math/comparison operations that produce scalar values
+    // this will have to be refined to pass parameters and divide into BinOp and UnOp.
+    bit_and: Simple(.bit_and),
+    cmp_eq: Simple(.cmp_eq),
+    cmp_gt: Simple(.cmp_gt),
+    cmp_lte: Simple(.cmp_lte),
+    ctz: Simple(.ctz),
+    sub: Simple(.sub),
 
     // Unimplemented tags (no-op)
     add_with_overflow: Unimplemented(.{}),
     array_to_slice: Unimplemented(.{}),
-    bit_and: Unimplemented(.{}),
     block: Unimplemented(.{}),
-    cmp_eq: Unimplemented(.{}),
-    cmp_gt: Unimplemented(.{}),
-    cmp_lte: Unimplemented(.{}),
-    cond_br: Unimplemented(.{}),
-    ctz: Unimplemented(.{}),
+    cond_br: Unimplemented(.{ .void = true }),
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
     is_non_err: Unimplemented(.{}),
     is_non_null: Unimplemented(.{}),
-    memset_safe: Unimplemented(.{}),
-    noop_pruned_debug: Unimplemented(.{}),
+    memset_safe: Unimplemented(.{ .void = true }),
+    noop_pruned_debug: Unimplemented(.{ .void = true }),
     ptr_add: Unimplemented(.{}),
     ret_addr: Unimplemented(.{}),
     ret_load: Unimplemented(.{}),
@@ -292,16 +376,14 @@ pub const AnyTag = union(enum) {
     slice: Unimplemented(.{}),
     slice_len: Unimplemented(.{}),
     stack_trace_frames: Unimplemented(.{}),
-    store: Unimplemented(.{}),
     struct_field_ptr_index_0: Unimplemented(.{}),
     struct_field_ptr_index_1: Unimplemented(.{}),
     struct_field_ptr_index_2: Unimplemented(.{}),
     struct_field_ptr_index_3: Unimplemented(.{}),
     struct_field_val: Unimplemented(.{}),
-    sub: Unimplemented(.{}),
     sub_with_overflow: Unimplemented(.{}),
     @"try": Unimplemented(.{}),
-    unreach: Unimplemented(.{}),
+    unreach: Unimplemented(.{ .void = true }),
     unwrap_errunion_err: Unimplemented(.{}),
     wrap_errunion_err: Unimplemented(.{}),
     wrap_errunion_payload: Unimplemented(.{}),

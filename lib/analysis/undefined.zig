@@ -13,7 +13,7 @@ pub const Undefined = union(enum) {
         var_name: ?[]const u8 = null,
     },
 
-    pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror {
+    pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
         switch (self) {
             .undefined => |p| {
@@ -44,41 +44,42 @@ pub const Undefined = union(enum) {
         refinements.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
     }
 
-    pub fn store_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.StoreSafe) !void {
+    pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
         _ = index;
-        const ptr = params.ptr orelse return;
+        const ptr = params.ptr orelse @panic("store: ptr is null (interned/global) - not yet supported");
         // Follow pointer to get to pointee (local only - propagation happens on function close)
-        const ptr_idx = results[ptr].refinement orelse @panic("store_safe: ptr inst has no refinement");
+        const ptr_idx = results[ptr].refinement orelse @panic("store: ptr inst has no refinement");
         const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
-            .unimplemented => return, // TODO: handle unimplemented types
-            else => |t| std.debug.panic("store_safe: expected pointer, got {s}", .{@tagName(t)}),
+            // TODO: remove when struct_field_ptr is implemented
+            .unimplemented => return,
+            else => |t| std.debug.panic("store: expected pointer, got {s}", .{@tagName(t)}),
         };
         const undef_state: Undefined = if (params.is_undef)
             .{ .undefined = .{ .meta = ctx.meta } }
         else
             .{ .defined = {} };
         switch (refinements.at(pointee_idx).*) {
-            .scalar => |*imm| imm.undefined = undef_state,
-            // Storing to pointer/struct/etc - nothing to track for undefined analysis
-            .pointer, .optional, .region, .@"struct", .@"union" => {},
-            .unimplemented => {},
-            else => |t| std.debug.panic("store_safe: unexpected pointee type {s}", .{@tagName(t)}),
+            .scalar => |*s| s.undefined = undef_state,
+            .pointer => |*p| p.analyte.undefined = undef_state,
+            .optional, .region, .@"struct", .@"union" => @panic("store: pointee is compound type - undefined tracking not yet implemented"),
+            .unimplemented => @panic("store: pointee refinement is unimplemented"),
+            else => |t| std.debug.panic("store: unexpected pointee type {s}", .{@tagName(t)}),
         }
     }
 
     pub fn load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Load) !void {
-        const ptr = params.ptr orelse return;
+        const ptr = params.ptr orelse @panic("load: ptr is null (interned/global) - not yet supported");
         const ptr_idx = results[ptr].refinement orelse @panic("load: ptr inst has no refinement");
         // Follow pointer to get to pointee
         const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
-            .unimplemented => return, // TODO: handle unimplemented types
+            .unimplemented => @panic("load: ptr refinement is unimplemented"),
             else => |t| std.debug.panic("load: expected pointer, got {s}", .{@tagName(t)}),
         };
         switch (refinements.at(pointee_idx).*) {
-            .scalar => |imm| {
-                const undef = imm.undefined orelse return;
+            .scalar => |s| {
+                const undef = s.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .defined => {
@@ -88,9 +89,19 @@ pub const Undefined = union(enum) {
                     },
                 }
             },
-            // Loading pointer/struct/etc - nothing to track for undefined analysis
-            .pointer, .optional, .region, .@"struct", .@"union" => {},
-            .unimplemented => {},
+            .pointer => |p| {
+                const undef = p.analyte.undefined orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .defined => {
+                        // Propagate defined state to the loaded value
+                        const idx = results[index].refinement.?;
+                        refinements.at(idx).scalar.undefined = .{ .defined = {} };
+                    },
+                }
+            },
+            .optional, .region, .@"struct", .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
+            .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
         }
     }
@@ -98,7 +109,7 @@ pub const Undefined = union(enum) {
     pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
-        const inst = params.slot orelse return;
+        const inst = params.ptr orelse return;
         std.debug.assert(inst < results.len);
         const ptr_idx = results[inst].refinement orelse return;
         // Follow pointer to get to pointee
@@ -109,8 +120,15 @@ pub const Undefined = union(enum) {
             else => @panic("unexpected refinement type in dbg_var_ptr (outer)"),
         };
         switch (refinements.at(pointee_idx).*) {
-            .scalar => |*imm| {
-                const undef = &(imm.undefined orelse return);
+            .scalar => |*s| {
+                const undef = &(s.undefined orelse return);
+                switch (undef.*) {
+                    .undefined => |*meta| meta.var_name = params.name,
+                    .defined => {},
+                }
+            },
+            .pointer => |*p| {
+                const undef = &(p.analyte.undefined orelse return);
                 switch (undef.*) {
                     .undefined => |*meta| meta.var_name = params.name,
                     .defined => {},
@@ -147,9 +165,12 @@ test "alloc sets undefined state" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    try Undefined.alloc(&results, 1, &ctx, &refinements, .{});
+    // Use Inst.apply which calls tag.Alloc.apply (creates pointer) then Undefined.alloc
+    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
 
-    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
+    // alloc creates pointer; undefined state is on the pointee
+    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
+    const undef = refinements.at(pointee_idx).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
     try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
@@ -169,16 +190,19 @@ test "alloc_create sets undefined state" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    try Undefined.alloc_create(&results, 1, &ctx, &refinements, .{ .allocator_type = "PageAllocator" });
+    // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer) then Undefined.alloc_create
+    try Inst.apply(1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
 
-    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
+    // alloc_create creates pointer; undefined state is on the pointee
+    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
+    const undef = refinements.at(pointee_idx).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
     try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
     try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
     try std.testing.expectEqual(@as(?u32, 5), undef.undefined.meta.column);
 }
 
-test "store_safe with is_undef=true sets undefined" {
+test "store with is_undef=true sets undefined" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -191,14 +215,17 @@ test "store_safe with is_undef=true sets undefined" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    // store_safe clobbers with the new state
-    try Undefined.store_safe(&results, 0, &ctx, &refinements, .{ .ptr = 1, .src = null, .is_undef = true });
+    // First alloc at instruction 1, then store with is_undef=true
+    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = true } }, &results, &ctx, &refinements);
 
-    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
+    // Check the pointee's undefined state
+    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
+    const undef = refinements.at(pointee_idx).scalar.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
 
-test "store_safe with is_undef=false sets defined" {
+test "store with is_undef=false sets defined" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -211,10 +238,13 @@ test "store_safe with is_undef=false sets defined" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    // store_safe clobbers with the new state
-    try Undefined.store_safe(&results, 0, &ctx, &refinements, .{ .ptr = 1, .src = null, .is_undef = false });
+    // First alloc at instruction 1, then store with is_undef=false
+    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, &results, &ctx, &refinements);
 
-    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
+    // Check the pointee's undefined state
+    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
+    const undef = refinements.at(pointee_idx).scalar.undefined.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
@@ -233,11 +263,14 @@ test "load from undefined inst returns error" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .undefined = .{ .meta = .{
+
+    // Create pointer -> undefined scalar
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .undefined = .{ .meta = .{
         .function = "test_func",
         .file = "test.zig",
         .line = 1,
     } } } } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
 
     try std.testing.expectError(
         error.UseBeforeAssign,
@@ -257,7 +290,13 @@ test "load from defined inst does not return error" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+
+    // Create pointer -> defined scalar
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+
+    // Set up result for the load instruction (index 0)
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{} });
 
     try Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1 });
 }
@@ -274,7 +313,10 @@ test "load from inst without undefined tracking does not return error" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
-    // results[1].refinement is null
+
+    // Create pointer -> scalar with no undefined tracking (undefined = null)
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .undefined = null } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
 
     try Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1 });
 }
@@ -300,7 +342,7 @@ test "dbg_var_ptr sets var_name on undefined meta" {
         },
     } } } });
 
-    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = 1, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = 1, .name = "my_var" });
 
     const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqualStrings("my_var", undef.undefined.var_name.?);
@@ -320,14 +362,14 @@ test "dbg_var_ptr does not affect defined inst" {
     var results = [_]Inst{.{}} ** 3;
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
 
-    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = 1, .name = "my_var" });
+    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = 1, .name = "my_var" });
 
     // Should still be defined, no crash
     const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
-test "dbg_var_ptr with null slot does nothing" {
+test "dbg_var_ptr with null ptr does nothing" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -340,8 +382,8 @@ test "dbg_var_ptr with null slot does nothing" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    // Should not crash with null slot
-    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .slot = null, .name = "my_var" });
+    // Should not crash with null ptr
+    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = null, .name = "my_var" });
 }
 
 test "reportUseBeforeAssign with var_name returns error" {

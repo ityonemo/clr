@@ -7,13 +7,17 @@ const Analyte = Refinements.Analyte;
 pub const EIdx = Refinements.EIdx;
 
 const Inst = @This();
+const ArgumentInfo = struct {
+    caller_ref: EIdx,
+    name: []const u8,
+};
 
 /// Index into the Refinements entity table, or null if not yet initialized.
 refinement: ?EIdx = null,
 
-/// For pointer args: the caller's entity index for backward propagation.
+/// For args: caller's entity index for backward propagation, and parameter name for error messages.
 /// Used by backPropagate() along with the caller_refinements parameter.
-caller_ref: ?EIdx = null,
+argument: ?ArgumentInfo = null,
 
 /// Get this instruction's Refinement. Crashes if not initialized.
 pub fn get(self: *Inst, refinements: *Refinements) *Refinement {
@@ -83,31 +87,43 @@ pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void
 }
 
 /// Propagate analysis state back to callers via caller_ref.
-/// Called after onFinish to copy pointee state back to the caller's entity.
+/// Called after onFinish to copy state back to the caller's entity.
+/// Propagates both:
+/// - Pointer's analyte (memory_safety for allocation tracking)
+/// - Pointee's analyte (undefined tracking for scalar values)
 pub fn backPropagate(results: []Inst, refinements: *Refinements, caller_refinements: ?*Refinements) void {
     const cp = caller_refinements orelse return; // entrypoint, nothing to propagate
     for (results) |inst| {
-        const caller_entity_idx = inst.caller_ref orelse continue;
+        const arg_info = inst.argument orelse continue;
+        const caller_entity_idx = arg_info.caller_ref;
         const local_idx = inst.refinement orelse continue;
 
-        // Get local pointee's Analyte (following pointer if needed)
-        const local_analyte: ?*const Analyte = switch (refinements.at(local_idx).*) {
-            .scalar => |*imm| imm,
-            .pointer => |ind| switch (refinements.at(ind.to).*) {
-                .scalar => |*imm| imm,
-                else => null,
-            },
-            else => null,
-        };
-        const src = local_analyte orelse continue;
-
-        // Update caller's pointee's Analyte (same structure)
+        const local_refinement = refinements.at(local_idx);
         const caller_entity = cp.at(caller_entity_idx);
-        switch (caller_entity.*) {
-            .scalar => |*imm| imm.* = src.*,
-            .pointer => |ind| switch (cp.at(ind.to).*) {
-                .scalar => |*imm| imm.* = src.*,
-                else => {},
+
+        switch (local_refinement.*) {
+            .scalar => |src| {
+                switch (caller_entity.*) {
+                    .scalar => |*dst| dst.* = src,
+                    else => {},
+                }
+            },
+            .pointer => |local_ptr| {
+                switch (caller_entity.*) {
+                    .pointer => |*caller_ptr| {
+                        // Propagate pointer's analyte (memory_safety)
+                        caller_ptr.analyte = local_ptr.analyte;
+                        // Propagate pointee's analyte (undefined tracking)
+                        switch (refinements.at(local_ptr.to).*) {
+                            .scalar => |src| switch (cp.at(caller_ptr.to).*) {
+                                .scalar => |*dst| dst.* = src,
+                                else => {},
+                            },
+                            else => {},
+                        }
+                    },
+                    else => {},
+                }
             },
             else => {},
         }
@@ -149,9 +165,11 @@ test "alloc sets state to undefined" {
     // dbg_stmt sets instruction to void (no analysis tracking)
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(results[0].get(&refinements).*));
-    // alloc marks instruction as undefined
+    // alloc creates pointer; the pointee is marked undefined
     try std.testing.expect(results[1].refinement != null);
-    const analyte = &results[1].get(&refinements).scalar;
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(results[1].get(&refinements).*));
+    const pointee_idx = results[1].get(&refinements).pointer.to;
+    const analyte = &refinements.at(pointee_idx).scalar;
     try std.testing.expect(analyte.undefined != null);
     try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
     // uninitialized instruction has no refinement yet
@@ -175,8 +193,9 @@ test "store_safe with undef keeps state undefined" {
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
     try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = true } }, results, &ctx, &refinements);
 
-    // alloc instruction stays undefined after store_safe with undef
-    const analyte = &results[1].get(&refinements).scalar;
+    // alloc's pointee stays undefined after store_safe with undef
+    const pointee_idx = results[1].get(&refinements).pointer.to;
+    const analyte = &refinements.at(pointee_idx).scalar;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
 }
 
@@ -197,8 +216,9 @@ test "store_safe with value sets state to defined" {
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
     try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, results, &ctx, &refinements);
 
-    // alloc instruction becomes defined after store_safe with real value
-    const analyte = &results[1].get(&refinements).scalar;
+    // alloc's pointee becomes defined after store_safe with real value
+    const pointee_idx = results[1].get(&refinements).pointer.to;
+    const analyte = &refinements.at(pointee_idx).scalar;
     try std.testing.expectEqual(.defined, std.meta.activeTag(analyte.undefined.?));
 }
 
@@ -277,6 +297,7 @@ test "ret_safe copies scalar return value to caller_refinements" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
+    try ctx.stacktrace.append(allocator, "test_func"); // ret_safe needs a function name on stacktrace
 
     // Callee's refinements and results
     var callee_refinements = Refinements.init(allocator);
@@ -303,8 +324,8 @@ test "ret_safe copies scalar return value to caller_refinements" {
         .src = 0,
     } }, callee_results, &ctx, &callee_refinements);
 
-    // Verify return entity in caller's refinements is now a scalar
-    try std.testing.expectEqual(.scalar, std.meta.activeTag(caller_refinements.at(return_eidx).*));
+    // Verify return entity in caller's refinements is now a pointer
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(caller_refinements.at(return_eidx).*));
 }
 
 test "ret_safe with null src sets caller return to void" {
@@ -314,6 +335,7 @@ test "ret_safe with null src sets caller return to void" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
+    try ctx.stacktrace.append(allocator, "test_func");
 
     // Callee's refinements and results
     var callee_refinements = Refinements.init(allocator);
@@ -344,6 +366,7 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
+    try ctx.stacktrace.append(allocator, "test_func");
 
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
@@ -362,4 +385,139 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
             .src = 0,
         },
     }, results, &ctx, &refinements);
+}
+
+// =============================================================================
+// backPropagate Tests
+// =============================================================================
+
+test "backPropagate with null caller_refinements does nothing" {
+    const allocator = std.testing.allocator;
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    const results = make_results_list(allocator, 1);
+    defer clear_results_list(results, allocator);
+
+    // Should just return without error
+    backPropagate(results, &refinements, null);
+}
+
+test "backPropagate propagates scalar analyte to caller" {
+    const allocator = std.testing.allocator;
+    const undefined_analysis = @import("analysis/undefined.zig");
+
+    // Set up caller's refinements with a scalar
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+    const caller_scalar_idx = try caller_refinements.appendEntity(.{ .scalar = .{} });
+
+    // Set up callee's refinements with a modified scalar
+    var callee_refinements = Refinements.init(allocator);
+    defer callee_refinements.deinit();
+    const callee_scalar_idx = try callee_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .defined = {} },
+    } });
+
+    // Set up results with argument info pointing to caller
+    const results = make_results_list(allocator, 1);
+    defer clear_results_list(results, allocator);
+    results[0].refinement = callee_scalar_idx;
+    results[0].argument = .{ .caller_ref = caller_scalar_idx, .name = "arg" };
+
+    // Verify caller scalar is initially undefined tracking = null
+    try std.testing.expectEqual(@as(?undefined_analysis.Undefined, null), caller_refinements.at(caller_scalar_idx).scalar.undefined);
+
+    // Propagate
+    backPropagate(results, &callee_refinements, &caller_refinements);
+
+    // Verify caller scalar now has defined state
+    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_scalar_idx).scalar.undefined.?));
+}
+
+test "backPropagate propagates pointer analyte to caller" {
+    const allocator = std.testing.allocator;
+    const memory_safety = @import("analysis/memory_safety.zig");
+
+    // Set up caller's refinements with a pointer (no memory_safety)
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+    const caller_pointee_idx = try caller_refinements.appendEntity(.{ .scalar = .{} });
+    const caller_ptr_idx = try caller_refinements.appendEntity(.{ .pointer = .{
+        .analyte = .{},
+        .to = caller_pointee_idx,
+    } });
+
+    // Set up callee's refinements with a pointer that has memory_safety set
+    var callee_refinements = Refinements.init(allocator);
+    defer callee_refinements.deinit();
+    const callee_pointee_idx = try callee_refinements.appendEntity(.{ .scalar = .{} });
+    const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
+        .analyte = .{ .memory_safety = .{ .allocation = .{
+            .allocated = .{ .function = "test", .file = "test.zig", .line = 1 },
+            .allocator_type = "TestAllocator",
+        } } },
+        .to = callee_pointee_idx,
+    } });
+
+    // Set up results with argument info
+    const results = make_results_list(allocator, 1);
+    defer clear_results_list(results, allocator);
+    results[0].refinement = callee_ptr_idx;
+    results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "ptr" };
+
+    // Verify caller pointer has no memory_safety initially
+    try std.testing.expectEqual(@as(?memory_safety.MemorySafety, null), caller_refinements.at(caller_ptr_idx).pointer.analyte.memory_safety);
+
+    // Propagate
+    backPropagate(results, &callee_refinements, &caller_refinements);
+
+    // Verify caller pointer now has memory_safety
+    const ms = caller_refinements.at(caller_ptr_idx).pointer.analyte.memory_safety.?;
+    try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
+    try std.testing.expectEqualStrings("TestAllocator", ms.allocation.allocator_type);
+}
+
+test "backPropagate propagates pointee undefined state to caller" {
+    const allocator = std.testing.allocator;
+
+    // Set up caller's refinements with a pointer to undefined scalar
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+    const caller_pointee_idx = try caller_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .undefined = .{
+            .meta = .{ .function = "", .file = "", .line = 0 },
+        } },
+    } });
+    const caller_ptr_idx = try caller_refinements.appendEntity(.{ .pointer = .{
+        .analyte = .{},
+        .to = caller_pointee_idx,
+    } });
+
+    // Set up callee's refinements with pointer to defined scalar
+    var callee_refinements = Refinements.init(allocator);
+    defer callee_refinements.deinit();
+    const callee_pointee_idx = try callee_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .defined = {} },
+    } });
+    const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
+        .analyte = .{},
+        .to = callee_pointee_idx,
+    } });
+
+    // Set up results with argument info
+    const results = make_results_list(allocator, 1);
+    defer clear_results_list(results, allocator);
+    results[0].refinement = callee_ptr_idx;
+    results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "ptr" };
+
+    // Verify caller's pointee is undefined initially
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_pointee_idx).scalar.undefined.?));
+
+    // Propagate
+    backPropagate(results, &callee_refinements, &caller_refinements);
+
+    // Verify caller's pointee is now defined
+    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_pointee_idx).scalar.undefined.?));
 }

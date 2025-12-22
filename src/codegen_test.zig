@@ -330,3 +330,117 @@ test "instLine for br with block and operand" {
 
     try std.testing.expectEqualStrings("    try Inst.apply(9, .{ .br = .{ .block = 3, .src = 8 } }, results, ctx, &refinements);\n", result);
 }
+
+// =============================================================================
+// TransferOp Tests (bitcast, unwrap_errunion_payload, optional_payload)
+// =============================================================================
+
+test "instLine for bitcast" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 7) | (1 << 31));
+    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .bitcast, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .bitcast = .{ .src = 7 } }, results, ctx, &refinements);\n", result);
+}
+
+test "instLine for unwrap_errunion_payload" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
+    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .unwrap_errunion_payload, datum, 5, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(5, .{ .unwrap_errunion_payload = .{ .src = 4 } }, results, ctx, &refinements);\n", result);
+}
+
+test "instLine for optional_payload" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
+    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .optional_payload, datum, 6, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(6, .{ .optional_payload = .{ .src = 3 } }, results, ctx, &refinements);\n", result);
+}
+
+// =============================================================================
+// DbgVar Tests (dbg_var_ptr, dbg_var_val, dbg_arg_inline)
+// =============================================================================
+
+fn makeExtraWithString(comptime s: []const u8) []const u32 {
+    // Pack string into u32 array with null terminator
+    const len_with_null = s.len + 1;
+    const word_count = (len_with_null + 3) / 4;
+    var result: [word_count]u32 = [_]u32{0} ** word_count;
+    const bytes: [*]u8 = @ptrCast(&result);
+    @memcpy(bytes[0..s.len], s);
+    // bytes[s.len] is already 0 from zero-init
+    return &result;
+}
+
+test "instLine for dbg_var_ptr" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 2) | (1 << 31));
+    // pl_op: operand is ptr, payload is index into extra for name string
+    const extra = makeExtraWithString("my_var");
+    const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_var_ptr, datum, 3, extra, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(3, .{ .dbg_var_ptr = .{ .ptr = 2, .name = \"my_var\" } }, results, ctx, &refinements);\n", result);
+}
+
+test "instLine for dbg_var_val" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
+    const extra = makeExtraWithString("value_var");
+    const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_var_val, datum, 6, extra, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(6, .{ .dbg_var_val = .{ .ptr = 5, .name = \"value_var\" } }, results, ctx, &refinements);\n", result);
+}
+
+test "instLine for dbg_arg_inline" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 1) | (1 << 31));
+    const extra = makeExtraWithString("arg_name");
+    const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_arg_inline, datum, 2, extra, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .dbg_arg_inline = .{ .ptr = 1, .name = \"arg_name\" } }, results, ctx, &refinements);\n", result);
+}
+

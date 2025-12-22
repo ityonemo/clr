@@ -8,7 +8,7 @@ zig build
 
 # Check if bats is available
 if command -v bats &> /dev/null; then
-    bats "$SCRIPT_DIR/test/integration/"
+    bats -j "$(nproc)" "$SCRIPT_DIR/test/integration/"
 else
     echo "BATS not installed. Install with:"
     echo "  Ubuntu/Debian: sudo apt install bats"
