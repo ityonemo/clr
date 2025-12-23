@@ -67,6 +67,8 @@ bats test/integration/allocator.bats -f "double-free"
 
 **Important**: Do NOT modify integration tests to make them pass, unless we have decided to materially change the shape of the output. Integration tests should simply call `compile_and_run` and check the result. If a test fails, fix the codegen or runtime - not the test.
 
+**Important**: Do NOT report integration test failures as "pre-existing" unless you are CERTAIN the previous sprint left them as failures. Report failures without assuming they were already broken.
+
 **Important**: Integration tests MUST have comprehensive output checking. For error-detecting tests, verify:
 1. The exit status (`[ "$status" -ne 0 ]` for errors, `[ "$status" -eq 0 ]` for success)
 2. The error message type (e.g., "use of undefined value found in")

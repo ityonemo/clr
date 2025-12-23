@@ -41,9 +41,11 @@ pub const MemorySafety = union(enum) {
 
     pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
         _ = index;
-        // TODO: let this handle comptime case
         const ptr = params.ptr orelse return;
-        const src = params.src orelse return;
+        const src = switch (params.src) {
+            .eidx => |idx| idx,
+            .interned, .other => return, // comptime/global values don't have memory safety tracking
+        };
 
         // If storing from a parameter, propagate the parameter name and location to the destination's stack_ptr
         if (results[src].argument) |arg_info| {
@@ -89,7 +91,10 @@ pub const MemorySafety = union(enum) {
     pub fn ret_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetSafe) !void {
         _ = index;
 
-        const src = params.src orelse return;
+        const src = switch (params.src) {
+            .eidx => |idx| idx,
+            .interned, .other => return, // comptime/global values don't have memory safety tracking
+        };
         std.debug.assert(src < results.len);
 
         const src_idx = results[src].refinement orelse return;
@@ -362,7 +367,7 @@ test "bitcast propagates stack_ptr metadata" {
     } });
 
     // Bitcast shares the refinement
-    try Inst.apply(1, .{ .bitcast = .{ .src = 0 } }, &results, &ctx, &refinements);
+    try Inst.apply(1, .{ .bitcast = .{ .src = .{ .eidx = 0 } } }, &results, &ctx, &refinements);
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
@@ -402,7 +407,7 @@ test "ret_safe detects escape when returning stack pointer from same function" {
 
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = 0 }),
+        MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = .{ .eidx = 0 } }),
     );
 }
 
@@ -436,7 +441,7 @@ test "ret_safe allows returning arg (empty function name)" {
     } });
 
     // Should NOT error - returning pointer from caller is fine
-    try MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = 0 });
+    try MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = .{ .eidx = 0 } });
 }
 
 test "alloc_create sets allocation metadata on pointer analyte" {
@@ -574,7 +579,7 @@ test "load detects use after free" {
 
     // Create, store (to make it defined), and free allocation
     try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
     try Inst.apply(2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
 
     // Load after free should error
@@ -599,7 +604,7 @@ test "load from live allocation does not error" {
 
     // Create and store to allocation (not freed)
     try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
 
     // Load from live allocation should succeed
     try Inst.apply(2, .{ .load = .{ .ptr = 0 } }, &results, &ctx, &refinements);
@@ -665,13 +670,15 @@ test "onFinish allows passed allocation" {
     defer caller_refinements.deinit();
     const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
-    var results = [_]Inst{.{}} ** 2;
+    var results = [_]Inst{.{}} ** 3;
 
     // Create allocation
     try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    // Store to transform future -> scalar
+    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
 
     // Return it (marks as passed)
-    try Inst.apply(1, .{ .ret_safe = .{ .caller_refinements = &caller_refinements, .return_eidx = return_eidx, .src = 0 } }, &results, &ctx, &refinements);
+    try Inst.apply(2, .{ .ret_safe = .{ .caller_refinements = &caller_refinements, .return_eidx = return_eidx, .src = .{ .eidx = 0 } } }, &results, &ctx, &refinements);
 
     // onFinish should not error - allocation was passed to caller
     try MemorySafety.onFinish(&results, &ctx, &refinements);

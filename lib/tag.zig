@@ -7,13 +7,39 @@ const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 pub const analyses = .{ Undefined, MemorySafety };
 
+// Type
+
+/// This struct exists to propagate information from the AIR generator into
+/// the parameters of a instruction.  Some operations are expected to set
+/// the type based on interned information; in those cases, the type will be used.
+pub const Type = union(enum) {
+    scalar: void,
+    pointer: *Type,
+    optional: *Type,
+    region: *Type, // unused, for now, will represent slices (maybe)
+    @"struct": void, // unused, for now, temporarily void. Will be a slice of Simple.
+    @"union": void, // unused, for now, temporarily void. Will be a slice of Simple.
+    void: void,
+};
+
+/// Source reference for instructions - indicates where a value comes from.
+/// Used by store, br, ret_safe, and other tags that reference source values.
+pub const Src = union(enum) {
+    /// Runtime value from a result in the results table
+    eidx: usize,
+    /// Compile-time known value (interned in InternPool)
+    interned: Type,
+    /// Other sources (globals, etc.) - currently unimplemented
+    other: void,
+};
+
 // Tag payload types
 
 pub const Alloc = struct {
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        // Create the pointed-to scalar entity (the stack memory)
-        const pointee_idx = try refinements.appendEntity(.{ .scalar = .{} });
-        // Create pointer entity pointing to the scalar
+        // Create the pointed-to future entity (structure determined by first store)
+        const pointee_idx = try refinements.appendEntity(.{ .future = .{ .name = null } });
+        // Create pointer entity pointing to the future
         _ = try Inst.clobberInst(refinements, results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
         try splat(.alloc, results, index, ctx, refinements, self);
     }
@@ -23,9 +49,9 @@ pub const AllocCreate = struct {
     allocator_type: []const u8,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        // Create the pointed-to scalar entity (the allocated memory)
-        const pointee_idx = try refinements.appendEntity(.{ .scalar = .{} });
-        // Create pointer entity pointing to the scalar
+        // Create the pointed-to future entity (structure determined by first store)
+        const pointee_idx = try refinements.appendEntity(.{ .future = .{ .name = null } });
+        // Create pointer entity pointing to the future
         _ = try Inst.clobberInst(refinements, results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
         try splat(.alloc_create, results, index, ctx, refinements, self);
     }
@@ -79,21 +105,20 @@ pub const Arg = struct {
 };
 
 pub const Bitcast = struct {
-    /// Index into results[] array. `null` when source is a comptime value
-    /// (no instruction to trace), in which case we create a fresh scalar.
-    /// TODO: oWe MAY have to turn this into some sort of union if other bitcast-ing 
-    /// options are possible.
-    src: ?usize,
+    /// Source value being bitcast.
+    src: Src,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         // Share source instruction's entity (intraprocedural - no copy needed).
         // TODO: When we add analyte fields to pointer entities, we may need to
         // copy/merge analyte data from the source entity to the destination here.
-        if (self.src) |src| {
-            results[index].refinement = results[src].refinement;
-        } else {
-            // Comptime source - create fresh scalar
-            _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+        switch (self.src) {
+            .eidx => |src| results[index].refinement = results[src].refinement,
+            .interned, .other => {
+                // Comptime/global source - create fresh scalar
+                // TODO: use type info from .interned to determine structure
+                _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+            },
         }
         try splat(.bitcast, results, index, ctx, refinements, self);
     }
@@ -106,31 +131,40 @@ pub const Block = struct {
         _ = self;
         _ = ctx;
         // Block result is a future - will be filled in by br instruction
-        _ = try Inst.clobberInst(refinements, results, index, .{ .future = {} });
+        _ = try Inst.clobberInst(refinements, results, index, .{ .future = .{ .name = null } });
     }
 };
 
 /// Br (break) transfers control to a block, optionally carrying a value.
-/// - `break :blk value` → src is the instruction producing the value
-/// - `break :blk` (void) → src is null, block result is void
+/// - `break :blk value` → src is .eidx or .interned with the value
+/// - `break :blk` (void) → src is .interned with .void type
 pub const Br = struct {
     block: usize,
-    /// Index into results[] for the value being passed to the block.
-    /// Null for void breaks (no value passed).
-    src: ?usize,
+    /// Value being passed to the block.
+    src: Src,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         // Share source instruction's entity with block instruction (intraprocedural - no copy needed).
         // TODO: Need a way to merge types/analytes when multiple branches target the same block.
         // Currently we just overwrite, but we should union the analysis states.
-        if (self.src) |src| {
-            if (results[src].refinement) |src_idx| {
-                results[self.block].refinement = src_idx;
-            } else {
-                _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} });
-            }
-        } else {
-            _ = try Inst.clobberInst(refinements, results, self.block, .void);
+        switch (self.src) {
+            .eidx => |src| {
+                if (results[src].refinement) |src_idx| {
+                    results[self.block].refinement = src_idx;
+                } else {
+                    _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} });
+                }
+            },
+            .interned => |ty| {
+                // Comptime value - create refinement based on type
+                // TODO: use full type info to determine structure
+                if (ty == .void) {
+                    _ = try Inst.clobberInst(refinements, results, self.block, .void);
+                } else {
+                    _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} });
+                }
+            },
+            .other => _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} }),
         }
         try splat(.br, results, index, ctx, refinements, self);
     }
@@ -202,16 +236,18 @@ pub const Load = struct {
 /// The result shares the source's entity - unwrapping doesn't create a copy of the value,
 /// it just accesses what's already there.
 pub const OptionalPayload = struct {
-    /// Index into results[] array. Null when source is a comptime value
-    /// (no instruction to trace), in which case we create a fresh scalar.
-    src: ?usize,
+    /// Source optional being unwrapped.
+    src: Src,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         // Share source instruction's entity (intraprocedural - no copy needed)
-        if (self.src) |src| {
-            results[index].refinement = results[src].refinement;
-        } else {
-            _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+        switch (self.src) {
+            .eidx => |src| results[index].refinement = results[src].refinement,
+            .interned, .other => {
+                // Comptime/global source - create fresh scalar
+                // TODO: use type info from .interned to determine structure
+                _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+            },
         }
         try splat(.optional_payload, results, index, ctx, refinements, self);
     }
@@ -225,9 +261,8 @@ pub const OptionalPayload = struct {
 pub const RetSafe = struct {
     caller_refinements: ?*Refinements,
     return_eidx: EIdx,
-    /// Index into results[] array for the value being returned.
-    /// Null for void returns (function returns nothing).
-    src: ?usize,
+    /// Value being returned. Use .interned with .void for void returns.
+    src: Src,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         _ = try Inst.clobberInst(refinements, results, index, .void);
@@ -235,34 +270,63 @@ pub const RetSafe = struct {
         // Copy return value to caller's refinements
         if (self.caller_refinements) |caller_refinements| {
             const return_eidx = self.return_eidx;
-            if (self.src) |src| {
-                const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                if (refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
-                switch (caller_refinements.at(return_eidx).*) {
-                    .retval_future, .void => {
-                        // .void can be overwritten - it's from an error path return
-                        // Copy return value from callee to caller's return slot
-                        const new_idx = try refinements.at(src_idx).*.copy_to(refinements, caller_refinements);
-                        caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
-                    },
-                    else => {
-                        // With cond_br cloning caller_refinements per branch, this case
-                        // should only hit for multiple returns within the same branch.
-                        // For now, we keep the first return value (conservative: later
-                        // returns might have more refined analysis state).
-                    },
-                }
-            } else {
-                switch (caller_refinements.at(return_eidx).*) {
-                    .retval_future => caller_refinements.at(return_eidx).* = .void,
-                    .void => {},
-                    else => @panic("void function retval incorrectly set to some value"),
-                }
+            switch (self.src) {
+                .eidx => |src| {
+                    const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
+                    if (refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
+                    switch (caller_refinements.at(return_eidx).*) {
+                        .retval_future, .void => {
+                            // .void can be overwritten - it's from an error path return
+                            // Copy return value from callee to caller's return slot
+                            const new_idx = try refinements.at(src_idx).*.copy_to(refinements, caller_refinements);
+                            caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
+                        },
+                        else => {
+                            // With cond_br cloning caller_refinements per branch, this case
+                            // should only hit for multiple returns within the same branch.
+                            // For now, we keep the first return value (conservative: later
+                            // returns might have more refined analysis state).
+                        },
+                    }
+                },
+                .interned => |ty| {
+                    // Comptime return value
+                    if (ty == .void) {
+                        // Void return
+                        switch (caller_refinements.at(return_eidx).*) {
+                            .retval_future => caller_refinements.at(return_eidx).* = .void,
+                            .void => {},
+                            else => @panic("void function retval incorrectly set to some value"),
+                        }
+                    } else {
+                        // Non-void comptime value - create scalar for now
+                        // TODO: use type info to determine structure
+                        switch (caller_refinements.at(return_eidx).*) {
+                            .retval_future, .void => {
+                                caller_refinements.at(return_eidx).* = .{ .scalar = .{} };
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                .other => {
+                    // Global/other - create scalar for now
+                    switch (caller_refinements.at(return_eidx).*) {
+                        .retval_future, .void => {
+                            caller_refinements.at(return_eidx).* = .{ .scalar = .{} };
+                        },
+                        else => {},
+                    }
+                },
             }
         }
 
         // Splat runs last - analyses see state after copy is complete
         try splat(.ret_safe, results, index, ctx, refinements, self);
+
+        // Mark all futures as tombstoned - this path is exiting, so any
+        // unresolved futures won't be resolved by this branch.
+        refinements.tombstoneAllFutures();
     }
 };
 
@@ -292,15 +356,76 @@ pub const Store = struct {
     /// Index into results[] for the pointer being stored through.
     /// Null when storing to a global or constant pointer (interned value).
     ptr: ?usize,
-    /// Index into results[] for the value being stored.
-    /// Null when storing a comptime constant.
-    src: ?usize,
+    /// Source value being stored.
+    src: Src,
     is_undef: bool,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         _ = try Inst.clobberInst(refinements, results, index, .void);
+
+        // Transform .future pointee into actual structure based on src
+        var pending_var_name: ?[]const u8 = null;
+        var pointee_idx: ?Inst.EIdx = null;
+
+        if (self.ptr) |ptr| {
+            const ptr_idx = results[ptr].refinement orelse {
+                try splat(.store, results, index, ctx, refinements, self);
+                return;
+            };
+            if (refinements.at(ptr_idx).* != .pointer) {
+                try splat(.store, results, index, ctx, refinements, self);
+                return;
+            }
+            pointee_idx = refinements.at(ptr_idx).pointer.to;
+
+            if (refinements.at(pointee_idx.?).* == .future) {
+                // Extract pending var_name before transforming
+                pending_var_name = refinements.at(pointee_idx.?).future.name;
+
+                // Determine structure from src, or default to scalar
+                // Can't copy from .future or .retval_future, so default to scalar
+                const src_ref: Refinement = blk: {
+                    switch (self.src) {
+                        .eidx => |src| {
+                            if (results[src].refinement) |src_idx| {
+                                const ref = refinements.at(src_idx).*;
+                                if (ref != .future and ref != .retval_future) {
+                                    break :blk ref;
+                                }
+                            }
+                        },
+                        .interned => {
+                            // TODO: use type info to determine structure
+                        },
+                        .other => {},
+                    }
+                    break :blk .{ .scalar = .{} };
+                };
+                Refinement.clobber_structured_idx(pointee_idx.?, refinements, src_ref, refinements);
+            }
+        }
+
         // The ptr instruction's entity is unchanged - we only update the pointee's analysis state
         try splat(.store, results, index, ctx, refinements, self);
+
+        // Apply pending var_name to the undefined state if it was set
+        if (pending_var_name) |name| {
+            if (pointee_idx) |idx| {
+                switch (refinements.at(idx).*) {
+                    .scalar => |*s| if (s.undefined) |*u| switch (u.*) {
+                        .undefined => |*meta| meta.var_name = name,
+                        .inconsistent => |*meta| meta.var_name = name,
+                        .defined => {},
+                    },
+                    .pointer => |*p| if (p.analyte.undefined) |*u| switch (u.*) {
+                        .undefined => |*meta| meta.var_name = name,
+                        .inconsistent => |*meta| meta.var_name = name,
+                        .defined => {},
+                    },
+                    else => {},
+                }
+            }
+        }
     }
 };
 
@@ -308,16 +433,18 @@ pub const Store = struct {
 /// The result shares the source's entity - unwrapping doesn't create a copy of the value,
 /// it just accesses what's already there.
 pub const UnwrapErrunionPayload = struct {
-    /// Index into results[] array. Null when source is a comptime value
-    /// (no instruction to trace), in which case we create a fresh scalar.
-    src: ?usize,
+    /// Source error union being unwrapped.
+    src: Src,
 
     pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
         // Share source instruction's entity (intraprocedural - no copy needed)
-        if (self.src) |src| {
-            results[index].refinement = results[src].refinement;
-        } else {
-            _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+        switch (self.src) {
+            .eidx => |src| results[index].refinement = results[src].refinement,
+            .interned, .other => {
+                // Comptime/global source - create fresh scalar
+                // TODO: use type info from .interned to determine structure
+                _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+            },
         }
         try splat(.unwrap_errunion_payload, results, index, ctx, refinements, self);
     }
@@ -465,32 +592,27 @@ pub fn splatMerge(
         const false_ref = false_refinements.at(false_eidx.?).*;
         const true_is_future = true_ref == .future;
         const false_is_future = false_ref == .future;
-        const orig_ref = refinements.at(orig_eidx).*;
 
         if (true_is_future and false_is_future) {
             // Both are .future - nothing to merge, leave as .future
             continue;
         }
         if (true_is_future) {
-            // True branch didn't resolve (early return?), use false branch's value
-            if (orig_ref == .future) {
-                // For .future blocks, point directly to the resolved entity from the branch
-                // This avoids creating a copy (which would lose identity for allocation tracking)
-                result.refinement = false_eidx;
-            } else {
-                Refinement.clobber_structured_idx(orig_eidx, refinements, false_ref, false_refinements);
+            // True branch didn't resolve - must be tombstoned (early return)
+            if (!true_ref.future.tombstoned) {
+                @panic("merging non-tombstoned future with resolved value - branch didn't return but also didn't resolve the future");
             }
+            // Use false branch's value since true branch exited
+            result.refinement = false_eidx;
             continue;
         }
         if (false_is_future) {
-            // False branch didn't resolve (early return?), use true branch's value
-            if (orig_ref == .future) {
-                // For .future blocks, point directly to the resolved entity from the branch
-                // This avoids creating a copy (which would lose identity for allocation tracking)
-                result.refinement = true_eidx;
-            } else {
-                Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
+            // False branch didn't resolve - must be tombstoned (early return)
+            if (!false_ref.future.tombstoned) {
+                @panic("merging non-tombstoned future with resolved value - branch didn't return but also didn't resolve the future");
             }
+            // Use true branch's value since false branch exited
+            result.refinement = true_eidx;
             continue;
         }
 

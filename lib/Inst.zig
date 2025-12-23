@@ -140,16 +140,10 @@ fn mergeCallerReturn(
                     );
                 }
             }
-        } else if (true_set) {
-            // Only true branch returned
-            const true_idx = try true_return.*.copy_to(true_cp, caller_refinements);
-            orig_return.* = caller_refinements.at(true_idx).*;
-        } else if (false_set) {
-            // Only false branch returned
-            const false_idx = try false_return.*.copy_to(false_cp, caller_refinements);
-            orig_return.* = caller_refinements.at(false_idx).*;
         }
-        // else: neither branch returned, leave as retval_future
+        // If only one branch returned (early return), don't copy it.
+        // The other branch continues to code after cond_br, which will set its own return.
+        // If neither branch returned, leave as retval_future.
     }
 }
 
@@ -265,7 +259,7 @@ pub fn assertAllValid(refinements: *Refinements, results: []const Inst) void {
 // Tests
 // =============================================================================
 
-test "alloc sets state to undefined" {
+test "alloc creates pointer to future" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -285,13 +279,11 @@ test "alloc sets state to undefined" {
     // dbg_stmt sets instruction to void (no analysis tracking)
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(results[0].get(&refinements).*));
-    // alloc creates pointer; the pointee is marked undefined
+    // alloc creates pointer; the pointee is .future (structure determined by first store)
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(results[1].get(&refinements).*));
     const pointee_idx = results[1].get(&refinements).pointer.to;
-    const analyte = &refinements.at(pointee_idx).scalar;
-    try std.testing.expect(analyte.undefined != null);
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(analyte.undefined.?));
+    try std.testing.expectEqual(.future, std.meta.activeTag(refinements.at(pointee_idx).*));
     // uninitialized instruction has no refinement yet
     try std.testing.expectEqual(null, results[2].refinement);
 }
@@ -311,7 +303,7 @@ test "store_safe with undef keeps state undefined" {
     defer clear_results_list(results, allocator);
 
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
-    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = true } }, results, &ctx, &refinements);
+    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } }, results, &ctx, &refinements);
 
     // alloc's pointee stays undefined after store_safe with undef
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -334,7 +326,7 @@ test "store_safe with value sets state to defined" {
     defer clear_results_list(results, allocator);
 
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
-    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, results, &ctx, &refinements);
+    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, results, &ctx, &refinements);
 
     // alloc's pointee becomes defined after store_safe with real value
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -353,14 +345,15 @@ test "load from undefined instruction reports use before assign" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 3);
+    const results = make_results_list(allocator, 4);
     defer clear_results_list(results, allocator);
 
-    // Set up: alloc creates undefined instruction
+    // Set up: alloc creates pointer to future, store with is_undef transforms to scalar+undefined
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
+    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } }, results, &ctx, &refinements);
 
     // Load from undefined instruction should return error
-    try std.testing.expectError(error.UseBeforeAssign, Inst.apply(2, .{ .load = .{ .ptr = 1 } }, results, &ctx, &refinements));
+    try std.testing.expectError(error.UseBeforeAssign, Inst.apply(3, .{ .load = .{ .ptr = 1 } }, results, &ctx, &refinements));
 }
 
 test "load from defined instruction does not report error" {
@@ -379,7 +372,7 @@ test "load from defined instruction does not report error" {
 
     // Set up: alloc then store a real value
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
-    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, results, &ctx, &refinements);
+    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, results, &ctx, &refinements);
 
     // Load from defined instruction should NOT return error
     try Inst.apply(3, .{ .load = .{ .ptr = 1 } }, results, &ctx, &refinements);
@@ -402,7 +395,7 @@ test "all instructions get valid refinements after operations" {
     // Apply various operations that should all set refinements
     try Inst.apply(0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } }, results, &ctx, &refinements);
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
-    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, results, &ctx, &refinements);
+    try Inst.apply(2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, results, &ctx, &refinements);
     try Inst.apply(3, .{ .load = .{ .ptr = 1 } }, results, &ctx, &refinements);
     try Inst.apply(4, .{ .block = .{} }, results, &ctx, &refinements);
 
@@ -435,13 +428,13 @@ test "ret_safe copies scalar return value to caller_refinements" {
 
     // In callee: allocate and store a value
     try Inst.apply(0, .{ .alloc = .{} }, callee_results, &ctx, &callee_refinements);
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, callee_results, &ctx, &callee_refinements);
+    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, callee_results, &ctx, &callee_refinements);
 
     // Return the value from instruction 0
     try Inst.apply(2, .{ .ret_safe = .{
         .caller_refinements = &caller_refinements,
         .return_eidx = return_eidx,
-        .src = 0,
+        .src = .{ .eidx = 0 },
     } }, callee_results, &ctx, &callee_refinements);
 
     // Verify return entity in caller's refinements is now a pointer
@@ -468,11 +461,11 @@ test "ret_safe with null src sets caller return to void" {
     defer caller_refinements.deinit();
     const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
-    // Return void (src = null)
+    // Return void
     try Inst.apply(0, .{ .ret_safe = .{
         .caller_refinements = &caller_refinements,
         .return_eidx = return_eidx,
-        .src = null,
+        .src = .{ .interned = .{ .void = {} } },
     } }, callee_results, &ctx, &callee_refinements);
 
     // Verify return entity in caller's refinements is now void
@@ -495,14 +488,14 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
 
     // Allocate a value
     try Inst.apply(0, .{ .alloc = .{} }, results, &ctx, &refinements);
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = false } }, results, &ctx, &refinements);
+    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, results, &ctx, &refinements);
 
     // Return with null caller_refinements (entrypoint case) - should just succeed without error
     try Inst.apply(1, .{
         .ret_safe = .{
             .caller_refinements = null,
             .return_eidx = 0, // doesn't matter when caller_refinements is null
-            .src = 0,
+            .src = .{ .eidx = 0 },
         },
     }, results, &ctx, &refinements);
 }

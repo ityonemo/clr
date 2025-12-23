@@ -33,10 +33,10 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store, .store_safe => payloadStore(arena, ip, datum),
         .load => payloadLoad(arena, datum),
-        .ret_safe => payloadRetSafe(arena, datum),
+        .ret_safe => payloadRetSafe(arena, ip, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
-        .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, datum),
-        .br => payloadBr(arena, datum),
+        .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
+        .br => payloadBr(arena, ip, datum),
         else => ".{}",
     };
 }
@@ -44,20 +44,19 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
 /// Payload for operations that transfer all properties from source to result.
 /// Used for bitcast, unwrap_errunion_payload, etc. where the result carries
 /// the same memory safety / allocation state as the source.
-fn payloadTransferOp(arena: std.mem.Allocator, datum: Data) []const u8 {
+fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
-    const src: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(arena, ".{{ .src = {?d} }}", .{src}, null);
+    const src_str = srcString(arena, ip, operand);
+    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
 /// Payload for br (branch to block with value).
 /// Transfers properties from operand to target block.
-fn payloadBr(arena: std.mem.Allocator, datum: Data) []const u8 {
+fn payloadBr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const block_inst = @intFromEnum(datum.br.block_inst);
     const operand = datum.br.operand;
-    // Handle .none case explicitly - toIndex() asserts on .none
-    const src: ?usize = if (operand == .none) null else if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {?d} }}", .{ block_inst, src }, null);
+    const src_str = srcString(arena, ip, operand);
+    return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {s} }}", .{ block_inst, src_str }, null);
 }
 
 /// Generate a single inst line for a given tag and data.
@@ -125,12 +124,37 @@ fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
     }, null);
 }
 
+/// Convert an AIR Ref to a Src union string.
+/// Handles .eidx (runtime instruction), .interned (comptime), and .other (globals).
+fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const u8 {
+    // Check for .none first (void/no value)
+    if (ref == .none) {
+        return ".{ .interned = .{ .void = {} } }";
+    }
+    if (ref.toIndex()) |idx| {
+        // Runtime value from instruction
+        return clr_allocator.allocPrint(arena, ".{{ .eidx = {d} }}", .{@intFromEnum(idx)}, null);
+    }
+    if (ref.toInterned()) |interned_idx| {
+        // Comptime value - check if it's void
+        const ty = ip.typeOf(interned_idx);
+        if (ty == .void_type) {
+            return ".{ .interned = .{ .void = {} } }";
+        }
+        // For now, treat all non-void interned values as scalar
+        // TODO: inspect interned type to determine actual structure
+        return ".{ .interned = .{ .scalar = {} } }";
+    }
+    // Other (globals, etc.)
+    return ".{ .other = {} }";
+}
+
 fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(ip, datum.bin_op.rhs);
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
-    const src: ?usize = if (datum.bin_op.rhs.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {?d}, .is_undef = {} }}", .{ ptr, src, is_undef }, null);
+    const src_str = srcString(arena, ip, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {s}, .is_undef = {} }}", .{ ptr, src_str, is_undef }, null);
 }
 
 fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -147,10 +171,9 @@ fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
     }
 }
 
-fn payloadRetSafe(arena: std.mem.Allocator, datum: Data) []const u8 {
-    const operand_index = datum.un_op.toIndex() orelse return ".{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = null }";
-    const src = @intFromEnum(operand_index);
-    return clr_allocator.allocPrint(arena, ".{{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = {d} }}", .{src}, null);
+fn payloadRetSafe(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const src_str = srcString(arena, ip, datum.un_op);
+    return clr_allocator.allocPrint(arena, ".{{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = {s} }}", .{src_str}, null);
 }
 
 fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {

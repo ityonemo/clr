@@ -52,19 +52,21 @@ pub const Undefined = union(enum) {
     }
 
     pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
+        _ = results;
+        _ = index;
+        _ = ctx;
+        _ = refinements;
         _ = params;
-        // Inst contains .pointer = Indirected, get the pointee
-        const ptr_idx = results[index].refinement.?;
-        const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        refinements.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Pointee starts as .future - undefined state is set when store transforms it
     }
 
     pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
+        _ = results;
+        _ = index;
+        _ = ctx;
+        _ = refinements;
         _ = params;
-        // Inst contains .pointer = Indirected, get the pointee
-        const ptr_idx = results[index].refinement.?;
-        const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        refinements.at(pointee_idx).scalar.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+        // Pointee starts as .future - undefined state is set when store transforms it
     }
 
     pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
@@ -126,6 +128,7 @@ pub const Undefined = union(enum) {
                 }
             },
             .optional, .region, .@"struct", .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
+            .future => @panic("load: pointee is .future - was never stored to"),
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
         }
@@ -161,6 +164,7 @@ pub const Undefined = union(enum) {
                     .defined => {},
                 }
             },
+            .future => |*f| f.name = params.name, // Store name for when store transforms the future
             .unimplemented => {},
             else => @panic("unexpected refinement type in dbg_var_ptr (pointee)"),
         }
@@ -274,7 +278,7 @@ fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Disc
     return ctx;
 }
 
-test "alloc sets undefined state" {
+test "alloc creates pointer to future" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -287,19 +291,15 @@ test "alloc sets undefined state" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    // Use Inst.apply which calls tag.Alloc.apply (creates pointer) then Undefined.alloc
+    // Use Inst.apply which calls tag.Alloc.apply (creates pointer to future)
     try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
 
-    // alloc creates pointer; undefined state is on the pointee
+    // alloc creates pointer; pointee is .future (structure determined by first store)
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    const undef = refinements.at(pointee_idx).scalar.undefined.?;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
-    try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
-    try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
-    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.meta.column);
+    try std.testing.expectEqual(.future, std.meta.activeTag(refinements.at(pointee_idx).*));
 }
 
-test "alloc_create sets undefined state" {
+test "alloc_create creates pointer to future" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -312,16 +312,12 @@ test "alloc_create sets undefined state" {
 
     var results = [_]Inst{.{}} ** 3;
 
-    // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer) then Undefined.alloc_create
+    // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer to future)
     try Inst.apply(1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
 
-    // alloc_create creates pointer; undefined state is on the pointee
+    // alloc_create creates pointer; pointee is .future (structure determined by first store)
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    const undef = refinements.at(pointee_idx).scalar.undefined.?;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
-    try std.testing.expectEqualStrings("test.zig", undef.undefined.meta.file);
-    try std.testing.expectEqual(@as(u32, 10), undef.undefined.meta.line);
-    try std.testing.expectEqual(@as(?u32, 5), undef.undefined.meta.column);
+    try std.testing.expectEqual(.future, std.meta.activeTag(refinements.at(pointee_idx).*));
 }
 
 test "store with is_undef=true sets undefined" {
@@ -339,7 +335,7 @@ test "store with is_undef=true sets undefined" {
 
     // First alloc at instruction 1, then store with is_undef=true
     try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
-    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = true } }, &results, &ctx, &refinements);
+    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } }, &results, &ctx, &refinements);
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -362,7 +358,7 @@ test "store with is_undef=false sets defined" {
 
     // First alloc at instruction 1, then store with is_undef=false
     try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
-    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = null, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;

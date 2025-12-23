@@ -1,11 +1,14 @@
 const std = @import("std");
 const Context = @import("Context.zig");
+const Inst = @import("Inst.zig");
 const Refinements = @import("Refinements.zig");
-const EIdx = @import("Inst.zig").EIdx;
+const Refinement = Refinements.Refinement;
+const EIdx = Inst.EIdx;
 
 /// Debug function to dump analysis state at any point.
-/// Call as: clr.dump(ctx, &refinements, caller_refinements, return_eidx);
+/// Call as: clr.dump(results, ctx, &refinements, caller_refinements, return_eidx);
 pub fn dump(
+    results: []Inst,
     ctx: *Context,
     refinements: *Refinements,
     caller_refinements: ?*Refinements,
@@ -38,16 +41,18 @@ pub fn dump(
     const ret_msg = std.fmt.bufPrint(&buf, "Return EIdx: {d}\n", .{return_eidx}) catch "Return EIdx: <format error>\n";
     writer.writeAll(ret_msg) catch {};
 
-    // Local refinements
-    const ref_msg = std.fmt.bufPrint(&buf, "Refinements ({d} entities):\n", .{refinements.list.items.len}) catch "Refinements: <format error>\n";
-    writer.writeAll(ref_msg) catch {};
-    dumpRefinementsList(writer, &buf, refinements, "  ");
+    // Instruction results
+    const inst_msg = std.fmt.bufPrint(&buf, "Instruction Results ({d} instructions):\n", .{results.len}) catch "Instructions: <format error>\n";
+    writer.writeAll(inst_msg) catch {};
+    dumpInstructionResults(writer, results, refinements, "  ");
 
     // Caller refinements
     if (caller_refinements) |cp| {
-        const cp_msg = std.fmt.bufPrint(&buf, "Caller Refinements ({d} entities):\n", .{cp.list.items.len}) catch "Caller Refinements: <format error>\n";
-        writer.writeAll(cp_msg) catch {};
-        dumpRefinementsList(writer, &buf, cp, "  ");
+        writer.writeAll("Caller Return Slot:\n") catch {};
+        var desc_buf: [2048]u8 = undefined;
+        const desc = formatRefinementDeep(&desc_buf, cp.at(return_eidx).*, cp, 0);
+        const line = std.fmt.bufPrint(&buf, "  [{d}] {s}\n", .{ return_eidx, desc }) catch "  <format error>\n";
+        writer.writeAll(line) catch {};
     } else {
         writer.writeAll("Caller Refinements: null (entrypoint)\n") catch {};
     }
@@ -55,27 +60,60 @@ pub fn dump(
     writer.writeAll("===== END DEBUG DUMP =====\n\n") catch {};
 }
 
-fn dumpRefinementsList(writer: *std.Io.Writer, buf: []u8, refinements: *Refinements, prefix: []const u8) void {
-    for (refinements.list.items, 0..) |ref, i| {
-        const ref_str = formatRefinement(buf, ref);
-        const line = std.fmt.bufPrint(buf[ref_str.len..], "{s}[{d}] {s}\n", .{ prefix, i, ref_str }) catch continue;
-        writer.writeAll(line) catch {};
+fn dumpInstructionResults(writer: *std.Io.Writer, results: []Inst, refinements: *Refinements, prefix: []const u8) void {
+    var desc_buf: [2048]u8 = undefined;
+    var line_buf: [4096]u8 = undefined;
+
+    for (results, 0..) |inst, i| {
+        if (inst.refinement) |eidx| {
+            const ref = refinements.at(eidx);
+            const desc = formatRefinementDeep(&desc_buf, ref.*, refinements, 0);
+            const line = std.fmt.bufPrint(&line_buf, "{s}[{d}] → {s}\n", .{ prefix, i, desc }) catch continue;
+            writer.writeAll(line) catch {};
+        } else {
+            const line = std.fmt.bufPrint(&line_buf, "{s}[{d}] → (uninitialized)\n", .{ prefix, i }) catch continue;
+            writer.writeAll(line) catch {};
+        }
     }
 }
 
-fn formatRefinement(buf: []u8, ref: Refinements.Refinement) []const u8 {
+fn formatRefinementDeep(buf: []u8, ref: Refinement, refinements: *Refinements, depth: usize) []const u8 {
+    if (depth > 10) return "<max depth>";
+
     return switch (ref) {
         .scalar => |s| std.fmt.bufPrint(buf, "scalar(undef={s}, mem={s})", .{
             formatUndefined(s.undefined),
             formatMemSafety(s.memory_safety),
         }) catch "scalar(?)",
-        .pointer => |p| std.fmt.bufPrint(buf, "pointer(to={d}, undef={s}, mem={s})", .{
-            p.to,
-            formatUndefined(p.analyte.undefined),
-            formatMemSafety(p.analyte.memory_safety),
-        }) catch "pointer(?)",
-        .optional => |o| std.fmt.bufPrint(buf, "optional(to={d})", .{o.to}) catch "optional(?)",
-        .region => |r| std.fmt.bufPrint(buf, "region(to={d})", .{r.to}) catch "region(?)",
+        .pointer => |p| blk: {
+            var inner_buf: [1024]u8 = undefined;
+            const pointee = refinements.at(p.to);
+            const pointee_desc = formatRefinementDeep(&inner_buf, pointee.*, refinements, depth + 1);
+            const result = std.fmt.bufPrint(buf, "pointer(undef={s}, mem={s}) → {s}", .{
+                formatUndefined(p.analyte.undefined),
+                formatMemSafety(p.analyte.memory_safety),
+                pointee_desc,
+            }) catch "pointer(?)";
+            break :blk result;
+        },
+        .optional => |o| blk: {
+            var inner_buf: [1024]u8 = undefined;
+            const payload = refinements.at(o.to);
+            const payload_desc = formatRefinementDeep(&inner_buf, payload.*, refinements, depth + 1);
+            const result = std.fmt.bufPrint(buf, "optional(undef={s}, mem={s}) → {s}", .{
+                formatUndefined(o.analyte.undefined),
+                formatMemSafety(o.analyte.memory_safety),
+                payload_desc,
+            }) catch "optional(?)";
+            break :blk result;
+        },
+        .region => |r| blk: {
+            var inner_buf: [1024]u8 = undefined;
+            const inner = refinements.at(r.to);
+            const inner_desc = formatRefinementDeep(&inner_buf, inner.*, refinements, depth + 1);
+            const result = std.fmt.bufPrint(buf, "region → {s}", .{inner_desc}) catch "region(?)";
+            break :blk result;
+        },
         .@"struct" => "struct",
         .@"union" => "union",
         .retval_future => "retval_future",
@@ -90,7 +128,7 @@ fn formatUndefined(undef: ?@import("analysis/undefined.zig").Undefined) []const 
         return switch (u) {
             .undefined => "UNDEF",
             .defined => "defined",
-            .conflicting_branch => "CONFLICT",
+            .inconsistent => "CONFLICT",
         };
     }
     return "null";
@@ -101,6 +139,7 @@ fn formatMemSafety(ms: ?@import("analysis/memory_safety.zig").MemorySafety) []co
         return switch (m) {
             .allocation => |a| if (a.freed != null) "freed" else "allocated",
             .stack_ptr => "stack_ptr",
+            else => "OTHER",
         };
     }
     return "null";

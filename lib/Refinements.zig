@@ -15,15 +15,25 @@ pub const Refinement = union(enum) {
         to: EIdx,
     };
 
+    /// this special-case for values which will contain a refinement type, but it isn't set at this
+    /// particular point in time.  Note that the structure of the refinement cannot be derived from 
+    /// zig's compiler type, since for example a "usize" might *actually* be a pointer, and should
+    /// be treated as a pointer in refinements.
+    pub const Future = struct {
+        /// null if it is anonymous, otherwise contains the variable name.
+        name: ?[]const u8,
+        /// if the future gets cancelled due to an early return, we set this to true.
+        tombstoned: bool = false,
+    };
+
     scalar: Analyte,
     pointer: Indirected,
     optional: Indirected,
     region: Indirected, // unused, for now, will represent slices (maybe)
     @"struct": void, // unused, for now, temporarily void. Will be a slice of EIdx.
     @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
-    retval_future: void, // special-case for retval slots before a return has been called.
-    future: void, // this special-case for values which will contain a refinement type, but it isn't set at this
-    // particular point in time.
+    future: Future,
+    retval_future: void, // special-case for retvals before a return has been called.
     unimplemented: void, // this means we have an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
 
@@ -98,7 +108,7 @@ pub const Refinement = union(enum) {
             .@"union" => .{ .@"union" = {} },
             .unimplemented => .{ .unimplemented = {} },
             .void => .{ .void = {} },
-            .future => @panic("cannot copy from .future"),
+            .future => |name| .{ .future = name }, // Preserve future (uninitialized slot)
             .retval_future => @panic("cannot copy from .retval_future"),
         };
         // Now safe to get pointer and assign
@@ -131,7 +141,7 @@ pub const Refinement = union(enum) {
             .pointer => try src.copy_to_indirected(src_list, dst_list, .pointer),
             .optional => try src.copy_to_indirected(src_list, dst_list, .optional),
             .retval_future => @panic("cannot copy from .retval_future"),
-            .future => @panic("cannot copy from .future"),
+            .future => |name| try dst_list.appendEntity(.{ .future = name }), // Copy future as-is (uninitialized slot)
             .region => try src.copy_to_indirected(src_list, dst_list, .region),
             .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copy_to_fields(src_list, dst_list, .@"union"),
@@ -193,4 +203,14 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     var new = Refinements.init(allocator);
     try new.list.appendSlice(self.list.items);
     return new;
+}
+
+/// Mark all futures as tombstoned. Called on ret_safe to indicate
+/// that this execution path exited and won't resolve its futures.
+pub fn tombstoneAllFutures(self: *Refinements) void {
+    for (self.list.items) |*item| {
+        if (item.* == .future) {
+            item.future.tombstoned = true;
+        }
+    }
 }
