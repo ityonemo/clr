@@ -51,3 +51,14 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value" ]]
 }
+
+@test "no error when both branches set value" {
+    run compile_and_run "$TEST_CASES/undefined/if/both_branches_set.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined when neither branch sets value" {
+    run compile_and_run "$TEST_CASES/undefined/if/neither_branch_sets.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value" ]] || [[ "$output" =~ "may be undefined" ]]
+}
