@@ -60,11 +60,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
-@test "detects undefined when neither branch sets value" {
-    run compile_and_run "$TEST_CASES/undefined/if/neither_branch_sets.zig"
+@test "detects undefined when both branches set to undefined" {
+    run compile_and_run "$TEST_CASES/undefined/if/both_branches_unset.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use of undefined value found in neither_branch_sets.main" ]]
-    [[ "$output" =~ "neither_branch_sets.zig:12:4)" ]]
-    [[ "$output" =~ "undefined value assigned to 'x' in neither_branch_sets.main" ]]
-    [[ "$output" =~ "neither_branch_sets.zig:2:4)" ]]
+    [[ "$output" =~ "use of undefined value found in both_branches_unset.main" ]]
+    [[ "$output" =~ "both_branches_unset.zig:11:4)" ]]
+    [[ "$output" =~ "undefined value assigned in both_branches_unset.main" ]]
+    [[ "$output" =~ "both_branches_unset.zig:6:8)" ]]
 }
