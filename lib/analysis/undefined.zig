@@ -91,7 +91,12 @@ pub const Undefined = union(enum) {
         switch (refinements.at(pointee_idx).*) {
             .scalar => |*s| s.undefined = undef_state,
             .pointer => |*p| p.analyte.undefined = undef_state,
-            .optional, .region, .@"struct", .@"union" => @panic("store: pointee is compound type - undefined tracking not yet implemented"),
+            .optional => |*opt| {
+                // For optionals, set undefined state on the analyte (the optional itself)
+                // The inner value's undefined state is separate
+                opt.analyte.undefined = undef_state;
+            },
+            .region, .@"struct", .@"union" => @panic("store: pointee is compound type - undefined tracking not yet implemented"),
             .unimplemented => @panic("store: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("store: unexpected pointee type {s}", .{@tagName(t)}),
         }
@@ -121,10 +126,10 @@ pub const Undefined = union(enum) {
                     },
                 }
             },
-            .pointer => |p| {
-                // undefined is null when pointer wasn't allocated through our tracked mechanisms.
+            .pointer, .optional => |ind| {
+                // undefined is null when pointer/optional wasn't allocated through our tracked mechanisms.
                 // No undefined tracking available - skip.
-                const undef = p.analyte.undefined orelse return;
+                const undef = ind.analyte.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -135,7 +140,7 @@ pub const Undefined = union(enum) {
                     },
                 }
             },
-            .optional, .region, .@"struct", .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
+            .region, .@"struct", .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
             .future => @panic("load: pointee is .future - was never stored to"),
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
@@ -168,9 +173,9 @@ pub const Undefined = union(enum) {
                     .defined => {},
                 }
             },
-            .pointer => |*p| {
-                // undefined is null when pointer wasn't tracked - nothing to name
-                const undef = &(p.analyte.undefined orelse return);
+            .pointer, .optional => |*ind| {
+                // undefined is null when pointer/optional wasn't tracked - nothing to name
+                const undef = &(ind.analyte.undefined orelse return);
                 switch (undef.*) {
                     .undefined => |*meta| meta.var_name = params.name,
                     .inconsistent => |*meta| meta.var_name = params.name,
@@ -403,6 +408,33 @@ test "store with is_undef=false sets defined" {
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
     const undef = refinements.at(pointee_idx).scalar.undefined.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
+}
+
+test "store with .null type creates optional refinement with defined inner scalar" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+
+    // Alloc at instruction 1, then store null (which has .null type with scalar child)
+    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    // .null = &.{ .scalar = {} } should create .optional refinement with defined inner scalar
+    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } }, .is_undef = false } }, &results, &ctx, &refinements);
+
+    // Check the pointee is now an optional
+    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
+    try std.testing.expectEqual(.optional, std.meta.activeTag(refinements.at(pointee_idx).*));
+
+    // Check the optional's inner value is a defined scalar
+    const inner_idx = refinements.at(pointee_idx).optional.to;
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(inner_idx).*));
 }
 
 // TODO: Interprocedural tests disabled during entity system refactoring.

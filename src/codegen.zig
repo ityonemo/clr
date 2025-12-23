@@ -136,17 +136,92 @@ fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const 
         return clr_allocator.allocPrint(arena, ".{{ .eidx = {d} }}", .{@intFromEnum(idx)}, null);
     }
     if (ref.toInterned()) |interned_idx| {
-        // Comptime value - check if it's void
-        const ty = ip.typeOf(interned_idx);
-        if (ty == .void_type) {
-            return ".{ .interned = .{ .void = {} } }";
+        // Check for null value first (untyped null)
+        if (interned_idx == .null_value) {
+            return ".{ .interned = .{ .null = {} } }";
         }
-        // For now, treat all non-void interned values as scalar
-        // TODO: inspect interned type to determine actual structure
-        return ".{ .interned = .{ .scalar = {} } }";
+        // Comptime value - determine structure from type
+        const ty = ip.typeOf(interned_idx);
+        // Check for typed null only if type is NOT a well-known type (to avoid IP lookup in tests)
+        if (!isWellKnownType(ty)) {
+            const type_key = ip.indexToKey(ty);
+            if (type_key == .opt_type) {
+                // It's an optional type - check if the value is null
+                const val_key = ip.indexToKey(interned_idx);
+                if (val_key == .opt and val_key.opt.val == .none) {
+                    // Include the child type so we know the structure even for null
+                    const child_str = typeToString(arena, ip, type_key.opt_type);
+                    return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .null = &{s} }} }}", .{child_str}, null);
+                }
+            }
+        }
+        const type_str = typeToString(arena, ip, ty);
+        return clr_allocator.allocPrint(arena, ".{{ .interned = {s} }}", .{type_str}, null);
     }
     // Other (globals, etc.)
     return ".{ .other = {} }";
+}
+
+/// Check if a type index is a well-known type (doesn't require InternPool lookup).
+fn isWellKnownType(ty: InternPool.Index) bool {
+    return switch (ty) {
+        .void_type, .noreturn_type, .none => true,
+        .u8_type, .u16_type, .u32_type, .u64_type, .u128_type, .usize_type => true,
+        .i8_type, .i16_type, .i32_type, .i64_type, .i128_type, .isize_type => true,
+        .f16_type, .f32_type, .f64_type, .f80_type, .f128_type => true,
+        .bool_type, .c_char_type, .comptime_int_type, .comptime_float_type => true,
+        .undefined_type, .null_type, .anyerror_type, .type_type => true,
+        .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => true,
+        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => true,
+        else => false,
+    };
+}
+
+/// Convert an InternPool type to a Type union string.
+/// Recursively handles nested types like pointers and optionals.
+fn typeToString(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
+    // Handle well-known type indices first (no InternPool lookup needed)
+    return switch (ty) {
+        .void_type => ".{ .void = {} }",
+        .noreturn_type => ".{ .void = {} }",
+        .none => ".{ .scalar = {} }",
+        // Common scalar types
+        .u8_type, .u16_type, .u32_type, .u64_type, .u128_type, .usize_type => ".{ .scalar = {} }",
+        .i8_type, .i16_type, .i32_type, .i64_type, .i128_type, .isize_type => ".{ .scalar = {} }",
+        .f16_type, .f32_type, .f64_type, .f80_type, .f128_type => ".{ .scalar = {} }",
+        .bool_type, .c_char_type, .comptime_int_type, .comptime_float_type => ".{ .scalar = {} }",
+        .undefined_type, .null_type, .anyerror_type, .type_type => ".{ .scalar = {} }",
+        // Pointer types (well-known)
+        .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => ".{ .pointer = &.{ .scalar = {} } }",
+        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => ".{ .pointer = &.{ .scalar = {} } }",
+        // For other types, need to look up in InternPool
+        else => typeToStringLookup(arena, ip, ty),
+    };
+}
+
+/// Look up a non-well-known type in the InternPool.
+fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
+    const type_key = ip.indexToKey(ty);
+    return switch (type_key) {
+        .simple_type => |simple| switch (simple) {
+            .void => ".{ .void = {} }",
+            .noreturn => ".{ .void = {} }",
+            else => ".{ .scalar = {} }",
+        },
+        .ptr_type => |ptr| {
+            const child_str = typeToString(arena, ip, ptr.child);
+            return clr_allocator.allocPrint(arena, ".{{ .pointer = &{s} }}", .{child_str}, null);
+        },
+        .opt_type => |child| {
+            // opt_type payload is the child type directly (not a struct with .child)
+            const child_str = typeToString(arena, ip, child);
+            return clr_allocator.allocPrint(arena, ".{{ .optional = &{s} }}", .{child_str}, null);
+        },
+        .struct_type => ".{ .@\"struct\" = {} }",
+        .union_type => ".{ .@\"union\" = {} }",
+        // All other types treated as scalar (int, float, array, enum, etc.)
+        else => ".{ .scalar = {} }",
+    };
 }
 
 fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
@@ -660,6 +735,7 @@ const FunctionGen = union(enum) {
             , .{}, null),
             .sub => clr_allocator.allocPrint(arena,
                 \\}}
+                \\
                 \\
             , .{}, null),
         };

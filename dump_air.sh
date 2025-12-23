@@ -11,4 +11,8 @@ SOURCE_FILE="$1"
 FUNCTION_NAME="$2"
 NUM_LINES="${3:-40}"
 
-zig/zig-out/bin/zig build-exe -ofmt=air "$SOURCE_FILE" 2>&1 | grep -A "$NUM_LINES" "# Begin Function AIR: $FUNCTION_NAME"
+# Get basename without extension and prepend to function name
+BASENAME=$(basename "$SOURCE_FILE" .zig)
+FULL_FUNCTION_NAME="${BASENAME}.${FUNCTION_NAME}"
+
+zig/zig-out/bin/zig build-exe --verbose-air "$SOURCE_FILE" 2>&1 | grep -A "$NUM_LINES" "# Begin Function AIR: $FULL_FUNCTION_NAME"

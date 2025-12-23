@@ -14,9 +14,10 @@ pub const analyses = .{ Undefined, MemorySafety };
 /// the type based on interned information; in those cases, the type will be used.
 pub const Type = union(enum) {
     scalar: void,
-    pointer: *Type,
-    optional: *Type,
-    region: *Type, // unused, for now, will represent slices (maybe)
+    pointer: *const Type,
+    optional: *const Type,
+    null: *const Type, // used to signal that an optional is being set to null.
+    region: *const Type, // unused, for now, will represent slices (maybe)
     @"struct": void, // unused, for now, temporarily void. Will be a slice of Simple.
     @"union": void, // unused, for now, temporarily void. Will be a slice of Simple.
     void: void,
@@ -32,6 +33,35 @@ pub const Src = union(enum) {
     /// Other sources (globals, etc.) - currently unimplemented
     other: void,
 };
+
+/// Convert a Type (from codegen) to a Refinement.
+/// Used when storing interned values to determine the refinement structure.
+/// Note: .null types are converted to .optional refinements since null is a valid defined value.
+fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
+    return switch (ty) {
+        .scalar => .{ .scalar = .{} },
+        .void => .void,
+        .pointer => |child| {
+            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_idx = try refinements.appendEntity(child_ref);
+            return .{ .pointer = .{ .analyte = .{}, .to = child_idx } };
+        },
+        .optional, .null => |child| {
+            // Both .optional and .null create an .optional refinement
+            // .null is just a null optional value - still has the same structure
+            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_idx = try refinements.appendEntity(child_ref);
+            return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
+        },
+        .region => |child| {
+            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_idx = try refinements.appendEntity(child_ref);
+            return .{ .region = .{ .analyte = .{}, .to = child_idx } };
+        },
+        .@"struct" => .{ .@"struct" = {} },
+        .@"union" => .{ .@"union" = {} },
+    };
+}
 
 // Tag payload types
 
@@ -392,8 +422,9 @@ pub const Store = struct {
                                 }
                             }
                         },
-                        .interned => {
-                            // TODO: use type info to determine structure
+                        .interned => |ty| {
+                            // Use type info to determine structure
+                            break :blk try typeToRefinement(ty, refinements);
                         },
                         .other => {},
                     }

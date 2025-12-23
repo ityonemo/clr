@@ -2,6 +2,17 @@
 
 ## Currently Not Implemented, But Planned
 
+### Large Return Value Tracking (ret_load, ret_ptr)
+
+Functions that return large values (structs, arrays) use `ret_load` or `ret_ptr` instructions instead of `ret_safe`. These instructions handle returns where the value is returned via a pointer to caller-provided storage.
+
+- `ret_load`: Returns by loading from a pointer (for values that don't fit in registers)
+- `ret_ptr`: Returns the pointer where the return value should be stored
+
+**Impact**: Analysis of functions returning large structs or arrays may be incomplete. Return value tracking only works for simple scalar returns via `ret_safe`.
+
+**Planned fix**: Implement handlers for `ret_load` and `ret_ptr` that properly track the data flow through the return pointer.
+
 ### Const vs Mutable Pointer Parameter Tracking
 
 The `arg_ptr` mechanism propagates analysis information backwards through pointer parameters to update the caller's slot state. Currently, this happens for ALL pointer parameters, but it should NOT happen for `*const` pointers since the callee cannot modify through them.
@@ -10,17 +21,19 @@ The `arg_ptr` mechanism propagates analysis information backwards through pointe
 
 **Planned fix**: Add `is_const: bool` field to the arg payload and only set `arg_ptr` when `!is_const`.
 
-### Slot Type Tracking
+### Refinement Type Tracking
 
-Slots don't track what type of value they contain. This makes it difficult to reason about:
-- Whether a slot holds a pointer vs a value type
+Refinements track basic type structure (scalar, pointer, optional) but don't capture the full Zig type. This makes it difficult to reason about:
 - Whether a pointer is const or mutable
 - Struct vs slice vs primitive types
+- Specific integer/float types
 - How to correctly propagate analysis information through different type categories
 
-**Impact**: Type-specific analysis decisions cannot be made, leading to overly conservative or incorrect behavior in some cases.
+**Current state**: Codegen extracts type info from the InternPool for interned values and passes it via the `Type` union. Refinements can be scalars, pointers, optionals, or regions with nested structure.
 
-**Planned fix**: Allow analyzers to express a richer type system at runtime. Instead of embedding static type info during codegen, analyzers can build and refine their own type representations as they process instructions.
+**Impact**: Type-specific analysis decisions are limited. For example, we can't distinguish `*u8` from `*u32`.
+
+**Planned fix**: Extend the type system to capture more detail when needed for specific analyses.
 
 ### Runtime Allocator Type Identification
 
@@ -35,9 +48,9 @@ For runtime allocators (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), we cu
 
 ### Struct Field Tracking
 
-Uninitialized struct fields and memory safety for individual fields are not tracked. For example, setting `.x` but not `.y` on a struct is not detected.
+Uninitialized struct fields and memory safety for individual fields are not tracked. For example, setting `.x` but not `.y` on a struct is not detected. The `struct_field_ptr_index_*` instructions are currently no-ops.
 
-**Planned fix**: Requires the richer runtime type system (see Slot Type Tracking above).
+**Planned fix**: Implement struct field pointer tracking to follow field accesses and track individual field states.
 
 ### Global Types and Variables
 
@@ -51,11 +64,28 @@ Region-based memory management (allocating from a region, freeing entire regions
 
 **Planned**: Support for region allocators and tracking region lifetimes.
 
-### Loops and Control Flow
+### Branching and Control Flow
 
-Loops and branching control flow are not properly analyzed. The analyzer currently follows straight-line code but doesn't perform fixed-point iteration for loops or merge states across different control flow paths.
+Basic infrastructure for conditional branching (`cond_br`) exists, with partial support in undefined analysis:
 
-**Planned**: Implement proper control flow analysis with fixed-point iteration for loops and state merging at join points.
+**What works**:
+- Simple if/else branches that both assign or both leave undefined
+- Detection of inconsistent branches (one assigns, one doesn't)
+- Merging undefined states at join points for scalar and optional types
+
+**What doesn't work**:
+- Memory safety analysis doesn't merge states at join points
+- Multiple branches targeting the same block (complex control flow)
+- Nested conditionals may have edge cases
+- Early returns from one branch need more testing
+
+### Loops
+
+Loop analysis is not implemented. The analyzer doesn't perform fixed-point iteration to reach stable states for loop bodies.
+
+**Impact**: Variables modified in loops, allocations in loops, and loop-dependent control flow are not properly analyzed.
+
+**Planned**: Implement fixed-point iteration for loops with proper state merging.
 
 ## Desired But Unknown How to Implement
 
@@ -104,7 +134,7 @@ Slice and array bounds checking is not performed. Out-of-bounds access is not de
 
 ### Optional/Null Safety
 
-Unwrapping optionals without null checks is not detected.
+Basic optional type tracking exists (refinements can be `.optional` with an inner type), but unwrapping optionals without null checks is not detected. The `is_non_null` and `optional_payload` instructions are currently no-ops.
 
 ### Union Variant Safety
 

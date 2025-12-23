@@ -537,12 +537,14 @@ test "generateFunction with simple cond_br block" {
         \\    _ = return_eidx;
         \\    try Inst.apply(6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } }, results, ctx, refinements);
         \\}
+        \\
         \\fn fn_42_cond_br_true_7(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {
         \\    _ = caller_refinements;
         \\    _ = return_eidx;
         \\    try Inst.apply(4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 }, .is_undef = false } }, results, ctx, refinements);
         \\    try Inst.apply(5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } }, results, ctx, refinements);
         \\}
+        \\
         \\fn fn_42(ctx: *Context, caller_refinements: ?*Refinements) anyerror!EIdx {
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
