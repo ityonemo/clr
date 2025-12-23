@@ -663,7 +663,7 @@ test "onFinish allows passed allocation" {
 
     var caller_refinements = Refinements.init(allocator);
     defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.appendEntity(.{ .unset_retval = {} });
+    const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
     var results = [_]Inst{.{}} ** 2;
 

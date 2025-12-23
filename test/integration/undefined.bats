@@ -34,3 +34,20 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/basic/call_sets_via_pointer.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "detects inconsistent branch - one branch sets, other doesn't" {
+    run compile_and_run "$TEST_CASES/undefined/if/one_branch_sets.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of value that may be undefined in one_branch_sets.main" ]]
+    [[ "$output" =~ "one_branch_sets.zig:9:4)" ]]
+    [[ "$output" =~ "conditional branch has conflicting status" ]]
+    [[ "$output" =~ "one_branch_sets.zig:5:8)" ]]
+    [[ "$output" =~ "variable 'x' was set to undefined in one_branch_sets.main" ]]
+    [[ "$output" =~ "one_branch_sets.zig:2:4)" ]]
+}
+
+@test "detects undefined value returned from branch" {
+    run compile_and_run "$TEST_CASES/undefined/if/return_from_both_branches.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value" ]]
+}

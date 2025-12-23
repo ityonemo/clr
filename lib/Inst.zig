@@ -39,6 +39,120 @@ pub fn call(index: usize, called: anytype, args: anytype, results: []Inst, ctx: 
     results[index].refinement = return_eidx;
 }
 
+/// Execute both branches of a conditional, then merge results.
+/// Both branches are executed to get conservative analysis results.
+pub fn cond_br(
+    comptime index: usize,
+    comptime true_fn: fn ([]Inst, *Context, *Refinements, ?*Refinements, EIdx) anyerror!void,
+    comptime false_fn: fn ([]Inst, *Context, *Refinements, ?*Refinements, EIdx) anyerror!void,
+    results: []Inst,
+    ctx: *Context,
+    refinements: *Refinements,
+    caller_refinements: ?*Refinements,
+    return_eidx: EIdx,
+) !void {
+    // Clone results and refinements, and context for each branch
+    const true_results = clone_results_list(results, ctx.allocator);
+    defer clear_results_list(true_results, ctx.allocator);
+    var true_refinements = try refinements.clone(ctx.allocator);
+    defer true_refinements.deinit();
+    const true_ctx = ctx.copy();
+    defer true_ctx.delete();
+
+    const false_results = clone_results_list(results, ctx.allocator);
+    defer clear_results_list(false_results, ctx.allocator);
+    var false_refinements = try refinements.clone(ctx.allocator);
+    defer false_refinements.deinit();
+    const false_ctx = ctx.copy();
+    defer false_ctx.delete();
+
+    // Clone caller_refinements for each branch so ret_safe writes don't conflict
+    var true_caller_refinements: ?Refinements = if (caller_refinements) |cp|
+        try cp.clone(ctx.allocator)
+    else
+        null;
+    defer if (true_caller_refinements) |*r| r.deinit();
+
+    var false_caller_refinements: ?Refinements = if (caller_refinements) |cp|
+        try cp.clone(ctx.allocator)
+    else
+        null;
+    defer if (false_caller_refinements) |*r| r.deinit();
+
+    // Execute both branches (they modify their cloned state)
+    try true_fn(true_results, true_ctx, &true_refinements, if (true_caller_refinements) |*r| r else null, return_eidx);
+    try false_fn(false_results, false_ctx, &false_refinements, if (false_caller_refinements) |*r| r else null, return_eidx);
+
+    // Mark the block instruction as void
+    results[index].refinement = try refinements.appendEntity(.{ .void = {} });
+
+    // Merge: walk results and call analysis merge for each slot that has refinements
+    try tag.splatMerge(.cond_br, results, ctx, refinements, true_results, &true_refinements, false_results, &false_refinements);
+
+    // Merge caller_refinements return slot if both branches wrote to it
+    if (caller_refinements) |cp| {
+        try mergeCallerReturn(
+            ctx,
+            cp,
+            return_eidx,
+            if (true_caller_refinements) |*r| r else null,
+            if (false_caller_refinements) |*r| r else null,
+        );
+    }
+}
+
+/// Merge the return slot from both branch's caller_refinements back into the original.
+/// Called after both branches of a conditional have executed.
+fn mergeCallerReturn(
+    ctx: *Context,
+    caller_refinements: *Refinements,
+    return_eidx: EIdx,
+    true_caller: ?*Refinements,
+    false_caller: ?*Refinements,
+) !void {
+    const true_cp = true_caller orelse return;
+    const false_cp = false_caller orelse return;
+
+    const orig_return = caller_refinements.at(return_eidx);
+    const true_return = true_cp.at(return_eidx);
+    const false_return = false_cp.at(return_eidx);
+
+    // If original is still retval_future, check if either branch set it
+    if (orig_return.* == .retval_future) {
+        const true_set = true_return.* != .retval_future;
+        const false_set = false_return.* != .retval_future;
+
+        if (true_set and false_set) {
+            // Both branches returned - need to merge
+            // For now, copy true branch's value, then let analyses merge
+            const true_idx = try true_return.*.copy_to(true_cp, caller_refinements);
+            orig_return.* = caller_refinements.at(true_idx).*;
+
+            // Call each analysis's merge function for the return value
+            inline for (tag.analyses) |Analysis| {
+                if (@hasDecl(Analysis, "mergeReturn")) {
+                    try Analysis.mergeReturn(
+                        ctx,
+                        caller_refinements,
+                        return_eidx,
+                        true_cp,
+                        false_cp,
+                    );
+                }
+            }
+        } else if (true_set) {
+            // Only true branch returned
+            const true_idx = try true_return.*.copy_to(true_cp, caller_refinements);
+            orig_return.* = caller_refinements.at(true_idx).*;
+        } else if (false_set) {
+            // Only false branch returned
+            const false_idx = try false_return.*.copy_to(false_cp, caller_refinements);
+            orig_return.* = caller_refinements.at(false_idx).*;
+        }
+        // else: neither branch returned, leave as retval_future
+    }
+}
+
 // =============================================================================
 // Results list management
 // =============================================================================
@@ -53,6 +167,12 @@ pub fn make_results_list(allocator: std.mem.Allocator, count: usize) []Inst {
 
 pub fn clear_results_list(list: []Inst, allocator: std.mem.Allocator) void {
     allocator.free(list);
+}
+
+pub fn clone_results_list(list: []Inst, allocator: std.mem.Allocator) []Inst {
+    const new_list = allocator.alloc(Inst, list.len) catch @panic("out of memory");
+    @memcpy(new_list, list);
+    return new_list;
 }
 
 // =============================================================================
@@ -308,10 +428,10 @@ test "ret_safe copies scalar return value to caller_refinements" {
     // Caller's refinements - pre-allocate return entity
     var caller_refinements = Refinements.init(allocator);
     defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.appendEntity(.{ .unset_retval = {} });
+    const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
     // Verify return entity is initially unset
-    try std.testing.expectEqual(.unset_retval, std.meta.activeTag(caller_refinements.at(return_eidx).*));
+    try std.testing.expectEqual(.retval_future, std.meta.activeTag(caller_refinements.at(return_eidx).*));
 
     // In callee: allocate and store a value
     try Inst.apply(0, .{ .alloc = .{} }, callee_results, &ctx, &callee_refinements);
@@ -346,7 +466,7 @@ test "ret_safe with null src sets caller return to void" {
     // Caller's refinements - pre-allocate return entity
     var caller_refinements = Refinements.init(allocator);
     defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.appendEntity(.{ .unset_retval = {} });
+    const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
     // Return void (src = null)
     try Inst.apply(0, .{ .ret_safe = .{

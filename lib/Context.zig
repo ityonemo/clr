@@ -26,6 +26,19 @@ pub fn deinit(self: *Context) void {
     self.stacktrace.deinit(self.allocator);
 }
 
+/// Create a shallow copy of the context (for branch execution).
+/// All fields are copied by value - pointers/slices share underlying data.
+pub fn copy(self: *Context) *Context {
+    const new_ctx = self.allocator.create(Context) catch @panic("out of memory");
+    new_ctx.* = self.*;
+    return new_ctx;
+}
+
+/// Delete a copied context.
+pub fn delete(self: *Context) void {
+    self.allocator.destroy(self);
+}
+
 pub fn push_fn(self: *Context, func_name: []const u8) !void {
     self.meta.function = func_name;
     try self.stacktrace.append(self.allocator, func_name);

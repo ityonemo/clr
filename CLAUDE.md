@@ -11,6 +11,16 @@
 - `zig build` - Builds libclr.so (the AIR plugin)
 - `zig build test` - Runs unit tests for libclr
 - `./run_integration.sh` - Runs BATS integration tests
+- `./dump_air.sh <source_file> <function_name> [num_lines]` - Dump AIR for a specific function
+
+### Debugging AIR
+
+To view the raw AIR for a function:
+```sh
+./dump_air.sh test/cases/undefined/basic/assigned_before_use.zig assigned_before_use.main 40
+```
+
+This shows the instruction indices, tags, and nesting structure. Block bodies may have indices that are **higher** than post-block instructions (e.g., block at %10 may contain %16-%23, while %11-%15 come after the block).
 
 ## Testing
 
@@ -401,6 +411,8 @@ Only `ret_safe` is implemented. The following return variants are marked as `Uni
 ## Known Issues / Future Work
 
 **InternPool type inspection**: See `zig/src/InternPool.zig` for `indexToKey()` which returns type information that can be pattern-matched to determine the category.
+
+**Returned pointers shouldn't trigger leak detection**: When a function returns a pointer, the local leak detection (in `onFinish`) incorrectly reports a leak because the allocation is "not freed" in the returning function. The caller takes ownership, so the return should exempt the pointer from local leak checks.
 
 ## AIR Backend Overview
 

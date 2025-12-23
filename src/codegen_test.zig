@@ -229,7 +229,7 @@ test "generateFunction produces complete function" {
         \\
         \\    const results = Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
-        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .unset_retval = {} }) else 0;
+        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .retval_future = {} }) else 0;
         \\
         \\    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);
         \\    try Inst.apply(1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } }, results, ctx, &refinements);
@@ -442,5 +442,133 @@ test "instLine for dbg_arg_inline" {
     const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_arg_inline, datum, 2, extra, &.{}, &.{}, &.{}, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .dbg_arg_inline = .{ .ptr = 1, .name = \"arg_name\" } }, results, ctx, &refinements);\n", result);
+}
+
+// =============================================================================
+// Conditional Branch Tests
+// =============================================================================
+
+test "generateFunction with simple cond_br block" {
+    // Test a simple if statement:
+    //   var x: u8 = undefined;
+    //   if (cond) { x = 5; }
+    //   return x;
+    //
+    // AIR structure:
+    //   0: alloc              <- x
+    //   1: store_safe         <- x = undefined
+    //   2: block              <- if block, body_len=5, body=[3,4,5,6,7]
+    //   3: load (condition)
+    //   4: store_safe (x = 5) <- then body
+    //   5: br                 <- then body
+    //   6: br                 <- else body
+    //   7: cond_br
+    //   8: load               <- load x
+    //   9: ret_safe           <- return x
+
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    const Ref = Air.Inst.Ref;
+
+    // Build instruction arrays
+    const tags: []const Tag = &.{
+        .alloc, // 0: alloc for x
+        .store_safe, // 1: store undef to x
+        .block, // 2: if block
+        .load, // 3: load condition (inside block body)
+        .store_safe, // 4: store 5 to x (then branch)
+        .br, // 5: br block (then branch)
+        .br, // 6: br block (else branch)
+        .cond_br, // 7: cond_br
+        .load, // 8: load x (after block)
+        .ret_safe, // 9: return
+    };
+
+    // Build refs for instructions
+    const ref_0: Ref = @enumFromInt(@as(u32, 0) | (1 << 31)); // inst 0
+    const ref_3: Ref = @enumFromInt(@as(u32, 3) | (1 << 31)); // inst 3
+    const ref_8: Ref = @enumFromInt(@as(u32, 8) | (1 << 31)); // inst 8
+
+    // Build data array
+    const data: []const Data = &.{
+        .{ .no_op = {} }, // 0: alloc
+        .{ .bin_op = .{ .lhs = ref_0, .rhs = .undef } }, // 1: store undef to x
+        .{ .ty_pl = .{ .ty = .none, .payload = 0 } }, // 2: block (payload=0 points to extra[0])
+        .{ .ty_op = .{ .ty = .none, .operand = .none } }, // 3: load condition
+        .{ .bin_op = .{ .lhs = ref_0, .rhs = ref_3 } }, // 4: store to x (then)
+        .{ .br = .{ .block_inst = @enumFromInt(2), .operand = .none } }, // 5: br block
+        .{ .br = .{ .block_inst = @enumFromInt(2), .operand = .none } }, // 6: br block
+        .{ .pl_op = .{ .operand = ref_3, .payload = 6 } }, // 7: cond_br (payload=6 points to extra[6])
+        .{ .ty_op = .{ .ty = .none, .operand = ref_0 } }, // 8: load x
+        .{ .un_op = ref_8 }, // 9: ret_safe
+    };
+
+    // Build extra array
+    // Block at extra[0]:
+    //   extra[0] = body_len = 5
+    //   extra[1..6] = body indices = [3, 4, 5, 6, 7]
+    // CondBr at extra[6]:
+    //   extra[6] = then_body_len = 2
+    //   extra[7] = else_body_len = 1
+    //   extra[8] = branch_hints = 0
+    //   extra[9..11] = then_body = [4, 5]
+    //   extra[11] = else_body = [6]
+    const extra: []const u32 = &.{
+        5, // body_len for block
+        3, 4, 5, 6, 7, // body indices [3,4,5,6,7]
+        2, // then_body_len
+        1, // else_body_len
+        0, // branch_hints
+        4, 5, // then body indices
+        6, // else body indices
+    };
+
+    const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, extra, 10, "test.zig", &.{});
+
+    // Expected output:
+    // 1. Branch functions should be generated for true/false branches (named by cond_br index)
+    // 2. Main function includes block instruction and condition load
+    // 3. cond_br branches (instructions 4,5,6) are in sub functions only
+
+    const expected =
+        \\fn fn_42_cond_br_false_7(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {
+        \\    _ = caller_refinements;
+        \\    _ = return_eidx;
+        \\    try Inst.apply(6, .{ .br = .{ .block = 2, .src = null } }, results, ctx, refinements);
+        \\}
+        \\fn fn_42_cond_br_true_7(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {
+        \\    _ = caller_refinements;
+        \\    _ = return_eidx;
+        \\    try Inst.apply(4, .{ .store_safe = .{ .ptr = 0, .src = 3, .is_undef = false } }, results, ctx, refinements);
+        \\    try Inst.apply(5, .{ .br = .{ .block = 2, .src = null } }, results, ctx, refinements);
+        \\}
+        \\fn fn_42(ctx: *Context, caller_refinements: ?*Refinements) anyerror!EIdx {
+        \\    ctx.meta.file = "test.zig";
+        \\    ctx.base_line = 10;
+        \\    try ctx.push_fn("test.main");
+        \\    defer ctx.pop_fn();
+        \\
+        \\    var refinements = Refinements.init(ctx.allocator);
+        \\    defer refinements.deinit();
+        \\
+        \\    const results = Inst.make_results_list(ctx.allocator, 10);
+        \\    defer Inst.clear_results_list(results, ctx.allocator);
+        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .retval_future = {} }) else 0;
+        \\
+        \\    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);
+        \\    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = null, .is_undef = true } }, results, ctx, &refinements);
+        \\    try Inst.apply(2, .{ .block = .{} }, results, ctx, &refinements);
+        \\    try Inst.apply(3, .{ .load = .{ .ptr = null } }, results, ctx, &refinements);
+        \\    try Inst.cond_br(7, fn_42_cond_br_true_7, fn_42_cond_br_false_7, results, ctx, &refinements, caller_refinements, return_eidx);
+        \\    try Inst.apply(8, .{ .load = .{ .ptr = 0 } }, results, ctx, &refinements);
+        \\    try Inst.apply(9, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = 8 } }, results, ctx, &refinements);
+        \\    try Inst.onFinish(results, ctx, &refinements);
+        \\    Inst.backPropagate(results, &refinements, caller_refinements);
+        \\    return return_eidx;
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
 }
 

@@ -12,6 +12,11 @@ pub const Undefined = union(enum) {
         meta: Meta,
         var_name: ?[]const u8 = null,
     },
+    inconsistent: struct {
+        undefined_meta: Meta, // where undefined was set
+        branch_meta: Meta, // where the conditional branch occurred
+        var_name: ?[]const u8 = null,
+    },
 
     pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
@@ -23,9 +28,27 @@ pub const Undefined = union(enum) {
                     try p.meta.print(ctx.writer, "undefined value assigned in ", .{});
                 }
             },
-            .defined => {},
+            .defined => unreachable,
+            .inconsistent => unreachable, // use reportInconsistentBranches instead
         }
         return error.UseBeforeAssign;
+    }
+
+    pub fn reportInconsistentBranches(self: @This(), ctx: *Context) anyerror!void {
+        try ctx.meta.print(ctx.writer, "use of value that may be undefined in ", .{});
+        switch (self) {
+            .inconsistent => |p| {
+                try p.branch_meta.print(ctx.writer, "conditional branch has conflicting status at ", .{});
+                if (p.var_name) |name| {
+                    try p.undefined_meta.print(ctx.writer, "variable '{s}' was set to undefined in ", .{name});
+                } else {
+                    try p.undefined_meta.print(ctx.writer, "value set to undefined in ", .{});
+                }
+            },
+            .defined => unreachable,
+            .undefined => unreachable, // use reportUseBeforeAssign instead
+        }
+        return error.InconsistentBranches;
     }
 
     pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
@@ -82,6 +105,7 @@ pub const Undefined = union(enum) {
                 const undef = s.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
                     .defined => {
                         // Propagate defined state to the loaded value
                         const idx = results[index].refinement.?;
@@ -93,6 +117,7 @@ pub const Undefined = union(enum) {
                 const undef = p.analyte.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
                     .defined => {
                         // Propagate defined state to the loaded value
                         const idx = results[index].refinement.?;
@@ -116,7 +141,7 @@ pub const Undefined = union(enum) {
         const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx,
-            .unimplemented, .unset_retval, .void => return,
+            .unimplemented, .retval_future, .void => return,
             else => @panic("unexpected refinement type in dbg_var_ptr (outer)"),
         };
         switch (refinements.at(pointee_idx).*) {
@@ -124,6 +149,7 @@ pub const Undefined = union(enum) {
                 const undef = &(s.undefined orelse return);
                 switch (undef.*) {
                     .undefined => |*meta| meta.var_name = params.name,
+                    .inconsistent => |*meta| meta.var_name = params.name,
                     .defined => {},
                 }
             },
@@ -131,6 +157,7 @@ pub const Undefined = union(enum) {
                 const undef = &(p.analyte.undefined orelse return);
                 switch (undef.*) {
                     .undefined => |*meta| meta.var_name = params.name,
+                    .inconsistent => |*meta| meta.var_name = params.name,
                     .defined => {},
                 }
             },
@@ -140,6 +167,101 @@ pub const Undefined = union(enum) {
     }
 
     // Backward propagation is handled centrally by Inst.backPropagate()
+
+    /// Merge undefined states from two branches after a conditional.
+    /// Walks the refinement tree and reports if branches have inconsistent initialization.
+    pub fn merge(
+        ctx: *Context,
+        comptime merge_tag: anytype,
+        orig: struct { *Refinements, EIdx },
+        true_branch: struct { *Refinements, EIdx },
+        false_branch: struct { *Refinements, EIdx },
+    ) !void {
+        _ = merge_tag; // Available for context-specific merge behavior
+        mergeRefinement(ctx, orig, true_branch, false_branch);
+    }
+
+    fn mergeRefinement(
+        ctx: *Context,
+        orig: struct { *Refinements, EIdx },
+        true_branch: struct { *Refinements, EIdx },
+        false_branch: struct { *Refinements, EIdx },
+    ) void {
+        const orig_ref = orig[0].at(orig[1]);
+        const true_ref = true_branch[0].at(true_branch[1]);
+        const false_ref = false_branch[0].at(false_branch[1]);
+
+        switch (orig_ref.*) {
+            .scalar => |*s| {
+                const true_undef = true_ref.scalar.undefined orelse return;
+                const false_undef = false_ref.scalar.undefined orelse return;
+                s.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
+            },
+            .pointer => |*p| {
+                // Merge analyte on the pointer itself
+                if (true_ref.pointer.analyte.undefined) |true_undef| {
+                    if (false_ref.pointer.analyte.undefined) |false_undef| {
+                        p.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
+                    }
+                }
+                // Recursively merge pointee
+                mergeRefinement(
+                    ctx,
+                    .{ orig[0], p.to },
+                    .{ true_branch[0], true_ref.pointer.to },
+                    .{ false_branch[0], false_ref.pointer.to },
+                );
+            },
+            .optional => |*o| {
+                if (true_ref.optional.analyte.undefined) |true_undef| {
+                    if (false_ref.optional.analyte.undefined) |false_undef| {
+                        o.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
+                    }
+                }
+                mergeRefinement(
+                    ctx,
+                    .{ orig[0], o.to },
+                    .{ true_branch[0], true_ref.optional.to },
+                    .{ false_branch[0], false_ref.optional.to },
+                );
+            },
+            .region => |*r| {
+                if (true_ref.region.analyte.undefined) |true_undef| {
+                    if (false_ref.region.analyte.undefined) |false_undef| {
+                        r.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
+                    }
+                }
+                mergeRefinement(
+                    ctx,
+                    .{ orig[0], r.to },
+                    .{ true_branch[0], true_ref.region.to },
+                    .{ false_branch[0], false_ref.region.to },
+                );
+            },
+            else => {},
+        }
+    }
+
+    fn mergeUndefinedStates(ctx: *Context, true_undef: Undefined, false_undef: Undefined) Undefined {
+        // Handle .inconsistent propagation first - once inconsistent, stays inconsistent
+        if (true_undef == .inconsistent) return true_undef;
+        if (false_undef == .inconsistent) return false_undef;
+
+        const true_is_defined = true_undef == .defined;
+        const false_is_defined = false_undef == .defined;
+
+        // Both agree
+        if (true_is_defined and false_is_defined) return .{ .defined = {} };
+        if (!true_is_defined and !false_is_defined) return true_undef; // both undefined, use first's meta
+
+        // Inconsistent: one defined, one undefined -> return .inconsistent
+        const undef_state = if (!true_is_defined) true_undef.undefined else false_undef.undefined;
+        return .{ .inconsistent = .{
+            .undefined_meta = undef_state.meta,
+            .branch_meta = ctx.meta,
+            .var_name = undef_state.var_name,
+        } };
+    }
 };
 
 /// Helper to create a test context with specific meta values

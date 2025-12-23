@@ -5,7 +5,7 @@ const EIdx = Inst.EIdx;
 const Context = @import("Context.zig");
 const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
-const analyses = .{ Undefined, MemorySafety };
+pub const analyses = .{ Undefined, MemorySafety };
 
 // Tag payload types
 
@@ -96,6 +96,17 @@ pub const Bitcast = struct {
             _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
         }
         try splat(.bitcast, results, index, ctx, refinements, self);
+    }
+};
+
+/// Block creates a labeled scope that can be the target of `br` (break) instructions.
+/// The block's result is a `.future` that gets filled in when a `br` targets it.
+pub const Block = struct {
+    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+        _ = self;
+        _ = ctx;
+        // Block result is a future - will be filled in by br instruction
+        _ = try Inst.clobberInst(refinements, results, index, .{ .future = {} });
     }
 };
 
@@ -226,21 +237,24 @@ pub const RetSafe = struct {
             const return_eidx = self.return_eidx;
             if (self.src) |src| {
                 const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                if (refinements.at(src_idx).* == .unset_retval) @panic("cannot return an unset_retval");
+                if (refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
                 switch (caller_refinements.at(return_eidx).*) {
-                    .unset_retval, .void => {
+                    .retval_future, .void => {
                         // .void can be overwritten - it's from an error path return
                         // Copy return value from callee to caller's return slot
                         const new_idx = try refinements.at(src_idx).*.copy_to(refinements, caller_refinements);
                         caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
                     },
                     else => {
-                        // TODO: implement proper merge for multiple return paths
+                        // With cond_br cloning caller_refinements per branch, this case
+                        // should only hit for multiple returns within the same branch.
+                        // For now, we keep the first return value (conservative: later
+                        // returns might have more refined analysis state).
                     },
                 }
             } else {
                 switch (caller_refinements.at(return_eidx).*) {
-                    .unset_retval => caller_refinements.at(return_eidx).* = .void,
+                    .retval_future => caller_refinements.at(return_eidx).* = .void,
                     .void => {},
                     else => @panic("void function retval incorrectly set to some value"),
                 }
@@ -364,7 +378,7 @@ pub const AnyTag = union(enum) {
     // Unimplemented tags (no-op)
     add_with_overflow: Unimplemented(.{}),
     array_to_slice: Unimplemented(.{}),
-    block: Unimplemented(.{}),
+    block: Block,
     cond_br: Unimplemented(.{ .void = true }),
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
@@ -407,6 +421,89 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !v
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "onFinish")) {
             try Analysis.onFinish(results, ctx, refinements);
+        }
+    }
+}
+
+/// Merge branch results after a conditional.
+/// Walks through all result slots and calls each analysis's merge function.
+/// Analysis modules can implement `merge` to handle their specific fields.
+pub fn splatMerge(
+    comptime tag: anytype,
+    results: []Inst,
+    ctx: *Context,
+    refinements: *Refinements,
+    true_results: []Inst,
+    true_refinements: *Refinements,
+    false_results: []Inst,
+    false_refinements: *Refinements,
+) !void {
+    // Walk through all result slots
+    for (results, true_results, false_results) |*result, true_result, false_result| {
+        // Only merge if the original result has a refinement
+        const orig_eidx = result.refinement orelse continue;
+
+        // Get refinement indices from each branch (may be null if not touched)
+        const true_eidx = true_result.refinement;
+        const false_eidx = false_result.refinement;
+
+        // Trivial cases: one side null, copy the other directly
+        // Use index-based version because orig might be .future
+        if (true_eidx == null and false_eidx == null) continue;
+        if (true_eidx == null) {
+            Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(false_eidx.?).*, false_refinements);
+            continue;
+        }
+        if (false_eidx == null) {
+            Refinement.clobber_structured_idx(orig_eidx, refinements, true_refinements.at(true_eidx.?).*, true_refinements);
+            continue;
+        }
+
+        // Handle .future: if one branch has .future and the other has a resolved value, use the resolved one
+        const true_ref = true_refinements.at(true_eidx.?).*;
+        const false_ref = false_refinements.at(false_eidx.?).*;
+        const true_is_future = true_ref == .future;
+        const false_is_future = false_ref == .future;
+        const orig_ref = refinements.at(orig_eidx).*;
+
+        if (true_is_future and false_is_future) {
+            // Both are .future - nothing to merge, leave as .future
+            continue;
+        }
+        if (true_is_future) {
+            // True branch didn't resolve (early return?), use false branch's value
+            if (orig_ref == .future) {
+                // For .future blocks, point directly to the resolved entity from the branch
+                // This avoids creating a copy (which would lose identity for allocation tracking)
+                result.refinement = false_eidx;
+            } else {
+                Refinement.clobber_structured_idx(orig_eidx, refinements, false_ref, false_refinements);
+            }
+            continue;
+        }
+        if (false_is_future) {
+            // False branch didn't resolve (early return?), use true branch's value
+            if (orig_ref == .future) {
+                // For .future blocks, point directly to the resolved entity from the branch
+                // This avoids creating a copy (which would lose identity for allocation tracking)
+                result.refinement = true_eidx;
+            } else {
+                Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
+            }
+            continue;
+        }
+
+        // Non-trivial: both branches have resolved states - call each analyzer's merge
+        inline for (analyses) |Analysis| {
+            if (@hasDecl(Analysis, "merge")) {
+                try Analysis.merge(
+                    ctx,
+                    tag,
+                    .{ refinements, orig_eidx },
+                    .{ true_refinements, true_eidx.? },
+                    .{ false_refinements, false_eidx.? },
+                );
+            }
         }
     }
 }

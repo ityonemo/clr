@@ -1,4 +1,5 @@
 const clr_allocator = @import("allocator.zig");
+const debug = @import("debug.zig");
 const compiler = @import("compiler");
 const Air = compiler.Air;
 const InternPool = compiler.InternPool;
@@ -53,7 +54,9 @@ fn payloadTransferOp(arena: std.mem.Allocator, datum: Data) []const u8 {
 /// Transfers properties from operand to target block.
 fn payloadBr(arena: std.mem.Allocator, datum: Data) []const u8 {
     const block_inst = @intFromEnum(datum.br.block_inst);
-    const src: ?usize = if (datum.br.operand.toIndex()) |idx| @intFromEnum(idx) else null;
+    const operand = datum.br.operand;
+    // Handle .none case explicitly - toIndex() asserts on .none
+    const src: ?usize = if (operand == .none) null else if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
     return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {?d} }}", .{ block_inst, src }, null);
 }
 
@@ -131,6 +134,10 @@ fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []
 }
 
 fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
+    // Check for .none first (toIndex asserts on .none)
+    if (datum.ty_op.operand == .none) {
+        return ".{ .ptr = null }";
+    }
     // TODO: handle global/interned pointers - for now emit null
     if (datum.ty_op.operand.toIndex()) |idx| {
         const ptr = @intFromEnum(idx);
@@ -552,35 +559,139 @@ fn extractDestroyPtrInst(datum: Data, extra: []const u32, tags: []const Tag, dat
     return null;
 }
 
-/// Build all slot apply lines into a single buffer (uses provided arena allocator)
-fn buildInstLines(arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, param_names: []const []const u8) []const u8 {
-    if (tags.len == 0) return "";
+// =============================================================================
+// FunctionGen - Represents a function to generate (main or branch)
+// =============================================================================
 
-    // Build lines into a list first
-    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
-    var total_len: usize = 0;
+const SubTag = enum { cond_br_true, cond_br_false };
 
-    // Track sequential arg counter (separate from zir_param_index)
-    var arg_counter: u32 = 0;
+const FunctionGen = union(enum) {
+    /// Full function (entry point into the codegen)
+    full: struct {
+        func_index: u32,
+    },
+    /// Sub function (branch of a conditional)
+    sub: struct {
+        func_index: u32,
+        instr_index: u32,
+        tag: SubTag,
+        body_indices: []const u32,
+    },
 
-    for (tags, data, 0..) |tag, datum, i| {
-        const line = _instLine(arena, ip, tag, datum, i, extra, tags, data, param_names, &arg_counter);
-        lines.append(arena, line) catch @panic("out of memory");
-        total_len += line.len;
+    /// Generate function name
+    fn name(self: FunctionGen, arena: std.mem.Allocator) []const u8 {
+        return switch (self) {
+            .full => |f| clr_allocator.allocPrint(arena, "fn_{d}", .{f.func_index}, null),
+            .sub => |s| clr_allocator.allocPrint(arena, "fn_{d}_{s}_{d}", .{
+                s.func_index,
+                @tagName(s.tag),
+                s.instr_index,
+            }, null),
+        };
     }
 
-    // Concatenate all lines into single buffer
-    const buf = arena.alloc(u8, total_len) catch @panic("out of memory");
-    var pos: usize = 0;
-    for (lines.items) |line| {
-        @memcpy(buf[pos..][0..line.len], line);
-        pos += line.len;
+    /// Generate function signature/header (opening)
+    /// For sub functions, discard_caller_params controls whether to add _ = caller_refinements/return_eidx
+    fn header(self: FunctionGen, arena: std.mem.Allocator, params: []const u8, fqn: []const u8, file_path: []const u8, base_line: u32, num_insts: usize, discard_caller_params: bool) []const u8 {
+        return switch (self) {
+            .full => |f| clr_allocator.allocPrint(arena,
+                \\fn fn_{d}(ctx: *Context, caller_refinements: ?*Refinements{s}) anyerror!EIdx {{
+                \\    ctx.meta.file = "{s}";
+                \\    ctx.base_line = {d};
+                \\    try ctx.push_fn("{s}");
+                \\    defer ctx.pop_fn();
+                \\
+                \\    var refinements = Refinements.init(ctx.allocator);
+                \\    defer refinements.deinit();
+                \\
+                \\    const results = Inst.make_results_list(ctx.allocator, {d});
+                \\    defer Inst.clear_results_list(results, ctx.allocator);
+                \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{{ .retval_future = {{}} }}) else 0;
+                \\
+                \\
+            , .{ f.func_index, params, file_path, base_line, fqn, num_insts }, null),
+            .sub => |s| if (discard_caller_params)
+                clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_{s}_{d}(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {{
+                    \\    _ = caller_refinements;
+                    \\    _ = return_eidx;
+                    \\
+                , .{ s.func_index, @tagName(s.tag), s.instr_index }, null)
+            else
+                clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_{s}_{d}(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {{
+                    \\
+                , .{ s.func_index, @tagName(s.tag), s.instr_index }, null),
+        };
     }
 
-    return buf;
+    /// Generate function footer (closing)
+    fn footer(self: FunctionGen, arena: std.mem.Allocator) []const u8 {
+        return switch (self) {
+            .full => clr_allocator.allocPrint(arena,
+                \\    try Inst.onFinish(results, ctx, &refinements);
+                \\    Inst.backPropagate(results, &refinements, caller_refinements);
+                \\    return return_eidx;
+                \\}}
+                \\
+            , .{}, null),
+            .sub => clr_allocator.allocPrint(arena,
+                \\}}
+                \\
+            , .{}, null),
+        };
+    }
+
+    /// Check if this is a sub function (needs different refinements handling)
+    fn isSub(self: FunctionGen) bool {
+        return self == .sub;
+    }
+
+};
+
+/// Extract body indices from a block instruction
+/// Returns null if extraction fails
+fn extractBlockBody(block_idx: u32, data: []const Data, extra: []const u32) ?[]const u32 {
+    if (block_idx >= data.len) return null;
+    const block_data = data[block_idx];
+    // Raw access: ty_pl has ty (u32) then payload (u32), so payload is at byte offset 4
+    const raw_ptr: [*]const u8 = @ptrCast(&block_data);
+    const payload_ptr: *const u32 = @ptrCast(@alignCast(raw_ptr + 4));
+    const payload_index = payload_ptr.*;
+    if (payload_index >= extra.len) return null;
+    const body_len = extra[payload_index];
+    if (body_len == 0) return null;
+
+    const body_indices_start = payload_index + 1;
+    if (body_indices_start + body_len > extra.len) return null;
+    return extra[body_indices_start..][0..body_len];
 }
 
-/// Generate Zig source code for a function from AIR instructions
+/// Extract then and else body indices from a cond_br instruction
+/// Returns null if extraction fails
+fn extractCondBrBodies(cond_br_idx: usize, data: []const Data, extra: []const u32) ?struct { then: []const u32, @"else": []const u32 } {
+    if (cond_br_idx >= data.len) return null;
+    const cond_br_datum = data[cond_br_idx];
+    const cond_br_payload = cond_br_datum.pl_op.payload;
+    if (cond_br_payload + 3 > extra.len) return null;
+
+    const then_body_len = extra[cond_br_payload];
+    const else_body_len = extra[cond_br_payload + 1];
+    // branch_hints at extra[cond_br_payload + 2] - we don't use them
+
+    const then_body_start = cond_br_payload + 3;
+    const else_body_start = then_body_start + then_body_len;
+    if (else_body_start + else_body_len > extra.len) return null;
+
+    return .{
+        .then = extra[then_body_start..][0..then_body_len],
+        .@"else" = extra[else_body_start..][0..else_body_len],
+    };
+}
+
+/// Generate Zig source code for a function from AIR instructions using worklist algorithm.
+/// This processes the main function and any nested conditionals, outputting branch functions
+/// first (so they're in scope) followed by the main function.
 pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, base_line: u32, file_path: []const u8, param_names: []const []const u8) []u8 {
     if (tags.len == 0) @panic("function with no instructions encountered");
 
@@ -588,7 +699,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Count args and build parameter list
+    // Count args and build parameter list (only for full functions)
     const arg_count = countArgs(tags);
     const param_list = buildParamList(arena.allocator(), arg_count);
     const params: []const u8 = if (arg_count > 0)
@@ -596,32 +707,231 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     else
         "";
 
-    // Build inst lines first
-    const inst_lines = buildInstLines(arena.allocator(), ip, tags, data, extra, param_names);
+    // Worklist of functions to generate
+    var worklist: std.ArrayListUnmanaged(FunctionGen) = .empty;
+    // Output: generated functions (sub functions first, main last)
+    var sub_functions: std.ArrayListUnmanaged([]const u8) = .empty;
+    var sub_functions_len: usize = 0;
 
-    // Generate complete function with inst lines injected (use main arena for final result)
-    // Size hint: inst_lines + template + margin
-    const size_hint = inst_lines.len + 4096;
-    return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}(ctx: *Context, caller_refinements: ?*Refinements{s}) anyerror!EIdx {{
-        \\    ctx.meta.file = "{s}";
-        \\    ctx.base_line = {d};
-        \\    try ctx.push_fn("{s}");
-        \\    defer ctx.pop_fn();
+    // Start with the main function
+    worklist.append(arena.allocator(), .{ .full = .{ .func_index = func_index } }) catch @panic("out of memory");
+
+    var main_function: []const u8 = "";
+
+    while (worklist.items.len > 0) {
+        const item = worklist.pop().?;
+        // Generate this function
+        const func_str = generateOneFunction(
+            arena.allocator(),
+            item,
+            func_index,
+            fqn,
+            ip,
+            tags,
+            data,
+            extra,
+            params,
+            file_path,
+            base_line,
+            param_names,
+            &worklist,
+        );
+
+        switch (item) {
+            .full => {
+                main_function = func_str;
+            },
+            .sub => {
+                sub_functions.append(arena.allocator(), func_str) catch @panic("out of memory");
+                sub_functions_len += func_str.len;
+            },
+        }
+    }
+
+    // Combine: sub functions first, then main function
+    if (sub_functions_len == 0) {
+        // No sub functions - just copy main to persistent allocator
+        const result = clr_allocator.allocator().alloc(u8, main_function.len) catch @panic("out of memory");
+        @memcpy(result, main_function);
+        return result;
+    }
+
+    const total_len = sub_functions_len + main_function.len;
+    const result = clr_allocator.allocator().alloc(u8, total_len) catch @panic("out of memory");
+    var pos: usize = 0;
+
+    // Sub functions first
+    for (sub_functions.items) |func| {
+        @memcpy(result[pos..][0..func.len], func);
+        pos += func.len;
+    }
+
+    // Main function last
+    @memcpy(result[pos..][0..main_function.len], main_function);
+
+    return result;
+}
+
+/// Generate a single function (full or sub) using backwards walk + stack approach
+fn generateOneFunction(
+    arena: std.mem.Allocator,
+    item: FunctionGen,
+    func_index: u32,
+    fqn: []const u8,
+    ip: *const InternPool,
+    tags: []const Tag,
+    data: []const Data,
+    extra: []const u32,
+    params: []const u8,
+    file_path: []const u8,
+    base_line: u32,
+    param_names: []const []const u8,
+    worklist: *std.ArrayListUnmanaged(FunctionGen),
+) []const u8 {
+    // For full functions, collect cond_br branch body indices to skip
+    // (they're processed in sub functions, not main)
+    var skip_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    if (item == .full) {
+        // Find all cond_br instructions and mark their then/else body indices for skipping
+        for (tags, 0..) |tag, idx| {
+            if (tag != .cond_br) continue;
+            if (extractCondBrBodies(idx, data, extra)) |bodies| {
+                for (bodies.then) |body_idx| {
+                    skip_set.put(arena, body_idx, {}) catch @panic("out of memory");
+                }
+                for (bodies.@"else") |body_idx| {
+                    skip_set.put(arena, body_idx, {}) catch @panic("out of memory");
+                }
+            }
+        }
+    }
+
+    // Determine which indices to process
+    const indices: []const u32 = switch (item) {
+        .full => blk: {
+            // Full function: all indices 0..tags.len
+            const all_indices = arena.alloc(u32, tags.len) catch @panic("out of memory");
+            for (all_indices, 0..) |*slot, i| {
+                slot.* = @intCast(i);
+            }
+            break :blk all_indices;
+        },
+        .sub => |s| s.body_indices,
+    };
+
+    // Stack for instruction data (will be reversed)
+    const InstrData = struct {
+        idx: u32,
+        tag: Tag,
+        datum: Data,
+    };
+    var stack: std.ArrayListUnmanaged(InstrData) = .empty;
+
+    // Walk backwards through indices, pushing to stack
+    // When we hit cond_br, add its branches to worklist
+    var i: usize = indices.len;
+    while (i > 0) {
+        i -= 1;
+        const idx = indices[i];
+        if (idx >= tags.len) continue;
+
+        // For full functions, skip cond_br branch body indices (they're in sub functions)
+        if (item == .full and skip_set.contains(idx)) {
+            continue;
+        }
+
+        const tag = tags[idx];
+        const datum = data[idx];
+
+        // Check for cond_br - add branches to worklist
+        if (tag == .cond_br) {
+            if (extractCondBrBodies(idx, data, extra)) |bodies| {
+                // Add both branches to worklist
+                worklist.append(arena, .{ .sub = .{
+                    .func_index = func_index,
+                    .instr_index = idx,
+                    .tag = .cond_br_true,
+                    .body_indices = bodies.then,
+                } }) catch @panic("out of memory");
+                worklist.append(arena, .{ .sub = .{
+                    .func_index = func_index,
+                    .instr_index = idx,
+                    .tag = .cond_br_false,
+                    .body_indices = bodies.@"else",
+                } }) catch @panic("out of memory");
+            }
+        }
+
+        // Push all instructions to stack (they'll be processed in forward order when popped)
+        stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum }) catch @panic("out of memory");
+    }
+
+    // Pop from stack to generate lines in forward order
+    var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+    var total_len: usize = 0;
+    var arg_counter: u32 = 0;
+
+    while (stack.items.len > 0) {
+        const instr = stack.pop().?;
+        var line: []const u8 = undefined;
+
+        if (instr.tag == .cond_br) {
+            // Generate Inst.cond_br call with function references
+            line = generateCondBrLine(arena, instr.idx, func_index);
+        } else {
+            line = _instLine(arena, ip, instr.tag, instr.datum, instr.idx, extra, tags, data, param_names, &arg_counter);
+        }
+
+        // For sub functions, refinements is already a *Refinements, so don't take address
+        if (item.isSub()) {
+            line = std.mem.replaceOwned(u8, arena, line, "&refinements", "refinements") catch @panic("out of memory");
+        }
+
+        lines.append(arena, line) catch @panic("out of memory");
+        total_len += line.len;
+    }
+
+    // Concatenate all lines
+    const body_lines = arena.alloc(u8, total_len) catch @panic("out of memory");
+    var pos: usize = 0;
+    for (lines.items) |line| {
+        @memcpy(body_lines[pos..][0..line.len], line);
+        pos += line.len;
+    }
+
+    // For sub functions, check if body contains ret_safe - if so, don't discard caller params
+    const discard_caller_params = switch (item) {
+        .full => false, // doesn't matter for full functions
+        .sub => |s| blk: {
+            for (s.body_indices) |body_idx| {
+                if (tags[body_idx] == .ret_safe) break :blk false;
+            }
+            break :blk true;
+        },
+    };
+
+    // Generate complete function with header/footer
+    const header_str = item.header(arena, params, fqn, file_path, base_line, tags.len, discard_caller_params);
+    const footer_str = item.footer(arena);
+
+    const func_len = header_str.len + body_lines.len + footer_str.len;
+    const func_buf = arena.alloc(u8, func_len) catch @panic("out of memory");
+    pos = 0;
+    @memcpy(func_buf[pos..][0..header_str.len], header_str);
+    pos += header_str.len;
+    @memcpy(func_buf[pos..][0..body_lines.len], body_lines);
+    pos += body_lines.len;
+    @memcpy(func_buf[pos..][0..footer_str.len], footer_str);
+
+    return func_buf;
+}
+
+/// Generate the Inst.cond_br call line with new naming scheme
+fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u32) []const u8 {
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.cond_br({d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d}, results, ctx, &refinements, caller_refinements, return_eidx);
         \\
-        \\    var refinements = Refinements.init(ctx.allocator);
-        \\    defer refinements.deinit();
-        \\
-        \\    const results = Inst.make_results_list(ctx.allocator, {d});
-        \\    defer Inst.clear_results_list(results, ctx.allocator);
-        \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{{ .unset_retval = {{}} }}) else 0;
-        \\
-        \\{s}    try Inst.onFinish(results, ctx, &refinements);
-        \\    Inst.backPropagate(results, &refinements, caller_refinements);
-        \\    return return_eidx;
-        \\}}
-        \\
-    , .{ func_index, params, file_path, base_line, fqn, tags.len, inst_lines }, size_hint);
+    , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
 }
 
 /// Generate epilogue with imports and main function
@@ -670,7 +980,7 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
         \\fn fn_{d}({s}) anyerror!EIdx {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    return if (caller_refinements) |cp| try cp.appendEntity(.{{ .unset_retval = {{}} }}) else 0;
+        \\    return if (caller_refinements) |cp| try cp.appendEntity(.{{ .retval_future = {{}} }}) else 0;
         \\}}
         \\
     , .{ func_index, params, func_index }, null);
