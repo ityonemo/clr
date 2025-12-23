@@ -8,6 +8,15 @@ pub const EIdx = Inst.EIdx;
 /// Dump analysis state. Call as: clr.dump(results, ctx, &refinements, caller_refinements, return_eidx);
 pub const dump = @import("dump.zig").dump;
 
+/// wraps all state into a single object that is easily passed between units.
+pub const State = struct {
+    ctx: *Context,
+    results: []Inst,
+    refinements: *Refinements,
+    return_eidx: EIdx,
+    caller_refinements: ?*Refinements,
+};
+
 test {
     @import("std").testing.refAllDecls(@This());
 }

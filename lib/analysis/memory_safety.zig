@@ -5,6 +5,7 @@ const EIdx = Inst.EIdx;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
+const State = @import("../lib.zig").State;
 
 // =========================================================================
 // State types
@@ -303,6 +304,16 @@ fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Disc
     return ctx;
 }
 
+fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_eidx = 0,
+        .caller_refinements = null,
+    };
+}
+
 test "alloc sets stack_ptr metadata on pointer analyte" {
     const allocator = std.testing.allocator;
 
@@ -315,9 +326,10 @@ test "alloc sets stack_ptr metadata on pointer analyte" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer) then MemorySafety.alloc
-    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc = .{} });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqualStrings("test_func", ms.stack_ptr.meta.function);
@@ -339,14 +351,15 @@ test "dbg_var_ptr sets variable name when name is other" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // First alloc to set up stack_ptr with .other name
-    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc = .{} });
     const ms1 = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.other, std.meta.activeTag(ms1.stack_ptr.name));
 
     // dbg_var_ptr should set the variable name
-    try Inst.apply(2, .{ .dbg_var_ptr = .{ .ptr = 1, .name = "foo" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 2, .{ .dbg_var_ptr = .{ .ptr = 1, .name = "foo" } });
 
     const ms2 = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.variable, std.meta.activeTag(ms2.stack_ptr.name));
@@ -365,6 +378,7 @@ test "bitcast propagates stack_ptr metadata" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Set up source pointer with stack_ptr on analyte
     const pointee_idx = try refinements.appendEntity(.{ .scalar = .{} });
@@ -382,7 +396,7 @@ test "bitcast propagates stack_ptr metadata" {
     } });
 
     // Bitcast shares the refinement
-    try Inst.apply(1, .{ .bitcast = .{ .src = .{ .eidx = 0 } } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .eidx = 0 } } });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
@@ -422,7 +436,7 @@ test "ret_safe detects escape when returning stack pointer from same function" {
 
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = .{ .eidx = 0 } }),
+        MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .src = .{ .eidx = 0 } }),
     );
 }
 
@@ -456,7 +470,7 @@ test "ret_safe allows returning arg (empty function name)" {
     } });
 
     // Should NOT error - returning pointer from caller is fine
-    try MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .caller_refinements = null, .return_eidx = 0, .src = .{ .eidx = 0 } });
+    try MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .src = .{ .eidx = 0 } });
 }
 
 test "alloc_create sets allocation metadata on pointer analyte" {
@@ -471,8 +485,9 @@ test "alloc_create sets allocation metadata on pointer analyte" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
-    try Inst.apply(1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
@@ -494,15 +509,16 @@ test "alloc_destroy marks allocation as freed" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create allocation
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
 
     // Update context for free location
     ctx.meta.line = 20;
 
     // Destroy allocation
-    try Inst.apply(1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
     const ms = refinements.at(results[0].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expect(ms.allocation.freed != null);
@@ -521,15 +537,16 @@ test "alloc_destroy detects double free" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create and free allocation
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
-    try Inst.apply(1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
     // Second free should error
     try std.testing.expectError(
         error.DoubleFree,
-        Inst.apply(2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements),
+        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }),
     );
 }
 
@@ -545,14 +562,15 @@ test "alloc_destroy detects mismatched allocator" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create with PageAllocator
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
 
     // Destroy with different allocator
     try std.testing.expectError(
         error.MismatchedAllocator,
-        Inst.apply(1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "ArenaAllocator" } }, &results, &ctx, &refinements),
+        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "ArenaAllocator" } }),
     );
 }
 
@@ -568,14 +586,15 @@ test "alloc_destroy detects freeing stack memory" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create stack allocation (alloc, not alloc_create)
-    try Inst.apply(0, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc = .{} });
 
     // Trying to free stack memory should error
     try std.testing.expectError(
         error.FreeStackMemory,
-        Inst.apply(1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements),
+        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }),
     );
 }
 
@@ -591,16 +610,17 @@ test "load detects use after free" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 4;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create, store (to make it defined), and free allocation
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
-    try Inst.apply(2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
     // Load after free should error
     try std.testing.expectError(
         error.UseAfterFree,
-        Inst.apply(3, .{ .load = .{ .ptr = 0 } }, &results, &ctx, &refinements),
+        Inst.apply(state, 3, .{ .load = .{ .ptr = 0 } }),
     );
 }
 
@@ -616,13 +636,14 @@ test "load from live allocation does not error" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create and store to allocation (not freed)
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Load from live allocation should succeed
-    try Inst.apply(2, .{ .load = .{ .ptr = 0 } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0 } });
 }
 
 test "onFinish detects memory leak" {
@@ -637,9 +658,10 @@ test "onFinish detects memory leak" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create allocation but don't free
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
 
     // onFinish should detect the leak
     try std.testing.expectError(
@@ -660,10 +682,11 @@ test "onFinish allows freed allocation" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create and free allocation
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
-    try Inst.apply(1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
     // onFinish should not error
     try MemorySafety.onFinish(&results, &ctx, &refinements);
@@ -686,14 +709,21 @@ test "onFinish allows passed allocation" {
     const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
     var results = [_]Inst{.{}} ** 3;
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_eidx = return_eidx,
+        .caller_refinements = &caller_refinements,
+    };
 
     // Create allocation
-    try Inst.apply(0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
     // Store to transform future -> scalar
-    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Return it (marks as passed)
-    try Inst.apply(2, .{ .ret_safe = .{ .caller_refinements = &caller_refinements, .return_eidx = return_eidx, .src = .{ .eidx = 0 } } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
 
     // onFinish should not error - allocation was passed to caller
     try MemorySafety.onFinish(&results, &ctx, &refinements);
@@ -711,9 +741,10 @@ test "onFinish ignores stack allocations" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
 
     // Create stack allocation (not heap)
-    try Inst.apply(0, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .alloc = .{} });
 
     // onFinish should not error - stack memory is fine
     try MemorySafety.onFinish(&results, &ctx, &refinements);

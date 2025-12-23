@@ -63,7 +63,7 @@ test "instLine for dbg_stmt" {
     const datum: Data = .{ .dbg_stmt = .{ .line = 10, .column = 5 } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_stmt, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .dbg_stmt = .{ .line = 10, .column = 5 } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 10, .column = 5 } });\n", result);
 }
 
 test "instLine for arg" {
@@ -76,7 +76,7 @@ test "instLine for arg" {
     const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum, 0, &.{}, &.{}, &.{}, &.{"test_param"}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"test_param\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name = \"test_param\" } });\n", result);
 }
 
 test "instLine for arg with sequential zir_param_index uses arg counter" {
@@ -94,17 +94,17 @@ test "instLine for arg with sequential zir_param_index uses arg counter" {
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"a\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result0);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name = \"a\" } });\n", result0);
 
     // Second arg: zir_param_index=1, should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
     const result1 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(1, .{ .arg = .{ .value = arg1, .name = \"b\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result1);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name = \"b\" } });\n", result1);
 
     // Third arg: zir_param_index=2, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result2 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .arg = .{ .value = arg2, .name = \"c\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result2);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name = \"c\" } });\n", result2);
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
@@ -126,17 +126,17 @@ test "instLine for arg with non-sequential zir_param_index uses sequential arg c
     // First arg: zir_param_index=0, should become arg0
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum0, 0, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .arg = .{ .value = arg0, .name = \"self\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result0);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name = \"self\" } });\n", result0);
 
     // Second arg: zir_param_index=2 (skipped 1), should become arg1
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result1 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum1, 1, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(1, .{ .arg = .{ .value = arg1, .name = \"byte_count\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result1);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name = \"byte_count\" } });\n", result1);
 
     // Third arg: zir_param_index=3, should become arg2
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
     const result2 = codegen._instLine(arena.allocator(), dummy_ip, .arg, datum2, 2, &.{}, &.{}, &.{}, param_names, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .arg = .{ .value = arg2, .name = \"return_address\", .caller_refinements = caller_refinements } }, results, ctx, &refinements);\n", result2);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name = \"return_address\" } });\n", result2);
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
@@ -154,7 +154,7 @@ test "instLine for ret_safe with source" {
     const datum: Data = .{ .un_op = operand_ref };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .ret_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = .{ .eidx = 5 } } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .eidx = 5 } } });\n", result);
 }
 
 test "instLine for alloc" {
@@ -167,7 +167,7 @@ test "instLine for alloc" {
     const datum: Data = .{ .no_op = {} };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{} });\n", result);
 }
 
 test "instLine for store_safe" {
@@ -183,7 +183,7 @@ test "instLine for store_safe" {
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .store_safe = .{ .ptr = 3, .src = .{ .eidx = 4 }, .is_undef = false } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 3, .src = .{ .eidx = 4 }, .is_undef = false } });\n", result);
 }
 
 test "instLine for load" {
@@ -198,7 +198,7 @@ test "instLine for load" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .load = .{ .ptr = 5 } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = 5 } });\n", result);
 }
 
 test "generateFunction produces complete function" {
@@ -231,12 +231,14 @@ test "generateFunction produces complete function" {
         \\    defer Inst.clear_results_list(results, ctx.allocator);
         \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .retval_future = {} }) else 0;
         \\
-        \\    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);
-        \\    try Inst.apply(1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } }, results, ctx, &refinements);
-        \\    try Inst.apply(2, .{ .load = .{ .ptr = 0 } }, results, ctx, &refinements);
-        \\    try Inst.apply(3, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = .{ .eidx = 2 } } }, results, ctx, &refinements);
-        \\    try Inst.onFinish(results, ctx, &refinements);
-        \\    Inst.backPropagate(results, &refinements, caller_refinements);
+        \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
+        \\
+        \\    try Inst.apply(state, 0, .{ .alloc = .{} });
+        \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
+        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0 } });
+        \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 2 } } });
+        \\    try Inst.onFinish(state);
+        \\    Inst.backPropagate(state);
         \\    return return_eidx;
         \\}
         \\
@@ -257,6 +259,7 @@ test "epilogue generates correct output" {
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
         \\const EIdx = clr.EIdx;
+        \\const State = clr.State;
         \\
         \\var writer_buf: [4096]u8 = undefined;
         \\var file_writer: std.fs.File.Writer = undefined;
@@ -328,7 +331,7 @@ test "instLine for br with block and operand" {
     } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .br, datum, 9, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(9, .{ .br = .{ .block = 3, .src = .{ .eidx = 8 } } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 9, .{ .br = .{ .block = 3, .src = .{ .eidx = 8 } } });\n", result);
 }
 
 // =============================================================================
@@ -347,7 +350,7 @@ test "instLine for bitcast" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .bitcast, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .bitcast = .{ .src = .{ .eidx = 7 } } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .eidx = 7 } } });\n", result);
 }
 
 test "instLine for unwrap_errunion_payload" {
@@ -362,7 +365,7 @@ test "instLine for unwrap_errunion_payload" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .unwrap_errunion_payload, datum, 5, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(5, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 4 } } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 4 } } });\n", result);
 }
 
 test "instLine for optional_payload" {
@@ -377,7 +380,7 @@ test "instLine for optional_payload" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .optional_payload, datum, 6, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(6, .{ .optional_payload = .{ .src = .{ .eidx = 3 } } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .optional_payload = .{ .src = .{ .eidx = 3 } } });\n", result);
 }
 
 // =============================================================================
@@ -409,7 +412,7 @@ test "instLine for dbg_var_ptr" {
     const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_var_ptr, datum, 3, extra, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(3, .{ .dbg_var_ptr = .{ .ptr = 2, .name = \"my_var\" } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .dbg_var_ptr = .{ .ptr = 2, .name = \"my_var\" } });\n", result);
 }
 
 test "instLine for dbg_var_val" {
@@ -425,7 +428,7 @@ test "instLine for dbg_var_val" {
     const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_var_val, datum, 6, extra, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(6, .{ .dbg_var_val = .{ .ptr = 5, .name = \"value_var\" } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .dbg_var_val = .{ .ptr = 5, .name = \"value_var\" } });\n", result);
 }
 
 test "instLine for dbg_arg_inline" {
@@ -441,7 +444,7 @@ test "instLine for dbg_arg_inline" {
     const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .dbg_arg_inline, datum, 2, extra, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(2, .{ .dbg_arg_inline = .{ .ptr = 1, .name = \"arg_name\" } }, results, ctx, &refinements);\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .dbg_arg_inline = .{ .ptr = 1, .name = \"arg_name\" } });\n", result);
 }
 
 // =============================================================================
@@ -532,17 +535,13 @@ test "generateFunction with simple cond_br block" {
     // 3. cond_br branches (instructions 4,5,6) are in sub functions only
 
     const expected =
-        \\fn fn_42_cond_br_false_7(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {
-        \\    _ = caller_refinements;
-        \\    _ = return_eidx;
-        \\    try Inst.apply(6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } }, results, ctx, refinements);
+        \\fn fn_42_cond_br_false_7(state: State) anyerror!void {
+        \\    try Inst.apply(state, 6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } });
         \\}
         \\
-        \\fn fn_42_cond_br_true_7(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {
-        \\    _ = caller_refinements;
-        \\    _ = return_eidx;
-        \\    try Inst.apply(4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 }, .is_undef = false } }, results, ctx, refinements);
-        \\    try Inst.apply(5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } }, results, ctx, refinements);
+        \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
+        \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 }, .is_undef = false } });
+        \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } });
         \\}
         \\
         \\fn fn_42(ctx: *Context, caller_refinements: ?*Refinements) anyerror!EIdx {
@@ -558,15 +557,17 @@ test "generateFunction with simple cond_br block" {
         \\    defer Inst.clear_results_list(results, ctx.allocator);
         \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .retval_future = {} }) else 0;
         \\
-        \\    try Inst.apply(0, .{ .alloc = .{} }, results, ctx, &refinements);
-        \\    try Inst.apply(1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } }, results, ctx, &refinements);
-        \\    try Inst.apply(2, .{ .block = .{} }, results, ctx, &refinements);
-        \\    try Inst.apply(3, .{ .load = .{ .ptr = null } }, results, ctx, &refinements);
-        \\    try Inst.cond_br(7, fn_42_cond_br_true_7, fn_42_cond_br_false_7, results, ctx, &refinements, caller_refinements, return_eidx);
-        \\    try Inst.apply(8, .{ .load = .{ .ptr = 0 } }, results, ctx, &refinements);
-        \\    try Inst.apply(9, .{ .ret_safe = .{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = .{ .eidx = 8 } } }, results, ctx, &refinements);
-        \\    try Inst.onFinish(results, ctx, &refinements);
-        \\    Inst.backPropagate(results, &refinements, caller_refinements);
+        \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
+        \\
+        \\    try Inst.apply(state, 0, .{ .alloc = .{} });
+        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
+        \\    try Inst.apply(state, 2, .{ .block = .{} });
+        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null } });
+        \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
+        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0 } });
+        \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .eidx = 8 } } });
+        \\    try Inst.onFinish(state);
+        \\    Inst.backPropagate(state);
         \\    return return_eidx;
         \\}
         \\

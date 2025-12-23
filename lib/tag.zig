@@ -3,6 +3,7 @@ const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
 const EIdx = Inst.EIdx;
 const Context = @import("Context.zig");
+const State = Inst.State;
 const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 pub const analyses = .{ Undefined, MemorySafety };
@@ -66,24 +67,24 @@ fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
 // Tag payload types
 
 pub const Alloc = struct {
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create the pointed-to future entity (structure determined by first store)
-        const pointee_idx = try refinements.appendEntity(.{ .future = .{ .name = null } });
+        const pointee_idx = try state.refinements.appendEntity(.{ .future = .{ .name = null } });
         // Create pointer entity pointing to the future
-        _ = try Inst.clobberInst(refinements, results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
-        try splat(.alloc, results, index, ctx, refinements, self);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+        try splat(.alloc, state, index, self);
     }
 };
 
 pub const AllocCreate = struct {
     allocator_type: []const u8,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create the pointed-to future entity (structure determined by first store)
-        const pointee_idx = try refinements.appendEntity(.{ .future = .{ .name = null } });
+        const pointee_idx = try state.refinements.appendEntity(.{ .future = .{ .name = null } });
         // Create pointer entity pointing to the future
-        _ = try Inst.clobberInst(refinements, results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
-        try splat(.alloc_create, results, index, ctx, refinements, self);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+        try splat(.alloc_create, state, index, self);
     }
 };
 
@@ -92,9 +93,9 @@ pub const AllocDestroy = struct {
     ptr: usize,
     allocator_type: []const u8,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        _ = try Inst.clobberInst(refinements, results, index, .void);
-        try splat(.alloc_destroy, results, index, ctx, refinements, self);
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.alloc_destroy, state, index, self);
     }
 };
 
@@ -119,18 +120,17 @@ pub const AllocDestroy = struct {
 /// - backPropagate: propagates S1'.undefined back to S1.undefined
 pub const Arg = struct {
     name: []const u8,
-    caller_refinements: ?*Refinements,
     // value is an index into the caller_refinements array.
     value: EIdx,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        const cp = self.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const cp = state.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
         // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
-        const local_copy_idx = try cp.at(self.value).*.copy_to(cp, refinements);
-        results[index].refinement = local_copy_idx;
+        const local_copy_idx = try cp.at(self.value).*.copy_to(cp, state.refinements);
+        state.results[index].refinement = local_copy_idx;
         // Set argument info for backward propagation on function close
-        results[index].argument = .{ .caller_ref = self.value, .name = self.name };
-        try splat(.arg, results, index, ctx, refinements, self);
+        state.results[index].argument = .{ .caller_ref = self.value, .name = self.name };
+        try splat(.arg, state, index, self);
     }
 };
 
@@ -138,30 +138,29 @@ pub const Bitcast = struct {
     /// Source value being bitcast.
     src: Src,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // Share source instruction's entity (intraprocedural - no copy needed).
         // TODO: When we add analyte fields to pointer entities, we may need to
         // copy/merge analyte data from the source entity to the destination here.
         switch (self.src) {
-            .eidx => |src| results[index].refinement = results[src].refinement,
+            .eidx => |src| state.results[index].refinement = state.results[src].refinement,
             .interned, .other => {
                 // Comptime/global source - create fresh scalar
                 // TODO: use type info from .interned to determine structure
-                _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             },
         }
-        try splat(.bitcast, results, index, ctx, refinements, self);
+        try splat(.bitcast, state, index, self);
     }
 };
 
 /// Block creates a labeled scope that can be the target of `br` (break) instructions.
 /// The block's result is a `.future` that gets filled in when a `br` targets it.
 pub const Block = struct {
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = self;
-        _ = ctx;
         // Block result is a future - will be filled in by br instruction
-        _ = try Inst.clobberInst(refinements, results, index, .{ .future = .{ .name = null } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .future = .{ .name = null } });
     }
 };
 
@@ -173,30 +172,30 @@ pub const Br = struct {
     /// Value being passed to the block.
     src: Src,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // Share source instruction's entity with block instruction (intraprocedural - no copy needed).
         // TODO: Need a way to merge types/analytes when multiple branches target the same block.
         // Currently we just overwrite, but we should union the analysis states.
         switch (self.src) {
             .eidx => |src| {
-                if (results[src].refinement) |src_idx| {
-                    results[self.block].refinement = src_idx;
+                if (state.results[src].refinement) |src_idx| {
+                    state.results[self.block].refinement = src_idx;
                 } else {
-                    _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} });
+                    _ = try Inst.clobberInst(state.refinements, state.results, self.block, .{ .scalar = .{} });
                 }
             },
             .interned => |ty| {
                 // Comptime value - create refinement based on type
                 // TODO: use full type info to determine structure
                 if (ty == .void) {
-                    _ = try Inst.clobberInst(refinements, results, self.block, .void);
+                    _ = try Inst.clobberInst(state.refinements, state.results, self.block, .void);
                 } else {
-                    _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} });
+                    _ = try Inst.clobberInst(state.refinements, state.results, self.block, .{ .scalar = .{} });
                 }
             },
-            .other => _ = try Inst.clobberInst(refinements, results, self.block, .{ .scalar = .{} }),
+            .other => _ = try Inst.clobberInst(state.refinements, state.results, self.block, .{ .scalar = .{} }),
         }
-        try splat(.br, results, index, ctx, refinements, self);
+        try splat(.br, state, index, self);
     }
 };
 
@@ -206,10 +205,10 @@ pub const DbgStmt = struct {
     line: u32,
     column: u32,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        _ = try Inst.clobberInst(refinements, results, index, .void);
-        ctx.meta.line = ctx.base_line + self.line + 1;
-        ctx.meta.column = self.column;
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        state.ctx.meta.line = state.ctx.base_line + self.line + 1;
+        state.ctx.meta.column = self.column;
     }
 };
 
@@ -222,9 +221,9 @@ pub const DbgVarPtr = struct {
     ptr: ?usize,
     name: []const u8,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        _ = try Inst.clobberInst(refinements, results, index, .void);
-        try splat(.dbg_var_ptr, results, index, ctx, refinements, self);
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.dbg_var_ptr, state, index, self);
     }
 };
 
@@ -237,9 +236,9 @@ pub const DbgVarVal = struct {
     ptr: ?usize,
     name: []const u8,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        _ = try Inst.clobberInst(refinements, results, index, .void);
-        try splat(.dbg_var_val, results, index, ctx, refinements, self);
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.dbg_var_val, state, index, self);
     }
 };
 
@@ -255,10 +254,10 @@ pub const Load = struct {
     /// TODO: We'll need to track globals/constants to properly analyze loads from them.
     ptr: ?usize,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // TODO: Should follow pointer and share pointee's entity, not create fresh scalar
-        _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
-        try splat(.load, results, index, ctx, refinements, self);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        try splat(.load, state, index, self);
     }
 };
 
@@ -269,17 +268,17 @@ pub const OptionalPayload = struct {
     /// Source optional being unwrapped.
     src: Src,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // Share source instruction's entity (intraprocedural - no copy needed)
         switch (self.src) {
-            .eidx => |src| results[index].refinement = results[src].refinement,
+            .eidx => |src| state.results[index].refinement = state.results[src].refinement,
             .interned, .other => {
                 // Comptime/global source - create fresh scalar
                 // TODO: use type info from .interned to determine structure
-                _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             },
         }
-        try splat(.optional_payload, results, index, ctx, refinements, self);
+        try splat(.optional_payload, state, index, self);
     }
 };
 
@@ -289,26 +288,24 @@ pub const OptionalPayload = struct {
 /// This handles copying the return value's entity back to the caller's refinements,
 /// enabling interprocedural tracking of returned values.
 pub const RetSafe = struct {
-    caller_refinements: ?*Refinements,
-    return_eidx: EIdx,
     /// Value being returned. Use .interned with .void for void returns.
     src: Src,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        _ = try Inst.clobberInst(refinements, results, index, .void);
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
 
         // Copy return value to caller's refinements
-        if (self.caller_refinements) |caller_refinements| {
-            const return_eidx = self.return_eidx;
+        if (state.caller_refinements) |caller_refinements| {
+            const return_eidx = state.return_eidx;
             switch (self.src) {
                 .eidx => |src| {
-                    const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                    if (refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
+                    const src_idx = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
+                    if (state.refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
                     switch (caller_refinements.at(return_eidx).*) {
                         .retval_future, .noreturn => {
                             // .noreturn can be overwritten - it's from an error path return
                             // Copy return value from callee to caller's return slot
-                            const new_idx = try refinements.at(src_idx).*.copy_to(refinements, caller_refinements);
+                            const new_idx = try state.refinements.at(src_idx).*.copy_to(state.refinements, caller_refinements);
                             caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
                         },
                         else => {
@@ -350,11 +347,11 @@ pub const RetSafe = struct {
         }
 
         // Splat runs last - analyses see state after copy is complete
-        try splat(.ret_safe, results, index, ctx, refinements, self);
+        try splat(.ret_safe, state, index, self);
 
         // Mark all futures as tombstoned - this path is exiting, so any
         // unresolved futures won't be resolved by this branch.
-        refinements.tombstoneAllFutures();
+        state.refinements.tombstoneAllFutures();
     }
 };
 
@@ -388,35 +385,35 @@ pub const Store = struct {
     src: Src,
     is_undef: bool,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        _ = try Inst.clobberInst(refinements, results, index, .void);
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
 
         // Transform .future pointee into actual structure based on src
         var pending_var_name: ?[]const u8 = null;
         var pointee_idx: ?Inst.EIdx = null;
 
         if (self.ptr) |ptr| {
-            const ptr_idx = results[ptr].refinement orelse {
-                try splat(.store, results, index, ctx, refinements, self);
+            const ptr_idx = state.results[ptr].refinement orelse {
+                try splat(.store, state, index, self);
                 return;
             };
-            if (refinements.at(ptr_idx).* != .pointer) {
-                try splat(.store, results, index, ctx, refinements, self);
+            if (state.refinements.at(ptr_idx).* != .pointer) {
+                try splat(.store, state, index, self);
                 return;
             }
-            pointee_idx = refinements.at(ptr_idx).pointer.to;
+            pointee_idx = state.refinements.at(ptr_idx).pointer.to;
 
-            if (refinements.at(pointee_idx.?).* == .future) {
+            if (state.refinements.at(pointee_idx.?).* == .future) {
                 // Extract pending var_name before transforming
-                pending_var_name = refinements.at(pointee_idx.?).future.name;
+                pending_var_name = state.refinements.at(pointee_idx.?).future.name;
 
                 // Determine structure from src, or default to scalar
                 // Can't copy from .future or .retval_future, so default to scalar
                 const src_ref: Refinement = blk: {
                     switch (self.src) {
                         .eidx => |src| {
-                            if (results[src].refinement) |src_idx| {
-                                const ref = refinements.at(src_idx).*;
+                            if (state.results[src].refinement) |src_idx| {
+                                const ref = state.refinements.at(src_idx).*;
                                 if (ref != .future and ref != .retval_future) {
                                     break :blk ref;
                                 }
@@ -424,22 +421,22 @@ pub const Store = struct {
                         },
                         .interned => |ty| {
                             // Use type info to determine structure
-                            break :blk try typeToRefinement(ty, refinements);
+                            break :blk try typeToRefinement(ty, state.refinements);
                         },
                         .other => {},
                     }
                     break :blk .{ .scalar = .{} };
                 };
-                try Refinement.clobber_structured_idx(pointee_idx.?, refinements, src_ref, refinements);
+                try Refinement.clobber_structured_idx(pointee_idx.?, state.refinements, src_ref, state.refinements);
             }
         }
 
         // Pass pending var_name to undefined analysis via context
-        ctx.pending_var_name = pending_var_name;
-        defer ctx.pending_var_name = null;
+        state.ctx.pending_var_name = pending_var_name;
+        defer state.ctx.pending_var_name = null;
 
         // The ptr instruction's entity is unchanged - we only update the pointee's analysis state
-        try splat(.store, results, index, ctx, refinements, self);
+        try splat(.store, state, index, self);
     }
 };
 
@@ -450,25 +447,25 @@ pub const UnwrapErrunionPayload = struct {
     /// Source error union being unwrapped.
     src: Src,
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
         // Share source instruction's entity (intraprocedural - no copy needed)
         switch (self.src) {
-            .eidx => |src| results[index].refinement = results[src].refinement,
+            .eidx => |src| state.results[index].refinement = state.results[src].refinement,
             .interned, .other => {
                 // Comptime/global source - create fresh scalar
                 // TODO: use type info from .interned to determine structure
-                _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             },
         }
-        try splat(.unwrap_errunion_payload, results, index, ctx, refinements, self);
+        try splat(.unwrap_errunion_payload, state, index, self);
     }
 };
 
 pub fn Simple(comptime instr: anytype) type {
     return struct {
-        pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-            _ = try Inst.clobberInst(refinements, results, index, .{ .scalar = .{} });
-            try splat(instr, results, index, ctx, refinements, self);
+        pub fn apply(self: @This(), state: State, index: usize) !void {
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            try splat(instr, state, index, self);
         }
     };
 }
@@ -476,13 +473,12 @@ pub fn Simple(comptime instr: anytype) type {
 pub fn Unimplemented(comptime opts: anytype) type {
     const known_void = if (@hasField(@TypeOf(opts), "void")) opts.void else false;
     return struct {
-        pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
+        pub fn apply(self: @This(), state: State, index: usize) !void {
             _ = self;
-            _ = ctx;
             if (known_void) {
-                _ = try Inst.clobberInst(refinements, results, index, .void);
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
             } else {
-                _ = try Inst.clobberInst(refinements, results, index, .unimplemented);
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
             }
         }
     };
@@ -548,10 +544,10 @@ pub const AnyTag = union(enum) {
     wrap_errunion_payload: Unimplemented(.{}),
 };
 
-pub fn splat(comptime tag: anytype, results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, payload: anytype) !void {
+pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, @tagName(tag))) {
-            try @field(Analysis, @tagName(tag))(results, index, ctx, refinements, payload);
+            try @field(Analysis, @tagName(tag))(state.results, index, state.ctx, state.refinements, payload);
         }
     }
 }

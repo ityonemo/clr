@@ -33,7 +33,7 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store, .store_safe => payloadStore(arena, ip, datum),
         .load => payloadLoad(arena, datum),
-        .ret_safe => payloadRetSafe(arena, ip, datum),
+        .ret_safe => payloadRetSafe2(arena, ip, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
         .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
         .br => payloadBr(arena, ip, datum),
@@ -47,6 +47,12 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
 fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(arena, ip, operand);
+    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for ret_safe - just the src, caller_refinements and return_eidx come from State.
+fn payloadRetSafe2(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const src_str = srcString(arena, ip, datum.un_op);
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
@@ -66,29 +72,29 @@ pub fn _instLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .noop_pruned_debug = .{{}} }}, results, ctx, &refinements);\n", .{inst_index}, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .noop_pruned_debug = .{{}} }});\n", .{inst_index}, null);
             }
             if (isAllocatorCreate(ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, allocator_type }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }});\n", .{ inst_index, allocator_type }, null);
             }
             if (isAllocatorDestroy(ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
                 const ptr_inst = extractDestroyPtrInst(datum, extra, tags, data) orelse {
                     // Can't determine ptr instruction, fall through to regular call
                     const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-                    break :blk clr_allocator.allocPrint(arena, "    try Inst.call({d}, {s}, {s}, results, ctx, &refinements);\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+                    break :blk clr_allocator.allocPrint(arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
                 };
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .allocator_type = \"{s}\" }} }}, results, ctx, &refinements);\n", .{ inst_index, ptr_inst, allocator_type }, null);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .allocator_type = \"{s}\" }} }});\n", .{ inst_index, ptr_inst, allocator_type }, null);
             }
             const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-            break :blk clr_allocator.allocPrint(arena, "    try Inst.call({d}, {s}, {s}, results, ctx, &refinements);\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+            break :blk clr_allocator.allocPrint(arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
         },
         else => blk: {
             const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names, arg_counter);
-            break :blk clr_allocator.allocPrint(arena, "    try Inst.apply({d}, .{{ .{s} = {s} }}, results, ctx, &refinements);\n", .{ inst_index, safeName(tag), tag_payload }, null);
+            break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, safeName(tag), tag_payload }, null);
         },
     };
 }
@@ -114,7 +120,7 @@ fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []cons
         counter.* += 1;
         break :blk idx;
     } else zir_param_index;
-    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\", .caller_refinements = caller_refinements }}", .{ arg_index, name }, null);
+    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ arg_index, name }, null);
 }
 
 fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
@@ -246,11 +252,6 @@ fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
     }
 }
 
-fn payloadRetSafe(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
-    const src_str = srcString(arena, ip, datum.un_op);
-    return clr_allocator.allocPrint(arena, ".{{ .caller_refinements = caller_refinements, .return_eidx = return_eidx, .src = {s} }}", .{src_str}, null);
-}
-
 fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
     const operand = datum.pl_op.operand;
     const name_index = datum.pl_op.payload;
@@ -298,7 +299,7 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
         break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
-    // Build args tuple string: .{ results[arg0].refinement.?, ... }
+    // Build args tuple string: .{ state.results[arg0].refinement.?, ... }
     var args_str: []const u8 = ".{";
     var first = true;
 
@@ -309,10 +310,10 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
             // Runtime value from local instruction - pass entity index
             const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} results[{d}].refinement.?", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} state.results[{d}].refinement.?", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, results[{d}].refinement.?", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, state.results[{d}].refinement.?", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
@@ -320,10 +321,10 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
             if (isZeroSizedType(ip, val_type)) continue;
             // Interned constant - create a defined scalar entity for it
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} try refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} try state.refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, try refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, try state.refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
             }
         }
     }
@@ -689,8 +690,9 @@ const FunctionGen = union(enum) {
     }
 
     /// Generate function signature/header (opening)
-    /// For sub functions, discard_caller_params controls whether to add _ = caller_refinements/return_eidx
+    /// For sub functions, discard_caller_params is unused (kept for API compatibility)
     fn header(self: FunctionGen, arena: std.mem.Allocator, params: []const u8, fqn: []const u8, file_path: []const u8, base_line: u32, num_insts: usize, discard_caller_params: bool) []const u8 {
+        _ = discard_caller_params;
         return switch (self) {
             .full => |f| clr_allocator.allocPrint(arena,
                 \\fn fn_{d}(ctx: *Context, caller_refinements: ?*Refinements{s}) anyerror!EIdx {{
@@ -706,20 +708,14 @@ const FunctionGen = union(enum) {
                 \\    defer Inst.clear_results_list(results, ctx.allocator);
                 \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{{ .retval_future = {{}} }}) else 0;
                 \\
+                \\    const state = State{{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements }};
+                \\
                 \\
             , .{ f.func_index, params, file_path, base_line, fqn, num_insts }, null),
-            .sub => |s| if (discard_caller_params)
-                clr_allocator.allocPrint(arena,
-                    \\fn fn_{d}_{s}_{d}(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {{
-                    \\    _ = caller_refinements;
-                    \\    _ = return_eidx;
-                    \\
-                , .{ s.func_index, @tagName(s.tag), s.instr_index }, null)
-            else
-                clr_allocator.allocPrint(arena,
-                    \\fn fn_{d}_{s}_{d}(results: []Inst, ctx: *Context, refinements: *Refinements, caller_refinements: ?*Refinements, return_eidx: EIdx) anyerror!void {{
-                    \\
-                , .{ s.func_index, @tagName(s.tag), s.instr_index }, null),
+            .sub => |s| clr_allocator.allocPrint(arena,
+                \\fn fn_{d}_{s}_{d}(state: State) anyerror!void {{
+                \\
+            , .{ s.func_index, @tagName(s.tag), s.instr_index }, null),
         };
     }
 
@@ -727,8 +723,8 @@ const FunctionGen = union(enum) {
     fn footer(self: FunctionGen, arena: std.mem.Allocator) []const u8 {
         return switch (self) {
             .full => clr_allocator.allocPrint(arena,
-                \\    try Inst.onFinish(results, ctx, &refinements);
-                \\    Inst.backPropagate(results, &refinements, caller_refinements);
+                \\    try Inst.onFinish(state);
+                \\    Inst.backPropagate(state);
                 \\    return return_eidx;
                 \\}}
                 \\
@@ -981,11 +977,6 @@ fn generateOneFunction(
             line = _instLine(arena, ip, instr.tag, instr.datum, instr.idx, extra, tags, data, param_names, &arg_counter);
         }
 
-        // For sub functions, refinements is already a *Refinements, so don't take address
-        if (item.isSub()) {
-            line = std.mem.replaceOwned(u8, arena, line, "&refinements", "refinements") catch @panic("out of memory");
-        }
-
         lines.append(arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
@@ -1028,7 +1019,7 @@ fn generateOneFunction(
 /// Generate the Inst.cond_br call line with new naming scheme
 fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u32) []const u8 {
     return clr_allocator.allocPrint(arena,
-        \\    try Inst.cond_br({d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d}, results, ctx, &refinements, caller_refinements, return_eidx);
+        \\    try Inst.cond_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d});
         \\
     , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
 }
@@ -1042,6 +1033,7 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
         \\const EIdx = clr.EIdx;
+        \\const State = clr.State;
         \\
         \\var writer_buf: [4096]u8 = undefined;
         \\var file_writer: std.fs.File.Writer = undefined;

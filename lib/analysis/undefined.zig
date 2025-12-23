@@ -5,6 +5,7 @@ const EIdx = Inst.EIdx;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
+const State = @import("../lib.zig").State;
 
 pub const Undefined = union(enum) {
     defined: void,
@@ -322,6 +323,16 @@ fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Disc
     return ctx;
 }
 
+fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_eidx = 0,
+        .caller_refinements = null,
+    };
+}
+
 test "alloc creates pointer to future" {
     const allocator = std.testing.allocator;
 
@@ -334,9 +345,10 @@ test "alloc creates pointer to future" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer to future)
-    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc = .{} });
 
     // alloc creates pointer; pointee is .future (structure determined by first store)
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -355,9 +367,10 @@ test "alloc_create creates pointer to future" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer to future)
-    try Inst.apply(1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
 
     // alloc_create creates pointer; pointee is .future (structure determined by first store)
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -376,10 +389,11 @@ test "store with is_undef=true sets undefined" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with is_undef=true
-    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
-    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -399,10 +413,11 @@ test "store with is_undef=false sets defined" {
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with is_undef=false
-    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
-    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -422,11 +437,12 @@ test "store with .null type creates optional refinement with defined inner scala
     defer refinements.deinit();
 
     var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
 
     // Alloc at instruction 1, then store null (which has .null type with scalar child)
-    try Inst.apply(1, .{ .alloc = .{} }, &results, &ctx, &refinements);
+    try Inst.apply(state, 1, .{ .alloc = .{} });
     // .null = &.{ .scalar = {} } should create .optional refinement with defined inner scalar
-    try Inst.apply(0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } }, .is_undef = false } }, &results, &ctx, &refinements);
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } }, .is_undef = false } });
 
     // Check the pointee is now an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
