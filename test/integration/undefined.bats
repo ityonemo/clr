@@ -49,7 +49,10 @@ load test_helper
 @test "detects undefined value returned from branch" {
     run compile_and_run "$TEST_CASES/undefined/if/return_from_both_branches.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use of undefined value" ]]
+    [[ "$output" =~ "use of undefined value found in return_from_both_branches.returns_from_both_branches" ]]
+    [[ "$output" =~ "return_from_both_branches.zig:12:8)" ]]
+    [[ "$output" =~ "undefined value assigned to 'x' in return_from_both_branches.returns_from_both_branches" ]]
+    [[ "$output" =~ "return_from_both_branches.zig:7:4)" ]]
 }
 
 @test "no error when both branches set value" {
@@ -60,5 +63,8 @@ load test_helper
 @test "detects undefined when neither branch sets value" {
     run compile_and_run "$TEST_CASES/undefined/if/neither_branch_sets.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use of undefined value" ]] || [[ "$output" =~ "may be undefined" ]]
+    [[ "$output" =~ "use of undefined value found in neither_branch_sets.main" ]]
+    [[ "$output" =~ "neither_branch_sets.zig:12:4)" ]]
+    [[ "$output" =~ "undefined value assigned to 'x' in neither_branch_sets.main" ]]
+    [[ "$output" =~ "neither_branch_sets.zig:2:4)" ]]
 }

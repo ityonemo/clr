@@ -67,6 +67,26 @@ bats test/integration/allocator.bats -f "double-free"
 
 **Important**: Do NOT modify integration tests to make them pass, unless we have decided to materially change the shape of the output. Integration tests should simply call `compile_and_run` and check the result. If a test fails, fix the codegen or runtime - not the test.
 
+**Important**: Integration tests MUST have comprehensive output checking. For error-detecting tests, verify:
+1. The exit status (`[ "$status" -ne 0 ]` for errors, `[ "$status" -eq 0 ]` for success)
+2. The error message type (e.g., "use of undefined value found in")
+3. The function name where the error occurred (e.g., "in function_name.main")
+4. The file name and line/column of the error (e.g., "filename.zig:12:4)")
+5. Any contextual messages (e.g., "undefined value assigned to 'x'")
+6. The source location of the context (e.g., "filename.zig:2:4)")
+
+Example of comprehensive test:
+```bash
+@test "detects undefined variable used before assignment" {
+    run compile_and_run "$TEST_CASES/undefined/basic/use_before_assign.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in use_before_assign.main" ]]
+    [[ "$output" =~ "use_before_assign.zig:3:4)" ]]
+    [[ "$output" =~ "undefined value assigned to 'x' in use_before_assign.main" ]]
+    [[ "$output" =~ "use_before_assign.zig:2:4)" ]]
+}
+```
+
 Test structure:
 - `test/integration/*.bats` - BATS test files
 - `test/integration/test_helper.bash` - Common setup and helper functions
