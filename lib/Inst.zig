@@ -52,18 +52,18 @@ pub fn cond_br(
     return_eidx: EIdx,
 ) !void {
     // Clone results and refinements, and context for each branch
-    const true_results = clone_results_list(results, ctx.allocator);
+    const true_results = try clone_results_list(results, ctx.allocator);
     defer clear_results_list(true_results, ctx.allocator);
     var true_refinements = try refinements.clone(ctx.allocator);
     defer true_refinements.deinit();
-    const true_ctx = ctx.copy();
+    const true_ctx = try ctx.copy();
     defer true_ctx.delete();
 
-    const false_results = clone_results_list(results, ctx.allocator);
+    const false_results = try clone_results_list(results, ctx.allocator);
     defer clear_results_list(false_results, ctx.allocator);
     var false_refinements = try refinements.clone(ctx.allocator);
     defer false_refinements.deinit();
-    const false_ctx = ctx.copy();
+    const false_ctx = try ctx.copy();
     defer false_ctx.delete();
 
     // Clone caller_refinements for each branch so ret_safe writes don't conflict
@@ -110,6 +110,8 @@ fn mergeCallerReturn(
     true_caller: ?*Refinements,
     false_caller: ?*Refinements,
 ) !void {
+    // Caller refinements are null when cond_br is at entrypoint (no caller to propagate to).
+    // This is legitimate - entrypoint functions have no caller return slot to merge.
     const true_cp = true_caller orelse return;
     const false_cp = false_caller orelse return;
 
@@ -151,8 +153,8 @@ fn mergeCallerReturn(
 // Results list management
 // =============================================================================
 
-pub fn make_results_list(allocator: std.mem.Allocator, count: usize) []Inst {
-    const list = allocator.alloc(Inst, count) catch @panic("out of memory");
+pub fn make_results_list(allocator: std.mem.Allocator, count: usize) error{OutOfMemory}![]Inst {
+    const list = try allocator.alloc(Inst, count);
     for (list) |*inst| {
         inst.* = .{};
     }
@@ -163,8 +165,8 @@ pub fn clear_results_list(list: []Inst, allocator: std.mem.Allocator) void {
     allocator.free(list);
 }
 
-pub fn clone_results_list(list: []Inst, allocator: std.mem.Allocator) []Inst {
-    const new_list = allocator.alloc(Inst, list.len) catch @panic("out of memory");
+pub fn clone_results_list(list: []Inst, allocator: std.mem.Allocator) error{OutOfMemory}![]Inst {
+    const new_list = try allocator.alloc(Inst, list.len);
     @memcpy(new_list, list);
     return new_list;
 }
@@ -206,7 +208,9 @@ pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void
 /// - Pointer's analyte (memory_safety for allocation tracking)
 /// - Pointee's analyte (undefined tracking for scalar values)
 pub fn backPropagate(results: []Inst, refinements: *Refinements, caller_refinements: ?*Refinements) void {
-    const cp = caller_refinements orelse return; // entrypoint, nothing to propagate
+    // Caller refinements are null at entrypoint - no caller to propagate analysis state to.
+    // This is legitimate - entrypoint functions don't need backward propagation.
+    const cp = caller_refinements orelse return;
     for (results) |inst| {
         const arg_info = inst.argument orelse continue;
         const caller_entity_idx = arg_info.caller_ref;
@@ -219,7 +223,7 @@ pub fn backPropagate(results: []Inst, refinements: *Refinements, caller_refineme
             .scalar => |src| {
                 switch (caller_entity.*) {
                     .scalar => |*dst| dst.* = src,
-                    else => {},
+                    else => |t| std.debug.panic("backPropagate: local is scalar but caller is {s}", .{@tagName(t)}),
                 }
             },
             .pointer => |local_ptr| {
@@ -231,15 +235,17 @@ pub fn backPropagate(results: []Inst, refinements: *Refinements, caller_refineme
                         switch (refinements.at(local_ptr.to).*) {
                             .scalar => |src| switch (cp.at(caller_ptr.to).*) {
                                 .scalar => |*dst| dst.* = src,
-                                else => {},
+                                // Caller's pointee was .future (never stored to), callee resolved it
+                                .future => cp.at(caller_ptr.to).* = .{ .scalar = src },
+                                else => |t| std.debug.panic("backPropagate: local pointee is scalar but caller pointee is {s}", .{@tagName(t)}),
                             },
-                            else => {},
+                            else => |t| std.debug.panic("backPropagate: local pointee is {s} - propagation not yet implemented", .{@tagName(t)}),
                         }
                     },
-                    else => {},
+                    else => |t| std.debug.panic("backPropagate: local is pointer but caller is {s}", .{@tagName(t)}),
                 }
             },
-            else => {},
+            else => |t| std.debug.panic("backPropagate: local refinement is {s} - propagation not yet implemented", .{@tagName(t)}),
         }
     }
 }
@@ -270,7 +276,7 @@ test "alloc creates pointer to future" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 3);
+    const results = try make_results_list(allocator, 3);
     defer clear_results_list(results, allocator);
 
     try Inst.apply(0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } }, results, &ctx, &refinements);
@@ -299,7 +305,7 @@ test "store_safe with undef keeps state undefined" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 3);
+    const results = try make_results_list(allocator, 3);
     defer clear_results_list(results, allocator);
 
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
@@ -322,7 +328,7 @@ test "store_safe with value sets state to defined" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 3);
+    const results = try make_results_list(allocator, 3);
     defer clear_results_list(results, allocator);
 
     try Inst.apply(1, .{ .alloc = .{} }, results, &ctx, &refinements);
@@ -345,7 +351,7 @@ test "load from undefined instruction reports use before assign" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 4);
+    const results = try make_results_list(allocator, 4);
     defer clear_results_list(results, allocator);
 
     // Set up: alloc creates pointer to future, store with is_undef transforms to scalar+undefined
@@ -367,7 +373,7 @@ test "load from defined instruction does not report error" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 4);
+    const results = try make_results_list(allocator, 4);
     defer clear_results_list(results, allocator);
 
     // Set up: alloc then store a real value
@@ -389,7 +395,7 @@ test "all instructions get valid refinements after operations" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 5);
+    const results = try make_results_list(allocator, 5);
     defer clear_results_list(results, allocator);
 
     // Apply various operations that should all set refinements
@@ -415,7 +421,7 @@ test "ret_safe copies scalar return value to caller_refinements" {
     // Callee's refinements and results
     var callee_refinements = Refinements.init(allocator);
     defer callee_refinements.deinit();
-    const callee_results = make_results_list(allocator, 3);
+    const callee_results = try make_results_list(allocator, 3);
     defer clear_results_list(callee_results, allocator);
 
     // Caller's refinements - pre-allocate return entity
@@ -453,7 +459,7 @@ test "ret_safe with null src sets caller return to void" {
     // Callee's refinements and results
     var callee_refinements = Refinements.init(allocator);
     defer callee_refinements.deinit();
-    const callee_results = make_results_list(allocator, 1);
+    const callee_results = try make_results_list(allocator, 1);
     defer clear_results_list(callee_results, allocator);
 
     // Caller's refinements - pre-allocate return entity
@@ -483,7 +489,7 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
 
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const results = make_results_list(allocator, 2);
+    const results = try make_results_list(allocator, 2);
     defer clear_results_list(results, allocator);
 
     // Allocate a value
@@ -510,7 +516,7 @@ test "backPropagate with null caller_refinements does nothing" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    const results = make_results_list(allocator, 1);
+    const results = try make_results_list(allocator, 1);
     defer clear_results_list(results, allocator);
 
     // Should just return without error
@@ -534,7 +540,7 @@ test "backPropagate propagates scalar analyte to caller" {
     } });
 
     // Set up results with argument info pointing to caller
-    const results = make_results_list(allocator, 1);
+    const results = try make_results_list(allocator, 1);
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_scalar_idx;
     results[0].argument = .{ .caller_ref = caller_scalar_idx, .name = "arg" };
@@ -575,7 +581,7 @@ test "backPropagate propagates pointer analyte to caller" {
     } });
 
     // Set up results with argument info
-    const results = make_results_list(allocator, 1);
+    const results = try make_results_list(allocator, 1);
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_ptr_idx;
     results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "ptr" };
@@ -620,7 +626,7 @@ test "backPropagate propagates pointee undefined state to caller" {
     } });
 
     // Set up results with argument info
-    const results = make_results_list(allocator, 1);
+    const results = try make_results_list(allocator, 1);
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_ptr_idx;
     results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "ptr" };

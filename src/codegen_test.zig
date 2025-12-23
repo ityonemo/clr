@@ -227,7 +227,7 @@ test "generateFunction produces complete function" {
         \\    var refinements = Refinements.init(ctx.allocator);
         \\    defer refinements.deinit();
         \\
-        \\    const results = Inst.make_results_list(ctx.allocator, 4);
+        \\    const results = try Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
         \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .retval_future = {} }) else 0;
         \\
@@ -552,7 +552,7 @@ test "generateFunction with simple cond_br block" {
         \\    var refinements = Refinements.init(ctx.allocator);
         \\    defer refinements.deinit();
         \\
-        \\    const results = Inst.make_results_list(ctx.allocator, 10);
+        \\    const results = try Inst.make_results_list(ctx.allocator, 10);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
         \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{ .retval_future = {} }) else 0;
         \\

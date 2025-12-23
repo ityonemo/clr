@@ -41,10 +41,12 @@ pub const MemorySafety = union(enum) {
 
     pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
         _ = index;
+        // ptr is null for stores to interned/global locations - no memory safety tracking needed
         const ptr = params.ptr orelse return;
         const src = switch (params.src) {
             .eidx => |idx| idx,
-            .interned, .other => return, // comptime/global values don't have memory safety tracking
+            // comptime/global values don't have memory safety tracking - skip
+            .interned, .other => return,
         };
 
         // If storing from a parameter, propagate the parameter name and location to the destination's stack_ptr
@@ -74,8 +76,10 @@ pub const MemorySafety = union(enum) {
         _ = index;
         _ = ctx;
         // Set the variable name on the stack_ptr metadata (now on pointer's analyte)
+        // ptr is null for debug info pointing to interned/global - no memory safety tracking
         const inst = params.ptr orelse return;
         std.debug.assert(inst < results.len);
+        // refinement is null for uninitialized instructions - nothing to name yet
         const ptr_idx = results[inst].refinement orelse return;
         // Get the pointer's analyte and update memory_safety
         const src_refinement = refinements.at(ptr_idx);
@@ -93,16 +97,19 @@ pub const MemorySafety = union(enum) {
 
         const src = switch (params.src) {
             .eidx => |idx| idx,
-            .interned, .other => return, // comptime/global values don't have memory safety tracking
+            // comptime/global values don't have memory safety tracking - skip
+            .interned, .other => return,
         };
         std.debug.assert(src < results.len);
 
+        // refinement is null for uninitialized instructions - skip (would be caught by undefined analysis)
         const src_idx = results[src].refinement orelse return;
         const src_refinement = refinements.at(src_idx);
 
-        // Only pointers can escape - scalars are fine
+        // Only pointers can escape - scalars are copied by value, safe to return
         if (src_refinement.* != .pointer) return;
 
+        // memory_safety is null for untracked pointers (e.g., external pointers) - skip
         const ms = &(src_refinement.pointer.analyte.memory_safety orelse return);
 
         switch (ms.*) {
@@ -187,14 +194,22 @@ pub const MemorySafety = union(enum) {
     /// Handle load - detect use-after-free
     pub fn load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Load) !void {
         _ = index;
+        // ptr is null for interned/global loads - no memory safety tracking needed
         const ptr = params.ptr orelse return;
         std.debug.assert(ptr < results.len);
 
+        // refinement may be null for uninitialized instructions - skip
         const ptr_idx = results[ptr].refinement orelse return;
         const ptr_refinement = refinements.at(ptr_idx);
-        if (ptr_refinement.* != .pointer) return;
 
+        // Loading through a non-pointer is a bug - we should only load through pointers
+        if (ptr_refinement.* != .pointer) {
+            std.debug.panic("memory_safety.load: expected pointer, got {s}", .{@tagName(ptr_refinement.*)});
+        }
+
+        // memory_safety may be null for stack allocations or untracked pointers
         const ms = ptr_refinement.pointer.analyte.memory_safety orelse return;
+        // Only check use-after-free for heap allocations
         if (ms != .allocation) return;
 
         if (ms.allocation.freed) |free_site| {

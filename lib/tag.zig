@@ -275,17 +275,16 @@ pub const RetSafe = struct {
                     const src_idx = results[src].refinement orelse @panic("return function requested uninitialized instruction value");
                     if (refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
                     switch (caller_refinements.at(return_eidx).*) {
-                        .retval_future, .void => {
-                            // .void can be overwritten - it's from an error path return
+                        .retval_future, .noreturn => {
+                            // .noreturn can be overwritten - it's from an error path return
                             // Copy return value from callee to caller's return slot
                             const new_idx = try refinements.at(src_idx).*.copy_to(refinements, caller_refinements);
                             caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
                         },
                         else => {
-                            // With cond_br cloning caller_refinements per branch, this case
-                            // should only hit for multiple returns within the same branch.
-                            // For now, we keep the first return value (conservative: later
-                            // returns might have more refined analysis state).
+                            // Multiple returns within same branch - need to merge
+                            // TODO: implement proper merge of return value analysis states
+                            @panic("ret_safe: multiple returns in same branch - merge not yet implemented");
                         },
                     }
                 },
@@ -305,18 +304,17 @@ pub const RetSafe = struct {
                             .retval_future, .void => {
                                 caller_refinements.at(return_eidx).* = .{ .scalar = .{} };
                             },
-                            else => {},
+                            else => {
+                                // Multiple returns within same branch - need to merge
+                                // TODO: implement proper merge of return value analysis states
+                                @panic("ret_safe: multiple interned returns in same branch - merge not yet implemented");
+                            },
                         }
                     }
                 },
                 .other => {
-                    // Global/other - create scalar for now
-                    switch (caller_refinements.at(return_eidx).*) {
-                        .retval_future, .void => {
-                            caller_refinements.at(return_eidx).* = .{ .scalar = .{} };
-                        },
-                        else => {},
-                    }
+                    // Global/other source - not yet supported
+                    @panic("ret_safe: .other source not yet implemented");
                 },
             }
         }
@@ -401,31 +399,16 @@ pub const Store = struct {
                     }
                     break :blk .{ .scalar = .{} };
                 };
-                Refinement.clobber_structured_idx(pointee_idx.?, refinements, src_ref, refinements);
+                try Refinement.clobber_structured_idx(pointee_idx.?, refinements, src_ref, refinements);
             }
         }
+
+        // Pass pending var_name to undefined analysis via context
+        ctx.pending_var_name = pending_var_name;
+        defer ctx.pending_var_name = null;
 
         // The ptr instruction's entity is unchanged - we only update the pointee's analysis state
         try splat(.store, results, index, ctx, refinements, self);
-
-        // Apply pending var_name to the undefined state if it was set
-        if (pending_var_name) |name| {
-            if (pointee_idx) |idx| {
-                switch (refinements.at(idx).*) {
-                    .scalar => |*s| if (s.undefined) |*u| switch (u.*) {
-                        .undefined => |*meta| meta.var_name = name,
-                        .inconsistent => |*meta| meta.var_name = name,
-                        .defined => {},
-                    },
-                    .pointer => |*p| if (p.analyte.undefined) |*u| switch (u.*) {
-                        .undefined => |*meta| meta.var_name = name,
-                        .inconsistent => |*meta| meta.var_name = name,
-                        .defined => {},
-                    },
-                    else => {},
-                }
-            }
-        }
     }
 };
 
@@ -579,41 +562,52 @@ pub fn splatMerge(
         // Use index-based version because orig might be .future
         if (true_eidx == null and false_eidx == null) continue;
         if (true_eidx == null) {
-            Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(false_eidx.?).*, false_refinements);
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(false_eidx.?).*, false_refinements);
             continue;
         }
         if (false_eidx == null) {
-            Refinement.clobber_structured_idx(orig_eidx, refinements, true_refinements.at(true_eidx.?).*, true_refinements);
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_refinements.at(true_eidx.?).*, true_refinements);
             continue;
         }
 
-        // Handle .future: if one branch has .future and the other has a resolved value, use the resolved one
+        // Handle .future/.retval_future: if one branch has a future and the other has a resolved value, use the resolved one
         const true_ref = true_refinements.at(true_eidx.?).*;
         const false_ref = false_refinements.at(false_eidx.?).*;
-        const true_is_future = true_ref == .future;
-        const false_is_future = false_ref == .future;
+        const true_is_future = true_ref == .future or true_ref == .retval_future;
+        const false_is_future = false_ref == .future or false_ref == .retval_future;
 
         if (true_is_future and false_is_future) {
-            // Both are .future - nothing to merge, leave as .future
+            // Both are futures - nothing to merge, leave as is
             continue;
         }
         if (true_is_future) {
-            // True branch didn't resolve - must be tombstoned (early return)
-            if (!true_ref.future.tombstoned) {
+            // True branch didn't resolve this slot
+            // For .future, must be tombstoned (early return). For .retval_future, always OK to skip.
+            if (true_ref == .future and !true_ref.future.tombstoned) {
                 @panic("merging non-tombstoned future with resolved value - branch didn't return but also didn't resolve the future");
             }
-            // Use false branch's value since true branch exited
+            // Use false branch's value since true branch didn't resolve
             result.refinement = false_eidx;
             continue;
         }
         if (false_is_future) {
-            // False branch didn't resolve - must be tombstoned (early return)
-            if (!false_ref.future.tombstoned) {
+            // False branch didn't resolve this slot
+            // For .future, must be tombstoned (early return). For .retval_future, always OK to skip.
+            if (false_ref == .future and !false_ref.future.tombstoned) {
                 @panic("merging non-tombstoned future with resolved value - branch didn't return but also didn't resolve the future");
             }
-            // Use true branch's value since false branch exited
+            // Use true branch's value since false branch didn't resolve
             result.refinement = true_eidx;
             continue;
+        }
+
+        // Handle orig being .future or .retval_future when both branches resolved it
+        // (e.g., block instructions start as .future and are resolved by br in each branch)
+        const orig_ref = refinements.at(orig_eidx).*;
+        if (orig_ref == .future or orig_ref == .retval_future) {
+            // Both branches resolved the future - copy structure from true branch
+            // then continue to merge analysis states
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
         }
 
         // Non-trivial: both branches have resolved states - call each analyzer's merge

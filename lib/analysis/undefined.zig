@@ -80,10 +80,14 @@ pub const Undefined = union(enum) {
             .unimplemented => return,
             else => |t| std.debug.panic("store: expected pointer, got {s}", .{@tagName(t)}),
         };
+
+        // Create undefined state, including var_name from pending if set
+        const pending_var_name = ctx.pending_var_name;
         const undef_state: Undefined = if (params.is_undef)
-            .{ .undefined = .{ .meta = ctx.meta } }
+            .{ .undefined = .{ .meta = ctx.meta, .var_name = pending_var_name } }
         else
             .{ .defined = {} };
+
         switch (refinements.at(pointee_idx).*) {
             .scalar => |*s| s.undefined = undef_state,
             .pointer => |*p| p.analyte.undefined = undef_state,
@@ -104,6 +108,8 @@ pub const Undefined = union(enum) {
         };
         switch (refinements.at(pointee_idx).*) {
             .scalar => |s| {
+                // undefined is null when value wasn't allocated through our tracked mechanisms
+                // (e.g., external data, FFI). No undefined tracking available - skip.
                 const undef = s.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
@@ -116,6 +122,8 @@ pub const Undefined = union(enum) {
                 }
             },
             .pointer => |p| {
+                // undefined is null when pointer wasn't allocated through our tracked mechanisms.
+                // No undefined tracking available - skip.
                 const undef = p.analyte.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
@@ -137,18 +145,22 @@ pub const Undefined = union(enum) {
     pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
+        // ptr is null for debug info pointing to interned/global - no local tracking needed
         const inst = params.ptr orelse return;
         std.debug.assert(inst < results.len);
+        // refinement is null for uninitialized instructions - nothing to name yet
         const ptr_idx = results[inst].refinement orelse return;
         // Follow pointer to get to pointee
         const pointee_idx = switch (refinements.at(ptr_idx).*) {
             .pointer => |ind| ind.to,
             .scalar => ptr_idx,
+            // unimplemented/retval_future/void have no undefined tracking - skip naming
             .unimplemented, .retval_future, .void => return,
             else => @panic("unexpected refinement type in dbg_var_ptr (outer)"),
         };
         switch (refinements.at(pointee_idx).*) {
             .scalar => |*s| {
+                // undefined is null when value wasn't tracked - nothing to name
                 const undef = &(s.undefined orelse return);
                 switch (undef.*) {
                     .undefined => |*meta| meta.var_name = params.name,
@@ -157,6 +169,7 @@ pub const Undefined = union(enum) {
                 }
             },
             .pointer => |*p| {
+                // undefined is null when pointer wasn't tracked - nothing to name
                 const undef = &(p.analyte.undefined orelse return);
                 switch (undef.*) {
                     .undefined => |*meta| meta.var_name = params.name,
@@ -165,6 +178,7 @@ pub const Undefined = union(enum) {
                 }
             },
             .future => |*f| f.name = params.name, // Store name for when store transforms the future
+            // unimplemented values have no undefined tracking - skip naming
             .unimplemented => {},
             else => @panic("unexpected refinement type in dbg_var_ptr (pointee)"),
         }
@@ -194,6 +208,25 @@ pub const Undefined = union(enum) {
         const orig_ref = orig[0].at(orig[1]);
         const true_ref = true_branch[0].at(true_branch[1]);
         const false_ref = false_branch[0].at(false_branch[1]);
+
+        // Handle tombstoned futures - these represent early returns and are OK to merge
+        const true_is_tombstoned = true_ref.* == .future and true_ref.future.tombstoned;
+        const false_is_tombstoned = false_ref.* == .future and false_ref.future.tombstoned;
+
+        if (true_is_tombstoned and false_is_tombstoned) {
+            // Both branches returned early - nothing to merge
+            return;
+        }
+        if (true_is_tombstoned) {
+            // True branch returned early - use false branch's value
+            orig_ref.* = false_ref.*;
+            return;
+        }
+        if (false_is_tombstoned) {
+            // False branch returned early - use true branch's value
+            orig_ref.* = true_ref.*;
+            return;
+        }
 
         switch (orig_ref.*) {
             .scalar => |*s| {
@@ -242,7 +275,13 @@ pub const Undefined = union(enum) {
                     .{ false_branch[0], false_ref.region.to },
                 );
             },
-            else => {},
+            // Types without undefined tracking - no merge needed
+            .void, .unimplemented, .noreturn => {},
+            // Types with undefined tracking not yet implemented
+            .@"struct", .@"union" => @panic("mergeRefinement: struct/union merge not yet implemented"),
+            // Non-tombstoned futures should never appear in merges - they must be resolved first
+            .future => @panic("mergeRefinement: non-tombstoned .future should have been resolved before merge"),
+            .retval_future => @panic("mergeRefinement: cannot merge .retval_future"),
         }
     }
 

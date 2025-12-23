@@ -6,6 +6,10 @@ meta: @import("Meta.zig"),
 base_line: u32 = 0,
 writer: *std.Io.Writer = undefined,
 
+/// Temporary storage for var_name extracted from .future during store transformation.
+/// Set by Store.apply before splat, consumed by undefined.store, then cleared.
+pending_var_name: ?[]const u8 = null,
+
 const Context = @This();
 
 pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
@@ -28,8 +32,8 @@ pub fn deinit(self: *Context) void {
 
 /// Create a shallow copy of the context (for branch execution).
 /// All fields are copied by value - pointers/slices share underlying data.
-pub fn copy(self: *Context) *Context {
-    const new_ctx = self.allocator.create(Context) catch @panic("out of memory");
+pub fn copy(self: *Context) error{OutOfMemory}!*Context {
+    const new_ctx = try self.allocator.create(Context);
     new_ctx.* = self.*;
     return new_ctx;
 }

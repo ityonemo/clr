@@ -5,6 +5,7 @@ pub const Refinements = @import("Refinements.zig");
 pub const EIdx = Inst.EIdx;
 
 // Debug utilities
+/// Dump analysis state. Call as: clr.dump(results, ctx, &refinements, caller_refinements, return_eidx);
 pub const dump = @import("dump.zig").dump;
 
 test {

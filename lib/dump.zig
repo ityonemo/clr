@@ -120,6 +120,7 @@ fn formatRefinementDeep(buf: []u8, ref: Refinement, refinements: *Refinements, d
         .future => "future",
         .unimplemented => "unimplemented",
         .void => "void",
+        .noreturn => "noreturn",
     };
 }
 

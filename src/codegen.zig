@@ -627,7 +627,7 @@ const FunctionGen = union(enum) {
                 \\    var refinements = Refinements.init(ctx.allocator);
                 \\    defer refinements.deinit();
                 \\
-                \\    const results = Inst.make_results_list(ctx.allocator, {d});
+                \\    const results = try Inst.make_results_list(ctx.allocator, {d});
                 \\    defer Inst.clear_results_list(results, ctx.allocator);
                 \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{{ .retval_future = {{}} }}) else 0;
                 \\

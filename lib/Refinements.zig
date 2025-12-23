@@ -33,6 +33,7 @@ pub const Refinement = union(enum) {
     @"struct": void, // unused, for now, temporarily void. Will be a slice of EIdx.
     @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
     future: Future,
+    noreturn: void, // specific return value for error paths.
     retval_future: void, // special-case for retvals before a return has been called.
     unimplemented: void, // this means we have an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
@@ -41,52 +42,55 @@ pub const Refinement = union(enum) {
     /// TODO: In some cases, "deeper specification" may be added.
     /// NOTE: For .future destinations, use clobber_structured_idx instead because
     /// clobber_future may reallocate dst_list, invalidating the dst pointer.
-    pub fn clobber_structured(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements) void {
+    pub fn clobber_structured(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         switch (dst.*) {
             .scalar => {
                 if (src != .scalar) std.debug.panic("clobber mismatch: src is .{s} and dst is .scalar", .{@tagName(src)});
                 dst.scalar = src.scalar;
             },
-            .pointer => recurse_indirected(dst, dst_list, src, src_list, .pointer),
-            .optional => recurse_indirected(dst, dst_list, src, src_list, .optional),
+            .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
+            .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .retval_future => @panic("cannot copy from .retval_future"),
-            .region => recurse_indirected(dst, dst_list, src, src_list, .region),
+            .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // future: use index-based version to avoid stale pointer after reallocation
             .future => @panic("clobber_structured: use clobber_structured_idx for .future destinations"),
-            // following two types don't have any metadata associated with it.
+            // following types don't have any metadata associated with them.
             .unimplemented => if (src != .unimplemented) std.debug.panic("clobber mismatch: src is .{s} and dst is .unimplemented", .{@tagName(src)}),
             .void => if (src != .void) std.debug.panic("clobber mismatch: src is .{s} and dst is .void", .{@tagName(src)}),
+            .noreturn => if (src != .noreturn) std.debug.panic("clobber mismatch: src is .{s} and dst is .noreturn", .{@tagName(src)}),
         }
     }
 
     /// clobbers one refinement over another, using index for destination.
     /// Use this when dst might be .future (which requires reallocation-safe handling).
-    pub fn clobber_structured_idx(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) void {
+    pub fn clobber_structured_idx(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const dst = dst_list.at(dst_idx);
         switch (dst.*) {
             .scalar => {
                 if (src != .scalar) std.debug.panic("clobber mismatch: src is .{s} and dst is .scalar", .{@tagName(src)});
                 dst.scalar = src.scalar;
             },
-            .pointer => recurse_indirected(dst, dst_list, src, src_list, .pointer),
-            .optional => recurse_indirected(dst, dst_list, src, src_list, .optional),
-            .retval_future => @panic("cannot copy from .retval_future"),
-            .region => recurse_indirected(dst, dst_list, src, src_list, .region),
+            .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
+            .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
+            // retval_future is like future - a placeholder to be filled in
+            .retval_future => try clobber_future(dst_idx, dst_list, src, src_list),
+            .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // future: use index-based clobber to handle reallocation
-            .future => clobber_future(dst_idx, dst_list, src, src_list),
-            // following two types don't have any metadata associated with it.
+            .future => try clobber_future(dst_idx, dst_list, src, src_list),
+            // following types don't have any metadata associated with them.
             .unimplemented => if (src != .unimplemented) std.debug.panic("clobber mismatch: src is .{s} and dst is .unimplemented", .{@tagName(src)}),
             .void => if (src != .void) std.debug.panic("clobber mismatch: src is .{s} and dst is .void", .{@tagName(src)}),
+            .noreturn => if (src != .noreturn) std.debug.panic("clobber mismatch: src is .{s} and dst is .noreturn", .{@tagName(src)}),
         }
     }
 
     /// Clobber a .future slot with a src refinement, copying the structure without checks.
     /// Takes dst_idx instead of pointer because copy_to may reallocate dst_list.
-    fn clobber_future(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) void {
+    fn clobber_future(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const same_list = src_list == dst_list;
         // Note: We must compute the new value BEFORE getting a pointer to dst,
         // because copy_to may reallocate dst_list's backing memory.
@@ -94,20 +98,21 @@ pub const Refinement = union(enum) {
             .scalar => src,
             .pointer => |p| .{ .pointer = .{
                 .analyte = p.analyte,
-                .to = if (same_list) p.to else copy_to(src_list.at(p.to).*, src_list, dst_list) catch @panic("out of memory"),
+                .to = if (same_list) p.to else try copy_to(src_list.at(p.to).*, src_list, dst_list),
             } },
             .optional => |o| .{ .optional = .{
                 .analyte = o.analyte,
-                .to = if (same_list) o.to else copy_to(src_list.at(o.to).*, src_list, dst_list) catch @panic("out of memory"),
+                .to = if (same_list) o.to else try copy_to(src_list.at(o.to).*, src_list, dst_list),
             } },
             .region => |r| .{ .region = .{
                 .analyte = r.analyte,
-                .to = if (same_list) r.to else copy_to(src_list.at(r.to).*, src_list, dst_list) catch @panic("out of memory"),
+                .to = if (same_list) r.to else try copy_to(src_list.at(r.to).*, src_list, dst_list),
             } },
             .@"struct" => .{ .@"struct" = {} },
             .@"union" => .{ .@"union" = {} },
             .unimplemented => .{ .unimplemented = {} },
             .void => .{ .void = {} },
+            .noreturn => .{ .noreturn = {} },
             .future => |name| .{ .future = name }, // Preserve future (uninitialized slot)
             .retval_future => @panic("cannot copy from .retval_future"),
         };
@@ -115,13 +120,13 @@ pub const Refinement = union(enum) {
         dst_list.at(dst_idx).* = new_value;
     }
 
-    fn recurse_indirected(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
+    fn recurse_indirected(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!void {
         if (src != tag) std.debug.panic("clobber mismatch: src is .{s} and dst is .{s}", .{ @tagName(src), @tagName(tag) });
         // copy over analytes.
         @field(dst, @tagName(tag)).analyte = @field(src, @tagName(tag)).analyte;
         const new_dst = dst_list.at(@field(dst, @tagName(tag)).to);
         const new_src = src_list.at(@field(src, @tagName(tag)).to);
-        clobber_structured(new_dst, dst_list, new_src.*, src_list);
+        try clobber_structured(new_dst, dst_list, new_src.*, src_list);
     }
 
     fn recurse_fields(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
@@ -145,9 +150,10 @@ pub const Refinement = union(enum) {
             .region => try src.copy_to_indirected(src_list, dst_list, .region),
             .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copy_to_fields(src_list, dst_list, .@"union"),
-            // following two types don't have any metadata associated with it.
+            // following types don't have any metadata associated with them.
             .unimplemented => try dst_list.appendEntity(.{ .unimplemented = {} }),
             .void => try dst_list.appendEntity(.{ .void = {} }),
+            .noreturn => try dst_list.appendEntity(.{ .noreturn = {} }),
         };
     }
 
