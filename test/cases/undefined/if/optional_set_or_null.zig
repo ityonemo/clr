@@ -1,4 +1,4 @@
-fn use_optional(val: ?u8) void {
+noinline fn use_optional(val: ?u8) void {
     _ = val;
 }
 
@@ -12,5 +12,5 @@ pub fn main() void {
         x = null; // other branch sets null
     }
     // x is defined (either value or null) - should be OK
-    @call(.never_inline, use_optional, .{x});
+    use_optional(x);
 }
