@@ -68,3 +68,8 @@ load test_helper
     [[ "$output" =~ "undefined value assigned in both_branches_unset.main" ]]
     [[ "$output" =~ "both_branches_unset.zig:6:8)" ]]
 }
+
+@test "no error when optional set to value or null in branches" {
+    run compile_and_run "$TEST_CASES/undefined/if/optional_set_or_null.zig"
+    [ "$status" -eq 0 ]
+}

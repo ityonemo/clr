@@ -377,6 +377,7 @@ pub const AnyTag = union(enum) {
 
     // Unimplemented tags (no-op)
     add_with_overflow: Unimplemented(.{}),
+    aggregate_init: Unimplemented(.{}),
     array_to_slice: Unimplemented(.{}),
     block: Block,
     cond_br: Unimplemented(.{ .void = true }),
