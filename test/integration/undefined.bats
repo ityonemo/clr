@@ -83,7 +83,7 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in undefined_field_access.main" ]]
     [[ "$output" =~ "undefined_field_access.zig:10:" ]]
-    [[ "$output" =~ "undefined value assigned to 'p' in undefined_field_access.main" ]]
+    [[ "$output" =~ "undefined value assigned in undefined_field_access.main" ]]
     [[ "$output" =~ "undefined_field_access.zig:7:" ]]
 }
 
@@ -116,4 +116,21 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in struct_field_missed_when_passed.main" ]]
     [[ "$output" =~ "struct_field_missed_when_passed.zig:15:" ]]
+}
+
+@test "no error when field-level undefined is set before use" {
+    run compile_and_run "$TEST_CASES/undefined/structs/field_level_undefined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when partial init with default sets undefined field before use" {
+    run compile_and_run "$TEST_CASES/undefined/structs/partial_default_init.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined field x when default not applied with = undefined" {
+    run compile_and_run "$TEST_CASES/undefined/structs/full_undefined_with_default.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in full_undefined_with_default.main" ]]
+    [[ "$output" =~ "full_undefined_with_default.zig:9:" ]]
 }

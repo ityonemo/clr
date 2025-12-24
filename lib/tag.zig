@@ -1,3 +1,4 @@
+const std = @import("std");
 const Inst = @import("Inst.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
@@ -19,7 +20,7 @@ pub const Type = union(enum) {
     optional: *const Type,
     null: *const Type, // used to signal that an optional is being set to null.
     region: *const Type, // unused, for now, will represent slices (maybe)
-    @"struct": void, // unused, for now, temporarily void. Will be a slice of Simple.
+    @"struct": []const Type, // field types for struct
     @"union": void, // unused, for now, temporarily void. Will be a slice of Simple.
     void: void,
 };
@@ -59,7 +60,15 @@ fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .region = .{ .analyte = .{}, .to = child_idx } };
         },
-        .@"struct" => .{ .@"struct" = {} },
+        .@"struct" => |field_types| blk: {
+            const allocator = refinements.list.allocator;
+            const fields = allocator.alloc(Refinements.EIdx, field_types.len) catch @panic("out of memory");
+            for (field_types, 0..) |field_type, i| {
+                const field_ref = try typeToRefinement(field_type, refinements);
+                fields[i] = try refinements.appendEntity(field_ref);
+            }
+            break :blk .{ .@"struct" = .{ .fields = fields } };
+        },
         .@"union" => .{ .@"union" = {} },
     };
 }
@@ -244,20 +253,127 @@ pub const DbgVarVal = struct {
 
 /// Load dereferences a pointer and produces the value stored at that memory location.
 ///
-/// LIMITATION: Currently always creates a fresh scalar, which is incorrect for
-/// pointer-to-pointer types (e.g., `**u8`). Loading from a `**u8` should produce
-/// the inner pointer entity, not a fresh scalar. This breaks tracking for multi-level
-/// pointer dereferences. See CLAUDE.md "Known Limitations" section.
+/// For compound types (structs, pointers), loading shares the pointee's entity.
+/// For scalars, creates a fresh scalar since values are copied.
 pub const Load = struct {
     /// Index into results[] array. Null when loading from a global or constant
     /// pointer (interned value with no instruction to trace).
-    /// TODO: We'll need to track globals/constants to properly analyze loads from them.
     ptr: ?usize,
+    /// Type of the loaded value (from AIR ty_op)
+    ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // TODO: Should follow pointer and share pointee's entity, not create fresh scalar
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        const ptr = self.ptr orelse {
+            // Interned/global pointer - use type info to create proper structure
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.load, state, index, self);
+            return;
+        };
+
+        const ptr_ref = state.results[ptr].refinement orelse {
+            // Pointer has no refinement - use type info to create proper structure
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.load, state, index, self);
+            return;
+        };
+
+        // Follow pointer to get pointee
+        const pointee_idx = switch (state.refinements.at(ptr_ref).*) {
+            .pointer => |p| p.to,
+            else => {
+                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                try splat(.load, state, index, self);
+                return;
+            },
+        };
+
+        // Clobber with the pointee's refinement (shallow copy - structs share field entities)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, state.refinements.at(pointee_idx).*);
         try splat(.load, state, index, self);
+    }
+};
+
+/// StructFieldPtr gets a pointer to a specific field within a struct.
+/// Used by struct_field_ptr_index_N instructions.
+pub const StructFieldPtr = struct {
+    /// Base pointer to the struct
+    base: ?usize,
+    /// Index of the field to access
+    field_index: usize,
+    /// Result type (pointer to field type)
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const base = self.base orelse {
+            // Interned/global base - use type info to create proper structure
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.struct_field_ptr, state, index, self);
+            return;
+        };
+
+        const base_ref = state.results[base].refinement orelse {
+            std.debug.panic("struct_field_ptr: base instruction {d} has no refinement", .{base});
+        };
+
+        // Follow base pointer to struct
+        if (state.refinements.at(base_ref).* != .pointer) {
+            std.debug.panic("struct_field_ptr: expected pointer, got {s}", .{@tagName(state.refinements.at(base_ref).*)});
+        }
+        const struct_idx = state.refinements.at(base_ref).pointer.to;
+
+        // Get the struct and find the field
+        const pointee = state.refinements.at(struct_idx).*;
+        switch (pointee) {
+            .@"struct" => |s| {
+                if (self.field_index >= s.fields.len) {
+                    std.debug.panic("struct_field_ptr: field index {d} out of bounds for struct with {d} fields", .{ self.field_index, s.fields.len });
+                }
+                // Create a pointer to this field
+                const field_idx = s.fields[self.field_index];
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
+            },
+            .future, .scalar => {
+                // Materialize future/scalar into scalar (temporary - .future will be removed)
+                state.refinements.at(struct_idx).* = .{ .scalar = .{} };
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = struct_idx } });
+            },
+            else => std.debug.panic("struct_field_ptr: expected struct or future, got {s}", .{@tagName(pointee)}),
+        }
+        try splat(.struct_field_ptr, state, index, self);
+    }
+};
+
+/// StructFieldVal extracts a field value from a struct by value.
+/// This is used when accessing `s.field` where `s` is a struct value (not a pointer).
+pub const StructFieldVal = struct {
+    /// Operand containing the struct value
+    operand: ?usize,
+    /// Index of the field to extract
+    field_index: usize,
+    /// Result type (the field's type)
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const operand = self.operand orelse {
+            // Interned/global struct - use type info to create proper structure
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.struct_field_val, state, index, self);
+            return;
+        };
+
+        const struct_ref = state.results[operand].refinement orelse {
+            std.debug.panic("struct_field_val: operand instruction {d} has no refinement", .{operand});
+        };
+
+        // Get the struct and find the field
+        switch (state.refinements.at(struct_ref).*) {
+            .@"struct" => |s| {
+                // Share the field entity (reading a field doesn't copy it)
+                state.results[index].refinement = s.fields[self.field_index];
+            },
+            else => |t| std.debug.panic("struct_field_val: expected struct, got {s}", .{@tagName(t)}),
+        }
+        try splat(.struct_field_val, state, index, self);
     }
 };
 
@@ -531,11 +647,8 @@ pub const AnyTag = union(enum) {
     slice: Unimplemented(.{}),
     slice_len: Unimplemented(.{}),
     stack_trace_frames: Unimplemented(.{}),
-    struct_field_ptr_index_0: Unimplemented(.{}),
-    struct_field_ptr_index_1: Unimplemented(.{}),
-    struct_field_ptr_index_2: Unimplemented(.{}),
-    struct_field_ptr_index_3: Unimplemented(.{}),
-    struct_field_val: Unimplemented(.{}),
+    struct_field_ptr: StructFieldPtr,
+    struct_field_val: StructFieldVal,
     sub_with_overflow: Unimplemented(.{}),
     @"try": Unimplemented(.{}),
     unreach: Unimplemented(.{ .void = true }),

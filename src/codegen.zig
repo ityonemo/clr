@@ -21,6 +21,7 @@ const std = @import("std");
 fn safeName(tag: Tag) []const u8 {
     return switch (tag) {
         .@"try" => "@\"try\"",
+        .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => "struct_field_ptr",
         else => @tagName(tag),
     };
 }
@@ -32,11 +33,17 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .arg => payloadArg(arena, datum, param_names, arg_counter),
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store, .store_safe => payloadStore(arena, ip, datum),
-        .load => payloadLoad(arena, datum),
+        .load => payloadLoad(arena, ip, datum),
         .ret_safe => payloadRetSafe2(arena, ip, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
         .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
         .br => payloadBr(arena, ip, datum),
+        .struct_field_ptr_index_0 => payloadStructFieldPtr(arena, ip, datum, 0),
+        .struct_field_ptr_index_1 => payloadStructFieldPtr(arena, ip, datum, 1),
+        .struct_field_ptr_index_2 => payloadStructFieldPtr(arena, ip, datum, 2),
+        .struct_field_ptr_index_3 => payloadStructFieldPtr(arena, ip, datum, 3),
+        // Note: All struct_field_ptr_index_N are mapped to struct_field_ptr via safeName()
+        .struct_field_val => payloadStructFieldVal(arena, ip, datum, extra),
         else => ".{}",
     };
 }
@@ -54,6 +61,38 @@ fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Dat
 fn payloadRetSafe2(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const src_str = srcString(arena, ip, datum.un_op);
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for struct_field_ptr_index_N - gets pointer to a struct field.
+fn payloadStructFieldPtr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, field_index: usize) []const u8 {
+    // ty_op.ty is the result type (pointer to field), ty_op.operand is the base struct pointer
+    const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
+        typeToString(arena, ip, ty_idx)
+    else
+        ".{ .unknown = {} }"; // Will cause compile error if hit
+    const base_ptr: ?usize = if (datum.ty_op.operand.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(arena, ".{{ .base = {?d}, .field_index = {d}, .ty = {s} }}", .{ base_ptr, field_index, ty_str }, null);
+}
+
+/// Payload for struct_field_val - extracts a field value from a struct by value.
+/// Uses ty_pl with StructField payload: struct_operand and field_index.
+fn payloadStructFieldVal(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32) []const u8 {
+    // ty_pl has ty (Ref) and payload index (u32)
+    const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
+        typeToString(arena, ip, ty_idx)
+    else
+        ".{ .unknown = {} }"; // Will cause compile error if hit
+    const payload_index = datum.ty_pl.payload;
+
+    // StructField: struct_operand (Ref as u32), field_index (u32)
+    const struct_operand_raw = extra[payload_index];
+    const field_index = extra[payload_index + 1];
+
+    // Convert the raw u32 to a Ref and extract the index
+    const struct_operand: Ref = @enumFromInt(struct_operand_raw);
+    const operand: ?usize = if (struct_operand.toIndex()) |idx| @intFromEnum(idx) else null;
+
+    return clr_allocator.allocPrint(arena, ".{{ .operand = {?d}, .field_index = {d}, .ty = {s} }}", .{ operand, field_index, ty_str }, null);
 }
 
 /// Payload for br (branch to block with value).
@@ -223,11 +262,37 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
             const child_str = typeToString(arena, ip, child);
             return clr_allocator.allocPrint(arena, ".{{ .optional = &{s} }}", .{child_str}, null);
         },
-        .struct_type => ".{ .@\"struct\" = {} }",
+        .struct_type => structTypeToString(arena, ip, ty),
         .union_type => ".{ .@\"union\" = {} }",
         // All other types treated as scalar (int, float, array, enum, etc.)
         else => ".{ .scalar = {} }",
     };
+}
+
+/// Convert a struct type to a Type string with field types.
+/// Note: field_types.get(ip) crashes in DLL context due to vtable relocation issues.
+/// We use field count and assume scalar fields for now.
+fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index) []const u8 {
+    const loaded = ip.loadStructType(type_index);
+    const field_count = loaded.field_types.len;
+
+    if (field_count == 0) {
+        return ".{ .@\"struct\" = &.{} }";
+    }
+
+    // Build field types string - assume all fields are scalars for now
+    var result = std.ArrayListUnmanaged(u8){};
+    result.appendSlice(arena, ".{ .@\"struct\" = &.{ ") catch @panic("out of memory");
+
+    for (0..field_count) |i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        result.appendSlice(arena, ".{ .scalar = {} }") catch @panic("out of memory");
+    }
+
+    result.appendSlice(arena, " } }") catch @panic("out of memory");
+    return result.items;
 }
 
 fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
@@ -238,17 +303,22 @@ fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []
     return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {s}, .is_undef = {} }}", .{ ptr, src_str, is_undef }, null);
 }
 
-fn payloadLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
+fn payloadLoad(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    // ty_op.ty is a Ref to the result type
+    const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
+        typeToString(arena, ip, ty_idx)
+    else
+        ".{ .unknown = {} }"; // Will cause compile error if hit - needs investigation
     // Check for .none first (toIndex asserts on .none)
     if (datum.ty_op.operand == .none) {
-        return ".{ .ptr = null }";
+        return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
     }
     // TODO: handle global/interned pointers - for now emit null
     if (datum.ty_op.operand.toIndex()) |idx| {
         const ptr = @intFromEnum(idx);
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = {d} }}", .{ptr}, null);
+        return clr_allocator.allocPrint(arena, ".{{ .ptr = {d}, .ty = {s} }}", .{ ptr, ty_str }, null);
     } else {
-        return ".{ .ptr = null }";
+        return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
     }
 }
 
@@ -549,7 +619,7 @@ fn traceAllocatorType(tags: []const Tag, data: []const Data, ip: *const InternPo
                 }
             }
         },
-        .struct_field_ptr_index_0, .struct_field_ptr_index_1 => {
+        .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => {
             // Trace through struct field access
             const base_ref = datum.ty_op.operand;
             if (base_ref.toIndex()) |src_idx| {
@@ -703,6 +773,7 @@ const FunctionGen = union(enum) {
                 \\
                 \\    var refinements = Refinements.init(ctx.allocator);
                 \\    defer refinements.deinit();
+                \\    defer refinements.testValid();
                 \\
                 \\    const results = try Inst.make_results_list(ctx.allocator, {d});
                 \\    defer Inst.clear_results_list(results, ctx.allocator);

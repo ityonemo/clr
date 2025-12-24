@@ -195,10 +195,10 @@ test "instLine for load" {
 
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
-    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
+    const datum: Data = .{ .ty_op = .{ .ty = .u8_type, .operand = operand_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .load, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = 5 } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = 5, .ty = .{ .scalar = {} } } });\n", result);
 }
 
 test "generateFunction produces complete function" {
@@ -212,7 +212,7 @@ test "generateFunction produces complete function" {
     const data: []const Data = &.{
         .{ .no_op = {} },
         .{ .dbg_stmt = .{ .line = 1, .column = 3 } },
-        .{ .ty_op = .{ .ty = .none, .operand = load_ref } },
+        .{ .ty_op = .{ .ty = .u8_type, .operand = load_ref } },
         .{ .un_op = ret_ref },
     };
     const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig", &.{});
@@ -226,6 +226,7 @@ test "generateFunction produces complete function" {
         \\
         \\    var refinements = Refinements.init(ctx.allocator);
         \\    defer refinements.deinit();
+        \\    defer refinements.testValid();
         \\
         \\    const results = try Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -235,7 +236,7 @@ test "generateFunction produces complete function" {
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{} });
         \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
-        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0 } });
+        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 2 } } });
         \\    try Inst.onFinish(state);
         \\    Inst.backPropagate(state);
@@ -498,12 +499,12 @@ test "generateFunction with simple cond_br block" {
         .{ .no_op = {} }, // 0: alloc
         .{ .bin_op = .{ .lhs = ref_0, .rhs = .undef } }, // 1: store undef to x
         .{ .ty_pl = .{ .ty = .none, .payload = 0 } }, // 2: block (payload=0 points to extra[0])
-        .{ .ty_op = .{ .ty = .none, .operand = .none } }, // 3: load condition
+        .{ .ty_op = .{ .ty = .u8_type, .operand = .none } }, // 3: load condition
         .{ .bin_op = .{ .lhs = ref_0, .rhs = ref_3 } }, // 4: store to x (then)
         .{ .br = .{ .block_inst = @enumFromInt(2), .operand = .none } }, // 5: br block
         .{ .br = .{ .block_inst = @enumFromInt(2), .operand = .none } }, // 6: br block
         .{ .pl_op = .{ .operand = ref_3, .payload = 6 } }, // 7: cond_br (payload=6 points to extra[6])
-        .{ .ty_op = .{ .ty = .none, .operand = ref_0 } }, // 8: load x
+        .{ .ty_op = .{ .ty = .u8_type, .operand = ref_0 } }, // 8: load x
         .{ .un_op = ref_8 }, // 9: ret_safe
     };
 
@@ -552,6 +553,7 @@ test "generateFunction with simple cond_br block" {
         \\
         \\    var refinements = Refinements.init(ctx.allocator);
         \\    defer refinements.deinit();
+        \\    defer refinements.testValid();
         \\
         \\    const results = try Inst.make_results_list(ctx.allocator, 10);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -562,9 +564,9 @@ test "generateFunction with simple cond_br block" {
         \\    try Inst.apply(state, 0, .{ .alloc = .{} });
         \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
         \\    try Inst.apply(state, 2, .{ .block = .{} });
-        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null } });
+        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .scalar = {} } } });
         \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
-        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0 } });
+        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .eidx = 8 } } });
         \\    try Inst.onFinish(state);
         \\    Inst.backPropagate(state);

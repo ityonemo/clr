@@ -620,7 +620,7 @@ test "load detects use after free" {
     // Load after free should error
     try std.testing.expectError(
         error.UseAfterFree,
-        Inst.apply(state, 3, .{ .load = .{ .ptr = 0 } }),
+        Inst.apply(state, 3, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } }),
     );
 }
 
@@ -643,7 +643,7 @@ test "load from live allocation does not error" {
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Load from live allocation should succeed
-    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0 } });
+    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });
 }
 
 test "onFinish detects memory leak" {

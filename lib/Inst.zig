@@ -34,8 +34,12 @@ pub fn apply(state: State, index: usize, any_tag: tag.AnyTag) !void {
 pub fn call(state: State, index: usize, called: anytype, args: anytype) !void {
     // Skip if called is null (indirect call through function pointer - TODO: handle these)
     if (@TypeOf(called) == @TypeOf(null)) return;
+    // Save caller's base_line - callee will set its own
+    const saved_base_line = state.ctx.base_line;
     // Pass caller's refinements so callee can write return value into it
     const return_eidx = try @call(.auto, called, .{ state.ctx, state.refinements } ++ args);
+    // Restore caller's base_line
+    state.ctx.base_line = saved_base_line;
     // Deposit returned entity index into caller's instruction
     state.results[index].refinement = return_eidx;
 }
@@ -206,9 +210,21 @@ pub fn initInst(refinements: *Refinements, results: []Inst, index: usize) !EIdx 
 /// Overwrite an instruction with a new refinement. Creates new entity regardless of prior state.
 /// Call this in tag handlers before splat() so analyses can set their respective fields.
 /// For conditional keep-of-previous-value semantics, use merge (not yet implemented).
+/// Struct fields are deep copied so each entry owns its own memory.
 pub fn clobberInst(refinements: *Refinements, results: []Inst, index: usize, value: Refinement) !EIdx {
     const idx: EIdx = @intCast(refinements.list.items.len);
-    try refinements.list.append(value);
+    if (value == .@"struct") {
+        // Deep copy struct fields to avoid double-free on deinit
+        const allocator = refinements.list.allocator;
+        const new_fields = try allocator.alloc(Refinements.EIdx, value.@"struct".fields.len);
+        @memcpy(new_fields, value.@"struct".fields);
+        try refinements.list.append(.{ .@"struct" = .{
+            .analyte = value.@"struct".analyte,
+            .fields = new_fields,
+        } });
+    } else {
+        try refinements.list.append(value);
+    }
     results[index].refinement = idx;
     return idx;
 }
@@ -219,6 +235,44 @@ pub fn clobberInst(refinements: *Refinements, results: []Inst, index: usize, val
 
 pub fn onFinish(state: State) !void {
     try tag.splatFinish(state.results, state.ctx, state.refinements);
+}
+
+/// Recursively propagate pointee state from local to caller.
+fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Refinements, caller_idx: EIdx) void {
+    const local = local_refs.at(local_idx);
+    const caller = caller_refs.at(caller_idx);
+
+    switch (local.*) {
+        .scalar => |src| {
+            if (caller.* == .future) {
+                caller.* = .{ .scalar = src };
+                return;
+            }
+            if (caller.* != .scalar) std.debug.panic("backPropagate: local pointee is scalar but caller pointee is {s}", .{@tagName(caller.*)});
+            caller.scalar = src;
+        },
+        .pointer => |src| {
+            if (caller.* == .future) return; // Caller hasn't been dereferenced yet
+            if (caller.* != .pointer) std.debug.panic("backPropagate: local pointee is pointer but caller pointee is {s}", .{@tagName(caller.*)});
+            caller.pointer.analyte = src.analyte;
+            propagatePointee(local_refs, src.to, caller_refs, caller.pointer.to);
+        },
+        .@"struct" => |src| {
+            if (caller.* == .future) return; // Caller hasn't been dereferenced yet
+            if (caller.* != .@"struct") std.debug.panic("backPropagate: local pointee is struct but caller pointee is {s}", .{@tagName(caller.*)});
+            caller.@"struct".analyte = src.analyte;
+            for (src.fields, 0..) |local_field_idx, i| {
+                propagatePointee(local_refs, local_field_idx, caller_refs, caller.@"struct".fields[i]);
+            }
+        },
+        .optional => |src| {
+            if (caller.* == .future) return; // Caller hasn't been dereferenced yet
+            if (caller.* != .optional) std.debug.panic("backPropagate: local pointee is optional but caller pointee is {s}", .{@tagName(caller.*)});
+            caller.optional.analyte = src.analyte;
+            propagatePointee(local_refs, src.to, caller_refs, caller.optional.to);
+        },
+        else => |t| std.debug.panic("backPropagate: local pointee is {s} - propagation not yet implemented", .{@tagName(t)}),
+    }
 }
 
 /// Propagate analysis state back to callers via caller_ref.
@@ -240,28 +294,26 @@ pub fn backPropagate(state: State) void {
 
         switch (local_refinement.*) {
             .scalar => |src| {
-                switch (caller_entity.*) {
-                    .scalar => |*dst| dst.* = src,
-                    else => |t| std.debug.panic("backPropagate: local is scalar but caller is {s}", .{@tagName(t)}),
-                }
+                if (caller_entity.* != .scalar) std.debug.panic("backPropagate: local is scalar but caller is {s}", .{@tagName(caller_entity.*)});
+                caller_entity.scalar = src;
             },
             .pointer => |local_ptr| {
-                switch (caller_entity.*) {
-                    .pointer => |*caller_ptr| {
-                        // Propagate pointer's analyte (memory_safety)
-                        caller_ptr.analyte = local_ptr.analyte;
-                        // Propagate pointee's analyte (undefined tracking)
-                        switch (state.refinements.at(local_ptr.to).*) {
-                            .scalar => |src| switch (cp.at(caller_ptr.to).*) {
-                                .scalar => |*dst| dst.* = src,
-                                // Caller's pointee was .future (never stored to), callee resolved it
-                                .future => cp.at(caller_ptr.to).* = .{ .scalar = src },
-                                else => |t| std.debug.panic("backPropagate: local pointee is scalar but caller pointee is {s}", .{@tagName(t)}),
-                            },
-                            else => |t| std.debug.panic("backPropagate: local pointee is {s} - propagation not yet implemented", .{@tagName(t)}),
-                        }
-                    },
-                    else => |t| std.debug.panic("backPropagate: local is pointer but caller is {s}", .{@tagName(t)}),
+                if (caller_entity.* != .pointer) std.debug.panic("backPropagate: local is pointer but caller is {s}", .{@tagName(caller_entity.*)});
+                // Propagate pointer's analyte (memory_safety)
+                caller_entity.pointer.analyte = local_ptr.analyte;
+                // Propagate pointee's analyte (undefined tracking)
+                propagatePointee(state.refinements, local_ptr.to, cp, caller_entity.pointer.to);
+            },
+            .optional => |local_opt| {
+                if (caller_entity.* != .optional) std.debug.panic("backPropagate: local is optional but caller is {s}", .{@tagName(caller_entity.*)});
+                caller_entity.optional.analyte = local_opt.analyte;
+                propagatePointee(state.refinements, local_opt.to, cp, caller_entity.optional.to);
+            },
+            .@"struct" => |local_struct| {
+                if (caller_entity.* != .@"struct") std.debug.panic("backPropagate: local is struct but caller is {s}", .{@tagName(caller_entity.*)});
+                caller_entity.@"struct".analyte = local_struct.analyte;
+                for (local_struct.fields, 0..) |local_field_idx, i| {
+                    propagatePointee(state.refinements, local_field_idx, cp, caller_entity.@"struct".fields[i]);
                 }
             },
             else => |t| std.debug.panic("backPropagate: local refinement is {s} - propagation not yet implemented", .{@tagName(t)}),
@@ -394,7 +446,7 @@ test "load from undefined instruction reports use before assign" {
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
 
     // Load from undefined instruction should return error
-    try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr = 1 } }));
+    try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } }));
 }
 
 test "load from defined instruction does not report error" {
@@ -418,7 +470,7 @@ test "load from defined instruction does not report error" {
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Load from defined instruction should NOT return error
-    try Inst.apply(state, 3, .{ .load = .{ .ptr = 1 } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
 }
 
 test "all instructions get valid refinements after operations" {
@@ -441,7 +493,7 @@ test "all instructions get valid refinements after operations" {
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
     try Inst.apply(state, 1, .{ .alloc = .{} });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
-    try Inst.apply(state, 3, .{ .load = .{ .ptr = 1 } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 4, .{ .block = .{} });
 
     // All instructions should have valid refinements
@@ -728,4 +780,160 @@ test "backPropagate propagates pointee undefined state to caller" {
 
     // Verify caller's pointee is now defined
     try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_pointee_idx).scalar.undefined.?));
+}
+
+test "backPropagate propagates struct field undefined state to caller" {
+    const allocator = std.testing.allocator;
+
+    // Set up caller's refinements: pointer → struct { field0: undefined, field1: undefined }
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+    const caller_field0_idx = try caller_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .undefined = .{
+            .meta = .{ .function = "", .file = "", .line = 0 },
+        } },
+    } });
+    const caller_field1_idx = try caller_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .undefined = .{
+            .meta = .{ .function = "", .file = "", .line = 0 },
+        } },
+    } });
+    const caller_fields = try allocator.alloc(EIdx, 2);
+    caller_fields[0] = caller_field0_idx;
+    caller_fields[1] = caller_field1_idx;
+    const caller_struct_idx = try caller_refinements.appendEntity(.{ .@"struct" = .{
+        .fields = caller_fields,
+    } });
+    const caller_ptr_idx = try caller_refinements.appendEntity(.{ .pointer = .{
+        .analyte = .{ .undefined = .{ .defined = {} } },
+        .to = caller_struct_idx,
+    } });
+
+    // Set up callee's refinements: pointer → struct { field0: defined, field1: undefined }
+    var callee_refinements = Refinements.init(allocator);
+    defer callee_refinements.deinit();
+    const callee_field0_idx = try callee_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .defined = {} },
+    } });
+    const callee_field1_idx = try callee_refinements.appendEntity(.{ .scalar = .{
+        .undefined = .{ .undefined = .{
+            .meta = .{ .function = "", .file = "", .line = 0 },
+        } },
+    } });
+    const callee_fields = try allocator.alloc(EIdx, 2);
+    callee_fields[0] = callee_field0_idx;
+    callee_fields[1] = callee_field1_idx;
+    const callee_struct_idx = try callee_refinements.appendEntity(.{ .@"struct" = .{
+        .fields = callee_fields,
+    } });
+    const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
+        .analyte = .{ .undefined = .{ .defined = {} } },
+        .to = callee_struct_idx,
+    } });
+
+    // Set up results with argument info
+    const results = try make_results_list(allocator, 1);
+    defer clear_results_list(results, allocator);
+    results[0].refinement = callee_ptr_idx;
+    results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "ptr" };
+
+    // Verify caller's fields are undefined initially
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field0_idx).scalar.undefined.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field1_idx).scalar.undefined.?));
+
+    // Propagate
+    const state = State{
+        .ctx = undefined,
+        .results = results,
+        .refinements = &callee_refinements,
+        .return_eidx = 0,
+        .caller_refinements = &caller_refinements,
+    };
+    backPropagate(state);
+
+    // Verify caller's field0 is now defined, field1 is still undefined
+    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_field0_idx).scalar.undefined.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field1_idx).scalar.undefined.?));
+}
+
+test "full flow: callee modifies struct field via pointer-to-pointer chain" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // === CALLER SETUP ===
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+    const caller_results = try make_results_list(allocator, 3);
+    defer clear_results_list(caller_results, allocator);
+
+    // Caller: inst 1 = alloc; inst 2 = store_safe with undefined struct
+    const caller_state = testState(&ctx, caller_results, &caller_refinements);
+    try Inst.apply(caller_state, 1, .{ .alloc = .{} });
+    try Inst.apply(caller_state, 2, .{ .store_safe = .{
+        .ptr = 1,
+        .src = .{ .interned = .{ .@"struct" = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } },
+        .is_undef = true,
+    } });
+
+    // Verify caller's struct has undefined fields
+    const caller_ptr_idx = caller_results[1].refinement.?;
+    const caller_struct_idx = caller_refinements.at(caller_ptr_idx).pointer.to;
+    const caller_fields = caller_refinements.at(caller_struct_idx).@"struct".fields;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_fields[0]).scalar.undefined.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_fields[1]).scalar.undefined.?));
+
+    // === CALLEE SETUP ===
+    var callee_refinements = Refinements.init(allocator);
+    defer callee_refinements.deinit();
+    const callee_results = try make_results_list(allocator, 8);
+    defer clear_results_list(callee_results, allocator);
+
+    const callee_state = State{
+        .ctx = &ctx,
+        .results = callee_results,
+        .refinements = &callee_refinements,
+        .return_eidx = 0,
+        .caller_refinements = &caller_refinements,
+    };
+
+    // Callee: inst 0 = arg (pointer to struct)
+    try Inst.apply(callee_state, 0, .{ .arg = .{ .value = caller_ptr_idx, .name = "p" } });
+
+    // Callee: inst 1 = alloc, inst 2 = store inst 0's pointer to inst 1
+    try Inst.apply(callee_state, 1, .{ .alloc = .{} });
+    try Inst.apply(callee_state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .eidx = 0 }, .is_undef = false } });
+
+    // Callee: inst 3 = bitcast inst 1 (shares refinement)
+    try Inst.apply(callee_state, 3, .{ .bitcast = .{ .src = .{ .eidx = 1 } } });
+
+    // Callee: inst 5 = load from inst 3 (gets the pointer stored in inst 1)
+    try Inst.apply(callee_state, 5, .{ .load = .{ .ptr = 3, .ty = .{ .pointer = &.{ .@"struct" = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } } } });
+
+    // Callee: inst 6 = struct_field_ptr of field 0
+    try Inst.apply(callee_state, 6, .{ .struct_field_ptr = .{
+        .base = 5,
+        .field_index = 0,
+        .ty = .{ .pointer = &.{ .scalar = {} } },
+    } });
+
+    // Callee: inst 7 = store_safe to inst 6 (sets field0 to defined)
+    try Inst.apply(callee_state, 7, .{ .store_safe = .{ .ptr = 6, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+
+    // Check that callee's local field0 is now defined
+    const local_ptr_idx = callee_results[0].refinement.?;
+    const local_struct_idx = callee_refinements.at(local_ptr_idx).pointer.to;
+    const local_fields = callee_refinements.at(local_struct_idx).@"struct".fields;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(callee_refinements.at(local_fields[0]).scalar.undefined.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(callee_refinements.at(local_fields[1]).scalar.undefined.?));
+
+    // === BACKPROPAGATE ===
+    backPropagate(callee_state);
+
+    // After backPropagate, caller's field0 should be defined, field1 should be undefined
+    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_fields[0]).scalar.undefined.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_fields[1]).scalar.undefined.?));
 }

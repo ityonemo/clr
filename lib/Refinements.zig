@@ -26,11 +26,18 @@ pub const Refinement = union(enum) {
         tombstoned: bool = false,
     };
 
+    pub const Struct = struct {
+        /// Analyte for tracking on the whole struct
+        analyte: Analyte = .{},
+        /// Field refinement indices - each field has its own refinement
+        fields: []const EIdx,
+    };
+
     scalar: Analyte,
     pointer: Indirected,
     optional: Indirected,
     region: Indirected, // unused, for now, will represent slices (maybe)
-    @"struct": void, // unused, for now, temporarily void. Will be a slice of EIdx.
+    @"struct": Struct, // struct with field refinements
     @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
     future: Future,
     noreturn: void, // specific return value for error paths.
@@ -108,7 +115,17 @@ pub const Refinement = union(enum) {
                 .analyte = r.analyte,
                 .to = if (same_list) r.to else try copy_to(src_list.at(r.to).*, src_list, dst_list),
             } },
-            .@"struct" => .{ .@"struct" = {} },
+            .@"struct" => |s| blk: {
+                if (same_list) {
+                    break :blk src;
+                }
+                const allocator = dst_list.list.allocator;
+                const new_fields = try allocator.alloc(EIdx, s.fields.len);
+                for (s.fields, 0..) |field_idx, i| {
+                    new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
+                }
+                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
+            },
             .@"union" => .{ .@"union" = {} },
             .unimplemented => .{ .unimplemented = {} },
             .void => .{ .void = {} },
@@ -168,11 +185,21 @@ pub const Refinement = union(enum) {
     }
 
     fn copy_to_fields(src: Refinement, src_list: *Refinements, dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
-        // this is just a placeholder for what will be an actual implementation when fielded refinements are implemented
-        _ = src;
-        _ = src_list;
-        const to_insert: Refinement = @unionInit(Refinement, @tagName(tag), {});
-        return dst_list.appendEntity(to_insert);
+        if (tag == .@"union") {
+            // Union not yet implemented
+            return dst_list.appendEntity(.{ .unimplemented = {} });
+        }
+        // Copy struct fields
+        const src_struct = src.@"struct";
+        const allocator = dst_list.list.allocator;
+        const new_fields = try allocator.alloc(EIdx, src_struct.fields.len);
+        for (src_struct.fields, 0..) |field_idx, i| {
+            new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
+        }
+        return dst_list.appendEntity(.{ .@"struct" = .{
+            .analyte = src_struct.analyte,
+            .fields = new_fields,
+        } });
     }
 };
 
@@ -188,6 +215,13 @@ pub fn init(allocator: Allocator) Refinements {
 }
 
 pub fn deinit(self: *Refinements) void {
+    const allocator = self.list.allocator;
+    // Free any struct field allocations
+    for (self.list.items) |item| {
+        if (item == .@"struct") {
+            allocator.free(item.@"struct".fields);
+        }
+    }
     self.list.deinit();
 }
 
@@ -205,9 +239,23 @@ pub fn appendEntity(self: *Refinements, value: Refinement) !EIdx {
 
 /// Deep clone the entire refinements table.
 /// EIdx references remain valid because indices are preserved.
+/// Struct field slices are deep copied so each refinements list owns its own memory.
 pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     var new = Refinements.init(allocator);
-    try new.list.appendSlice(self.list.items);
+    try new.list.ensureTotalCapacity(self.list.items.len);
+    for (self.list.items) |item| {
+        if (item == .@"struct") {
+            // Deep copy struct fields
+            const new_fields = try allocator.alloc(EIdx, item.@"struct".fields.len);
+            @memcpy(new_fields, item.@"struct".fields);
+            try new.list.append(.{ .@"struct" = .{
+                .analyte = item.@"struct".analyte,
+                .fields = new_fields,
+            } });
+        } else {
+            try new.list.append(item);
+        }
+    }
     return new;
 }
 
@@ -219,4 +267,10 @@ pub fn tombstoneAllFutures(self: *Refinements) void {
             item.future.tombstoned = true;
         }
     }
+}
+
+const undefined_analysis = @import("analysis/undefined.zig");
+
+pub fn testValid(self: *Refinements) void {
+    undefined_analysis.testValid(self);
 }
