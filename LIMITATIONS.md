@@ -48,9 +48,19 @@ For runtime allocators (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), we cu
 
 ### Struct Field Tracking
 
-Uninitialized struct fields and memory safety for individual fields are not tracked. For example, setting `.x` but not `.y` on a struct is not detected. The `struct_field_ptr_index_*` instructions are currently no-ops.
+Struct field tracking is partially implemented:
 
-**Planned fix**: Implement struct field pointer tracking to follow field accesses and track individual field states.
+**What works**:
+- `struct_field_val`: Extracting a field value from a struct by value is tracked
+- Field-level undefined detection when accessing struct fields
+
+**What doesn't work**:
+- `struct_field_ptr`: The undefined analysis doesn't have a handler for struct_field_ptr, so stores through field pointers may not be properly tracked
+- Memory safety for individual fields is not tracked
+
+**Example not detected**: Setting `.x` but not `.y` through field pointers (as opposed to struct literals) may not be caught.
+
+**Planned fix**: Add undefined analysis handler for `struct_field_ptr` to track stores through field pointers.
 
 ### Global Types and Variables
 
