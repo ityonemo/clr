@@ -106,7 +106,7 @@ clr/
 
 Zig is a famously "unsafe" language. Memory management is done manually, which opens up the possibility of implementation errors. While Zig reduces security issues relative to C by eliminating out-of-bounds array access and null pointer dereferencing in safety-checked code, it is still less safe than Rust, which eliminates use-after-free, double-free, and data races through static analysis.
 
-Inspired by Rust's MIRI project, CLR performs static analysis on Zig's AIR intermediate representation to achieve a higher degree of safety than Zig provides out-of-the-box. Unlike MIRI, which interprets Rust's MIR at runtime, CLR transpiles AIR into Zig source code that performs the analysis at compile time.
+Inspired by Rust's MIRI project, CLR performs static analysis on Zig's AIR intermediate representation to achieve a higher degree of safety than Zig provides out-of-the-box. Unlike MIRI, which interprets Rust's MIR in a sandboxed pseudo-runtime, CLR transpiles AIR into Zig source code that statically runs an analysis.  Note that CLR's air output zig code could in principle be run at compile time, but by running through a zig intermediate, we produce an easy-to-understand and easy-to-debug logical flow.  An ambitious person might use this general approach to emit a different output target, such as a proof assistant language!
 
 The key insight: if you need MIRI for security-conscious Rust projects anyway, why not pick a simpler language and do MIRI-style analysis to get borrow checking and other refinement-type analysis? This project shows that such a future is a real possibility for Zig.
 
