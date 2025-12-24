@@ -73,3 +73,47 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/if/optional_set_or_null.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Struct Tests
+# =============================================================================
+
+@test "detects undefined struct field access" {
+    run compile_and_run "$TEST_CASES/undefined/structs/undefined_field_access.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in undefined_field_access.main" ]]
+    [[ "$output" =~ "undefined_field_access.zig:10:" ]]
+    [[ "$output" =~ "undefined value assigned to 'p' in undefined_field_access.main" ]]
+    [[ "$output" =~ "undefined_field_access.zig:7:" ]]
+}
+
+@test "no error when undefined struct field is not accessed" {
+    run compile_and_run "$TEST_CASES/undefined/structs/undefined_field_not_accessed.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined struct field when struct is passed" {
+    run compile_and_run "$TEST_CASES/undefined/structs/undefined_struct_passed.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in" ]]
+    [[ "$output" =~ "undefined_struct_passed.zig" ]]
+}
+
+@test "detects undefined field accessed through passed pointer" {
+    run compile_and_run "$TEST_CASES/undefined/structs/undefined_field_accessed_through_pass.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in" ]]
+    [[ "$output" =~ "undefined_field_accessed_through_pass.zig" ]]
+}
+
+@test "no error when struct is fully defined via passed pointer" {
+    run compile_and_run "$TEST_CASES/undefined/structs/struct_defined_via_pass.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined field when callee misses setting it" {
+    run compile_and_run "$TEST_CASES/undefined/structs/struct_field_missed_when_passed.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in struct_field_missed_when_passed.main" ]]
+    [[ "$output" =~ "struct_field_missed_when_passed.zig:15:" ]]
+}
