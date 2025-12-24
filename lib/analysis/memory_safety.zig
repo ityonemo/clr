@@ -54,11 +54,10 @@ pub const MemorySafety = union(enum) {
         if (results[src].argument) |arg_info| {
             // get the target pointer refinement (this should generally have been created by "arg")
             const tgt_refinement_idx = results[ptr].refinement orelse @panic("store: ptr parameter has no refinement");
-            const tgt_refinement = refinements.at(tgt_refinement_idx);
+            // arg always creates pointer refinement for pointer parameters
+            const tgt_ptr = &refinements.at(tgt_refinement_idx).pointer;
 
-            if (tgt_refinement.* != .pointer) @panic("store: non-pointer target value");
-
-            if (tgt_refinement.pointer.analyte.memory_safety) |*ms| {
+            if (tgt_ptr.analyte.memory_safety) |*ms| {
                 if (ms.* == .stack_ptr) {
                     ms.stack_ptr.name = .{ .parameter = arg_info.name };
                     ms.stack_ptr.meta = .{
@@ -79,14 +78,13 @@ pub const MemorySafety = union(enum) {
         // Set the variable name on the stack_ptr metadata (now on pointer's analyte)
         // ptr is null for debug info pointing to interned/global - no memory safety tracking
         const inst = params.ptr orelse return;
-        std.debug.assert(inst < results.len);
         // refinement is null for uninitialized instructions - nothing to name yet
         const ptr_idx = results[inst].refinement orelse return;
         // Get the pointer's analyte and update memory_safety
-        const src_refinement = refinements.at(ptr_idx);
-        if (src_refinement.* != .pointer) @panic("non-pointer src for dbg_var_ptr");
+        // alloc always creates pointer refinement
+        const ptr_analyte = &refinements.at(ptr_idx).pointer.analyte;
 
-        const ms = &(src_refinement.pointer.analyte.memory_safety orelse @panic("dbg_var_ptr: no memory safety initialized"));
+        const ms = &(ptr_analyte.memory_safety orelse @panic("dbg_var_ptr: no memory safety initialized"));
         if (ms.* != .stack_ptr) return;
         if (ms.stack_ptr.name == .other) {
             ms.stack_ptr.name = .{ .variable = params.name };
@@ -101,8 +99,6 @@ pub const MemorySafety = union(enum) {
             // comptime/global values don't have memory safety tracking - skip
             .interned, .other => return,
         };
-        std.debug.assert(src < results.len);
-
         // refinement is null for uninitialized instructions - skip (would be caught by undefined analysis)
         const src_idx = results[src].refinement orelse return;
         const src_refinement = refinements.at(src_idx);
@@ -172,10 +168,9 @@ pub const MemorySafety = union(enum) {
         const ptr = params.ptr;
 
         const ptr_idx = results[ptr].refinement orelse @panic("alloc_destroy: inst has no refinement");
-        const ptr_refinement = refinements.at(ptr_idx);
-        if (ptr_refinement.* != .pointer) @panic("alloc_destroy: expected pointer type");
-
-        const ms = &(ptr_refinement.pointer.analyte.memory_safety orelse @panic("alloc_destroy: no memory_safety"));
+        // alloc_create always creates pointer refinement with memory_safety
+        const ptr_analyte = &refinements.at(ptr_idx).pointer.analyte;
+        const ms = &(ptr_analyte.memory_safety orelse @panic("alloc_destroy: no memory_safety"));
 
         switch (ms.*) {
             .stack_ptr => |sp| return reportFreeStackMemory(ctx, sp),
@@ -197,8 +192,6 @@ pub const MemorySafety = union(enum) {
         _ = index;
         // ptr is null for interned/global loads - no memory safety tracking needed
         const ptr = params.ptr orelse return;
-        std.debug.assert(ptr < results.len);
-
         // refinement may be null for uninitialized instructions - skip
         const ptr_idx = results[ptr].refinement orelse return;
         const ptr_refinement = refinements.at(ptr_idx);

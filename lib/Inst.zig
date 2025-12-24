@@ -322,12 +322,11 @@ pub fn backPropagate(state: State) void {
 }
 
 /// Assert all refinements are valid (non-null for all results that have one).
+/// Accesses each refinement to trigger Zig's bounds checking if invalid.
 pub fn assertAllValid(refinements: *Refinements, results: []const Inst) void {
-    for (results, 0..) |inst, i| {
+    for (results) |inst| {
         if (inst.refinement) |idx| {
-            if (idx >= refinements.list.items.len) {
-                std.debug.panic("instruction {} has invalid refinement index {}", .{ i, idx });
-            }
+            _ = refinements.list.items[idx]; // Zig's bounds checking handles invalid indices
         }
     }
 }

@@ -272,7 +272,6 @@ pub const Undefined = union(enum) {
         _ = ctx;
         // ptr is null for debug info pointing to interned/global - no local tracking needed
         const inst = params.ptr orelse return;
-        std.debug.assert(inst < results.len);
         // refinement is null for uninitialized instructions - nothing to name yet
         const ptr_idx = results[inst].refinement orelse return;
         // Follow pointer to get to pointee
@@ -334,12 +333,7 @@ pub const Undefined = union(enum) {
             },
         };
 
-        if (params.field_index >= s.fields.len) {
-            // Field index out of bounds - result was created as fresh scalar, set to defined
-            refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
-            return;
-        }
-
+        // Zig's bounds checking handles out-of-bounds access
         const field_idx = s.fields[params.field_index];
 
         // When field is in bounds, result shares field's refinement (undefined state already set).

@@ -325,10 +325,7 @@ pub const StructFieldPtr = struct {
         const pointee = state.refinements.at(struct_idx).*;
         switch (pointee) {
             .@"struct" => |s| {
-                if (self.field_index >= s.fields.len) {
-                    std.debug.panic("struct_field_ptr: field index {d} out of bounds for struct with {d} fields", .{ self.field_index, s.fields.len });
-                }
-                // Create a pointer to this field
+                // Create a pointer to this field (Zig's bounds checking handles out-of-bounds)
                 const field_idx = s.fields[self.field_index];
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
             },
@@ -366,13 +363,10 @@ pub const StructFieldVal = struct {
         };
 
         // Get the struct and find the field
-        switch (state.refinements.at(struct_ref).*) {
-            .@"struct" => |s| {
-                // Share the field entity (reading a field doesn't copy it)
-                state.results[index].refinement = s.fields[self.field_index];
-            },
-            else => |t| std.debug.panic("struct_field_val: expected struct, got {s}", .{@tagName(t)}),
-        }
+        // operand must be a struct value - load creates struct refinement for struct types
+        const s = state.refinements.at(struct_ref).@"struct";
+        // Share the field entity (reading a field doesn't copy it)
+        state.results[index].refinement = s.fields[self.field_index];
         try splat(.struct_field_val, state, index, self);
     }
 };

@@ -174,6 +174,36 @@ Output goes to stderr.
   };
   ```
 
+- **Rely on Zig's bounds checking** - Don't write explicit bounds checks before array access. Zig's runtime safety already panics on out-of-bounds access with a clear error message. Add a comment explaining why the access is guaranteed valid:
+  ```zig
+  // BAD: Redundant bounds check
+  if (field_index >= s.fields.len) {
+      std.debug.panic("out of bounds");
+  }
+  const field = s.fields[field_index];
+
+  // GOOD: Let Zig handle it, add comment explaining guarantee
+  // field_index comes from codegen which validates against struct type
+  const field = s.fields[field_index];
+  ```
+
+- **Rely on Zig's union tag assertions** - Don't write explicit tag checks before accessing a union field. Accessing `union.field` panics on wrong tag in debug mode. Add a comment explaining why the tag is guaranteed:
+  ```zig
+  // BAD: Redundant tag check with switch
+  switch (refinement.*) {
+      .pointer => |p| doSomething(p),
+      else => @panic("expected pointer"),
+  }
+
+  // BAD: Redundant tag check with if
+  if (refinement.* != .pointer) @panic("expected pointer");
+  const p = refinement.pointer;
+
+  // GOOD: Let Zig handle it, add comment explaining guarantee
+  // alloc always creates pointer refinement
+  const p = refinement.pointer;
+  ```
+
 ## TDD Procedure: Adding a New AIR Tag Handler
 
 Follow these steps to add support for a new AIR instruction tag:
