@@ -86,6 +86,51 @@ fn payloadAlloc(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []
     return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
 }
 
+/// Extract type info for AllocCreate payload.
+/// allocator.create(T) returns Allocator.Error!*T, so we unwrap error union then pointer.
+/// NOTE: Returns ".{ .unknown = {} }" when type cannot be determined, which will cause
+/// a compile error in the generated .air.zig - this is intentional to surface extraction failures.
+/// TODO: Audit other places in codegen that fall back to scalar and consider using .unknown instead.
+fn extractAllocCreateType(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const callee_ref = datum.pl_op.operand;
+    const ip_idx = callee_ref.toInterned() orelse return ".{ .unknown = {} }";
+
+    // Get function and its type
+    const func_key = ip.indexToKey(ip_idx);
+    const func_ty = switch (func_key) {
+        .func => |f| f.ty,
+        else => return ".{ .unknown = {} }",
+    };
+
+    // Get function type to access return_type
+    const func_type_key = ip.indexToKey(func_ty);
+    const return_type = switch (func_type_key) {
+        .func_type => |ft| ft.return_type,
+        else => return ".{ .unknown = {} }",
+    };
+
+    // Return type is Allocator.Error!*T - unwrap error union to get *T
+    const ptr_type: InternPool.Index = blk: {
+        const return_key = ip.indexToKey(return_type);
+        break :blk switch (return_key) {
+            .error_union_type => |eu| eu.payload_type,
+            .ptr_type => return_type, // Already unwrapped
+            else => return ".{ .unknown = {} }",
+        };
+    };
+
+    // Now unwrap *T to get T
+    const pointee_type: InternPool.Index = blk: {
+        const ptr_key = ip.indexToKey(ptr_type);
+        break :blk switch (ptr_key) {
+            .ptr_type => |p| p.child,
+            else => return ".{ .unknown = {} }",
+        };
+    };
+
+    return typeToString(arena, ip, pointee_type);
+}
+
 /// Payload for struct_field_ptr_index_N - gets pointer to a struct field.
 fn payloadStructFieldPtr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, field_index: usize) []const u8 {
     // ty_op.ty is the result type (pointer to field), ty_op.operand is the base struct pointer
@@ -139,7 +184,8 @@ pub fn _instLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             if (isAllocatorCreate(ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
                 const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\" }} }});\n", .{ inst_index, allocator_type }, null);
+                const created_type = extractAllocCreateType(arena, ip, datum);
+                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\", .ty = {s} }} }});\n", .{ inst_index, allocator_type, created_type }, null);
             }
             if (isAllocatorDestroy(ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst

@@ -94,11 +94,13 @@ pub const Alloc = struct {
 
 pub const AllocCreate = struct {
     allocator_type: []const u8,
+    ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create the pointed-to future entity (structure determined by first store)
-        const pointee_idx = try state.refinements.appendEntity(.{ .future = .{ .name = null } });
-        // Create pointer entity pointing to the future
+        // Create pointee from type info
+        const pointee_ref = try typeToRefinement(self.ty, state.refinements);
+        const pointee_idx = try state.refinements.appendEntity(pointee_ref);
+        // Create pointer entity pointing to the typed pointee
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
         try splat(.alloc_create, state, index, self);
     }
