@@ -30,6 +30,7 @@ fn safeName(tag: Tag) []const u8 {
 /// Note: call tags are handled separately in buildInstLines via payloadCallParts.
 fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
+        .alloc => payloadAlloc(arena, ip, datum),
         .arg => payloadArg(arena, datum, param_names, arg_counter),
         .dbg_stmt => payloadDbgStmt(arena, datum),
         .store, .store_safe => payloadStore(arena, ip, datum),
@@ -61,6 +62,28 @@ fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Dat
 fn payloadRetSafe2(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const src_str = srcString(arena, ip, datum.un_op);
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for alloc - extracts pointee type from the pointer type.
+fn payloadAlloc(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const ptr_type = datum.ty.toIntern();
+    // Extract pointee type from pointer type
+    const pointee_type: InternPool.Index = switch (ptr_type) {
+        // Well-known pointer types - extract pointee directly
+        .manyptr_u8_type, .manyptr_const_u8_type => .u8_type,
+        .manyptr_const_u8_sentinel_0_type => .u8_type,
+        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => .u8_type,
+        else => blk: {
+            // For other types, look up in InternPool
+            const ptr_key = ip.indexToKey(ptr_type);
+            break :blk switch (ptr_key) {
+                .ptr_type => |p| p.child,
+                else => .none, // fallback
+            };
+        },
+    };
+    const pointee_str = typeToString(arena, ip, pointee_type);
+    return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
 }
 
 /// Payload for struct_field_ptr_index_N - gets pointer to a struct field.

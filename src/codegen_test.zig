@@ -164,10 +164,11 @@ test "instLine for alloc" {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    const datum: Data = .{ .no_op = {} };
+    // alloc uses datum.ty which is a pointer type - use well-known manyptr_u8_type
+    const datum: Data = .{ .ty = .{ .ip_index = .manyptr_u8_type } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .alloc, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });\n", result);
 }
 
 test "instLine for store_safe" {
@@ -210,7 +211,7 @@ test "generateFunction produces complete function" {
     const load_ref: Ref = @enumFromInt(@as(u32, 0) | (1 << 31));
     const ret_ref: Ref = @enumFromInt(@as(u32, 2) | (1 << 31));
     const data: []const Data = &.{
-        .{ .no_op = {} },
+        .{ .ty = .{ .ip_index = .manyptr_u8_type } }, // alloc needs pointer type
         .{ .dbg_stmt = .{ .line = 1, .column = 3 } },
         .{ .ty_op = .{ .ty = .u8_type, .operand = load_ref } },
         .{ .un_op = ret_ref },
@@ -234,7 +235,7 @@ test "generateFunction produces complete function" {
         \\
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
         \\
-        \\    try Inst.apply(state, 0, .{ .alloc = .{} });
+        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
         \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 2 } } });
@@ -496,7 +497,7 @@ test "generateFunction with simple cond_br block" {
 
     // Build data array
     const data: []const Data = &.{
-        .{ .no_op = {} }, // 0: alloc
+        .{ .ty = .{ .ip_index = .manyptr_u8_type } }, // 0: alloc
         .{ .bin_op = .{ .lhs = ref_0, .rhs = .undef } }, // 1: store undef to x
         .{ .ty_pl = .{ .ty = .none, .payload = 0 } }, // 2: block (payload=0 points to extra[0])
         .{ .ty_op = .{ .ty = .u8_type, .operand = .none } }, // 3: load condition
@@ -561,7 +562,7 @@ test "generateFunction with simple cond_br block" {
         \\
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
         \\
-        \\    try Inst.apply(state, 0, .{ .alloc = .{} });
+        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
         \\    try Inst.apply(state, 2, .{ .block = .{} });
         \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .scalar = {} } } });
