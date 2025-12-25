@@ -15,4 +15,4 @@ NUM_LINES="${3:-40}"
 BASENAME=$(basename "$SOURCE_FILE" .zig)
 FULL_FUNCTION_NAME="${BASENAME}.${FUNCTION_NAME}"
 
-zig/zig-out/bin/zig build-exe --verbose-air "$SOURCE_FILE" 2>&1 | grep -A "$NUM_LINES" "# Begin Function AIR: $FULL_FUNCTION_NAME"
+zig/zig-out/bin/zig build-exe --verbose-air -fno-error-tracing "$SOURCE_FILE" 2>&1 | grep -A "$NUM_LINES" "# Begin Function AIR: $FULL_FUNCTION_NAME"

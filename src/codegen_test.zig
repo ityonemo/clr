@@ -261,6 +261,7 @@ test "epilogue generates correct output" {
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
         \\const EIdx = clr.EIdx;
+        \\const Arg = clr.Arg;
         \\const State = clr.State;
         \\
         \\var writer_buf: [4096]u8 = undefined;

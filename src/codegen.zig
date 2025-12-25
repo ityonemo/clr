@@ -355,6 +355,11 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
             const child_str = typeToString(arena, ip, child);
             return clr_allocator.allocPrint(arena, ".{{ .optional = &{s} }}", .{child_str}, null);
         },
+        .error_union_type => |eu| {
+            // error_union_type has payload_type field
+            const payload_str = typeToString(arena, ip, eu.payload_type);
+            return clr_allocator.allocPrint(arena, ".{{ .errorunion = &{s} }}", .{payload_str}, null);
+        },
         .struct_type => structTypeToString(arena, ip, ty),
         .union_type => ".{ .@\"union\" = {} }",
         // All other types treated as scalar (int, float, array, enum, etc.)
@@ -462,7 +467,8 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
         break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
-    // Build args tuple string: .{ state.results[arg0].refinement.?, ... }
+    // Build args tuple string: .{ Arg, Arg, ... }
+    // Args are tagged unions: .{ .eidx = N } or .{ .interned = Type }
     var args_str: []const u8 = ".{";
     var first = true;
 
@@ -470,24 +476,25 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
     while (i < args_len) : (i += 1) {
         const arg_ref: Ref = @enumFromInt(extra[payload_index + 1 + i]);
         if (arg_ref.toIndex()) |idx| {
-            // Runtime value from local instruction - pass entity index
+            // Runtime value from local instruction - look up entity index from results
             const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} state.results[{d}].refinement.?", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, state.results[{d}].refinement.?", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
             const val_type = ip.typeOf(interned_idx);
             if (isZeroSizedType(ip, val_type)) continue;
-            // Interned constant - create a defined scalar entity for it
+            // Interned constant - pass type info so runtime can create entity
+            const type_str = typeToString(arena, ip, val_type);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} try state.refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s} Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, try state.refinements.appendEntity(.{{ .scalar = .{{}} }})", .{args_str}, null);
+                args_str = clr_allocator.allocPrint(arena, "{s}, Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
             }
         }
     }
@@ -555,14 +562,14 @@ fn countArgs(tags: []const Tag) u32 {
     return count;
 }
 
-/// Generate parameter list string like "arg0: EIdx, arg1: EIdx"
+/// Generate parameter list string like "arg0: Arg, arg1: Arg"
 fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
     if (arg_count == 0) return "";
 
-    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: EIdx", .{}, null);
+    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: Arg", .{}, null);
     var i: u32 = 1;
     while (i < arg_count) : (i += 1) {
-        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: EIdx", .{ result, i }, null);
+        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: Arg", .{ result, i }, null);
     }
     return result;
 }
@@ -1197,6 +1204,7 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
         \\const EIdx = clr.EIdx;
+        \\const Arg = clr.Arg;
         \\const State = clr.State;
         \\
         \\var writer_buf: [4096]u8 = undefined;
@@ -1224,11 +1232,11 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + caller_refinements + arity EIdx args
+    // Build parameter list: ctx + caller_refinements + arity Arg args
     var params: []const u8 = "ctx: *Context, caller_refinements: ?*Refinements";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
-        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: EIdx", .{params}, null);
+        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: Arg", .{params}, null);
     }
 
     return clr_allocator.allocPrint(clr_allocator.allocator(),

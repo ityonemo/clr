@@ -91,6 +91,19 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// For interned args, no memory safety tracking needed (constants have no allocation state).
+    /// For eidx args, memory safety state was already copied from caller.
+    /// TODO: See LIMITATIONS.md - interned pointer args may need special handling.
+    pub fn arg(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Arg) !void {
+        _ = results;
+        _ = index;
+        _ = ctx;
+        _ = refinements;
+        _ = params;
+        // Nothing to do - interned values have no memory safety state,
+        // and eidx values already have their state copied from caller.
+    }
+
     pub fn ret_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetSafe) !void {
         _ = index;
 
@@ -155,7 +168,9 @@ pub const MemorySafety = union(enum) {
 
     /// Handle allocator.create() - marks pointer as heap allocation
     pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
-        const ptr_idx = results[index].refinement.?;
+        // Result is errorunion -> ptr -> pointee
+        const eu_idx = results[index].refinement.?;
+        const ptr_idx = refinements.at(eu_idx).errorunion.to;
         refinements.at(ptr_idx).pointer.analyte.memory_safety = .{ .allocation = .{
             .allocated = ctx.meta,
             .allocator_type = params.allocator_type,
@@ -279,6 +294,70 @@ pub const MemorySafety = union(enum) {
             },
         }
         return error.FreeStackMemory;
+    }
+
+    // =========================================================================
+    // Branch merging
+    // =========================================================================
+
+    /// Merge memory_safety state from two branches after a conditional.
+    /// If one branch has memory_safety and the original doesn't, copy it.
+    pub fn merge(
+        ctx: *Context,
+        comptime merge_tag: anytype,
+        orig: struct { *Refinements, EIdx },
+        true_branch: struct { *Refinements, EIdx },
+        false_branch: struct { *Refinements, EIdx },
+    ) !void {
+        _ = ctx;
+        _ = merge_tag;
+        _ = false_branch; // TODO: handle case where false branch has memory_safety
+        mergeRefinement(orig, true_branch);
+    }
+
+    fn mergeRefinement(
+        orig: struct { *Refinements, EIdx },
+        true_branch: struct { *Refinements, EIdx },
+    ) void {
+        const orig_ref = orig[0].at(orig[1]);
+        const true_ref = true_branch[0].at(true_branch[1]);
+
+        switch (orig_ref.*) {
+            .pointer => |*op| {
+                if (true_ref.* == .pointer) {
+                    const tp = true_ref.pointer;
+                    // Copy memory_safety if original doesn't have it
+                    if (op.analyte.memory_safety == null and tp.analyte.memory_safety != null) {
+                        op.analyte.memory_safety = tp.analyte.memory_safety;
+                    }
+                    // Recursively merge pointee
+                    mergeRefinement(.{ orig[0], op.to }, .{ true_branch[0], tp.to });
+                }
+            },
+            .optional => |o| {
+                if (true_ref.* == .optional) {
+                    mergeRefinement(.{ orig[0], o.to }, .{ true_branch[0], true_ref.optional.to });
+                }
+            },
+            .errorunion => |e| {
+                if (true_ref.* == .errorunion) {
+                    mergeRefinement(.{ orig[0], e.to }, .{ true_branch[0], true_ref.errorunion.to });
+                }
+            },
+            .region => |r| {
+                if (true_ref.* == .region) {
+                    mergeRefinement(.{ orig[0], r.to }, .{ true_branch[0], true_ref.region.to });
+                }
+            },
+            .@"struct" => |s| {
+                if (true_ref.* == .@"struct") {
+                    for (s.fields, true_ref.@"struct".fields) |of, tf| {
+                        mergeRefinement(.{ orig[0], of }, .{ true_branch[0], tf });
+                    }
+                }
+            },
+            else => {},
+        }
     }
 };
 
@@ -482,7 +561,10 @@ test "alloc_create sets allocation metadata on pointer analyte" {
 
     try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
-    const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
+    // alloc_create creates errorunion -> ptr -> pointee
+    const eu_idx = results[1].refinement.?;
+    const ptr_idx = refinements.at(eu_idx).errorunion.to;
+    const ms = refinements.at(ptr_idx).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
     try std.testing.expectEqualStrings("PageAllocator", ms.allocation.allocator_type);
     try std.testing.expectEqualStrings("test.zig", ms.allocation.allocated.file);
@@ -501,19 +583,22 @@ test "alloc_destroy marks allocation as freed" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 4;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create allocation
+    // Create allocation (errorunion -> ptr -> pointee)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    // Unwrap error union to get the pointer (simulating real AIR flow)
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
 
     // Update context for free location
     ctx.meta.line = 20;
 
-    // Destroy allocation
-    try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
+    // Destroy allocation (ptr points to unwrapped pointer at inst 1)
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
-    const ms = refinements.at(results[0].refinement.?).pointer.analyte.memory_safety.?;
+    const ptr_idx = results[1].refinement.?;
+    const ms = refinements.at(ptr_idx).pointer.analyte.memory_safety.?;
     try std.testing.expect(ms.allocation.freed != null);
     try std.testing.expectEqual(@as(u32, 20), ms.allocation.freed.?.line);
 }
@@ -529,17 +614,19 @@ test "alloc_destroy detects double free" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 5;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create and free allocation
+    // Create allocation and unwrap
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    // First free
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
     // Second free should error
     try std.testing.expectError(
         error.DoubleFree,
-        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } }),
+        Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } }),
     );
 }
 
@@ -554,16 +641,17 @@ test "alloc_destroy detects mismatched allocator" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 4;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create with PageAllocator
+    // Create with PageAllocator and unwrap
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
 
     // Destroy with different allocator
     try std.testing.expectError(
         error.MismatchedAllocator,
-        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "ArenaAllocator" } }),
+        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "ArenaAllocator" } }),
     );
 }
 
@@ -602,18 +690,19 @@ test "load detects use after free" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 4;
+    var results = [_]Inst{.{}} ** 6;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create, store (to make it defined), and free allocation
+    // Create, unwrap, store (to make it defined), and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
     // Load after free should error
     try std.testing.expectError(
         error.UseAfterFree,
-        Inst.apply(state, 3, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } }),
+        Inst.apply(state, 4, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } }),
     );
 }
 
@@ -628,15 +717,16 @@ test "load from live allocation does not error" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 5;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create and store to allocation (not freed)
+    // Create, unwrap, and store to allocation (not freed)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Load from live allocation should succeed
-    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
 }
 
 test "onFinish detects memory leak" {
@@ -650,13 +740,14 @@ test "onFinish detects memory leak" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 2;
+    var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create allocation but don't free
+    // Create allocation and unwrap but don't free
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
 
-    // onFinish should detect the leak
+    // onFinish should detect the leak (via the unwrapped pointer at inst 1)
     try std.testing.expectError(
         error.MemoryLeak,
         MemorySafety.onFinish(&results, &ctx, &refinements),
@@ -674,12 +765,13 @@ test "onFinish allows freed allocation" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 2;
+    var results = [_]Inst{.{}} ** 4;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create and free allocation
+    // Create, unwrap, and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
     // onFinish should not error
     try MemorySafety.onFinish(&results, &ctx, &refinements);
@@ -701,7 +793,7 @@ test "onFinish allows passed allocation" {
     defer caller_refinements.deinit();
     const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
 
-    var results = [_]Inst{.{}} ** 3;
+    var results = [_]Inst{.{}} ** 5;
     const state = State{
         .ctx = &ctx,
         .results = &results,
@@ -710,13 +802,14 @@ test "onFinish allows passed allocation" {
         .caller_refinements = &caller_refinements,
     };
 
-    // Create allocation
+    // Create allocation and unwrap
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
-    // Store to transform future -> scalar
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    // Store to make the pointee defined
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
-    // Return it (marks as passed)
-    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
+    // Return the pointer (marks as passed)
+    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 1 } } });
 
     // onFinish should not error - allocation was passed to caller
     try MemorySafety.onFinish(&results, &ctx, &refinements);

@@ -2,10 +2,11 @@
 pub const Context = @import("Context.zig");
 pub const Inst = @import("Inst.zig");
 pub const Refinements = @import("Refinements.zig");
+pub const Arg = @import("tag.zig").Src;
 pub const EIdx = Inst.EIdx;
 
 // Debug utilities
-/// Dump analysis state. Call as: clr.dump(results, ctx, &refinements, caller_refinements, return_eidx);
+/// Dump analysis state. Call as: clr.dump(state);
 pub const dump = @import("dump.zig").dump;
 
 /// wraps all state into a single object that is easily passed between units.

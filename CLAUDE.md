@@ -119,6 +119,17 @@ Output goes to stderr.
 - **Do not modify the zig/ submodule** - Any changes to the Zig compiler must be made by humans, not AI
 - **Use debug.zig for debugging** - Use `src/debug.zig` for debug output. It uses `std.fmt.bufPrint` with raw Linux syscalls. Do not modify this file - it works correctly in the DLL context where `std.debug.print` does not.
 
+## Architecture: Tag Handlers vs Analysis Modules
+
+**IMPORTANT**: Tag handlers in `lib/tag.zig` must NOT reach into analyte fields directly (e.g., `.analyte.undefined`, `.analyte.memory_safety`). Analyte manipulation is the responsibility of analysis modules in `lib/analysis/`.
+
+Tag handlers should only:
+1. Set up refinement STRUCTURE (pointer, scalar, struct, etc.)
+2. Call `splat()` to dispatch to analysis modules
+3. Use generic helpers like `copyAnalyteState()` that work on any analyte
+
+If you find yourself writing `.analyte.undefined = ...` or `.analyte.memory_safety = ...` in a tag handler, that logic belongs in an analysis module instead.
+
 ## Zig Language Reminders
 
 - **Flatten control flow** - Use Zig's tools to flatten imperative code instead of nesting logic. Early returns/continues with `orelse` and union checks keep the main logic at the top level:

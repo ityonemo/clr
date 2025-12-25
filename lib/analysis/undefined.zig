@@ -7,7 +7,7 @@ const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 
-// NOTE: For .optional and .struct refinements, the top-level analyte.undefined should always be null.
+// NOTE: For .optional, .errorunion and .struct refinements, the top-level analyte.undefined should always be null.
 // We don't track undefined state on the container itself - only on the payload/fields.
 
 pub const Undefined = union(enum) {
@@ -67,8 +67,10 @@ pub const Undefined = union(enum) {
 
     pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
         _ = params;
+        // Result is errorunion -> ptr -> pointee
+        const eu_idx = results[index].refinement.?;
+        const ptr_idx = refinements.at(eu_idx).errorunion.to;
         // The pointer itself is defined (it exists)
-        const ptr_idx = results[index].refinement.?;
         refinements.at(ptr_idx).pointer.analyte.undefined = .{ .defined = {} };
         // The pointee starts as undefined (must be set by store before use)
         const pointee_idx = refinements.at(ptr_idx).pointer.to;
@@ -92,6 +94,7 @@ pub const Undefined = union(enum) {
                 setDefinedRecursive(refinements, p.to);
             },
             .optional => |o| setDefinedRecursive(refinements, o.to),
+            .errorunion => |e| setDefinedRecursive(refinements, e.to),
             .@"struct" => |s| {
                 for (s.fields) |field_idx| {
                     setDefinedRecursive(refinements, field_idx);
@@ -111,20 +114,32 @@ pub const Undefined = union(enum) {
         refinements.at(idx).scalar.undefined = .{ .defined = {} };
     }
 
-    pub fn add_with_overflow(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Unimplemented(.{})) !void {
-        _ = results;
-        _ = index;
-        _ = ctx;
-        _ = refinements;
-        _ = params;
-        // add_with_overflow is Unimplemented - it creates .unimplemented refinement, no undefined state needed
-    }
-
     pub fn optional_payload(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.OptionalPayload) !void {
         _ = ctx;
-        _ = params;
-        const idx = results[index].refinement.?;
-        refinements.at(idx).scalar.undefined = .{ .defined = {} };
+        _ = results;
+        _ = index;
+        _ = refinements;
+        // For .eidx: result shares source's entity, undefined state already correct
+        if (params.src == .interned) {
+            @panic("optional_payload: interned source unimplemented");
+        }
+    }
+
+    /// For interned (compile-time constant) args, set everything to defined.
+    /// For eidx args, the entity was copied with its existing state - no change needed.
+    pub fn arg(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Arg) !void {
+        _ = ctx;
+        switch (params.value) {
+            .interned => {
+                // Compile-time constants are always defined
+                const idx = results[index].refinement.?;
+                setDefinedRecursive(refinements, idx);
+            },
+            .eidx => {
+                // Runtime value - undefined state was already copied from caller
+            },
+            .other => {},
+        }
     }
 
     /// br sets refinement on its target block, not on itself.
@@ -157,6 +172,10 @@ pub const Undefined = union(enum) {
             .optional => |o| {
                 // Don't set analyte.undefined on optional - only the payload carries undefined state
                 setUndefinedRecursive(refinements, o.to, undef_state);
+            },
+            .errorunion => |e| {
+                // Don't set analyte.undefined on errorunion - only the payload carries undefined state
+                setUndefinedRecursive(refinements, e.to, undef_state);
             },
             .@"struct" => |s| {
                 // Don't set analyte.undefined on struct - only the fields carry undefined state
@@ -233,6 +252,13 @@ pub const Undefined = union(enum) {
                                 else => {},
                             }
                         },
+                        .errorunion => |e| {
+                            switch (refinements.at(e.to).*) {
+                                .scalar => |*s| s.undefined = .{ .defined = {} },
+                                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                                else => {},
+                            }
+                        },
                         .@"struct" => {},
                         .void, .unimplemented, .noreturn, .retval_future => {},
                         .region => @panic("store: region not yet implemented"),
@@ -246,6 +272,13 @@ pub const Undefined = union(enum) {
                         .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
                         .optional => |o| {
                             switch (refinements.at(o.to).*) {
+                                .scalar => |*s| s.undefined = .{ .defined = {} },
+                                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                                else => {},
+                            }
+                        },
+                        .errorunion => |e| {
+                            switch (refinements.at(e.to).*) {
                                 .scalar => |*s| s.undefined = .{ .defined = {} },
                                 .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
                                 else => {},
@@ -307,6 +340,20 @@ pub const Undefined = union(enum) {
                 // Optional containers don't track undefined - check the payload
                 // Recurse to check the payload's undefined state
                 switch (refinements.at(o.to).*) {
+                    .scalar => |s| {
+                        const undef = s.undefined orelse return;
+                        switch (undef) {
+                            .undefined => return undef.reportUseBeforeAssign(ctx),
+                            .inconsistent => return undef.reportInconsistentBranches(ctx),
+                            .defined => {},
+                        }
+                    },
+                    else => {}, // Other payload types - skip for now
+                }
+            },
+            .errorunion => |e| {
+                // Error union containers don't track undefined - check the payload
+                switch (refinements.at(e.to).*) {
                     .scalar => |s| {
                         const undef = s.undefined orelse return;
                         switch (undef) {
@@ -477,6 +524,15 @@ pub const Undefined = union(enum) {
                     .{ false_branch[0], false_ref.optional.to },
                 );
             },
+            .errorunion => |*e| {
+                // Error union containers don't track undefined - just recurse into payload
+                mergeRefinement(
+                    ctx,
+                    .{ orig[0], e.to },
+                    .{ true_branch[0], true_ref.errorunion.to },
+                    .{ false_branch[0], false_ref.errorunion.to },
+                );
+            },
             .region => |*r| {
                 if (true_ref.region.analyte.undefined) |true_undef| {
                     if (false_ref.region.analyte.undefined) |false_undef| {
@@ -555,6 +611,11 @@ pub fn testValid(refinements: *Refinements) void {
                     @panic("OptionalContainerHasUndefinedState");
                 }
             },
+            .errorunion => |e| {
+                if (e.analyte.undefined != null) {
+                    @panic("ErrorUnionRootHasUndefinedState");
+                }
+            },
             .@"struct" => |s| {
                 if (s.analyte.undefined != null) {
                     @panic("StructContainerHasUndefinedState");
@@ -608,7 +669,7 @@ test "alloc creates pointer to typed pointee" {
     testValid(&refinements);
 }
 
-test "alloc_create creates pointer to future" {
+test "alloc_create creates errorunion -> pointer -> pointee" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -622,11 +683,15 @@ test "alloc_create creates pointer to future" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer with typed pointee)
+    // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
     try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
-    // alloc_create creates pointer; pointee is created from type info (scalar in this case)
-    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
+    // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
+    const eu_idx = results[1].refinement.?;
+    try std.testing.expectEqual(.errorunion, std.meta.activeTag(refinements.at(eu_idx).*));
+    const ptr_idx = refinements.at(eu_idx).errorunion.to;
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(ptr_idx).*));
+    const pointee_idx = refinements.at(ptr_idx).pointer.to;
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
 }
 

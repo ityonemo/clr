@@ -25,6 +25,7 @@ pub const Refinement = union(enum) {
     scalar: Analyte,
     pointer: Indirected,
     optional: Indirected,
+    errorunion: Indirected,
     region: Indirected, // unused, for now, will represent slices (maybe)
     @"struct": Struct, // struct with field refinements
     @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
@@ -45,6 +46,7 @@ pub const Refinement = union(enum) {
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
+            .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             .retval_future => @panic("clobber_structured: use clobber_structured_idx for .retval_future destinations"),
             .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
@@ -67,6 +69,7 @@ pub const Refinement = union(enum) {
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
+            .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             // retval_future is a placeholder for return values, to be filled in by ret_safe
             .retval_future => try clobber_retval_future(dst_idx, dst_list, src, src_list),
             .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
@@ -95,18 +98,25 @@ pub const Refinement = union(enum) {
                 .analyte = o.analyte,
                 .to = if (same_list) o.to else try copy_to(src_list.at(o.to).*, src_list, dst_list),
             } },
+            .errorunion => |e| .{ .errorunion = .{
+                .analyte = e.analyte,
+                .to = if (same_list) e.to else try copy_to(src_list.at(e.to).*, src_list, dst_list),
+            } },
             .region => |r| .{ .region = .{
                 .analyte = r.analyte,
                 .to = if (same_list) r.to else try copy_to(src_list.at(r.to).*, src_list, dst_list),
             } },
             .@"struct" => |s| blk: {
-                if (same_list) {
-                    break :blk src;
-                }
                 const allocator = dst_list.list.allocator;
                 const new_fields = try allocator.alloc(EIdx, s.fields.len);
-                for (s.fields, 0..) |field_idx, i| {
-                    new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
+                if (same_list) {
+                    // Same list: just copy field indices, they already reference valid entities
+                    @memcpy(new_fields, s.fields);
+                } else {
+                    // Different lists: need to copy field entities too
+                    for (s.fields, 0..) |field_idx, i| {
+                        new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
+                    }
                 }
                 break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
             },
@@ -145,6 +155,7 @@ pub const Refinement = union(enum) {
             .scalar => try dst_list.appendEntity(src),
             .pointer => try src.copy_to_indirected(src_list, dst_list, .pointer),
             .optional => try src.copy_to_indirected(src_list, dst_list, .optional),
+            .errorunion => try src.copy_to_indirected(src_list, dst_list, .errorunion),
             .retval_future => @panic("cannot copy from .retval_future"),
             .region => try src.copy_to_indirected(src_list, dst_list, .region),
             .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),

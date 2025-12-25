@@ -1,3 +1,14 @@
+// =============================================================================
+// IMPORTANT: Tag handlers must NOT reach into analyte fields directly.
+// Analyte manipulation (undefined, memory_safety) is the responsibility of
+// analysis modules in lib/analysis/. Tag handlers should only:
+//   1. Set up refinement STRUCTURE (pointer, scalar, struct, etc.)
+//   2. Call splat() to dispatch to analysis modules
+//   3. Use generic helpers like copyAnalyteState() that work on any analyte
+// If you find yourself writing `.analyte.undefined = ...` in a tag handler,
+// that logic belongs in an analysis module instead.
+// =============================================================================
+
 const std = @import("std");
 const Inst = @import("Inst.zig");
 const Refinements = @import("Refinements.zig");
@@ -18,6 +29,7 @@ pub const Type = union(enum) {
     scalar: void,
     pointer: *const Type,
     optional: *const Type,
+    errorunion: *const Type, // error union payload type
     null: *const Type, // used to signal that an optional is being set to null.
     region: *const Type, // unused, for now, will represent slices (maybe)
     @"struct": []const Type, // field types for struct
@@ -26,7 +38,8 @@ pub const Type = union(enum) {
 };
 
 /// Source reference for instructions - indicates where a value comes from.
-/// Used by store, br, ret_safe, and other tags that reference source values.
+/// Used by store, br, ret_safe, and other tags that reference source values,
+/// as well as by calls.
 pub const Src = union(enum) {
     /// Runtime value from a result in the results table
     eidx: usize,
@@ -39,19 +52,24 @@ pub const Src = union(enum) {
 /// Convert a Type (from codegen) to a Refinement.
 /// Used when storing interned values to determine the refinement structure.
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
-fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
+pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
     return switch (ty) {
-        .scalar => .{ .scalar = .{} },
+        .scalar => .{ .scalar = .{ .undefined = .{ .defined = {} } } },
         .void => .void,
         .pointer => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .pointer = .{ .analyte = .{}, .to = child_idx } };
+            return .{ .pointer = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .to = child_idx } };
         },
         .optional => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
+        },
+        .errorunion => |child| {
+            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_idx = try refinements.appendEntity(child_ref);
+            return .{ .errorunion = .{ .analyte = .{}, .to = child_idx } };
         },
         .null => |child| {
             // .null is a null optional value - creates same structure as .optional
@@ -97,11 +115,14 @@ pub const AllocCreate = struct {
     ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
+        // AllocCreate returns Allocator.Error!*T, so we create errorunion -> ptr -> T
         // Create pointee from type info
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
         const pointee_idx = try state.refinements.appendEntity(pointee_ref);
         // Create pointer entity pointing to the typed pointee
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+        // Wrap in error union
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .analyte = .{}, .to = ptr_idx } });
         try splat(.alloc_create, state, index, self);
     }
 };
@@ -138,16 +159,31 @@ pub const AllocDestroy = struct {
 /// - backPropagate: propagates S1'.undefined back to S1.undefined
 pub const Arg = struct {
     name: []const u8,
-    // value is an index into the caller_refinements array.
-    value: EIdx,
+    /// Source of the argument value - either runtime (.eidx) or compile-time (.interned)
+    value: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const cp = state.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
-        // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
-        const local_copy_idx = try cp.at(self.value).*.copy_to(cp, state.refinements);
-        state.results[index].refinement = local_copy_idx;
-        // Set argument info for backward propagation on function close
-        state.results[index].argument = .{ .caller_ref = self.value, .name = self.name };
+        switch (self.value) {
+            .eidx => |eidx| {
+                const caller_eidx: EIdx = @intCast(eidx);
+                const cp = state.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
+                // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
+                const local_copy_idx = try cp.at(caller_eidx).*.copy_to(cp, state.refinements);
+                state.results[index].refinement = local_copy_idx;
+                // Set argument info for backward propagation on function close
+                state.results[index].argument = .{ .caller_ref = caller_eidx, .name = self.name };
+            },
+            .interned => |ty| {
+                // Compile-time constant - create entity from type info
+                const ref = try typeToRefinement(ty, state.refinements);
+                const local_idx = try state.refinements.appendEntity(ref);
+                state.results[index].refinement = local_idx;
+                // No backward propagation needed for constants (caller_ref = null),
+                // but still record parameter name for error messages (e.g., stack pointer escape)
+                state.results[index].argument = .{ .caller_ref = null, .name = self.name };
+            },
+            .other => @panic("Arg: .other source not yet implemented"),
+        }
         try splat(.arg, state, index, self);
     }
 };
@@ -193,29 +229,16 @@ pub const Br = struct {
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Block already has the correct type structure from Block.apply.
-        // We copy the source's analysis state (memory_safety, undefined) to the block's entity.
-        const block_idx = state.results[self.block].refinement orelse {
-            std.debug.panic("br: block {d} has no refinement", .{self.block});
-        };
-
+        // For eidx sources, share the source's refinement with the block.
+        // This ensures operations on the block (like alloc_destroy) affect the same entity.
+        // Clone preserves indices, so sharing propagates correctly through merge.
         switch (self.src) {
             .eidx => |src| {
                 const src_idx = state.results[src].refinement orelse return;
-                // Copy analysis state from source to block's entity
-                copyAnalyteState(state.refinements, block_idx, src_idx);
+                state.results[self.block].refinement = src_idx;
             },
-            .interned => |ty| {
-                // Comptime value - mark as defined
-                if (ty != .void) {
-                    switch (state.refinements.at(block_idx).*) {
-                        .scalar => |*s| s.undefined = .{ .defined = {} },
-                        .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                        else => {},
-                    }
-                }
-            },
-            .other => {},
+            // Interned values are handled by analysis modules (e.g., undefined.br marks as defined)
+            .interned, .other => {},
         }
         try splat(.br, state, index, self);
     }
@@ -338,8 +361,19 @@ pub const Load = struct {
             },
         };
 
-        // Clobber with the pointee's refinement (shallow copy - structs share field entities)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, state.refinements.at(pointee_idx).*);
+        // For structs, we need to deep copy the fields slice to avoid double-free on deinit.
+        // Other refinement types can be shallow copied safely.
+        const pointee = state.refinements.at(pointee_idx).*;
+        const new_ref: Refinement = switch (pointee) {
+            .@"struct" => |s| blk: {
+                const allocator = state.refinements.list.allocator;
+                const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
+                @memcpy(new_fields, s.fields);
+                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
+            },
+            else => pointee,
+        };
+        _ = try Inst.clobberInst(state.refinements, state.results, index, new_ref);
         try splat(.load, state, index, self);
     }
 };
@@ -469,7 +503,17 @@ pub const RetSafe = struct {
                             // .noreturn can be overwritten - it's from an error path return
                             // Copy return value from callee to caller's return slot
                             const new_idx = try state.refinements.at(src_idx).*.copy_to(state.refinements, caller_refinements);
-                            caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
+                            // Deep copy for structs to avoid double-free on deinit
+                            const new_val = caller_refinements.at(new_idx).*;
+                            caller_refinements.at(return_eidx).* = switch (new_val) {
+                                .@"struct" => |s| blk: {
+                                    const allocator = caller_refinements.list.allocator;
+                                    const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
+                                    @memcpy(new_fields, s.fields);
+                                    break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
+                                },
+                                else => new_val,
+                            };
                         },
                         else => {
                             // Multiple returns within same branch - need to merge
@@ -552,20 +596,25 @@ pub const Store = struct {
 };
 
 /// UnwrapErrunionPayload extracts the success value from an error union (e.g., `try x` or `x catch`).
-/// The result shares the source's entity - unwrapping doesn't create a copy of the value,
+/// The result shares the source's payload entity - unwrapping doesn't create a copy of the value,
 /// it just accesses what's already there.
 pub const UnwrapErrunionPayload = struct {
     /// Source error union being unwrapped.
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Share source instruction's entity (intraprocedural - no copy needed)
         switch (self.src) {
-            .eidx => |src| state.results[index].refinement = state.results[src].refinement,
+            .eidx => |src| {
+                // Get the errorunion refinement and extract its payload
+                const src_eidx = state.results[src].refinement orelse
+                    std.debug.panic("unwrap_errunion_payload: source inst {d} has no refinement", .{src});
+                const src_ref = state.refinements.at(src_eidx).*;
+                // errorunion's .to points to the payload entity
+                const payload_idx = src_ref.errorunion.to;
+                state.results[index].refinement = payload_idx;
+            },
             .interned, .other => {
-                // Comptime/global source - create fresh scalar
-                // TODO: use type info from .interned to determine structure
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+                std.debug.panic("unwrap_errunion_payload: interned/other sources not supported", .{});
             },
         }
         try splat(.unwrap_errunion_payload, state, index, self);
@@ -575,7 +624,7 @@ pub const UnwrapErrunionPayload = struct {
 pub fn Simple(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
             try splat(instr, state, index, self);
         }
     };
@@ -593,6 +642,7 @@ pub fn OverflowOp(comptime instr: anytype) type {
             const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
             const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
 
+            // clobberInst takes ownership of fields slice
             const fields = allocator.alloc(EIdx, 2) catch @panic("out of memory");
             fields[0] = field0_idx;
             fields[1] = field1_idx;
@@ -646,14 +696,14 @@ pub const AnyTag = union(enum) {
     sub: Simple(.sub),
 
     // Unimplemented tags (no-op)
-    add_with_overflow: Unimplemented(.{}),
+    add_with_overflow: OverflowOp(.add_with_overflow),
     aggregate_init: Unimplemented(.{}),
     array_to_slice: Unimplemented(.{}),
     block: Block,
     cond_br: Unimplemented(.{ .void = true }),
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
-    is_non_err: Unimplemented(.{}),
+    is_non_err: Simple(.is_non_err), // produces boolean scalar
     is_non_null: Unimplemented(.{}),
     memset_safe: Unimplemented(.{ .void = true }),
     noop_pruned_debug: Unimplemented(.{ .void = true }),
@@ -669,7 +719,7 @@ pub const AnyTag = union(enum) {
     sub_with_overflow: OverflowOp(.sub_with_overflow),
     @"try": Unimplemented(.{}),
     unreach: Unimplemented(.{ .void = true }),
-    unwrap_errunion_err: Unimplemented(.{}),
+    unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
     wrap_errunion_err: Unimplemented(.{}),
     wrap_errunion_payload: Unimplemented(.{}),
 };
@@ -715,6 +765,26 @@ pub fn splatMerge(
         const true_eidx = true_result.refinement;
         const false_eidx = false_result.refinement;
 
+        // If a branch changed which entity this result points to (e.g., br sharing),
+        // propagate that to the original. Clone preserves indices, so this is valid.
+        // Prefer true branch (success path in error unions).
+        if (true_eidx != null and true_eidx.? != orig_eidx) {
+            result.refinement = true_eidx.?;
+            // Also need to merge analysis state from the branch's entity to the original
+            inline for (analyses) |Analysis| {
+                if (@hasDecl(Analysis, "merge")) {
+                    try Analysis.merge(
+                        ctx,
+                        tag,
+                        .{ refinements, true_eidx.? },
+                        .{ true_refinements, true_eidx.? },
+                        .{ false_refinements, false_eidx orelse orig_eidx },
+                    );
+                }
+            }
+            continue;
+        }
+
         // Trivial cases: one side null, copy the other directly
         // Use index-based version because orig might be .retval_future
         if (true_eidx == null and false_eidx == null) continue;
@@ -739,12 +809,12 @@ pub fn splatMerge(
         }
         if (true_is_retval_future) {
             // True branch didn't return - use false branch's value
-            result.refinement = false_eidx;
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, false_ref, false_refinements);
             continue;
         }
         if (false_is_retval_future) {
             // False branch didn't return - use true branch's value
-            result.refinement = true_eidx;
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
             continue;
         }
 
@@ -754,24 +824,6 @@ pub fn splatMerge(
             // Both branches resolved the retval_future - copy structure from true branch
             // then continue to merge analysis states
             try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
-        }
-
-        // Copy analyte state from branch to original if original doesn't have it.
-        // This handles br copying alloc_create's analyte (memory_safety, undefined) to a block.
-        // (memory_safety doesn't have a merge function, so we handle it here)
-        if (orig_ref == .pointer and true_ref == .pointer) {
-            const orig_ptr = &refinements.at(orig_eidx).pointer;
-            const true_ptr = true_ref.pointer;
-            // Copy memory_safety if original doesn't have it
-            if (orig_ptr.analyte.memory_safety == null and true_ptr.analyte.memory_safety != null) {
-                orig_ptr.analyte.memory_safety = true_ptr.analyte.memory_safety;
-            }
-            // Copy undefined if original doesn't have it
-            if (orig_ptr.analyte.undefined == null and true_ptr.analyte.undefined != null) {
-                orig_ptr.analyte.undefined = true_ptr.analyte.undefined;
-            }
-            // Also copy pointee's undefined state if original pointee doesn't have it
-            copyMissingUndefinedState(refinements, orig_ptr.to, true_refinements, true_ptr.to);
         }
 
         // Non-trivial: both branches have resolved states - call each analyzer's merge
@@ -786,48 +838,5 @@ pub fn splatMerge(
                 );
             }
         }
-    }
-}
-
-/// Recursively copy undefined state from source refinement to destination if destination is missing it.
-/// Used by splatMerge to propagate undefined state from branches that got it from br.
-fn copyMissingUndefinedState(
-    dst_refinements: *Refinements,
-    dst_idx: EIdx,
-    src_refinements: *Refinements,
-    src_idx: EIdx,
-) void {
-    const dst = dst_refinements.at(dst_idx);
-    const src = src_refinements.at(src_idx);
-
-    switch (dst.*) {
-        .scalar => |*ds| {
-            if (src.* == .scalar) {
-                if (ds.undefined == null and src.scalar.undefined != null) {
-                    ds.undefined = src.scalar.undefined;
-                }
-            }
-        },
-        .pointer => |*dp| {
-            if (src.* == .pointer) {
-                if (dp.analyte.undefined == null and src.pointer.analyte.undefined != null) {
-                    dp.analyte.undefined = src.pointer.analyte.undefined;
-                }
-                copyMissingUndefinedState(dst_refinements, dp.to, src_refinements, src.pointer.to);
-            }
-        },
-        .optional => |*d_opt| {
-            if (src.* == .optional) {
-                copyMissingUndefinedState(dst_refinements, d_opt.to, src_refinements, src.optional.to);
-            }
-        },
-        .@"struct" => |d_struct| {
-            if (src.* == .@"struct") {
-                for (d_struct.fields, src.@"struct".fields) |df, sf| {
-                    copyMissingUndefinedState(dst_refinements, df, src_refinements, sf);
-                }
-            }
-        },
-        else => {},
     }
 }

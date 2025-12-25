@@ -9,7 +9,9 @@ pub const State = @import("lib.zig").State;
 
 const Inst = @This();
 const ArgumentInfo = struct {
-    caller_ref: EIdx,
+    /// Caller's entity index for backward propagation. Null for interned args
+    /// (compile-time constants have nothing to propagate back to).
+    caller_ref: ?EIdx,
     name: []const u8,
 };
 
@@ -210,21 +212,10 @@ pub fn initInst(refinements: *Refinements, results: []Inst, index: usize) !EIdx 
 /// Overwrite an instruction with a new refinement. Creates new entity regardless of prior state.
 /// Call this in tag handlers before splat() so analyses can set their respective fields.
 /// For conditional keep-of-previous-value semantics, use merge (not yet implemented).
-/// Struct fields are deep copied so each entry owns its own memory.
+/// For structs, takes ownership of the fields slice (caller must allocate fresh fields).
 pub fn clobberInst(refinements: *Refinements, results: []Inst, index: usize, value: Refinement) !EIdx {
     const idx: EIdx = @intCast(refinements.list.items.len);
-    if (value == .@"struct") {
-        // Deep copy struct fields to avoid double-free on deinit
-        const allocator = refinements.list.allocator;
-        const new_fields = try allocator.alloc(Refinements.EIdx, value.@"struct".fields.len);
-        @memcpy(new_fields, value.@"struct".fields);
-        try refinements.list.append(.{ .@"struct" = .{
-            .analyte = value.@"struct".analyte,
-            .fields = new_fields,
-        } });
-    } else {
-        try refinements.list.append(value);
-    }
+    try refinements.list.append(value);
     results[index].refinement = idx;
     return idx;
 }
@@ -280,7 +271,8 @@ pub fn backPropagate(state: State) void {
     const cp = state.caller_refinements orelse return;
     for (state.results) |inst| {
         const arg_info = inst.argument orelse continue;
-        const caller_entity_idx = arg_info.caller_ref;
+        // Skip interned args - nothing to propagate back to (they're compile-time constants)
+        const caller_entity_idx = arg_info.caller_ref orelse continue;
         const local_idx = inst.refinement orelse continue;
 
         const local_refinement = state.refinements.at(local_idx);
@@ -895,7 +887,7 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     };
 
     // Callee: inst 0 = arg (pointer to struct)
-    try Inst.apply(callee_state, 0, .{ .arg = .{ .value = caller_ptr_idx, .name = "p" } });
+    try Inst.apply(callee_state, 0, .{ .arg = .{ .value = .{ .eidx = caller_ptr_idx }, .name = "p" } });
 
     // Callee: inst 1 = alloc (pointer to struct), inst 2 = store inst 0's pointer to inst 1
     try Inst.apply(callee_state, 1, .{ .alloc = .{ .ty = .{ .pointer = &struct_ty } } });

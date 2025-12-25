@@ -50,11 +50,35 @@ Refinements track basic type structure (scalar, pointer, optional) but don't cap
 
 **Planned fix**: Extend the type system to capture more detail when needed for specific analyses.
 
+### GeneralPurposeAllocator Crashes Codegen
+
+Using `std.heap.GeneralPurposeAllocator` in test code causes libclr.so to segfault during codegen. The AIR itself is valid (dump_air.sh works), but when the DLL processes the complex nested GPA type, it crashes.
+
+**Investigation needed**: Determine what aspect of the GPA type causes the crash - likely a buffer overflow or DLL relocation issue when processing deeply nested generic types.
+
+**Workaround**: Use simpler allocators like `std.heap.FixedBufferAllocator` for testing allocator mismatch scenarios.
+
+### Short Bool Functions Crash Codegen
+
+Simple functions with bool variables and conditionals can crash libclr.so during codegen, even when the AIR is valid. For example:
+
+```zig
+pub fn main() u8 {
+    const b: bool = true;
+    if (b) { return 1; }
+    return 0;
+}
+```
+
+The AIR shows the branch is optimized away, but codegen still crashes.
+
+**Investigation needed**: Determine what aspect of these simple functions triggers the crash.
+
 ### Runtime Allocator Type Identification
 
-For runtime allocators (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), we currently return a generic "Allocator" marker instead of the specific type like "GeneralPurposeAllocator".
+For runtime allocators (e.g., `var gpa = GeneralPurposeAllocator(.{}){}` or `const alloc = fba.allocator()`), we currently return a generic "Allocator" marker instead of the specific type.
 
-**Impact**: Mismatched allocator detection only works when at least one allocator is a comptime constant. Two different runtime allocators will both show as "Allocator" and won't be detected as mismatched.
+**Impact**: Mismatched allocator detection only works when at least one allocator is a comptime constant (like `std.heap.page_allocator`). Two different runtime allocators will both show as "Allocator" and won't be detected as mismatched.
 
 **Planned improvements**:
 1. **Global/const allocator tracking**: If an allocator is stored in a global or const variable, trace through the store to find the vtable source
@@ -82,6 +106,25 @@ Struct field tracking is partially implemented:
 Global variables and types are not fully tracked through the analysis.
 
 **Planned fix**: May require more sophisticated analysis for generating dependency understanding and retriggering analysis on functions when globals change.
+
+### Interned Pointer Arguments (Memory Safety)
+
+When a compile-time constant pointer is passed as a function argument (e.g., a pointer to a global or string literal), the memory safety analysis doesn't set any state on it. This is probably correct for most cases, but edge cases may exist.
+
+**Example**: Passing `&global_var` as an argument - the memory safety analysis currently does nothing. This may need special handling if we want to track globals.
+
+**Investigation needed**: Determine if interned pointer arguments need memory safety state initialization.
+
+### Compile-Time Constants with Undefined Fields
+
+Currently, we assume all compile-time constants (interned values) passed as function arguments are fully defined. However, Zig allows structs with undefined fields at comptime:
+
+```zig
+const s = .{ .x = 5, .y = undefined };
+foo(s);  // Passes interned struct with undefined field
+```
+
+**Investigation needed**: Determine if/how the InternPool represents undefined fields in interned structs, and whether we need to extract that information during codegen to properly track partial undefined state.
 
 ### Region Allocation/Freeing
 
