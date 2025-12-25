@@ -193,29 +193,69 @@ pub const Br = struct {
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Share source instruction's entity with block instruction (intraprocedural - no copy needed).
-        // TODO: Need a way to merge types/analytes when multiple branches target the same block.
-        // Currently we just overwrite, but we should union the analysis states.
+        // Block already has the correct type structure from Block.apply.
+        // We copy the source's analysis state (memory_safety, undefined) to the block's entity.
+        const block_idx = state.results[self.block].refinement orelse {
+            std.debug.panic("br: block {d} has no refinement", .{self.block});
+        };
+
         switch (self.src) {
             .eidx => |src| {
-                if (state.results[src].refinement) |src_idx| {
-                    state.results[self.block].refinement = src_idx;
-                } else {
-                    _ = try Inst.clobberInst(state.refinements, state.results, self.block, .{ .scalar = .{} });
-                }
+                const src_idx = state.results[src].refinement orelse return;
+                // Copy analysis state from source to block's entity
+                copyAnalyteState(state.refinements, block_idx, src_idx);
             },
             .interned => |ty| {
-                // Comptime value - create refinement based on type
-                // TODO: use full type info to determine structure
-                if (ty == .void) {
-                    _ = try Inst.clobberInst(state.refinements, state.results, self.block, .void);
-                } else {
-                    _ = try Inst.clobberInst(state.refinements, state.results, self.block, .{ .scalar = .{} });
+                // Comptime value - mark as defined
+                if (ty != .void) {
+                    switch (state.refinements.at(block_idx).*) {
+                        .scalar => |*s| s.undefined = .{ .defined = {} },
+                        .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                        else => {},
+                    }
                 }
             },
-            .other => _ = try Inst.clobberInst(state.refinements, state.results, self.block, .{ .scalar = .{} }),
+            .other => {},
         }
         try splat(.br, state, index, self);
+    }
+
+    /// Copy analysis state (memory_safety, undefined) from source entity to destination.
+    /// This preserves the destination's type structure while updating its analysis state.
+    fn copyAnalyteState(refinements: *Refinements, dst_idx: EIdx, src_idx: EIdx) void {
+        const dst = refinements.at(dst_idx);
+        const src = refinements.at(src_idx);
+
+        switch (dst.*) {
+            .pointer => |*dp| {
+                if (src.* == .pointer) {
+                    const sp = src.pointer;
+                    // Copy analyte (memory_safety, undefined)
+                    dp.analyte = sp.analyte;
+                    // Recursively copy pointee's analysis state
+                    copyAnalyteState(refinements, dp.to, sp.to);
+                }
+            },
+            .scalar => |*ds| {
+                if (src.* == .scalar) {
+                    ds.* = src.scalar;
+                }
+            },
+            .optional => |*d_opt| {
+                if (src.* == .optional) {
+                    copyAnalyteState(refinements, d_opt.to, src.optional.to);
+                }
+            },
+            .@"struct" => |*d_struct| {
+                if (src.* == .@"struct") {
+                    const s_struct = src.@"struct";
+                    for (d_struct.fields, s_struct.fields) |df, sf| {
+                        copyAnalyteState(refinements, df, sf);
+                    }
+                }
+            },
+            else => {},
+        }
     }
 };
 
@@ -340,12 +380,11 @@ pub const StructFieldPtr = struct {
                 const field_idx = s.fields[self.field_index];
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
             },
-            .future, .scalar => {
-                // Materialize future/scalar into scalar (temporary - .future will be removed)
-                state.refinements.at(struct_idx).* = .{ .scalar = .{} };
+            .scalar => {
+                // Scalar being treated as struct - use the scalar itself as target
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = struct_idx } });
             },
-            else => std.debug.panic("struct_field_ptr: expected struct or future, got {s}", .{@tagName(pointee)}),
+            else => std.debug.panic("struct_field_ptr: expected struct, got {s}", .{@tagName(pointee)}),
         }
         try splat(.struct_field_ptr, state, index, self);
     }
@@ -374,10 +413,13 @@ pub const StructFieldVal = struct {
         };
 
         // Get the struct and find the field
-        // operand must be a struct value - load creates struct refinement for struct types
-        const s = state.refinements.at(struct_ref).@"struct";
-        // Share the field entity (reading a field doesn't copy it)
-        state.results[index].refinement = s.fields[self.field_index];
+        switch (state.refinements.at(struct_ref).*) {
+            .@"struct" => |s| {
+                // Share the field entity (reading a field doesn't copy it)
+                state.results[index].refinement = s.fields[self.field_index];
+            },
+            else => |t| std.debug.panic("struct_field_val: expected struct, got {s}", .{@tagName(t)}),
+        }
         try splat(.struct_field_val, state, index, self);
     }
 };
@@ -469,10 +511,6 @@ pub const RetSafe = struct {
 
         // Splat runs last - analyses see state after copy is complete
         try splat(.ret_safe, state, index, self);
-
-        // Mark all futures as tombstoned - this path is exiting, so any
-        // unresolved futures won't be resolved by this branch.
-        state.refinements.tombstoneAllFutures();
     }
 };
 
@@ -508,54 +546,6 @@ pub const Store = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-
-        // Transform .future pointee into actual structure based on src
-        var pending_var_name: ?[]const u8 = null;
-        var pointee_idx: ?Inst.EIdx = null;
-
-        if (self.ptr) |ptr| {
-            const ptr_idx = state.results[ptr].refinement orelse {
-                try splat(.store, state, index, self);
-                return;
-            };
-            if (state.refinements.at(ptr_idx).* != .pointer) {
-                try splat(.store, state, index, self);
-                return;
-            }
-            pointee_idx = state.refinements.at(ptr_idx).pointer.to;
-
-            if (state.refinements.at(pointee_idx.?).* == .future) {
-                // Extract pending var_name before transforming
-                pending_var_name = state.refinements.at(pointee_idx.?).future.name;
-
-                // Determine structure from src, or default to scalar
-                // Can't copy from .future or .retval_future, so default to scalar
-                const src_ref: Refinement = blk: {
-                    switch (self.src) {
-                        .eidx => |src| {
-                            if (state.results[src].refinement) |src_idx| {
-                                const ref = state.refinements.at(src_idx).*;
-                                if (ref != .future and ref != .retval_future) {
-                                    break :blk ref;
-                                }
-                            }
-                        },
-                        .interned => |ty| {
-                            // Use type info to determine structure
-                            break :blk try typeToRefinement(ty, state.refinements);
-                        },
-                        .other => {},
-                    }
-                    break :blk .{ .scalar = .{} };
-                };
-                try Refinement.clobber_structured_idx(pointee_idx.?, state.refinements, src_ref, state.refinements);
-            }
-        }
-
-        // Pass pending var_name to undefined analysis via context
-        state.ctx.pending_var_name = pending_var_name;
-        defer state.ctx.pending_var_name = null;
-
         // The ptr instruction's entity is unchanged - we only update the pointee's analysis state
         try splat(.store, state, index, self);
     }
@@ -586,6 +576,28 @@ pub fn Simple(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
             _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            try splat(instr, state, index, self);
+        }
+    };
+}
+
+/// Overflow operations (add_with_overflow, sub_with_overflow, etc.) return a
+/// struct { result: T, overflow: u1 }. We create a two-field struct with both
+/// fields as defined scalars.
+pub fn OverflowOp(comptime instr: anytype) type {
+    return struct {
+        pub fn apply(self: @This(), state: State, index: usize) !void {
+            const allocator = state.refinements.list.allocator;
+
+            // Create two scalar fields (result and overflow flag)
+            const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
+            const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
+
+            const fields = allocator.alloc(EIdx, 2) catch @panic("out of memory");
+            fields[0] = field0_idx;
+            fields[1] = field1_idx;
+
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .fields = fields } });
             try splat(instr, state, index, self);
         }
     };
@@ -654,7 +666,7 @@ pub const AnyTag = union(enum) {
     stack_trace_frames: Unimplemented(.{}),
     struct_field_ptr: StructFieldPtr,
     struct_field_val: StructFieldVal,
-    sub_with_overflow: Unimplemented(.{}),
+    sub_with_overflow: OverflowOp(.sub_with_overflow),
     @"try": Unimplemented(.{}),
     unreach: Unimplemented(.{ .void = true }),
     unwrap_errunion_err: Unimplemented(.{}),
@@ -704,7 +716,7 @@ pub fn splatMerge(
         const false_eidx = false_result.refinement;
 
         // Trivial cases: one side null, copy the other directly
-        // Use index-based version because orig might be .future
+        // Use index-based version because orig might be .retval_future
         if (true_eidx == null and false_eidx == null) continue;
         if (true_eidx == null) {
             try Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(false_eidx.?).*, false_refinements);
@@ -715,44 +727,51 @@ pub fn splatMerge(
             continue;
         }
 
-        // Handle .future/.retval_future: if one branch has a future and the other has a resolved value, use the resolved one
+        // Handle .retval_future: if one branch has retval_future and the other has a resolved value, use the resolved one
         const true_ref = true_refinements.at(true_eidx.?).*;
         const false_ref = false_refinements.at(false_eidx.?).*;
-        const true_is_future = true_ref == .future or true_ref == .retval_future;
-        const false_is_future = false_ref == .future or false_ref == .retval_future;
+        const true_is_retval_future = true_ref == .retval_future;
+        const false_is_retval_future = false_ref == .retval_future;
 
-        if (true_is_future and false_is_future) {
-            // Both are futures - nothing to merge, leave as is
+        if (true_is_retval_future and false_is_retval_future) {
+            // Both are retval_futures - nothing to merge, leave as is
             continue;
         }
-        if (true_is_future) {
-            // True branch didn't resolve this slot
-            // For .future, must be tombstoned (early return). For .retval_future, always OK to skip.
-            if (true_ref == .future and !true_ref.future.tombstoned) {
-                @panic("merging non-tombstoned future with resolved value - branch didn't return but also didn't resolve the future");
-            }
-            // Use false branch's value since true branch didn't resolve
+        if (true_is_retval_future) {
+            // True branch didn't return - use false branch's value
             result.refinement = false_eidx;
             continue;
         }
-        if (false_is_future) {
-            // False branch didn't resolve this slot
-            // For .future, must be tombstoned (early return). For .retval_future, always OK to skip.
-            if (false_ref == .future and !false_ref.future.tombstoned) {
-                @panic("merging non-tombstoned future with resolved value - branch didn't return but also didn't resolve the future");
-            }
-            // Use true branch's value since false branch didn't resolve
+        if (false_is_retval_future) {
+            // False branch didn't return - use true branch's value
             result.refinement = true_eidx;
             continue;
         }
 
-        // Handle orig being .future or .retval_future when both branches resolved it
-        // (e.g., block instructions start as .future and are resolved by br in each branch)
+        // Handle orig being .retval_future when both branches resolved it
         const orig_ref = refinements.at(orig_eidx).*;
-        if (orig_ref == .future or orig_ref == .retval_future) {
-            // Both branches resolved the future - copy structure from true branch
+        if (orig_ref == .retval_future) {
+            // Both branches resolved the retval_future - copy structure from true branch
             // then continue to merge analysis states
             try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
+        }
+
+        // Copy analyte state from branch to original if original doesn't have it.
+        // This handles br copying alloc_create's analyte (memory_safety, undefined) to a block.
+        // (memory_safety doesn't have a merge function, so we handle it here)
+        if (orig_ref == .pointer and true_ref == .pointer) {
+            const orig_ptr = &refinements.at(orig_eidx).pointer;
+            const true_ptr = true_ref.pointer;
+            // Copy memory_safety if original doesn't have it
+            if (orig_ptr.analyte.memory_safety == null and true_ptr.analyte.memory_safety != null) {
+                orig_ptr.analyte.memory_safety = true_ptr.analyte.memory_safety;
+            }
+            // Copy undefined if original doesn't have it
+            if (orig_ptr.analyte.undefined == null and true_ptr.analyte.undefined != null) {
+                orig_ptr.analyte.undefined = true_ptr.analyte.undefined;
+            }
+            // Also copy pointee's undefined state if original pointee doesn't have it
+            copyMissingUndefinedState(refinements, orig_ptr.to, true_refinements, true_ptr.to);
         }
 
         // Non-trivial: both branches have resolved states - call each analyzer's merge
@@ -767,5 +786,48 @@ pub fn splatMerge(
                 );
             }
         }
+    }
+}
+
+/// Recursively copy undefined state from source refinement to destination if destination is missing it.
+/// Used by splatMerge to propagate undefined state from branches that got it from br.
+fn copyMissingUndefinedState(
+    dst_refinements: *Refinements,
+    dst_idx: EIdx,
+    src_refinements: *Refinements,
+    src_idx: EIdx,
+) void {
+    const dst = dst_refinements.at(dst_idx);
+    const src = src_refinements.at(src_idx);
+
+    switch (dst.*) {
+        .scalar => |*ds| {
+            if (src.* == .scalar) {
+                if (ds.undefined == null and src.scalar.undefined != null) {
+                    ds.undefined = src.scalar.undefined;
+                }
+            }
+        },
+        .pointer => |*dp| {
+            if (src.* == .pointer) {
+                if (dp.analyte.undefined == null and src.pointer.analyte.undefined != null) {
+                    dp.analyte.undefined = src.pointer.analyte.undefined;
+                }
+                copyMissingUndefinedState(dst_refinements, dp.to, src_refinements, src.pointer.to);
+            }
+        },
+        .optional => |*d_opt| {
+            if (src.* == .optional) {
+                copyMissingUndefinedState(dst_refinements, d_opt.to, src_refinements, src.optional.to);
+            }
+        },
+        .@"struct" => |d_struct| {
+            if (src.* == .@"struct") {
+                for (d_struct.fields, src.@"struct".fields) |df, sf| {
+                    copyMissingUndefinedState(dst_refinements, df, src_refinements, sf);
+                }
+            }
+        },
+        else => {},
     }
 }

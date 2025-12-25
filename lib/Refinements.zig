@@ -15,17 +15,6 @@ pub const Refinement = union(enum) {
         to: EIdx,
     };
 
-    /// this special-case for values which will contain a refinement type, but it isn't set at this
-    /// particular point in time.  Note that the structure of the refinement cannot be derived from 
-    /// zig's compiler type, since for example a "usize" might *actually* be a pointer, and should
-    /// be treated as a pointer in refinements.
-    pub const Future = struct {
-        /// null if it is anonymous, otherwise contains the variable name.
-        name: ?[]const u8,
-        /// if the future gets cancelled due to an early return, we set this to true.
-        tombstoned: bool = false,
-    };
-
     pub const Struct = struct {
         /// Analyte for tracking on the whole struct
         analyte: Analyte = .{},
@@ -39,7 +28,6 @@ pub const Refinement = union(enum) {
     region: Indirected, // unused, for now, will represent slices (maybe)
     @"struct": Struct, // struct with field refinements
     @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
-    future: Future,
     noreturn: void, // specific return value for error paths.
     retval_future: void, // special-case for retvals before a return has been called.
     unimplemented: void, // this means we have an operation that is unimplemented but does carry a value.
@@ -47,8 +35,8 @@ pub const Refinement = union(enum) {
 
     /// clobbers one refinement over another.  The dst structure must be identical.
     /// TODO: In some cases, "deeper specification" may be added.
-    /// NOTE: For .future destinations, use clobber_structured_idx instead because
-    /// clobber_future may reallocate dst_list, invalidating the dst pointer.
+    /// NOTE: For .retval_future destinations, use clobber_structured_idx instead because
+    /// clobber_retval_future may reallocate dst_list, invalidating the dst pointer.
     pub fn clobber_structured(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         switch (dst.*) {
             .scalar => {
@@ -57,12 +45,10 @@ pub const Refinement = union(enum) {
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
-            .retval_future => @panic("cannot copy from .retval_future"),
+            .retval_future => @panic("clobber_structured: use clobber_structured_idx for .retval_future destinations"),
             .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
-            // future: use index-based version to avoid stale pointer after reallocation
-            .future => @panic("clobber_structured: use clobber_structured_idx for .future destinations"),
             // following types don't have any metadata associated with them.
             .unimplemented => if (src != .unimplemented) std.debug.panic("clobber mismatch: src is .{s} and dst is .unimplemented", .{@tagName(src)}),
             .void => if (src != .void) std.debug.panic("clobber mismatch: src is .{s} and dst is .void", .{@tagName(src)}),
@@ -71,7 +57,7 @@ pub const Refinement = union(enum) {
     }
 
     /// clobbers one refinement over another, using index for destination.
-    /// Use this when dst might be .future (which requires reallocation-safe handling).
+    /// Use this when dst might be .retval_future (which requires reallocation-safe handling).
     pub fn clobber_structured_idx(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const dst = dst_list.at(dst_idx);
         switch (dst.*) {
@@ -81,13 +67,11 @@ pub const Refinement = union(enum) {
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
-            // retval_future is like future - a placeholder to be filled in
-            .retval_future => try clobber_future(dst_idx, dst_list, src, src_list),
+            // retval_future is a placeholder for return values, to be filled in by ret_safe
+            .retval_future => try clobber_retval_future(dst_idx, dst_list, src, src_list),
             .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
-            // future: use index-based clobber to handle reallocation
-            .future => try clobber_future(dst_idx, dst_list, src, src_list),
             // following types don't have any metadata associated with them.
             .unimplemented => if (src != .unimplemented) std.debug.panic("clobber mismatch: src is .{s} and dst is .unimplemented", .{@tagName(src)}),
             .void => if (src != .void) std.debug.panic("clobber mismatch: src is .{s} and dst is .void", .{@tagName(src)}),
@@ -95,9 +79,9 @@ pub const Refinement = union(enum) {
         }
     }
 
-    /// Clobber a .future slot with a src refinement, copying the structure without checks.
+    /// Clobber a .retval_future slot with a src refinement, copying the structure without checks.
     /// Takes dst_idx instead of pointer because copy_to may reallocate dst_list.
-    fn clobber_future(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
+    fn clobber_retval_future(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const same_list = src_list == dst_list;
         // Note: We must compute the new value BEFORE getting a pointer to dst,
         // because copy_to may reallocate dst_list's backing memory.
@@ -130,7 +114,6 @@ pub const Refinement = union(enum) {
             .unimplemented => .{ .unimplemented = {} },
             .void => .{ .void = {} },
             .noreturn => .{ .noreturn = {} },
-            .future => |name| .{ .future = name }, // Preserve future (uninitialized slot)
             .retval_future => @panic("cannot copy from .retval_future"),
         };
         // Now safe to get pointer and assign
@@ -163,7 +146,6 @@ pub const Refinement = union(enum) {
             .pointer => try src.copy_to_indirected(src_list, dst_list, .pointer),
             .optional => try src.copy_to_indirected(src_list, dst_list, .optional),
             .retval_future => @panic("cannot copy from .retval_future"),
-            .future => |name| try dst_list.appendEntity(.{ .future = name }), // Copy future as-is (uninitialized slot)
             .region => try src.copy_to_indirected(src_list, dst_list, .region),
             .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copy_to_fields(src_list, dst_list, .@"union"),
@@ -257,16 +239,6 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
         }
     }
     return new;
-}
-
-/// Mark all futures as tombstoned. Called on ret_safe to indicate
-/// that this execution path exited and won't resolve its futures.
-pub fn tombstoneAllFutures(self: *Refinements) void {
-    for (self.list.items) |*item| {
-        if (item.* == .future) {
-            item.future.tombstoned = true;
-        }
-    }
 }
 
 const undefined_analysis = @import("analysis/undefined.zig");

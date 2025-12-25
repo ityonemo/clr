@@ -244,21 +244,16 @@ fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Ref
 
     switch (local.*) {
         .scalar => |src| {
-            if (caller.* == .future) {
-                caller.* = .{ .scalar = src };
-                return;
-            }
+            // caller should already be scalar from type info
             if (caller.* != .scalar) std.debug.panic("backPropagate: local pointee is scalar but caller pointee is {s}", .{@tagName(caller.*)});
             caller.scalar = src;
         },
         .pointer => |src| {
-            if (caller.* == .future) return; // Caller hasn't been dereferenced yet
             if (caller.* != .pointer) std.debug.panic("backPropagate: local pointee is pointer but caller pointee is {s}", .{@tagName(caller.*)});
             caller.pointer.analyte = src.analyte;
             propagatePointee(local_refs, src.to, caller_refs, caller.pointer.to);
         },
         .@"struct" => |src| {
-            if (caller.* == .future) return; // Caller hasn't been dereferenced yet
             if (caller.* != .@"struct") std.debug.panic("backPropagate: local pointee is struct but caller pointee is {s}", .{@tagName(caller.*)});
             caller.@"struct".analyte = src.analyte;
             for (src.fields, 0..) |local_field_idx, i| {
@@ -266,7 +261,6 @@ fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Ref
             }
         },
         .optional => |src| {
-            if (caller.* == .future) return; // Caller hasn't been dereferenced yet
             if (caller.* != .optional) std.debug.panic("backPropagate: local pointee is optional but caller pointee is {s}", .{@tagName(caller.*)});
             caller.optional.analyte = src.analyte;
             propagatePointee(local_refs, src.to, caller_refs, caller.optional.to);

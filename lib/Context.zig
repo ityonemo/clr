@@ -6,10 +6,6 @@ meta: @import("Meta.zig"),
 base_line: u32 = 0,
 writer: *std.Io.Writer = undefined,
 
-/// Temporary storage for var_name extracted from .future during store transformation.
-/// Set by Store.apply before splat, consumed by undefined.store, then cleared.
-pending_var_name: ?[]const u8 = null,
-
 const Context = @This();
 
 pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {

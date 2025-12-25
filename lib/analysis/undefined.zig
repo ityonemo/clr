@@ -66,11 +66,13 @@ pub const Undefined = union(enum) {
     }
 
     pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
-        _ = ctx;
         _ = params;
-        // The pointer itself is defined (it exists), pointee state is set by store
+        // The pointer itself is defined (it exists)
         const ptr_idx = results[index].refinement.?;
         refinements.at(ptr_idx).pointer.analyte.undefined = .{ .defined = {} };
+        // The pointee starts as undefined (must be set by store before use)
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = ctx.meta } });
     }
 
     pub fn struct_field_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.StructFieldPtr) !void {
@@ -95,7 +97,7 @@ pub const Undefined = union(enum) {
                     setDefinedRecursive(refinements, field_idx);
                 }
             },
-            .future, .void, .unimplemented, .noreturn, .retval_future => {},
+            .void, .unimplemented, .noreturn, .retval_future => {},
             .region => @panic("setDefinedRecursive: region not yet implemented"),
             .@"union" => @panic("setDefinedRecursive: union not yet implemented"),
         }
@@ -162,7 +164,7 @@ pub const Undefined = union(enum) {
                     setUndefinedRecursive(refinements, field_idx, undef_state);
                 }
             },
-            .future, .void, .unimplemented, .noreturn, .retval_future => {},
+            .void, .unimplemented, .noreturn, .retval_future => {},
             .region => @panic("setUndefinedRecursive: region not yet implemented"),
             .@"union" => @panic("setUndefinedRecursive: union not yet implemented"),
         }
@@ -183,28 +185,78 @@ pub const Undefined = union(enum) {
 
         if (params.is_undef) {
             // Undefined stores: mark pointee and all children as undefined (recursive)
-            const pending_var_name = ctx.pending_var_name;
-            const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta, .var_name = pending_var_name } };
+            // Variable name (if any) was already set by dbg_var_ptr on the pointee
+            const existing_var_name = switch (refinements.at(pointee_idx).*) {
+                .scalar => |s| if (s.undefined) |u| switch (u) {
+                    .undefined => |meta| meta.var_name,
+                    .inconsistent => |meta| meta.var_name,
+                    .defined => null,
+                } else null,
+                else => null,
+            };
+            const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta, .var_name = existing_var_name } };
             setUndefinedRecursive(refinements, pointee_idx, undef_state);
         } else {
-            // Defined stores: mark just the immediate pointee as defined (non-recursive)
-            // For containers (optional/struct), we don't set their analyte - only scalars/pointers
-            switch (refinements.at(pointee_idx).*) {
-                .scalar => |*s| s.undefined = .{ .defined = {} },
-                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                .optional => |o| {
-                    // Storing any value (including null) to an optional makes inner defined
-                    switch (refinements.at(o.to).*) {
+            // Defined stores: update the pointee based on source type
+            switch (params.src) {
+                .eidx => |src_idx| {
+                    // Runtime source - connect pointee to source's entity
+                    const src_ref = results[src_idx].refinement orelse {
+                        // Source has no refinement - just mark as defined
+                        switch (refinements.at(pointee_idx).*) {
+                            .scalar => |*s| s.undefined = .{ .defined = {} },
+                            .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                            else => {},
+                        }
+                        return;
+                    };
+                    // When storing a pointer value, update the destination's `to` field
+                    // so loads through the destination will reach the same target
+                    switch (refinements.at(pointee_idx).*) {
                         .scalar => |*s| s.undefined = .{ .defined = {} },
-                        .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                        else => {},
+                        .pointer => |*p| {
+                            // If source is also a pointer, copy its structure
+                            if (refinements.at(src_ref).* == .pointer) {
+                                const src_ptr = refinements.at(src_ref).pointer;
+                                p.to = src_ptr.to;
+                                // Copy analyte but override undefined to defined
+                                p.analyte = src_ptr.analyte;
+                                p.analyte.undefined = .{ .defined = {} };
+                            } else {
+                                p.analyte.undefined = .{ .defined = {} };
+                            }
+                        },
+                        .optional => |o| {
+                            switch (refinements.at(o.to).*) {
+                                .scalar => |*s| s.undefined = .{ .defined = {} },
+                                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                                else => {},
+                            }
+                        },
+                        .@"struct" => {},
+                        .void, .unimplemented, .noreturn, .retval_future => {},
+                        .region => @panic("store: region not yet implemented"),
+                        .@"union" => @panic("store: union not yet implemented"),
                     }
                 },
-                // Structs need per-field handling via struct_field_ptr/store pairs
-                .@"struct" => {},
-                .future, .void, .unimplemented, .noreturn, .retval_future => {},
-                .region => @panic("store: region not yet implemented"),
-                .@"union" => @panic("store: union not yet implemented"),
+                .interned, .other => {
+                    // Compile-time source - just mark as defined
+                    switch (refinements.at(pointee_idx).*) {
+                        .scalar => |*s| s.undefined = .{ .defined = {} },
+                        .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                        .optional => |o| {
+                            switch (refinements.at(o.to).*) {
+                                .scalar => |*s| s.undefined = .{ .defined = {} },
+                                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                                else => {},
+                            }
+                        },
+                        .@"struct" => {},
+                        .void, .unimplemented, .noreturn, .retval_future => {},
+                        .region => @panic("store: region not yet implemented"),
+                        .@"union" => @panic("store: union not yet implemented"),
+                    }
+                },
             }
         }
     }
@@ -271,7 +323,6 @@ pub const Undefined = union(enum) {
                 // The loaded struct value will carry the field refinements
             },
             .region, .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
-            .future => @panic("load: pointee is .future - was never stored to"),
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
         }
@@ -313,7 +364,6 @@ pub const Undefined = union(enum) {
             },
             // Optional and struct containers don't track undefined on themselves
             .optional, .@"struct" => {},
-            .future => |*f| f.name = params.name, // Store name for when store transforms the future
             // unimplemented values have no undefined tracking - skip naming
             .unimplemented => {},
             else => @panic("unexpected refinement type in dbg_var_ptr (pointee)"),
@@ -368,7 +418,6 @@ pub const Undefined = union(enum) {
             // Optional and struct containers don't track undefined on themselves
             // Their children carry the undefined state
             .optional, .@"struct" => {},
-            .future => {}, // Field is a future - not yet resolved
             else => |t| std.debug.panic("struct_field_val: unexpected field refinement type {s}", .{@tagName(t)}),
         }
     }
@@ -397,25 +446,6 @@ pub const Undefined = union(enum) {
         const orig_ref = orig[0].at(orig[1]);
         const true_ref = true_branch[0].at(true_branch[1]);
         const false_ref = false_branch[0].at(false_branch[1]);
-
-        // Handle tombstoned futures - these represent early returns and are OK to merge
-        const true_is_tombstoned = true_ref.* == .future and true_ref.future.tombstoned;
-        const false_is_tombstoned = false_ref.* == .future and false_ref.future.tombstoned;
-
-        if (true_is_tombstoned and false_is_tombstoned) {
-            // Both branches returned early - nothing to merge
-            return;
-        }
-        if (true_is_tombstoned) {
-            // True branch returned early - use false branch's value
-            orig_ref.* = false_ref.*;
-            return;
-        }
-        if (false_is_tombstoned) {
-            // False branch returned early - use true branch's value
-            orig_ref.* = true_ref.*;
-            return;
-        }
 
         switch (orig_ref.*) {
             .scalar => |*s| {
@@ -475,8 +505,6 @@ pub const Undefined = union(enum) {
             },
             // Types with undefined tracking not yet implemented
             .@"union" => @panic("mergeRefinement: union merge not yet implemented"),
-            // Non-tombstoned futures should never appear in merges - they must be resolved first
-            .future => @panic("mergeRefinement: non-tombstoned .future should have been resolved before merge"),
             .retval_future => @panic("mergeRefinement: cannot merge .retval_future"),
         }
     }

@@ -117,7 +117,6 @@ fn formatRefinementDeep(buf: []u8, ref: Refinement, refinements: *Refinements, d
         .@"struct" => "struct",
         .@"union" => "union",
         .retval_future => "retval_future",
-        .future => "future",
         .unimplemented => "unimplemented",
         .void => "void",
         .noreturn => "noreturn",
