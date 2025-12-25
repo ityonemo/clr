@@ -2,6 +2,21 @@
 
 ## Currently Not Implemented, But Planned
 
+### Standard Library Function Analysis
+
+Currently, CLR only analyzes functions from the user's root module. Standard library functions (start.*, os.*, debug.*, posix.*, fs.*, etc.) are skipped because their AIR instructions contain uninitialized/garbage data in some fields.
+
+**Symptoms**: When processing stdlib functions, the `block` instruction's `ty_pl.ty` field contains garbage (0xAA patterns in debug mode), causing segfaults when trying to extract type information.
+
+**Impact**: Analysis cannot trace through stdlib function calls. If a stdlib function modifies memory or affects control flow, those effects are not tracked.
+
+**Investigation needed**:
+- Determine why stdlib AIR has uninitialized instruction fields
+- Check if this is an issue with how libclr.so receives data from the compiler
+- Consider whether stdlib functions need special handling (they may not have the same type annotation requirements)
+
+**Workaround**: Filter functions by checking if their FQN starts with the root module name, skipping all others.
+
 ### Large Return Value Tracking (ret_load, ret_ptr)
 
 Functions that return large values (structs, arrays) use `ret_load` or `ret_ptr` instructions instead of `ret_safe`. These instructions handle returns where the value is returned via a pointer to caller-provided storage.

@@ -93,8 +93,18 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const nav = ip.getNav(func.owner_nav);
     const fqn = nav.fqn.toSlice(ip);
 
-    // Check if this is the main function (entrypoint)
+    // Get root module name to filter user code from stdlib.
+    // Currently we only process functions from the user's module because stdlib
+    // functions have uninitialized/garbage data in some AIR instruction fields
+    // (e.g., block instruction's ty_pl.ty field contains 0xAA patterns).
+    // This causes segfaults when we try to extract type information.
+    // See LIMITATIONS.md for details.
     const root_name = zcu.root_mod.fully_qualified_name;
+    if (!std.mem.startsWith(u8, fqn, root_name)) {
+        return null;
+    }
+
+    // Check if this is the main function (entrypoint)
     var expected_main: [256]u8 = undefined;
     const expected_main_slice = std.fmt.bufPrint(&expected_main, "{s}.main", .{root_name}) catch return null;
     const is_entrypoint = std.mem.eql(u8, fqn, expected_main_slice);

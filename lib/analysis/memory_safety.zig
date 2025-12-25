@@ -480,7 +480,7 @@ test "alloc_create sets allocation metadata on pointer analyte" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
@@ -505,7 +505,7 @@ test "alloc_destroy marks allocation as freed" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
     // Update context for free location
     ctx.meta.line = 20;
@@ -533,7 +533,7 @@ test "alloc_destroy detects double free" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create and free allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
     // Second free should error
@@ -558,7 +558,7 @@ test "alloc_destroy detects mismatched allocator" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create with PageAllocator
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
     // Destroy with different allocator
     try std.testing.expectError(
@@ -606,7 +606,7 @@ test "load detects use after free" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create, store (to make it defined), and free allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
     try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
@@ -632,7 +632,7 @@ test "load from live allocation does not error" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create and store to allocation (not freed)
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Load from live allocation should succeed
@@ -654,7 +654,7 @@ test "onFinish detects memory leak" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create allocation but don't free
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
     // onFinish should detect the leak
     try std.testing.expectError(
@@ -678,7 +678,7 @@ test "onFinish allows freed allocation" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create and free allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .allocator_type = "PageAllocator" } });
 
     // onFinish should not error
@@ -711,7 +711,7 @@ test "onFinish allows passed allocation" {
     };
 
     // Create allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     // Store to transform future -> scalar
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 

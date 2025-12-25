@@ -173,12 +173,14 @@ pub const Bitcast = struct {
 };
 
 /// Block creates a labeled scope that can be the target of `br` (break) instructions.
-/// The block's result is a `.future` that gets filled in when a `br` targets it.
+/// The block's result type is known from codegen; br instructions may override with actual value.
 pub const Block = struct {
+    ty: Type,
+
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
-        // Block result is a future - will be filled in by br instruction
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .future = .{ .name = null } });
+        // Create block result from type info
+        const result_ref = try typeToRefinement(self.ty, state.refinements);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, result_ref);
     }
 };
 

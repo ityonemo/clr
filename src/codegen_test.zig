@@ -564,7 +564,7 @@ test "generateFunction with simple cond_br block" {
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
-        \\    try Inst.apply(state, 2, .{ .block = .{} });
+        \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });
         \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .scalar = {} } } });
         \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
         \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });

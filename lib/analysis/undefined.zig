@@ -192,8 +192,16 @@ pub const Undefined = union(enum) {
             switch (refinements.at(pointee_idx).*) {
                 .scalar => |*s| s.undefined = .{ .defined = {} },
                 .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                // Containers don't track undefined on themselves, only on children
-                .optional, .@"struct" => {},
+                .optional => |o| {
+                    // Storing any value (including null) to an optional makes inner defined
+                    switch (refinements.at(o.to).*) {
+                        .scalar => |*s| s.undefined = .{ .defined = {} },
+                        .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                        else => {},
+                    }
+                },
+                // Structs need per-field handling via struct_field_ptr/store pairs
+                .@"struct" => {},
                 .future, .void, .unimplemented, .noreturn, .retval_future => {},
                 .region => @panic("store: region not yet implemented"),
                 .@"union" => @panic("store: union not yet implemented"),
@@ -586,12 +594,12 @@ test "alloc_create creates pointer to future" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer to future)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator" } });
+    // Use Inst.apply which calls tag.AllocCreate.apply (creates pointer with typed pointee)
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
-    // alloc_create creates pointer; pointee is .future (structure determined by first store)
+    // alloc_create creates pointer; pointee is created from type info (scalar in this case)
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    try std.testing.expectEqual(.future, std.meta.activeTag(refinements.at(pointee_idx).*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
 }
 
 test "store with is_undef=true sets undefined" {

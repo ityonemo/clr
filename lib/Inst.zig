@@ -493,7 +493,7 @@ test "all instructions get valid refinements after operations" {
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
     try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 4, .{ .block = .{} });
+    try Inst.apply(state, 4, .{ .block = .{ .ty = .{ .void = {} } } });
 
     // All instructions should have valid refinements
     assertAllValid(&refinements, results);

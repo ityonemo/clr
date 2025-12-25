@@ -39,6 +39,7 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
         .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
         .br => payloadBr(arena, ip, datum),
+        .block => payloadBlock(arena, ip, datum),
         .struct_field_ptr_index_0 => payloadStructFieldPtr(arena, ip, datum, 0),
         .struct_field_ptr_index_1 => payloadStructFieldPtr(arena, ip, datum, 1),
         .struct_field_ptr_index_2 => payloadStructFieldPtr(arena, ip, datum, 2),
@@ -170,6 +171,29 @@ fn payloadBr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []con
     const operand = datum.br.operand;
     const src_str = srcString(arena, ip, operand);
     return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {s} }}", .{ block_inst, src_str }, null);
+}
+
+/// Payload for block - extracts the block's result type.
+fn payloadBlock(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const ty_ref = datum.ty_pl.ty;
+
+    // Check for well-known types that don't require InternPool lookup
+    if (ty_ref == .none) {
+        return ".{ .ty = .{ .void = {} } }";
+    }
+    if (ty_ref == .void_type) {
+        return ".{ .ty = .{ .void = {} } }";
+    }
+    if (ty_ref == .noreturn_type) {
+        return ".{ .ty = .{ .void = {} } }";
+    }
+
+    // Try to get interned index
+    const ty_idx = ty_ref.toInternedAllowNone() orelse return ".{ .ty = .{ .void = {} } }";
+
+    // Use typeToString which handles well-known types first
+    const ty_str = typeToString(arena, ip, ty_idx);
+    return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{ty_str}, null);
 }
 
 /// Generate a single inst line for a given tag and data.
