@@ -56,11 +56,13 @@ pub const Undefined = union(enum) {
     }
 
     pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
-        _ = ctx;
         _ = params;
-        // The pointer itself is defined (it exists), pointee state is set by store
+        // The pointer itself is defined (it exists)
         const ptr_idx = results[index].refinement.?;
         refinements.at(ptr_idx).pointer.analyte.undefined = .{ .defined = {} };
+        // The pointee starts as undefined (must be set by store before use)
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = ctx.meta } });
     }
 
     pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
@@ -547,7 +549,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     };
 }
 
-test "alloc creates pointer to future" {
+test "alloc creates pointer to typed pointee" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -561,12 +563,12 @@ test "alloc creates pointer to future" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Use Inst.apply which calls tag.Alloc.apply (creates pointer to future)
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    // Use Inst.apply which calls tag.Alloc.apply (creates pointer to typed pointee)
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
 
-    // alloc creates pointer; pointee is .future (structure determined by first store)
+    // alloc creates pointer; pointee type is determined by .ty parameter
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    try std.testing.expectEqual(.future, std.meta.activeTag(refinements.at(pointee_idx).*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
     testValid(&refinements);
 }
 
@@ -607,7 +609,7 @@ test "store with is_undef=true sets undefined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with is_undef=true
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
 
     // Check the pointee's undefined state
@@ -631,7 +633,7 @@ test "store with is_undef=false sets defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with is_undef=false
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Check the pointee's undefined state
@@ -640,7 +642,7 @@ test "store with is_undef=false sets defined" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
-test "store with .null type creates optional refinement with defined inner scalar" {
+test "store with .null to optional sets inner to defined" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -654,18 +656,19 @@ test "store with .null type creates optional refinement with defined inner scala
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Alloc at instruction 1, then store null (which has .null type with scalar child)
-    try Inst.apply(state, 1, .{ .alloc = .{} });
-    // .null = &.{ .scalar = {} } should create .optional refinement with defined inner scalar
+    // Alloc at instruction 1 with optional type, then store null
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
+    // Store null to the optional - inner should be defined (null is a valid defined value)
     try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } }, .is_undef = false } });
 
-    // Check the pointee is now an optional
+    // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
     try std.testing.expectEqual(.optional, std.meta.activeTag(refinements.at(pointee_idx).*));
 
     // Check the optional's inner value is a defined scalar
     const inner_idx = refinements.at(pointee_idx).optional.to;
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(inner_idx).*));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(inner_idx).scalar.undefined.?));
 }
 
 // TODO: Interprocedural tests disabled during entity system refactoring.

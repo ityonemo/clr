@@ -346,7 +346,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     };
 }
 
-test "alloc creates pointer to future" {
+test "alloc creates pointer to typed pointee" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -362,16 +362,16 @@ test "alloc creates pointer to future" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
 
     // dbg_stmt sets instruction to void (no analysis tracking)
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(results[0].get(&refinements).*));
-    // alloc creates pointer; the pointee is .future (structure determined by first store)
+    // alloc creates pointer; pointee type is determined by .ty parameter
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(results[1].get(&refinements).*));
     const pointee_idx = results[1].get(&refinements).pointer.to;
-    try std.testing.expectEqual(.future, std.meta.activeTag(refinements.at(pointee_idx).*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
     // uninitialized instruction has no refinement yet
     try std.testing.expectEqual(null, results[2].refinement);
 }
@@ -391,7 +391,7 @@ test "store_safe with undef keeps state undefined" {
     defer clear_results_list(results, allocator);
 
     const state = testState(&ctx, results, &refinements);
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
 
     // alloc's pointee stays undefined after store_safe with undef
@@ -415,7 +415,7 @@ test "store_safe with value sets state to defined" {
     defer clear_results_list(results, allocator);
 
     const state = testState(&ctx, results, &refinements);
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // alloc's pointee becomes defined after store_safe with real value
@@ -441,7 +441,7 @@ test "load from undefined instruction reports use before assign" {
     const state = testState(&ctx, results, &refinements);
 
     // Set up: alloc creates pointer to future, store with is_undef transforms to scalar+undefined
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
 
     // Load from undefined instruction should return error
@@ -465,7 +465,7 @@ test "load from defined instruction does not report error" {
     const state = testState(&ctx, results, &refinements);
 
     // Set up: alloc then store a real value
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Load from defined instruction should NOT return error
@@ -490,7 +490,7 @@ test "all instructions get valid refinements after operations" {
 
     // Apply various operations that should all set refinements
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
     try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 4, .{ .block = .{} });
@@ -532,7 +532,7 @@ test "ret_safe copies scalar return value to caller_refinements" {
     };
 
     // In callee: allocate and store a value
-    try Inst.apply(state, 0, .{ .alloc = .{} });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Return the value from instruction 0
@@ -596,7 +596,7 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
     const state = testState(&ctx, results, &refinements);
 
     // Allocate a value
-    try Inst.apply(state, 0, .{ .alloc = .{} });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // Return with null caller_refinements (entrypoint case) - should just succeed without error
@@ -869,12 +869,13 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     const caller_results = try make_results_list(allocator, 3);
     defer clear_results_list(caller_results, allocator);
 
-    // Caller: inst 1 = alloc; inst 2 = store_safe with undefined struct
+    // Caller: inst 1 = alloc (struct with 2 fields); inst 2 = store_safe with undefined struct
+    const struct_ty: tag.Type = .{ .@"struct" = &.{ .{ .scalar = {} }, .{ .scalar = {} } } };
     const caller_state = testState(&ctx, caller_results, &caller_refinements);
-    try Inst.apply(caller_state, 1, .{ .alloc = .{} });
+    try Inst.apply(caller_state, 1, .{ .alloc = .{ .ty = struct_ty } });
     try Inst.apply(caller_state, 2, .{ .store_safe = .{
         .ptr = 1,
-        .src = .{ .interned = .{ .@"struct" = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } },
+        .src = .{ .interned = struct_ty },
         .is_undef = true,
     } });
 
@@ -902,8 +903,8 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     // Callee: inst 0 = arg (pointer to struct)
     try Inst.apply(callee_state, 0, .{ .arg = .{ .value = caller_ptr_idx, .name = "p" } });
 
-    // Callee: inst 1 = alloc, inst 2 = store inst 0's pointer to inst 1
-    try Inst.apply(callee_state, 1, .{ .alloc = .{} });
+    // Callee: inst 1 = alloc (pointer to struct), inst 2 = store inst 0's pointer to inst 1
+    try Inst.apply(callee_state, 1, .{ .alloc = .{ .ty = .{ .pointer = &struct_ty } } });
     try Inst.apply(callee_state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .eidx = 0 }, .is_undef = false } });
 
     // Callee: inst 3 = bitcast inst 1 (shares refinement)

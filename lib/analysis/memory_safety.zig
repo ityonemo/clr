@@ -322,7 +322,7 @@ test "alloc sets stack_ptr metadata on pointer analyte" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer) then MemorySafety.alloc
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqualStrings("test_func", ms.stack_ptr.meta.function);
@@ -347,7 +347,7 @@ test "dbg_var_ptr sets variable name when name is other" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc to set up stack_ptr with .other name
-    try Inst.apply(state, 1, .{ .alloc = .{} });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     const ms1 = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.other, std.meta.activeTag(ms1.stack_ptr.name));
 
@@ -582,7 +582,7 @@ test "alloc_destroy detects freeing stack memory" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create stack allocation (alloc, not alloc_create)
-    try Inst.apply(state, 0, .{ .alloc = .{} });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
 
     // Trying to free stack memory should error
     try std.testing.expectError(
@@ -737,7 +737,7 @@ test "onFinish ignores stack allocations" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create stack allocation (not heap)
-    try Inst.apply(state, 0, .{ .alloc = .{} });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
 
     // onFinish should not error - stack memory is fine
     try MemorySafety.onFinish(&results, &ctx, &refinements);

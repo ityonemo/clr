@@ -48,9 +48,13 @@ fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .pointer = .{ .analyte = .{}, .to = child_idx } };
         },
-        .optional, .null => |child| {
-            // Both .optional and .null create an .optional refinement
-            // .null is just a null optional value - still has the same structure
+        .optional => |child| {
+            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_idx = try refinements.appendEntity(child_ref);
+            return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
+        },
+        .null => |child| {
+            // .null is a null optional value - creates same structure as .optional
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
@@ -76,10 +80,13 @@ fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
 // Tag payload types
 
 pub const Alloc = struct {
+    ty: Type,
+
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create the pointed-to future entity (structure determined by first store)
-        const pointee_idx = try state.refinements.appendEntity(.{ .future = .{ .name = null } });
-        // Create pointer entity pointing to the future
+        // Create pointee from type info
+        const pointee_ref = try typeToRefinement(self.ty, state.refinements);
+        const pointee_idx = try state.refinements.appendEntity(pointee_ref);
+        // Create pointer entity pointing to the typed pointee
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
         try splat(.alloc, state, index, self);
     }
