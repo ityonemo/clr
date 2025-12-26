@@ -12,6 +12,7 @@
 - `zig build test` - Runs unit tests for libclr
 - `./run_integration.sh` - Runs BATS integration tests
 - `./dump_air.sh <source_file> <function_name> [num_lines]` - Dump AIR for a specific function
+- `./clear.sh` - Clean up generated `.air.zig` files and other build artifacts
 
 ### Debugging AIR
 
@@ -257,6 +258,19 @@ test "instLine for my_new_tag" {
 
     try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .my_new_tag = .{ /* expected payload */ } }, results, ctx, &refinements);\n", result);
 }
+```
+
+**Extra array format for `generateFunction` tests**: When testing `generateFunction`, the extra array must use `block_index` indirection:
+- `extra[0]` = block_index (where the main body Block structure starts)
+- `extra[block_index]` = body_len
+- `extra[block_index + 1 ..]` = body instruction indices
+
+Example for a 4-instruction function with main body [0, 1, 2, 3]:
+```zig
+const extra: []const u32 = &.{ 1, 4, 0, 1, 2, 3 };
+//                              ^  ^  ^--------^ body indices
+//                              |  body_len
+//                              block_index
 ```
 
 ### 3. Add payload generator (`src/codegen.zig`)

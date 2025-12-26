@@ -50,11 +50,25 @@ pub const MemorySafety = union(enum) {
             .interned, .other => return,
         };
 
+        // When storing a pointer with allocation tracking, transfer ownership to the destination.
+        // Mark the source as .passed so only the destination tracks the allocation.
+        // This prevents false positives when the allocation is freed via the destination.
+        const src_ref = results[src].refinement orelse return;
+        const src_refinement = refinements.at(src_ref);
+        if (src_refinement.* == .pointer) {
+            if (src_refinement.pointer.analyte.memory_safety) |*ms| {
+                if (ms.* == .allocation) {
+                    // Mark source as passed - ownership transferred to destination
+                    ms.* = .passed;
+                }
+            }
+        }
+
         // If storing from a parameter, propagate the parameter name and location to the destination's stack_ptr
         if (results[src].argument) |arg_info| {
-            // get the target pointer refinement (this should generally have been created by "arg")
-            const tgt_refinement_idx = results[ptr].refinement orelse @panic("store: ptr parameter has no refinement");
-            // arg always creates pointer refinement for pointer parameters
+            // Get the target pointer refinement (created by arg for pointer parameters)
+            const tgt_refinement_idx = results[ptr].refinement orelse return;
+            if (refinements.at(tgt_refinement_idx).* != .pointer) return;
             const tgt_ptr = &refinements.at(tgt_refinement_idx).pointer;
 
             if (tgt_ptr.analyte.memory_safety) |*ms| {
@@ -68,7 +82,6 @@ pub const MemorySafety = union(enum) {
                     };
                 }
             }
-            else @panic("store: no memory safety initialized");
         }
     }
 
@@ -360,6 +373,44 @@ pub const MemorySafety = union(enum) {
         }
     }
 };
+
+// =========================================================================
+// Validation
+// =========================================================================
+
+const debug = @import("builtin").mode == .Debug;
+
+/// Validate that refinements conform to memory_safety tracking rules:
+/// - Pointers and scalars CAN have memory_safety (scalars for ptr-to-int casts)
+/// - Containers (optional, errorunion, struct) must NOT have memory_safety at the container level
+pub fn testValid(refinements: *Refinements) void {
+    if (!debug) return;
+    for (refinements.list.items) |ref| {
+        switch (ref) {
+            .pointer, .scalar => {
+                // Pointers CAN have memory_safety (stack_ptr or allocation)
+                // Scalars CAN have memory_safety (pointer cast to integer)
+                // No requirement that they MUST have it (untracked values are OK)
+            },
+            .optional => |o| {
+                if (o.analyte.memory_safety != null) {
+                    @panic("OptionalContainerHasMemorySafetyState");
+                }
+            },
+            .errorunion => |e| {
+                if (e.analyte.memory_safety != null) {
+                    @panic("ErrorUnionContainerHasMemorySafetyState");
+                }
+            },
+            .@"struct" => |s| {
+                if (s.analyte.memory_safety != null) {
+                    @panic("StructContainerHasMemorySafetyState");
+                }
+            },
+            else => {},
+        }
+    }
+}
 
 // =========================================================================
 // Tests
@@ -834,4 +885,176 @@ test "onFinish ignores stack allocations" {
 
     // onFinish should not error - stack memory is fine
     try MemorySafety.onFinish(&results, &ctx, &refinements);
+}
+
+test "load from struct field shares pointer entity - freeing loaded pointer marks original as freed" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 11;
+    const state = testState(&ctx, &results, &refinements);
+
+    // === SETUP: struct with pointer field pointing to allocation ===
+    // inst 0: alloc_create - create heap allocation
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    // inst 1: unwrap_errunion_payload - get the pointer
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    // inst 2: store_safe - make pointee defined
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+
+    // inst 3: alloc - create struct on stack with a pointer field
+    const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .pointer = &.{ .scalar = {} } }} };
+    try Inst.apply(state, 3, .{ .alloc = .{ .ty = struct_ty } });
+    // inst 4: store_safe - initialize struct with undefined
+    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 3, .src = .{ .interned = struct_ty }, .is_undef = true } });
+
+    // inst 5: struct_field_ptr - get pointer to field 0
+    try Inst.apply(state, 5, .{ .struct_field_ptr = .{
+        .base = 3,
+        .field_index = 0,
+        .ty = .{ .pointer = &.{ .pointer = &.{ .scalar = {} } } },
+    } });
+    // inst 6: store_safe - store the allocation pointer into struct field
+    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = 5, .src = .{ .eidx = 1 }, .is_undef = false } });
+
+    // === LOAD POINTER FROM STRUCT FIELD ===
+    // inst 7: load - load struct from stack alloc
+    try Inst.apply(state, 7, .{ .load = .{ .ptr = 3, .ty = struct_ty } });
+    // inst 8: struct_field_val - get pointer field value
+    try Inst.apply(state, 8, .{ .struct_field_val = .{ .operand = 7, .field_index = 0, .ty = .{ .pointer = &.{ .scalar = {} } } } });
+
+    // === FREE THE LOADED POINTER ===
+    // inst 9: alloc_destroy - free via the loaded pointer
+    try Inst.apply(state, 9, .{ .alloc_destroy = .{ .ptr = 8, .allocator_type = "PageAllocator" } });
+
+    // === VERIFICATION ===
+    // The original struct field pointer (stored via inst 6) should also be marked as freed.
+    // This requires that load shares the pointer entity instead of copying it.
+    //
+    // Load the struct again and get the field - check its memory_safety state
+    try Inst.apply(state, 10, .{ .load = .{ .ptr = 3, .ty = struct_ty } });
+
+    // Get the struct field pointer from the original struct (via struct_field_ptr at inst 5)
+    const field_ptr_ref = results[5].refinement.?;
+    const field_ptr = refinements.at(field_ptr_ref);
+
+    // The field pointer points to the pointer entity that should now be freed
+    const ptr_entity_idx = field_ptr.pointer.to;
+    const ptr_entity = refinements.at(ptr_entity_idx);
+
+    // The pointer should be marked as freed (its memory_safety should have freed != null)
+    try std.testing.expect(ptr_entity.* == .pointer);
+    const ms = ptr_entity.pointer.analyte.memory_safety orelse {
+        return error.ExpectedMemorySafetyState;
+    };
+    try std.testing.expect(ms == .allocation);
+    // This is the key assertion: the allocation should be marked as freed
+    try std.testing.expect(ms.allocation.freed != null);
+}
+
+test "interprocedural: callee freeing struct pointer field propagates back to caller" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
+    defer ctx.deinit();
+
+    // === CALLER SETUP ===
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+
+    var caller_results = [_]Inst{.{}} ** 6;
+    const caller_state = testState(&ctx, &caller_results, &caller_refinements);
+
+    // Caller: inst 0 = alloc_create, inst 1 = unwrap to get pointer
+    try Inst.apply(caller_state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    try Inst.apply(caller_state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    // inst 1 now has the allocation pointer
+
+    // Caller: inst 2 = alloc struct with pointer field
+    const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .pointer = &.{ .scalar = {} } }} };
+    try Inst.apply(caller_state, 2, .{ .alloc = .{ .ty = struct_ty } });
+    // inst 3 = store undefined struct
+    try Inst.apply(caller_state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = struct_ty }, .is_undef = true } });
+    // inst 4 = struct_field_ptr to field 0
+    try Inst.apply(caller_state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .pointer = &.{ .pointer = &.{ .scalar = {} } } } } });
+    // inst 5 = store allocation pointer into struct field
+    try Inst.apply(caller_state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 }, .is_undef = false } });
+
+    // Get the allocation entity for later verification
+    const alloc_ptr_ref = caller_results[1].refinement.?;
+    const alloc_scalar_idx = caller_refinements.at(alloc_ptr_ref).pointer.to;
+
+    // Verify allocation is not freed yet
+    const alloc_scalar_before = caller_refinements.at(alloc_scalar_idx);
+    try std.testing.expect(alloc_scalar_before.* == .scalar);
+    // The allocation tracking is on the pointer, not the scalar
+    const alloc_ptr_ms = caller_refinements.at(alloc_ptr_ref).pointer.analyte.memory_safety.?;
+    try std.testing.expect(alloc_ptr_ms == .passed); // Marked as passed when stored to field
+
+    // But the struct field pointer should point to the same scalar
+    const struct_ptr_ref = caller_results[2].refinement.?;
+    const struct_idx = caller_refinements.at(struct_ptr_ref).pointer.to;
+    const field_ptr_idx = caller_refinements.at(struct_idx).@"struct".fields[0];
+    const field_ptr = caller_refinements.at(field_ptr_idx);
+    try std.testing.expect(field_ptr.* == .pointer);
+    // The field pointer should have the allocation state
+    const field_ptr_ms = field_ptr.pointer.analyte.memory_safety.?;
+    try std.testing.expect(field_ptr_ms == .allocation);
+    try std.testing.expect(field_ptr_ms.allocation.freed == null);
+
+    // === CALLEE SETUP ===
+    var callee_refinements = Refinements.init(allocator);
+    defer callee_refinements.deinit();
+
+    var callee_results = [_]Inst{.{}} ** 5;
+
+    // Copy caller's struct pointer using copy_to (simulating arg)
+    const caller_ptr_idx = caller_results[2].refinement.?;
+    const local_ptr_idx = try caller_refinements.at(caller_ptr_idx).*.copy_to(&caller_refinements, &callee_refinements);
+    callee_results[0].refinement = local_ptr_idx;
+    callee_results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "container" };
+
+    const callee_state = State{
+        .ctx = &ctx,
+        .results = &callee_results,
+        .refinements = &callee_refinements,
+        .return_eidx = 0,
+        .caller_refinements = &caller_refinements,
+    };
+
+    // Callee: inst 1 = struct_field_ptr to get pointer to field 0
+    try Inst.apply(callee_state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .pointer = &.{ .pointer = &.{ .scalar = {} } } } } });
+    // Callee: inst 2 = load to get the pointer value from field
+    try Inst.apply(callee_state, 2, .{ .load = .{ .ptr = 1, .ty = .{ .pointer = &.{ .scalar = {} } } } });
+    // Callee: inst 3 = alloc_destroy to free the pointer
+    try Inst.apply(callee_state, 3, .{ .alloc_destroy = .{ .ptr = 2, .allocator_type = "PageAllocator" } });
+
+    // Callee's local pointer should be freed
+    const local_loaded_ptr_ref = callee_results[2].refinement.?;
+    const local_loaded_ptr = callee_refinements.at(local_loaded_ptr_ref);
+    try std.testing.expect(local_loaded_ptr.* == .pointer);
+    const local_ms = local_loaded_ptr.pointer.analyte.memory_safety.?;
+    try std.testing.expect(local_ms == .allocation);
+    try std.testing.expect(local_ms.allocation.freed != null);
+
+    // === BACKPROPAGATE ===
+    Inst.backPropagate(callee_state);
+
+    // === VERIFY CALLER'S STATE IS UPDATED ===
+    // The caller's struct field pointer should now be marked as freed
+    const field_ptr_after = caller_refinements.at(field_ptr_idx);
+    try std.testing.expect(field_ptr_after.* == .pointer);
+    const field_ptr_ms_after = field_ptr_after.pointer.analyte.memory_safety.?;
+    try std.testing.expect(field_ptr_ms_after == .allocation);
+    // This is the key assertion: the caller's field pointer should be marked as freed
+    try std.testing.expect(field_ptr_ms_after.allocation.freed != null);
 }

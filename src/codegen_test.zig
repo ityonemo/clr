@@ -216,7 +216,11 @@ test "generateFunction produces complete function" {
         .{ .ty_op = .{ .ty = .u8_type, .operand = load_ref } },
         .{ .un_op = ret_ref },
     };
-    const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, &.{}, 10, "test.zig", &.{});
+    // extra array format: extra[0] = block_index, extra[block_index] = body_len,
+    // extra[block_index+1..] = body instruction indices
+    // For 4 instructions (0,1,2,3) all in main body: block_index=1, body_len=4, indices=[0,1,2,3]
+    const extra: []const u32 = &.{ 1, 4, 0, 1, 2, 3 };
+    const result = codegen.generateFunction(42, "test.main", dummy_ip, tags, data, extra, 10, "test.zig", &.{});
 
     const expected =
         \\fn fn_42(ctx: *Context, caller_refinements: ?*Refinements) anyerror!EIdx {
@@ -500,29 +504,40 @@ test "generateFunction with simple cond_br block" {
     const data: []const Data = &.{
         .{ .ty = .{ .ip_index = .manyptr_u8_type } }, // 0: alloc
         .{ .bin_op = .{ .lhs = ref_0, .rhs = .undef } }, // 1: store undef to x
-        .{ .ty_pl = .{ .ty = .none, .payload = 0 } }, // 2: block (payload=0 points to extra[0])
+        .{ .ty_pl = .{ .ty = .none, .payload = 7 } }, // 2: block (payload=7 points to block body in extra)
         .{ .ty_op = .{ .ty = .u8_type, .operand = .none } }, // 3: load condition
         .{ .bin_op = .{ .lhs = ref_0, .rhs = ref_3 } }, // 4: store to x (then)
         .{ .br = .{ .block_inst = @enumFromInt(2), .operand = .none } }, // 5: br block
         .{ .br = .{ .block_inst = @enumFromInt(2), .operand = .none } }, // 6: br block
-        .{ .pl_op = .{ .operand = ref_3, .payload = 6 } }, // 7: cond_br (payload=6 points to extra[6])
+        .{ .pl_op = .{ .operand = ref_3, .payload = 10 } }, // 7: cond_br (payload=10 points to extra[10])
         .{ .ty_op = .{ .ty = .u8_type, .operand = ref_0 } }, // 8: load x
         .{ .un_op = ref_8 }, // 9: ret_safe
     };
 
     // Build extra array
-    // Block at extra[0]:
-    //   extra[0] = body_len = 5
-    //   extra[1..6] = body indices = [3, 4, 5, 6, 7]
-    // CondBr at extra[6]:
-    //   extra[6] = then_body_len = 2
-    //   extra[7] = else_body_len = 1
-    //   extra[8] = branch_hints = 0
-    //   extra[9..11] = then_body = [4, 5]
-    //   extra[11] = else_body = [6]
+    // The function's MAIN body is the top-level instructions [0, 1, 2, 8, 9].
+    // Instructions 3 and 7 are directly in block 2's body.
+    // Instructions 4, 5, 6 are inside cond_br 7's branches.
+    //
+    // extra[0] = block_index = 1 (where main body Block structure starts)
+    // Main body at extra[1]:
+    //   extra[1] = body_len = 5
+    //   extra[2..7] = body indices = [0, 1, 2, 8, 9] (top-level instructions)
+    // Block 2's body at extra[7]:
+    //   extra[7] = body_len = 2
+    //   extra[8..10] = body indices = [3, 7] (load condition, cond_br)
+    // CondBr at extra[10]:
+    //   extra[10] = then_body_len = 2
+    //   extra[11] = else_body_len = 1
+    //   extra[12] = branch_hints = 0
+    //   extra[13..15] = then_body = [4, 5]
+    //   extra[15] = else_body = [6]
     const extra: []const u32 = &.{
-        5, // body_len for block
-        3, 4, 5, 6, 7, // body indices [3,4,5,6,7]
+        1, // block_index for main body
+        5, // body_len for main body
+        0, 1, 2, 8, 9, // main body indices (top-level)
+        2, // block 2's body_len
+        3, 7, // block 2's body indices (load, cond_br)
         2, // then_body_len
         1, // else_body_len
         0, // branch_hints
@@ -567,6 +582,9 @@ test "generateFunction with simple cond_br block" {
         \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
         \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });
         \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .scalar = {} } } });
+        \\    try Inst.apply(state, 4, .{ .noop = .{} });
+        \\    try Inst.apply(state, 5, .{ .noop = .{} });
+        \\    try Inst.apply(state, 6, .{ .noop = .{} });
         \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
         \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0, .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .eidx = 8 } } });

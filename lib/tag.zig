@@ -361,19 +361,26 @@ pub const Load = struct {
             },
         };
 
-        // For structs, we need to deep copy the fields slice to avoid double-free on deinit.
-        // Other refinement types can be shallow copied safely.
+        // For pointers and scalars, share the entity directly. This ensures that
+        // modifications (like alloc_destroy marking a pointer as freed) are visible
+        // everywhere the pointer is used.
+        //
+        // For structs, we need to create a new struct entity with a copied fields slice
+        // to avoid double-free on deinit. However, the field indices are shared so
+        // modifications to fields are still visible.
         const pointee = state.refinements.at(pointee_idx).*;
-        const new_ref: Refinement = switch (pointee) {
-            .@"struct" => |s| blk: {
+        switch (pointee) {
+            .@"struct" => |s| {
                 const allocator = state.refinements.list.allocator;
                 const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
                 @memcpy(new_fields, s.fields);
-                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } });
             },
-            else => pointee,
-        };
-        _ = try Inst.clobberInst(state.refinements, state.results, index, new_ref);
+            else => {
+                // Share the entity directly (no copy needed)
+                state.results[index].refinement = pointee_idx;
+            },
+        }
         try splat(.load, state, index, self);
     }
 };

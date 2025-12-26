@@ -368,25 +368,24 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
 }
 
 /// Convert a struct type to a Type string with field types.
-/// Note: field_types.get(ip) crashes in DLL context due to vtable relocation issues.
-/// We use field count and assume scalar fields for now.
 fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index) []const u8 {
     const loaded = ip.loadStructType(type_index);
-    const field_count = loaded.field_types.len;
+    const field_types = loaded.field_types.get(ip);
 
-    if (field_count == 0) {
+    if (field_types.len == 0) {
         return ".{ .@\"struct\" = &.{} }";
     }
 
-    // Build field types string - assume all fields are scalars for now
+    // Build field types string with proper type inspection
     var result = std.ArrayListUnmanaged(u8){};
     result.appendSlice(arena, ".{ .@\"struct\" = &.{ ") catch @panic("out of memory");
 
-    for (0..field_count) |i| {
+    for (field_types, 0..) |field_type, i| {
         if (i > 0) {
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
-        result.appendSlice(arena, ".{ .scalar = {} }") catch @panic("out of memory");
+        const field_type_str = typeToString(arena, ip, field_type);
+        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
     }
 
     result.appendSlice(arena, " } }") catch @panic("out of memory");
