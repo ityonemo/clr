@@ -1054,82 +1054,133 @@ fn generateOneFunction(
     param_names: []const []const u8,
     worklist: *std.ArrayListUnmanaged(FunctionGen),
 ) []const u8 {
-    // For full functions, collect cond_br branch body indices to skip
-    // (they're processed in sub functions, not main)
-    var skip_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
-    if (item == .full) {
-        // Find all cond_br instructions and mark their then/else body indices for skipping
-        for (tags, 0..) |tag, idx| {
-            if (tag != .cond_br) continue;
-            if (extractCondBrBodies(idx, data, extra)) |bodies| {
-                for (bodies.then) |body_idx| {
-                    skip_set.put(arena, body_idx, {}) catch @panic("out of memory");
-                }
-                for (bodies.@"else") |body_idx| {
-                    skip_set.put(arena, body_idx, {}) catch @panic("out of memory");
+    // Build body_set: the set of instruction indices that are in this function's body.
+    // Instructions not in this set get noop (they're unreferenced/internal structures).
+    // We iteratively expand to include block bodies (blocks are inlined, not separate functions).
+    var body_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    var pending: std.ArrayListUnmanaged(u32) = .empty;
+
+    // Start with initial body indices
+    switch (item) {
+        .full => {
+            // Main body from extra data (mirrors Air.getMainBody())
+            // extra[0] = block_index, points to Block structure
+            // Block structure: body_len (u32), followed by body_len instruction indices
+            const block_index = extra[0];
+            const body_len = extra[block_index];
+            for (extra[block_index + 1 ..][0..body_len]) |body_idx| {
+                pending.append(arena, body_idx) catch @panic("out of memory");
+            }
+        },
+        .sub => |s| {
+            // Sub-function body indices passed from parent
+            for (s.body_indices) |body_idx| {
+                pending.append(arena, body_idx) catch @panic("out of memory");
+            }
+        },
+    }
+
+    // Process pending indices, expanding block bodies as we find them
+    while (pending.items.len > 0) {
+        const idx = pending.pop().?;
+        if (body_set.contains(idx)) continue;
+        body_set.put(arena, idx, {}) catch @panic("out of memory");
+
+        // If this is a block, add its body to pending (blocks are inlined)
+        if (tags[idx] == .block) {
+            if (extractBlockBody(idx, data, extra)) |block_body| {
+                for (block_body) |body_idx| {
+                    pending.append(arena, body_idx) catch @panic("out of memory");
                 }
             }
         }
     }
-
-    // Determine which indices to process
-    const indices: []const u32 = switch (item) {
-        .full => blk: {
-            // Full function: all indices 0..tags.len
-            const all_indices = arena.alloc(u32, tags.len) catch @panic("out of memory");
-            for (all_indices, 0..) |*slot, i| {
-                slot.* = @intCast(i);
-            }
-            break :blk all_indices;
-        },
-        .sub => |s| s.body_indices,
-    };
 
     // Stack for instruction data (will be reversed)
     const InstrData = struct {
         idx: u32,
         tag: Tag,
         datum: Data,
+        is_noop: bool,
     };
     var stack: std.ArrayListUnmanaged(InstrData) = .empty;
 
-    // Walk backwards through indices, pushing to stack
-    // When we hit cond_br, add its branches to worklist
-    var i: usize = indices.len;
-    while (i > 0) {
-        i -= 1;
-        const idx = indices[i];
-        if (idx >= tags.len) continue;
+    // For full functions: iterate ALL indices 0..tags.len, emit noop for non-body indices
+    // For sub functions: only iterate body indices (no noops needed outside body)
+    switch (item) {
+        .full => {
+            var i: usize = tags.len;
+            while (i > 0) {
+                i -= 1;
+                const idx: u32 = @intCast(i);
 
-        // For full functions, skip cond_br branch body indices (they're in sub functions)
-        if (item == .full and skip_set.contains(idx)) {
-            continue;
-        }
+                if (!body_set.contains(idx)) {
+                    // Not in body - emit noop
+                    stack.append(arena, .{ .idx = idx, .tag = undefined, .datum = undefined, .is_noop = true }) catch @panic("out of memory");
+                    continue;
+                }
 
-        const tag = tags[idx];
-        const datum = data[idx];
+                const tag = tags[idx];
+                const datum = data[idx];
 
-        // Check for cond_br - add branches to worklist
-        if (tag == .cond_br) {
-            if (extractCondBrBodies(idx, data, extra)) |bodies| {
-                // Add both branches to worklist
-                worklist.append(arena, .{ .sub = .{
-                    .func_index = func_index,
-                    .instr_index = idx,
-                    .tag = .cond_br_true,
-                    .body_indices = bodies.then,
-                } }) catch @panic("out of memory");
-                worklist.append(arena, .{ .sub = .{
-                    .func_index = func_index,
-                    .instr_index = idx,
-                    .tag = .cond_br_false,
-                    .body_indices = bodies.@"else",
-                } }) catch @panic("out of memory");
+                // Check for cond_br - add branches to worklist
+                if (tag == .cond_br) {
+                    if (extractCondBrBodies(idx, data, extra)) |bodies| {
+                        worklist.append(arena, .{ .sub = .{
+                            .func_index = func_index,
+                            .instr_index = idx,
+                            .tag = .cond_br_true,
+                            .body_indices = bodies.then,
+                        } }) catch @panic("out of memory");
+                        worklist.append(arena, .{ .sub = .{
+                            .func_index = func_index,
+                            .instr_index = idx,
+                            .tag = .cond_br_false,
+                            .body_indices = bodies.@"else",
+                        } }) catch @panic("out of memory");
+                    }
+                }
+
+                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = false }) catch @panic("out of memory");
             }
-        }
+        },
+        .sub => {
+            // For sub functions, only process body_set indices (which includes block expansions)
+            // No noops needed - parent function handles indices outside our body
+            // Collect and sort body_set keys to iterate in order
+            var body_indices_list: std.ArrayListUnmanaged(u32) = .empty;
+            var it = body_set.iterator();
+            while (it.next()) |entry| {
+                body_indices_list.append(arena, entry.key_ptr.*) catch @panic("out of memory");
+            }
+            // Sort in descending order for stack (will be reversed when popped)
+            std.mem.sort(u32, body_indices_list.items, {}, std.sort.desc(u32));
 
-        // Push all instructions to stack (they'll be processed in forward order when popped)
-        stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum }) catch @panic("out of memory");
+            for (body_indices_list.items) |idx| {
+                const tag = tags[idx];
+                const datum = data[idx];
+
+                // Check for nested cond_br
+                if (tag == .cond_br) {
+                    if (extractCondBrBodies(idx, data, extra)) |bodies| {
+                        worklist.append(arena, .{ .sub = .{
+                            .func_index = func_index,
+                            .instr_index = idx,
+                            .tag = .cond_br_true,
+                            .body_indices = bodies.then,
+                        } }) catch @panic("out of memory");
+                        worklist.append(arena, .{ .sub = .{
+                            .func_index = func_index,
+                            .instr_index = idx,
+                            .tag = .cond_br_false,
+                            .body_indices = bodies.@"else",
+                        } }) catch @panic("out of memory");
+                    }
+                }
+
+                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = false }) catch @panic("out of memory");
+            }
+        },
     }
 
     // Pop from stack to generate lines in forward order
@@ -1141,7 +1192,10 @@ fn generateOneFunction(
         const instr = stack.pop().?;
         var line: []const u8 = undefined;
 
-        if (instr.tag == .cond_br) {
+        if (instr.is_noop) {
+            // Generate noop for unreferenced instruction
+            line = generateNoopLine(arena, instr.idx);
+        } else if (instr.tag == .cond_br) {
             // Generate Inst.cond_br call with function references
             line = generateCondBrLine(arena, instr.idx, func_index);
         } else {
@@ -1193,6 +1247,14 @@ fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u3
         \\    try Inst.cond_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d});
         \\
     , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
+}
+
+/// Generate noop line for unreferenced instructions (gaps in the AIR array)
+fn generateNoopLine(arena: std.mem.Allocator, idx: u32) []const u8 {
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.apply(state, {d}, .{{ .noop = .{{}} }});
+        \\
+    , .{idx}, null);
 }
 
 /// Generate epilogue with imports and main function

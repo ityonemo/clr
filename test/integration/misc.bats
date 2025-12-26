@@ -7,3 +7,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "undefined" ]]
 }
+
+@test "handles nested if statements" {
+    run compile_and_run "$TEST_CASES/misc/nested_if.zig"
+    [ "$status" -eq 0 ]
+}

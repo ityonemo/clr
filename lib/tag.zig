@@ -667,7 +667,21 @@ pub fn Unimplemented(comptime opts: anytype) type {
     };
 }
 
+/// Noop tag for unreferenced instructions with garbage data.
+/// These instructions exist in the AIR array but are not in any body.
+pub const Noop = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        _ = state;
+        _ = index;
+        // Do nothing - placeholder for unreferenced instructions
+    }
+};
+
 pub const AnyTag = union(enum) {
+    // Noop for unreferenced instructions
+    noop: Noop,
+
     // Implemented tags
     alloc: Alloc,
     alloc_create: AllocCreate,
