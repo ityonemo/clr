@@ -20,6 +20,9 @@ pub const Refinement = union(enum) {
         analyte: Analyte = .{},
         /// Field refinement indices - each field has its own refinement
         fields: []const EIdx,
+        /// Field names - each field has an optional name (null for tuple fields)
+        /// Strings are static (embedded in generated .air.zig) so no allocation needed
+        field_names: []const ?[]const u8 = &.{},
     };
 
     scalar: Analyte,
@@ -118,7 +121,13 @@ pub const Refinement = union(enum) {
                         new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
                     }
                 }
-                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
+                // Copy field names if present
+                const new_field_names = if (s.field_names.len > 0) names_blk: {
+                    const names = try allocator.alloc(?[]const u8, s.field_names.len);
+                    @memcpy(names, s.field_names);
+                    break :names_blk names;
+                } else &.{};
+                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .field_names = new_field_names } };
             },
             .@"union" => .{ .@"union" = {} },
             .unimplemented => .{ .unimplemented = {} },
@@ -189,9 +198,16 @@ pub const Refinement = union(enum) {
         for (src_struct.fields, 0..) |field_idx, i| {
             new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
         }
+        // Copy field names if present
+        const new_field_names = if (src_struct.field_names.len > 0) blk: {
+            const names = try allocator.alloc(?[]const u8, src_struct.field_names.len);
+            @memcpy(names, src_struct.field_names);
+            break :blk names;
+        } else &.{};
         return dst_list.appendEntity(.{ .@"struct" = .{
             .analyte = src_struct.analyte,
             .fields = new_fields,
+            .field_names = new_field_names,
         } });
     }
 };
@@ -213,6 +229,9 @@ pub fn deinit(self: *Refinements) void {
     for (self.list.items) |item| {
         if (item == .@"struct") {
             allocator.free(item.@"struct".fields);
+            if (item.@"struct".field_names.len > 0) {
+                allocator.free(item.@"struct".field_names);
+            }
         }
     }
     self.list.deinit();
@@ -241,9 +260,16 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
             // Deep copy struct fields
             const new_fields = try allocator.alloc(EIdx, item.@"struct".fields.len);
             @memcpy(new_fields, item.@"struct".fields);
+            // Deep copy field names if present
+            const new_field_names = if (item.@"struct".field_names.len > 0) blk: {
+                const names = try allocator.alloc(?[]const u8, item.@"struct".field_names.len);
+                @memcpy(names, item.@"struct".field_names);
+                break :blk names;
+            } else &.{};
             try new.list.append(.{ .@"struct" = .{
                 .analyte = item.@"struct".analyte,
                 .fields = new_fields,
+                .field_names = new_field_names,
             } });
         } else {
             try new.list.append(item);

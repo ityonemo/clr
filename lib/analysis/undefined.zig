@@ -14,19 +14,19 @@ pub const Undefined = union(enum) {
     defined: void,
     undefined: struct {
         meta: Meta,
-        var_name: ?[]const u8 = null,
+        name_when_set: ?[]const u8 = null, // Access path when set to undefined
     },
     inconsistent: struct {
         undefined_meta: Meta, // where undefined was set
         branch_meta: Meta, // where the conditional branch occurred
-        var_name: ?[]const u8 = null,
+        name_when_set: ?[]const u8 = null, // Access path when set to undefined
     },
 
     pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
         switch (self) {
             .undefined => |p| {
-                if (p.var_name) |name| {
+                if (p.name_when_set) |name| {
                     try p.meta.print(ctx.writer, "undefined value assigned to '{s}' in ", .{name});
                 } else {
                     try p.meta.print(ctx.writer, "undefined value assigned in ", .{});
@@ -43,7 +43,7 @@ pub const Undefined = union(enum) {
         switch (self) {
             .inconsistent => |p| {
                 try p.branch_meta.print(ctx.writer, "conditional branch has conflicting status at ", .{});
-                if (p.var_name) |name| {
+                if (p.name_when_set) |name| {
                     try p.undefined_meta.print(ctx.writer, "variable '{s}' was set to undefined in ", .{name});
                 } else {
                     try p.undefined_meta.print(ctx.writer, "value set to undefined in ", .{});
@@ -204,16 +204,8 @@ pub const Undefined = union(enum) {
 
         if (params.is_undef) {
             // Undefined stores: mark pointee and all children as undefined (recursive)
-            // Variable name (if any) was already set by dbg_var_ptr on the pointee
-            const existing_var_name = switch (refinements.at(pointee_idx).*) {
-                .scalar => |s| if (s.undefined) |u| switch (u) {
-                    .undefined => |meta| meta.var_name,
-                    .inconsistent => |meta| meta.var_name,
-                    .defined => null,
-                } else null,
-                else => null,
-            };
-            const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta, .var_name = existing_var_name } };
+            // Capture name from the destination pointer instruction
+            const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta, .name_when_set = results[ptr].name } };
             setUndefinedRecursive(refinements, pointee_idx, undef_state);
         } else {
             // Defined stores: update the pointee based on source type
@@ -378,42 +370,46 @@ pub const Undefined = union(enum) {
     pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
-        // ptr is null for debug info pointing to interned/global - no local tracking needed
+        // Set the name on the instruction - names are now tracked on instructions, not entities
         const inst = params.ptr orelse return;
-        // refinement is null for uninitialized instructions - nothing to name yet
+        results[inst].name = params.name;
+
+        // In AIR, dbg_var_ptr comes AFTER the initial store, so we need to retroactively
+        // set the name on any undefined state that was created by the store.
         const ptr_idx = results[inst].refinement orelse return;
-        // Follow pointer to get to pointee
         const pointee_idx = switch (refinements.at(ptr_idx).*) {
-            .pointer => |ind| ind.to,
-            .scalar => ptr_idx,
-            // unimplemented/retval_future/void have no undefined tracking - skip naming
-            .unimplemented, .retval_future, .void => return,
-            else => @panic("unexpected refinement type in dbg_var_ptr (outer)"),
+            .pointer => |p| p.to,
+            else => return,
         };
-        switch (refinements.at(pointee_idx).*) {
+        setNameOnUndefined(refinements, pointee_idx, params.name);
+    }
+
+    /// Recursively set name_when_set on undefined states that don't have a name yet.
+    fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: []const u8) void {
+        switch (refinements.at(idx).*) {
             .scalar => |*s| {
-                // undefined is null when value wasn't tracked - nothing to name
-                const undef = &(s.undefined orelse return);
-                switch (undef.*) {
-                    .undefined => |*meta| meta.var_name = params.name,
-                    .inconsistent => |*meta| meta.var_name = params.name,
-                    .defined => {},
+                if (s.undefined) |*undef| {
+                    if (undef.* == .undefined and undef.undefined.name_when_set == null) {
+                        undef.undefined.name_when_set = name;
+                    }
                 }
             },
-            .pointer => |*ind| {
-                // undefined is null when pointer wasn't tracked - nothing to name
-                const undef = &(ind.analyte.undefined orelse return);
-                switch (undef.*) {
-                    .undefined => |*meta| meta.var_name = params.name,
-                    .inconsistent => |*meta| meta.var_name = params.name,
-                    .defined => {},
+            .pointer => |*p| {
+                if (p.analyte.undefined) |*undef| {
+                    if (undef.* == .undefined and undef.undefined.name_when_set == null) {
+                        undef.undefined.name_when_set = name;
+                    }
+                }
+                setNameOnUndefined(refinements, p.to, name);
+            },
+            .optional => |o| setNameOnUndefined(refinements, o.to, name),
+            .errorunion => |e| setNameOnUndefined(refinements, e.to, name),
+            .@"struct" => |s| {
+                for (s.fields) |field_idx| {
+                    setNameOnUndefined(refinements, field_idx, name);
                 }
             },
-            // Optional and struct containers don't track undefined on themselves
-            .optional, .@"struct" => {},
-            // unimplemented values have no undefined tracking - skip naming
-            .unimplemented => {},
-            else => @panic("unexpected refinement type in dbg_var_ptr (pointee)"),
+            else => {},
         }
     }
 
@@ -582,7 +578,7 @@ pub const Undefined = union(enum) {
         return .{ .inconsistent = .{
             .undefined_meta = undef_state.meta,
             .branch_meta = ctx.meta,
-            .var_name = undef_state.var_name,
+            .name_when_set = undef_state.name_when_set,
         } };
     }
 };
@@ -845,7 +841,7 @@ test "load from inst without undefined tracking does not return error" {
     try Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1, .ty = .{ .scalar = {} } });
 }
 
-test "dbg_var_ptr sets var_name on undefined meta" {
+test "dbg_var_ptr sets name on instruction" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -868,8 +864,8 @@ test "dbg_var_ptr sets var_name on undefined meta" {
 
     try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = 1, .name = "my_var" });
 
-    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
-    try std.testing.expectEqualStrings("my_var", undef.undefined.var_name.?);
+    // dbg_var_ptr sets name on the instruction, not on the undefined state
+    try std.testing.expectEqualStrings("my_var", results[1].name.?);
 }
 
 test "dbg_var_ptr does not affect defined inst" {
@@ -910,7 +906,7 @@ test "dbg_var_ptr with null ptr does nothing" {
     try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = null, .name = "my_var" });
 }
 
-test "reportUseBeforeAssign with var_name returns error" {
+test "reportUseBeforeAssign with name_when_set returns error" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -926,13 +922,13 @@ test "reportUseBeforeAssign with var_name returns error" {
             .line = 42,
             .column = 8,
         },
-        .var_name = "my_var",
+        .name_when_set = "my_var",
     } };
 
     try std.testing.expectError(error.UseBeforeAssign, undef.reportUseBeforeAssign(&ctx));
 }
 
-test "reportUseBeforeAssign without var_name returns error" {
+test "reportUseBeforeAssign without name_when_set returns error" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;

@@ -11,6 +11,7 @@
 - `zig build` - Builds libclr.so (the AIR plugin)
 - `zig build test` - Runs unit tests for libclr
 - `./run_integration.sh` - Runs BATS integration tests
+- `./run_one.sh <test_file>` - Run a single test case (generates `.air.zig` file in project root)
 - `./dump_air.sh <source_file> <function_name> [num_lines]` - Dump AIR for a specific function
 - `./clear.sh` - Clean up generated `.air.zig` files and other build artifacts
 

@@ -65,7 +65,7 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in both_branches_unset.main" ]]
     [[ "$output" =~ "both_branches_unset.zig:11:4)" ]]
-    [[ "$output" =~ "undefined value assigned in both_branches_unset.main" ]]
+    [[ "$output" =~ "undefined value assigned to 'x' in both_branches_unset.main" ]]
     [[ "$output" =~ "both_branches_unset.zig:6:8)" ]]
 }
 
@@ -83,7 +83,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in undefined_field_access.main" ]]
     [[ "$output" =~ "undefined_field_access.zig:10:" ]]
-    [[ "$output" =~ "undefined value assigned in undefined_field_access.main" ]]
+    # When entire struct is set to undefined, the name is the struct variable name
+    [[ "$output" =~ "undefined value assigned to 'p' in undefined_field_access.main" ]]
     [[ "$output" =~ "undefined_field_access.zig:7:" ]]
 }
 

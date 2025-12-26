@@ -22,10 +22,16 @@ pub const StackPtr = struct {
     };
 };
 
+pub const Free = struct {
+    meta: Meta,
+    name_at_free: ?[]const u8 = null,
+};
+
 pub const Allocation = struct {
     allocated: Meta,
-    freed: ?Meta = null, // null = still allocated, has value = freed
+    freed: ?Free = null, // null = still allocated, has value = freed
     allocator_type: []const u8, // Type of allocator that created this allocation
+    name_at_alloc: ?[]const u8 = null, // Access path when allocated (e.g., "container.ptr")
 };
 
 pub const MemorySafety = union(enum) {
@@ -51,13 +57,25 @@ pub const MemorySafety = union(enum) {
         };
 
         // When storing a pointer with allocation tracking, transfer ownership to the destination.
-        // Mark the source as .passed so only the destination tracks the allocation.
+        // Copy the allocation metadata to the destination, then mark source as .passed.
         // This prevents false positives when the allocation is freed via the destination.
         const src_ref = results[src].refinement orelse return;
         const src_refinement = refinements.at(src_ref);
         if (src_refinement.* == .pointer) {
             if (src_refinement.pointer.analyte.memory_safety) |*ms| {
                 if (ms.* == .allocation) {
+                    // Get the destination pointer's pointee (where the allocation will live)
+                    const dst_ref = results[ptr].refinement orelse return;
+                    const dst_refinement = refinements.at(dst_ref);
+                    if (dst_refinement.* != .pointer) return;
+                    const pointee_idx = dst_refinement.pointer.to;
+                    const pointee = refinements.at(pointee_idx);
+                    if (pointee.* == .pointer) {
+                        // Copy allocation metadata to destination, capturing name from destination instruction
+                        var new_alloc = ms.allocation;
+                        new_alloc.name_at_alloc = results[ptr].name;
+                        pointee.pointer.analyte.memory_safety = .{ .allocation = new_alloc };
+                    }
                     // Mark source as passed - ownership transferred to destination
                     ms.* = .passed;
                 }
@@ -65,22 +83,21 @@ pub const MemorySafety = union(enum) {
         }
 
         // If storing from a parameter, propagate the parameter name and location to the destination's stack_ptr
-        if (results[src].argument) |arg_info| {
-            // Get the target pointer refinement (created by arg for pointer parameters)
-            const tgt_refinement_idx = results[ptr].refinement orelse return;
-            if (refinements.at(tgt_refinement_idx).* != .pointer) return;
-            const tgt_ptr = &refinements.at(tgt_refinement_idx).pointer;
+        const param_name = results[src].name orelse return;
+        // Get the target pointer refinement (created by arg for pointer parameters)
+        const tgt_refinement_idx = results[ptr].refinement orelse return;
+        if (refinements.at(tgt_refinement_idx).* != .pointer) return;
+        const tgt_ptr = &refinements.at(tgt_refinement_idx).pointer;
 
-            if (tgt_ptr.analyte.memory_safety) |*ms| {
-                if (ms.* == .stack_ptr) {
-                    ms.stack_ptr.name = .{ .parameter = arg_info.name };
-                    ms.stack_ptr.meta = .{
-                        .function = ctx.meta.function,
-                        .file = ctx.meta.file,
-                        .line = ctx.base_line + 1,
-                        .column = null,
-                    };
-                }
+        if (tgt_ptr.analyte.memory_safety) |*ms| {
+            if (ms.* == .stack_ptr) {
+                ms.stack_ptr.name = .{ .parameter = param_name };
+                ms.stack_ptr.meta = .{
+                    .function = ctx.meta.function,
+                    .file = ctx.meta.file,
+                    .line = ctx.base_line + 1,
+                    .column = null,
+                };
             }
         }
     }
@@ -88,19 +105,21 @@ pub const MemorySafety = union(enum) {
     pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
-        // Set the variable name on the stack_ptr metadata (now on pointer's analyte)
-        // ptr is null for debug info pointing to interned/global - no memory safety tracking
+        // Set the name on the instruction - names are now tracked on instructions, not entities
         const inst = params.ptr orelse return;
-        // refinement is null for uninitialized instructions - nothing to name yet
-        const ptr_idx = results[inst].refinement orelse return;
-        // Get the pointer's analyte and update memory_safety
-        // alloc always creates pointer refinement
-        const ptr_analyte = &refinements.at(ptr_idx).pointer.analyte;
+        results[inst].name = params.name;
 
-        const ms = &(ptr_analyte.memory_safety orelse @panic("dbg_var_ptr: no memory safety initialized"));
-        if (ms.* != .stack_ptr) return;
-        if (ms.stack_ptr.name == .other) {
-            ms.stack_ptr.name = .{ .variable = params.name };
+        // Also set stack_ptr variable name for stack pointer escape detection
+        const ptr_idx = results[inst].refinement orelse return;
+        if (refinements.at(ptr_idx).* == .pointer) {
+            const outer_analyte = &refinements.at(ptr_idx).pointer.analyte;
+            if (outer_analyte.memory_safety) |*ms| {
+                if (ms.* == .stack_ptr) {
+                    if (ms.stack_ptr.name == .other) {
+                        ms.stack_ptr.name = .{ .variable = params.name };
+                    }
+                }
+            }
         }
     }
 
@@ -166,7 +185,7 @@ pub const MemorySafety = union(enum) {
             switch (ms) {
                 .allocation => |allocation| {
                     if (allocation.freed == null) {
-                        return reportMemoryLeak(ctx, allocation.allocated);
+                        return reportMemoryLeak(ctx, allocation);
                     }
                 },
                 .passed => {}, // Ownership transferred to caller - not a leak
@@ -204,12 +223,16 @@ pub const MemorySafety = union(enum) {
             .stack_ptr => |sp| return reportFreeStackMemory(ctx, sp),
             .allocation => |a| {
                 if (a.freed) |previous_free| {
-                    return reportDoubleFree(ctx, a.allocated, previous_free);
+                    return reportDoubleFree(ctx, a, previous_free);
                 }
                 if (!std.mem.eql(u8, a.allocator_type, params.allocator_type)) {
                     return reportMismatchedAllocator(ctx, a, params.allocator_type);
                 }
-                ms.allocation.freed = ctx.meta;
+                // Capture name from the pointer instruction being freed
+                ms.allocation.freed = .{
+                    .meta = ctx.meta,
+                    .name_at_free = results[ptr].name,
+                };
             },
             .passed => @panic("alloc_destroy on passed pointer - should not happen"),
         }
@@ -235,7 +258,7 @@ pub const MemorySafety = union(enum) {
         if (ms != .allocation) return;
 
         if (ms.allocation.freed) |free_site| {
-            return reportUseAfterFree(ctx, ms.allocation.allocated, free_site);
+            return reportUseAfterFree(ctx, ms.allocation, free_site);
         }
     }
 
@@ -264,23 +287,67 @@ pub const MemorySafety = union(enum) {
         return error.StackPointerEscape;
     }
 
-    fn reportDoubleFree(ctx: *Context, alloc_site: Meta, previous_free: Meta) anyerror {
+    /// Format name prefix for allocation error messages.
+    /// With name: "'container.ptr' "
+    /// Without name: ""
+    fn formatNamePrefix(name: ?[]const u8, buf: []u8) []const u8 {
+        if (name) |n| {
+            return std.fmt.bufPrint(buf, "'{s}' ", .{n}) catch "";
+        }
+        return "";
+    }
+
+    fn reportDoubleFree(ctx: *Context, allocation: Allocation, previous_free: Free) anyerror {
         try ctx.meta.print(ctx.writer, "double free in ", .{});
-        try previous_free.print(ctx.writer, "previously freed in ", .{});
-        try alloc_site.print(ctx.writer, "originally allocated in ", .{});
+        // Use name_at_free for "previously freed" line
+        var buf1: [256]u8 = undefined;
+        const free_prefix = formatNamePrefix(previous_free.name_at_free, &buf1);
+        if (free_prefix.len > 0) {
+            try previous_free.meta.print(ctx.writer, "{s}previously freed in ", .{free_prefix});
+        } else {
+            try previous_free.meta.print(ctx.writer, "previously freed in ", .{});
+        }
+        // Use name_at_alloc for "originally allocated" line
+        var buf2: [256]u8 = undefined;
+        const alloc_prefix = formatNamePrefix(allocation.name_at_alloc, &buf2);
+        if (alloc_prefix.len > 0) {
+            try allocation.allocated.print(ctx.writer, "{s}originally allocated in ", .{alloc_prefix});
+        } else {
+            try allocation.allocated.print(ctx.writer, "originally allocated in ", .{});
+        }
         return error.DoubleFree;
     }
 
-    fn reportUseAfterFree(ctx: *Context, alloc_site: Meta, free_site: Meta) anyerror {
+    fn reportUseAfterFree(ctx: *Context, allocation: Allocation, free_site: Free) anyerror {
         try ctx.meta.print(ctx.writer, "use after free in ", .{});
-        try free_site.print(ctx.writer, "freed in ", .{});
-        try alloc_site.print(ctx.writer, "allocated in ", .{});
+        // Use name_at_free for "freed" line
+        var buf1: [256]u8 = undefined;
+        const free_prefix = formatNamePrefix(free_site.name_at_free, &buf1);
+        if (free_prefix.len > 0) {
+            try free_site.meta.print(ctx.writer, "{s}freed in ", .{free_prefix});
+        } else {
+            try free_site.meta.print(ctx.writer, "freed in ", .{});
+        }
+        // Use name_at_alloc for "allocated" line
+        var buf2: [256]u8 = undefined;
+        const alloc_prefix = formatNamePrefix(allocation.name_at_alloc, &buf2);
+        if (alloc_prefix.len > 0) {
+            try allocation.allocated.print(ctx.writer, "{s}allocated in ", .{alloc_prefix});
+        } else {
+            try allocation.allocated.print(ctx.writer, "allocated in ", .{});
+        }
         return error.UseAfterFree;
     }
 
-    fn reportMemoryLeak(ctx: *Context, alloc_site: Meta) anyerror {
+    fn reportMemoryLeak(ctx: *Context, allocation: Allocation) anyerror {
         try ctx.meta.print(ctx.writer, "memory leak in ", .{});
-        try alloc_site.print(ctx.writer, "allocated in ", .{});
+        var buf: [256]u8 = undefined;
+        const name_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
+        if (name_prefix.len > 0) {
+            try allocation.allocated.print(ctx.writer, "{s}allocated in ", .{name_prefix});
+        } else {
+            try allocation.allocated.print(ctx.writer, "allocated in ", .{});
+        }
         return error.MemoryLeak;
     }
 
@@ -620,7 +687,7 @@ test "alloc_create sets allocation metadata on pointer analyte" {
     try std.testing.expectEqualStrings("PageAllocator", ms.allocation.allocator_type);
     try std.testing.expectEqualStrings("test.zig", ms.allocation.allocated.file);
     try std.testing.expectEqual(@as(u32, 10), ms.allocation.allocated.line);
-    try std.testing.expectEqual(@as(?Meta, null), ms.allocation.freed);
+    try std.testing.expectEqual(@as(?Free, null), ms.allocation.freed);
 }
 
 test "alloc_destroy marks allocation as freed" {
@@ -651,7 +718,7 @@ test "alloc_destroy marks allocation as freed" {
     const ptr_idx = results[1].refinement.?;
     const ms = refinements.at(ptr_idx).pointer.analyte.memory_safety.?;
     try std.testing.expect(ms.allocation.freed != null);
-    try std.testing.expectEqual(@as(u32, 20), ms.allocation.freed.?.line);
+    try std.testing.expectEqual(@as(u32, 20), ms.allocation.freed.?.meta.line);
 }
 
 test "alloc_destroy detects double free" {
@@ -910,7 +977,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
 
     // inst 3: alloc - create struct on stack with a pointer field
-    const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .pointer = &.{ .scalar = {} } }} };
+    const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .scalar = {} } } }} };
     try Inst.apply(state, 3, .{ .alloc = .{ .ty = struct_ty } });
     // inst 4: store_safe - initialize struct with undefined
     try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 3, .src = .{ .interned = struct_ty }, .is_undef = true } });
@@ -980,7 +1047,7 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     // inst 1 now has the allocation pointer
 
     // Caller: inst 2 = alloc struct with pointer field
-    const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .pointer = &.{ .scalar = {} } }} };
+    const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .scalar = {} } } }} };
     try Inst.apply(caller_state, 2, .{ .alloc = .{ .ty = struct_ty } });
     // inst 3 = store undefined struct
     try Inst.apply(caller_state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = struct_ty }, .is_undef = true } });
@@ -1021,7 +1088,8 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     const caller_ptr_idx = caller_results[2].refinement.?;
     const local_ptr_idx = try caller_refinements.at(caller_ptr_idx).*.copy_to(&caller_refinements, &callee_refinements);
     callee_results[0].refinement = local_ptr_idx;
-    callee_results[0].argument = .{ .caller_ref = caller_ptr_idx, .name = "container" };
+    callee_results[0].caller_eidx = caller_ptr_idx;
+    callee_results[0].name = "container";
 
     const callee_state = State{
         .ctx = &ctx,

@@ -22,6 +22,13 @@ pub const analyses = .{ Undefined, MemorySafety };
 
 // Type
 
+/// Represents a struct or union field with type and optional name.
+/// Name is null for tuple fields (anonymous structs).
+pub const Field = struct {
+    ty: Type,
+    name: ?[]const u8 = null,
+};
+
 /// This struct exists to propagate information from the AIR generator into
 /// the parameters of a instruction.  Some operations are expected to set
 /// the type based on interned information; in those cases, the type will be used.
@@ -32,8 +39,8 @@ pub const Type = union(enum) {
     errorunion: *const Type, // error union payload type
     null: *const Type, // used to signal that an optional is being set to null.
     region: *const Type, // unused, for now, will represent slices (maybe)
-    @"struct": []const Type, // field types for struct
-    @"union": void, // unused, for now, temporarily void. Will be a slice of Simple.
+    @"struct": []const Field, // field types and names for struct
+    @"union": void, // unused, for now, temporarily void. Will use Field later.
     void: void,
 };
 
@@ -82,14 +89,16 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .region = .{ .analyte = .{}, .to = child_idx } };
         },
-        .@"struct" => |field_types| blk: {
+        .@"struct" => |struct_fields| blk: {
             const allocator = refinements.list.allocator;
-            const fields = allocator.alloc(Refinements.EIdx, field_types.len) catch @panic("out of memory");
-            for (field_types, 0..) |field_type, i| {
-                const field_ref = try typeToRefinement(field_type, refinements);
+            const fields = allocator.alloc(Refinements.EIdx, struct_fields.len) catch @panic("out of memory");
+            const field_names = allocator.alloc(?[]const u8, struct_fields.len) catch @panic("out of memory");
+            for (struct_fields, 0..) |field, i| {
+                const field_ref = try typeToRefinement(field.ty, refinements);
                 fields[i] = try refinements.appendEntity(field_ref);
+                field_names[i] = field.name;
             }
-            break :blk .{ .@"struct" = .{ .fields = fields } };
+            break :blk .{ .@"struct" = .{ .fields = fields, .field_names = field_names } };
         },
         .@"union" => .{ .@"union" = {} },
     };
@@ -170,17 +179,18 @@ pub const Arg = struct {
                 // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
                 const local_copy_idx = try cp.at(caller_eidx).*.copy_to(cp, state.refinements);
                 state.results[index].refinement = local_copy_idx;
-                // Set argument info for backward propagation on function close
-                state.results[index].argument = .{ .caller_ref = caller_eidx, .name = self.name };
+                // Set caller_eidx for backward propagation on function close
+                state.results[index].caller_eidx = caller_eidx;
+                state.results[index].name = self.name;
             },
             .interned => |ty| {
                 // Compile-time constant - create entity from type info
                 const ref = try typeToRefinement(ty, state.refinements);
                 const local_idx = try state.refinements.appendEntity(ref);
                 state.results[index].refinement = local_idx;
-                // No backward propagation needed for constants (caller_ref = null),
-                // but still record parameter name for error messages (e.g., stack pointer escape)
-                state.results[index].argument = .{ .caller_ref = null, .name = self.name };
+                // No backward propagation needed for constants (caller_eidx stays null),
+                // but still record parameter name for error messages
+                state.results[index].name = self.name;
             },
             .other => @panic("Arg: .other source not yet implemented"),
         }
@@ -347,6 +357,7 @@ pub const Load = struct {
         const ptr_ref = state.results[ptr].refinement orelse {
             // Pointer has no refinement - use type info to create proper structure
             _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            state.results[index].name = state.results[ptr].name;
             try splat(.load, state, index, self);
             return;
         };
@@ -356,6 +367,7 @@ pub const Load = struct {
             .pointer => |p| p.to,
             else => {
                 _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                state.results[index].name = state.results[ptr].name;
                 try splat(.load, state, index, self);
                 return;
             },
@@ -365,7 +377,7 @@ pub const Load = struct {
         // modifications (like alloc_destroy marking a pointer as freed) are visible
         // everywhere the pointer is used.
         //
-        // For structs, we need to create a new struct entity with a copied fields slice
+        // For structs, we need to create a new struct entity with copied fields and field_names slices
         // to avoid double-free on deinit. However, the field indices are shared so
         // modifications to fields are still visible.
         const pointee = state.refinements.at(pointee_idx).*;
@@ -374,13 +386,23 @@ pub const Load = struct {
                 const allocator = state.refinements.list.allocator;
                 const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
                 @memcpy(new_fields, s.fields);
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } });
+                // Copy field_names if present
+                const new_field_names = if (s.field_names.len > 0) blk: {
+                    const names = allocator.alloc(?[]const u8, s.field_names.len) catch @panic("out of memory");
+                    @memcpy(names, s.field_names);
+                    break :blk names;
+                } else &.{};
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .field_names = new_field_names } });
             },
             else => {
                 // Share the entity directly (no copy needed)
                 state.results[index].refinement = pointee_idx;
             },
         }
+        // Propagate name from source pointer to load result.
+        // When we load a value through a named pointer (e.g., `container.ptr`),
+        // the loaded value should inherit that name for error reporting.
+        state.results[index].name = state.results[ptr].name;
         try splat(.load, state, index, self);
     }
 };
@@ -420,6 +442,19 @@ pub const StructFieldPtr = struct {
                 // Create a pointer to this field (Zig's bounds checking handles out-of-bounds)
                 const field_idx = s.fields[self.field_index];
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
+
+                // Build access path: base_name + "." + field_name
+                const field_name: ?[]const u8 = if (s.field_names.len > self.field_index)
+                    s.field_names[self.field_index]
+                else
+                    null;
+                const base_name = state.results[base].name;
+                state.results[index].name = if (base_name) |bn| blk: {
+                    if (field_name) |fn_| {
+                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+                    }
+                    break :blk bn;
+                } else field_name;
             },
             .scalar => {
                 // Scalar being treated as struct - use the scalar itself as target
@@ -458,6 +493,19 @@ pub const StructFieldVal = struct {
             .@"struct" => |s| {
                 // Share the field entity (reading a field doesn't copy it)
                 state.results[index].refinement = s.fields[self.field_index];
+
+                // Build access path: operand_name + "." + field_name
+                const field_name: ?[]const u8 = if (s.field_names.len > self.field_index)
+                    s.field_names[self.field_index]
+                else
+                    null;
+                const base_name = state.results[operand].name;
+                state.results[index].name = if (base_name) |bn| blk: {
+                    if (field_name) |fn_| {
+                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+                    }
+                    break :blk bn;
+                } else field_name;
             },
             else => |t| std.debug.panic("struct_field_val: expected struct, got {s}", .{@tagName(t)}),
         }

@@ -367,7 +367,7 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
     };
 }
 
-/// Convert a struct type to a Type string with field types.
+/// Convert a struct type to a Type string with field types and names.
 fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index) []const u8 {
     const loaded = ip.loadStructType(type_index);
     const field_types = loaded.field_types.get(ip);
@@ -385,7 +385,17 @@ fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_inde
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
         const field_type_str = typeToString(arena, ip, field_type);
-        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
+        // Get field name (null for tuples)
+        const field_name_opt = loaded.fieldName(ip, i).toSlice(ip);
+        if (field_name_opt) |field_name| {
+            // Emit Field with type and name
+            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s}, .name = \"{s}\" }}", .{ field_type_str, field_name }, null);
+            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        } else {
+            // Tuple field - emit Field with type only (name defaults to null)
+            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{field_type_str}, null);
+            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        }
     }
 
     result.appendSlice(arena, " } }") catch @panic("out of memory");
