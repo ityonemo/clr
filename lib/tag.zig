@@ -18,7 +18,8 @@ const Context = @import("Context.zig");
 const State = Inst.State;
 const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
-pub const analyses = .{ Undefined, MemorySafety };
+const NullSafety = @import("analysis/null_safety.zig").NullSafety;
+pub const analyses = .{ Undefined, MemorySafety, NullSafety };
 
 // Type
 
@@ -425,43 +426,28 @@ pub const StructFieldPtr = struct {
             return;
         };
 
-        const base_ref = state.results[base].refinement orelse {
-            std.debug.panic("struct_field_ptr: base instruction {d} has no refinement", .{base});
-        };
-
-        // Follow base pointer to struct
-        if (state.refinements.at(base_ref).* != .pointer) {
-            std.debug.panic("struct_field_ptr: expected pointer, got {s}", .{@tagName(state.refinements.at(base_ref).*)});
-        }
+        // base produces pointer refinement, follow to struct
+        const base_ref = state.results[base].refinement.?;
         const struct_idx = state.refinements.at(base_ref).pointer.to;
+        const s = state.refinements.at(struct_idx).@"struct";
 
-        // Get the struct and find the field
-        const pointee = state.refinements.at(struct_idx).*;
-        switch (pointee) {
-            .@"struct" => |s| {
-                // Create a pointer to this field (Zig's bounds checking handles out-of-bounds)
-                const field_idx = s.fields[self.field_index];
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
+        // Create a pointer to this field (Zig's bounds checking handles out-of-bounds)
+        const field_idx = s.fields[self.field_index];
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
 
-                // Build access path: base_name + "." + field_name
-                const field_name: ?[]const u8 = if (s.field_names.len > self.field_index)
-                    s.field_names[self.field_index]
-                else
-                    null;
-                const base_name = state.results[base].name;
-                state.results[index].name = if (base_name) |bn| blk: {
-                    if (field_name) |fn_| {
-                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
-                    }
-                    break :blk bn;
-                } else field_name;
-            },
-            .scalar => {
-                // Scalar being treated as struct - use the scalar itself as target
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = struct_idx } });
-            },
-            else => std.debug.panic("struct_field_ptr: expected struct, got {s}", .{@tagName(pointee)}),
-        }
+        // Build access path: base_name + "." + field_name
+        const field_name: ?[]const u8 = if (s.field_names.len > self.field_index)
+            s.field_names[self.field_index]
+        else
+            null;
+        const base_name = state.results[base].name;
+        state.results[index].name = if (base_name) |bn| blk: {
+            if (field_name) |fn_| {
+                break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+            }
+            break :blk bn;
+        } else field_name;
+
         try splat(.struct_field_ptr, state, index, self);
     }
 };
@@ -722,6 +708,55 @@ pub fn Unimplemented(comptime opts: anytype) type {
     };
 }
 
+/// Unreach marks the current path as unreachable (noreturn).
+pub const Unreach = struct {
+    pub fn apply(_: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .noreturn);
+    }
+};
+
+/// IsNonNull checks if an optional is non-null.
+/// Sets the optional's null_safety to .unknown with check info.
+pub const IsNonNull = struct {
+    /// Source optional being checked.
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Result is a boolean scalar (the result of the null check)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+        try splat(.is_non_null, state, index, self);
+    }
+};
+
+/// IsNull checks if an optional is null.
+/// Sets the optional's null_safety to .unknown with check info (inverted).
+pub const IsNull = struct {
+    /// Source optional being checked.
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Result is a boolean scalar (the result of the null check)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+        try splat(.is_null, state, index, self);
+    }
+};
+
+/// CondBr is emitted at the start of each branch to trigger null_safety refinement.
+/// The handler searches for optionals whose .unknown.inst matches condition_idx
+/// and updates them to .non_null or .null based on the branch.
+pub const CondBr = struct {
+    /// true for true branch, false for false branch
+    branch: bool,
+    /// Instruction index that produced the condition (e.g., is_non_null).
+    /// Null when condition comes from a comptime value.
+    condition_idx: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = index;
+        try splat(.cond_br, state, 0, self);
+    }
+};
+
 /// Noop tag for unreferenced instructions with garbage data.
 /// These instructions exist in the AIR array but are not in any body.
 pub const Noop = struct {
@@ -769,11 +804,12 @@ pub const AnyTag = union(enum) {
     aggregate_init: Unimplemented(.{}),
     array_to_slice: Unimplemented(.{}),
     block: Block,
-    cond_br: Unimplemented(.{ .void = true }),
+    cond_br: CondBr,
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
     is_non_err: Simple(.is_non_err), // produces boolean scalar
-    is_non_null: Unimplemented(.{}),
+    is_non_null: IsNonNull,
+    is_null: IsNull,
     memset_safe: Unimplemented(.{ .void = true }),
     noop_pruned_debug: Unimplemented(.{ .void = true }),
     ptr_add: Unimplemented(.{}),
@@ -787,7 +823,7 @@ pub const AnyTag = union(enum) {
     struct_field_val: StructFieldVal,
     sub_with_overflow: OverflowOp(.sub_with_overflow),
     @"try": Unimplemented(.{}),
-    unreach: Unimplemented(.{ .void = true }),
+    unreach: Unreach,
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
     wrap_errunion_err: Unimplemented(.{}),
     wrap_errunion_payload: Unimplemented(.{}),
@@ -883,6 +919,25 @@ pub fn splatMerge(
         }
         if (false_is_retval_future) {
             // False branch didn't return - use true branch's value
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
+            continue;
+        }
+
+        // Handle .noreturn: if one branch is unreachable, use the other branch's state
+        const true_is_noreturn = true_ref == .noreturn;
+        const false_is_noreturn = false_ref == .noreturn;
+
+        if (true_is_noreturn and false_is_noreturn) {
+            // Both are noreturn - nothing to merge, leave as is
+            continue;
+        }
+        if (true_is_noreturn) {
+            // True branch is unreachable - use false branch's value
+            try Refinement.clobber_structured_idx(orig_eidx, refinements, false_ref, false_refinements);
+            continue;
+        }
+        if (false_is_noreturn) {
+            // False branch is unreachable - use true branch's value
             try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
             continue;
         }
