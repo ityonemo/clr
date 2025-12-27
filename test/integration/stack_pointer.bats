@@ -52,7 +52,44 @@ load test_helper
     [[ "$output" =~ "stack_ptr_escaped_via_field.zig" ]]
 }
 
-@test "no false positive for heap pointer in union return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/union/no_escape_heap_ptr.zig"
+@test "detects parameter pointer escape in union return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/union/param_ptr_escape.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "param_ptr_escape.zig" ]]
+}
+
+@test "no false positive for passed-in pointer in union return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/union/no_escape.zig"
+    [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# Struct stack pointer tests
+# =============================================================================
+
+@test "detects stack pointer escape in struct return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/struct/stack_ptr_in_struct.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "stack_ptr_in_struct.zig" ]]
+}
+
+@test "detects parameter pointer escape in struct return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/struct/param_ptr_escape.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "param_ptr_escape.zig" ]]
+}
+
+@test "detects stack pointer escape via struct field" {
+    run compile_and_run "$TEST_CASES/stack_pointer/struct/stack_ptr_escaped_via_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "stack_ptr_escaped_via_field.zig" ]]
+}
+
+@test "no false positive for passed-in pointer in struct return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/struct/no_escape.zig"
     [ "$status" -eq 0 ]
 }

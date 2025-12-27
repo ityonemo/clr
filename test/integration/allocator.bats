@@ -195,3 +195,7 @@ load test_helper
     [[ "$output" =~ "pass_to_callee_use_after_free.zig" ]]
 }
 
+@test "no false positive for heap pointer in union return" {
+    run compile_and_run "$TEST_CASES/allocator/union_pointer_field/no_escape_heap_ptr.zig"
+    [ "$status" -eq 0 ]
+}
