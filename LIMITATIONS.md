@@ -23,14 +23,6 @@ Functions that return large values (structs, arrays) use `ret_load` or `ret_ptr`
 
 **Planned fix**: Implement handlers for `ret_load` and `ret_ptr` that properly track the data flow through the return pointer.
 
-### Const vs Mutable Pointer Parameter Tracking
-
-The `arg_ptr` mechanism propagates analysis information backwards through pointer parameters to update the caller's slot state. Currently, this happens for ALL pointer parameters, but it should NOT happen for `*const` pointers since the callee cannot modify through them.
-
-**Impact**: Information may incorrectly flow backwards through const pointers, leading to potential false negatives or incorrect analysis results.
-
-**Planned fix**: Add `is_const: bool` field to the arg payload and only set `arg_ptr` when `!is_const`.
-
 ### Refinement Type Tracking
 
 Refinements track basic type structure (scalar, pointer, optional) but don't capture the full Zig type. This makes it difficult to reason about:
@@ -45,29 +37,15 @@ Refinements track basic type structure (scalar, pointer, optional) but don't cap
 
 **Planned fix**: Extend the type system to capture more detail when needed for specific analyses.
 
-### GeneralPurposeAllocator Crashes Codegen
+### GeneralPurposeAllocator Type Complexity
 
-Using `std.heap.GeneralPurposeAllocator` in test code causes libclr.so to segfault during codegen. The AIR itself is valid (dump_air.sh works), but when the DLL processes the complex nested GPA type, it crashes.
+Using `std.heap.GeneralPurposeAllocator` generates deeply nested struct types that hit the recursion depth limit. The codegen emits `.{ .unknown = {} }` for these types, but the runtime `Type` union doesn't yet support the `unknown` variant.
 
-**Investigation needed**: Determine what aspect of the GPA type causes the crash - likely a buffer overflow or DLL relocation issue when processing deeply nested generic types.
+**Status**: Codegen succeeds, but the generated analyzer fails to compile due to missing `unknown` in `Type` union.
+
+**Planned fix**: Add `unknown` variant to `lib/tag.zig` Type union to handle complex types that exceed the depth limit.
 
 **Workaround**: Use simpler allocators like `std.heap.FixedBufferAllocator` for testing allocator mismatch scenarios.
-
-### Short Bool Functions Crash Codegen
-
-Simple functions with bool variables and conditionals can crash libclr.so during codegen, even when the AIR is valid. For example:
-
-```zig
-pub fn main() u8 {
-    const b: bool = true;
-    if (b) { return 1; }
-    return 0;
-}
-```
-
-The AIR shows the branch is optimized away, but codegen still crashes.
-
-**Investigation needed**: Determine what aspect of these simple functions triggers the crash.
 
 ### Runtime Allocator Type Identification
 
