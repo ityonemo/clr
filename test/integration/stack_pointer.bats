@@ -33,3 +33,26 @@ load test_helper
     run compile_and_run "$TEST_CASES/stack_pointer/basic/no_escape.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Union stack pointer tests
+# =============================================================================
+
+@test "detects stack pointer escape in union return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/union/stack_ptr_in_union.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "stack_ptr_in_union.zig" ]]
+}
+
+@test "detects stack pointer escape via union field" {
+    run compile_and_run "$TEST_CASES/stack_pointer/union/stack_ptr_escaped_via_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "stack_ptr_escaped_via_field.zig" ]]
+}
+
+@test "no false positive for heap pointer in union return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/union/no_escape_heap_ptr.zig"
+    [ "$status" -eq 0 ]
+}

@@ -195,25 +195,3 @@ load test_helper
     [[ "$output" =~ "pass_to_callee_use_after_free.zig" ]]
 }
 
-# =============================================================================
-# Union stack pointer tests
-# =============================================================================
-
-@test "detects stack pointer escape in union return" {
-    run compile_and_run "$TEST_CASES/allocator/stack_pointer/union/stack_ptr_in_union.zig"
-    [ "$status" -ne 0 ]
-    [[ "$output" =~ "stack pointer escape" ]]
-    [[ "$output" =~ "stack_ptr_in_union.zig" ]]
-}
-
-@test "detects stack pointer escape via union field" {
-    run compile_and_run "$TEST_CASES/allocator/stack_pointer/union/stack_ptr_escaped_via_field.zig"
-    [ "$status" -ne 0 ]
-    [[ "$output" =~ "stack pointer escape" ]]
-    [[ "$output" =~ "stack_ptr_escaped_via_field.zig" ]]
-}
-
-@test "no false positive for heap pointer in union" {
-    run compile_and_run "$TEST_CASES/allocator/stack_pointer/union/heap_ptr_in_union.zig"
-    [ "$status" -eq 0 ]
-}
