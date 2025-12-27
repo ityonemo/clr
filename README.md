@@ -19,7 +19,8 @@ live demo video: https://www.youtube.com/watch?v=ZY_Z-aGbYm8
 
 ## Overview
 
-This project creates a Zig transpiler for the Zig compiler, which transforms AIR (Abstract Intermediate Representation) into Zig source code that performs static analysis at compile time. The generated analyzer catches memory safety issues like use-before-assignment, use-after-free, and stack pointer escapes.
+This project creates a Zig transpiler for the Zig compiler, which transforms AIR (Abstract Intermediate Representation) into Zig source code that performs static analysis at compile time. The generated analyzer will be able to catche memory safety issues like use-before-assignment, use-after-free, stack pointer escapes,
+as well as zig-specific UB, such as non-nullness assertions, (un)tagged union violations, or fieldParentPtr misuse.
 
 The goal is to bring Rust-level memory safety guarantees to Zig through static analysis of AIR, without changing the language itself.
 
@@ -30,14 +31,20 @@ CLR depends on a forked version of the Zig compiler (included as a submodule in 
 This is an active rewrite of the original Elixir-based proof-of-concept in Zig. The Zig implementation loads as a compiler plugin and analyzes AIR directly.
 
 Currently implemented:
-- Undefined value tracking (use before assignment)
-- Interprocedural analysis (tracking values across function calls)
+- Undefined value tracking (use before assignment, field-level tracking for structs)
+- Memory safety analysis (use-after-free, double-free, memory leaks)
+- Allocator mismatch detection (freeing with wrong allocator)
+- Null safety (unchecked optional unwrap detection)
+- Interprocedural analysis (tracking values across function calls via pointer arguments)
+- Struct field tracking (pointer fields, nested structs)
 - Source location and variable name tracking for error messages
+- Branching/control flow with state merging
 
-Planned:
-- Stack pointer escape detection
-- Allocation tracking (use-after-free, double-free, leaks)
-- Control flow analysis
+Planned (see LIMITATIONS.md for details):
+- Union tracking
+- Loop analysis (fixed-point iteration)
+- Switch statement support (n-way merging)
+- Large return value tracking (ret_load, ret_ptr)
 
 ## Prerequisites
 
@@ -59,7 +66,10 @@ zig build
 
 ```sh
 # Compile a Zig file using the AIR backend
-zig/zig-out/bin/zig build-exe -fair-out=zig-out/lib/libclr.so -ofmt=air your_file.zig
+zig/zig-out/bin/zig build-exe -fair-out=zig-out/lib/libclr.so -ofmt=air -femit-bin=output.air.zig your_file.zig
+
+# Run the generated analyzer
+zig run --dep clr -Mroot=output.air.zig -Mclr=lib/lib.zig
 ```
 
 Output goes to stderr.
@@ -67,8 +77,11 @@ Output goes to stderr.
 ## Testing
 
 ```sh
-# Unit tests
+# Unit tests (codegen/DLL)
 zig build test
+
+# Unit tests (runtime library)
+zig test lib/lib.zig
 
 # Integration tests (requires BATS)
 ./run_integration.sh
@@ -81,20 +94,26 @@ zig build test
 
 ```
 clr/
-├── src/
+├── src/                     # DLL/plugin code (generates .air.zig)
 │   ├── clr.zig              # Main CLR plugin entry point
 │   ├── codegen.zig          # Generates .air.zig source from AIR instructions
 │   └── allocator.zig        # DLL-safe allocator wrapper
-├── lib/
-│   ├── tag.zig              # AnyTag union and splat dispatch
-│   ├── tag/                 # Individual tag handlers
-│   ├── analysis/            # Analysis modules (undefined, etc.)
-│   └── slots.zig            # Slot struct and apply/call dispatch
+├── lib/                     # Runtime analysis library
+│   ├── lib.zig              # Library entry point
+│   ├── tag.zig              # AnyTag union, Type, tag handlers, splat dispatch
+│   ├── Inst.zig             # Instruction results and interprocedural analysis
+│   ├── Refinements.zig      # Refinement types (pointer, struct, optional, etc.)
+│   ├── Analyte.zig          # Analysis state container
+│   ├── Context.zig          # Execution context (metadata, error reporting)
+│   └── analysis/            # Analysis modules
+│       ├── undefined.zig    # Use-before-assign tracking
+│       ├── memory_safety.zig # Allocation/free tracking
+│       └── null_safety.zig  # Optional unwrap checking
 ├── test/
 │   ├── integration/         # BATS integration tests
 │   │   ├── test_helper.bash
 │   │   └── *.bats
-│   └── cases/               # Test input files
+│   └── cases/               # Test input files (.zig)
 ├── zig/                     # Zig compiler submodule (instrumented fork)
 ├── build.zig                # Build configuration
 └── build.zig.zon            # Package dependencies
@@ -106,7 +125,7 @@ clr/
 
 Zig is a famously "unsafe" language. Memory management is done manually, which opens up the possibility of implementation errors. While Zig reduces security issues relative to C by eliminating out-of-bounds array access and null pointer dereferencing in safety-checked code, it is still less safe than Rust, which eliminates use-after-free, double-free, and data races through static analysis.
 
-Inspired by Rust's MIRI project, CLR performs static analysis on Zig's AIR intermediate representation to achieve a higher degree of safety than Zig provides out-of-the-box. Unlike MIRI, which interprets Rust's MIR in a sandboxed pseudo-runtime, CLR transpiles AIR into Zig source code that statically runs an analysis.  Note that CLR's air output zig code could in principle be run at compile time, but by running through a zig intermediate, we produce an easy-to-understand and easy-to-debug logical flow.  An ambitious person might use this general approach to emit a different output target, such as a proof assistant language!
+Inspired by Rust's MIRI project, CLR performs static analysis on Zig's AIR intermediate representation to achieve a higher degree of safety than Zig provides out-of-the-box. Unlike MIRI, which interprets Rust's MIR in a sandboxed pseudo-runtime, CLR transpiles AIR into Zig source code that statically runs analysis.  Note that CLR's air output zig code could in principle be run at compile time, but by running through a zig intermediate, we produce an easy-to-understand and easy-to-debug logical flow.  An ambitious person might use this general approach to emit a different output target, such as a proof assistant language, or refactor it to run entirely in the zig compiler!
 
 The key insight: if you need MIRI for security-conscious Rust projects anyway, why not pick a simpler language and do MIRI-style analysis to get borrow checking and other refinement-type analysis? This project shows that such a future is a real possibility for Zig.
 
