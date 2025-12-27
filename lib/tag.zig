@@ -42,7 +42,7 @@ pub const Type = union(enum) {
     undefined: *const Type, // used to signal that the type is undefined, must be scalar, pointer, optional
     region: *const Type, // unused, for now, will represent slices (maybe)
     @"struct": []const Field, // field types and names for struct
-    @"union": void, // unused, for now, temporarily void. Will use Field later.
+    @"union": []const Field, // field types and names for union
     void: void,
 };
 
@@ -91,23 +91,22 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // The undefined.store handler checks for .undefined wrapper and marks as undefined.
             return typeToRefinement(child.*, refinements);
         },
-        .region => |child| {
-            const child_ref = try typeToRefinement(child.*, refinements);
-            const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .region = .{ .analyte = .{}, .to = child_idx } };
-        },
-        .@"struct" => |struct_fields| blk: {
+        .region => @panic("regions not implemented yet"),
+        inline .@"struct", .@"union" => |type_fields, tag| blk: {
             const allocator = refinements.list.allocator;
-            const fields = allocator.alloc(Refinements.EIdx, struct_fields.len) catch @panic("out of memory");
-            const field_names = allocator.alloc(?[]const u8, struct_fields.len) catch @panic("out of memory");
-            for (struct_fields, 0..) |field, i| {
-                const field_ref = try typeToRefinement(field.ty, refinements);
-                fields[i] = try refinements.appendEntity(field_ref);
+            const FieldType = if (tag == .@"union") ?Refinements.EIdx else Refinements.EIdx;
+            const fields = allocator.alloc(FieldType, type_fields.len) catch @panic("out of memory");
+            const field_names = allocator.alloc(?[]const u8, type_fields.len) catch @panic("out of memory");
+            for (type_fields, 0..) |field, i| {
+                // For structs, create entities for each field; for unions, all fields start inactive (null)
+                fields[i] = if (tag == .@"union")
+                    null
+                else
+                    try refinements.appendEntity(try typeToRefinement(field.ty, refinements));
                 field_names[i] = field.name;
             }
-            break :blk .{ .@"struct" = .{ .fields = fields, .field_names = field_names } };
+            break :blk @unionInit(Refinement, @tagName(tag), .{ .fields = fields, .field_names = field_names });
         },
-        .@"union" => .{ .@"union" = {} },
     };
 }
 
@@ -422,10 +421,11 @@ pub const Load = struct {
     }
 };
 
-/// StructFieldPtr gets a pointer to a specific field within a struct.
+/// StructFieldPtr gets a pointer to a specific field within a struct or union.
 /// Used by struct_field_ptr_index_N instructions.
+/// Note: Zig AIR uses this for both struct and union field access.
 pub const StructFieldPtr = struct {
-    /// Base pointer to the struct
+    /// Base pointer to the struct or union
     base: ?usize,
     /// Index of the field to access
     field_index: usize,
@@ -440,36 +440,59 @@ pub const StructFieldPtr = struct {
             return;
         };
 
-        // base produces pointer refinement, follow to struct
-        const base_ref = state.results[base].refinement.?;
-        const struct_idx = state.refinements.at(base_ref).pointer.to;
-        const s = state.refinements.at(struct_idx).@"struct";
+        // base produces pointer refinement, follow to struct or union
+        const base_ref = state.results[base].refinement orelse {
+            // Base has no refinement - use type info
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.struct_field_ptr, state, index, self);
+            return;
+        };
+        const base_refinement = state.refinements.at(base_ref).*;
+        const container_idx = base_refinement.pointer.to;
+        const container = state.refinements.at(container_idx).*;
 
-        // Create a pointer to this field (Zig's bounds checking handles out-of-bounds)
-        const field_idx = s.fields[self.field_index];
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
+        switch (container) {
+            inline .@"struct", .@"union" => |data, tag| {
+                // Get field index - for unions, activate inactive fields
+                const field_idx = idx: {
+                    if (tag == .@"union") {
+                        if (data.fields[self.field_index]) |idx| break :idx idx;
+                        // Inactive field - create a fresh entity and activate it
+                        const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
+                        const new_idx = try state.refinements.appendEntity(new_field_ref);
+                        @constCast(data.fields)[self.field_index] = new_idx;
+                        break :idx new_idx;
+                    } else {
+                        break :idx data.fields[self.field_index];
+                    }
+                };
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
 
-        // Build access path: base_name + "." + field_name
-        const field_name: ?[]const u8 = if (s.field_names.len > self.field_index)
-            s.field_names[self.field_index]
-        else
-            null;
-        const base_name = state.results[base].name;
-        state.results[index].name = if (base_name) |bn| blk: {
-            if (field_name) |fn_| {
-                break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
-            }
-            break :blk bn;
-        } else field_name;
+                // Build access path: base_name + "." + field_name
+                const field_name: ?[]const u8 = if (data.field_names.len > self.field_index)
+                    data.field_names[self.field_index]
+                else
+                    null;
+                const base_name = state.results[base].name;
+                state.results[index].name = if (base_name) |bn| blk: {
+                    if (field_name) |fn_| {
+                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+                    }
+                    break :blk bn;
+                } else field_name;
+            },
+            else => |t| std.debug.panic("struct_field_ptr: expected struct or union, got {s}", .{@tagName(t)}),
+        }
 
         try splat(.struct_field_ptr, state, index, self);
     }
 };
 
-/// StructFieldVal extracts a field value from a struct by value.
-/// This is used when accessing `s.field` where `s` is a struct value (not a pointer).
+/// StructFieldVal extracts a field value from a struct or union by value.
+/// This is used when accessing `s.field` where `s` is a struct/union value (not a pointer).
+/// Note: Zig AIR uses this for both struct and union field access.
 pub const StructFieldVal = struct {
-    /// Operand containing the struct value
+    /// Operand containing the struct or union value
     operand: ?usize,
     /// Index of the field to extract
     field_index: usize,
@@ -478,25 +501,53 @@ pub const StructFieldVal = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const operand = self.operand orelse {
-            // Interned/global struct - use type info to create proper structure
+            // Interned/global struct/union - use type info to create proper structure
             _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
             try splat(.struct_field_val, state, index, self);
             return;
         };
 
-        const struct_ref = state.results[operand].refinement orelse {
+        const container_ref = state.results[operand].refinement orelse {
             std.debug.panic("struct_field_val: operand instruction {d} has no refinement", .{operand});
         };
 
-        // Get the struct and find the field
-        switch (state.refinements.at(struct_ref).*) {
-            .@"struct" => |s| {
+        // Get the struct or union and find the field
+        switch (state.refinements.at(container_ref).*) {
+            inline .@"struct", .@"union" => |data, tag| {
+                // Get field index - for unions, inactive fields create a fresh entity
+                const field_idx = idx: {
+                    if (tag == .@"union") {
+                        break :idx data.fields[self.field_index] orelse {
+                            // Inactive field - create a fresh entity with the result type
+                            const new_field_ref = try typeToRefinement(self.ty, state.refinements);
+                            const new_idx = try state.refinements.appendEntity(new_field_ref);
+                            state.results[index].refinement = new_idx;
+                            // Build access path and return early
+                            const field_name: ?[]const u8 = if (data.field_names.len > self.field_index)
+                                data.field_names[self.field_index]
+                            else
+                                null;
+                            const base_name = state.results[operand].name;
+                            state.results[index].name = if (base_name) |bn| blk: {
+                                if (field_name) |fn_| {
+                                    break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+                                }
+                                break :blk bn;
+                            } else field_name;
+                            try splat(.struct_field_val, state, index, self);
+                            return;
+                        };
+                    } else {
+                        break :idx data.fields[self.field_index];
+                    }
+                };
+
                 // Share the field entity (reading a field doesn't copy it)
-                state.results[index].refinement = s.fields[self.field_index];
+                state.results[index].refinement = field_idx;
 
                 // Build access path: operand_name + "." + field_name
-                const field_name: ?[]const u8 = if (s.field_names.len > self.field_index)
-                    s.field_names[self.field_index]
+                const field_name: ?[]const u8 = if (data.field_names.len > self.field_index)
+                    data.field_names[self.field_index]
                 else
                     null;
                 const base_name = state.results[operand].name;
@@ -507,7 +558,7 @@ pub const StructFieldVal = struct {
                     break :blk bn;
                 } else field_name;
             },
-            else => |t| std.debug.panic("struct_field_val: expected struct, got {s}", .{@tagName(t)}),
+            else => |t| std.debug.panic("struct_field_val: expected struct or union, got {s}", .{@tagName(t)}),
         }
         try splat(.struct_field_val, state, index, self);
     }
@@ -780,6 +831,65 @@ pub const Noop = struct {
     }
 };
 
+/// SetUnionTag sets the active tag on a union without setting the payload.
+/// This is a no-op for now since we're not implementing variant safety.
+pub const SetUnionTag = struct {
+    pub fn apply(_: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+    }
+};
+
+/// GetUnionTag gets the active tag from a union.
+/// Produces a scalar result (the tag value).
+pub const GetUnionTag = struct {
+    pub fn apply(_: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+    }
+};
+
+/// UnionInit initializes a union with one active field.
+/// Only the specified field gets a real entity; others are null (inactive).
+pub const UnionInit = struct {
+    field_index: usize,
+    init: Src,
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create union refinement from type info
+        const union_fields = self.ty.@"union";
+        const allocator = state.refinements.list.allocator;
+
+        // Union fields use ?EIdx - null means inactive, some means active
+        const fields = allocator.alloc(?Refinements.EIdx, union_fields.len) catch @panic("out of memory");
+        const field_names = allocator.alloc(?[]const u8, union_fields.len) catch @panic("out of memory");
+
+        for (union_fields, 0..) |field, i| {
+            if (i == self.field_index) {
+                // Active field - create entity from init value
+                switch (self.init) {
+                    .eidx => |src| {
+                        // Runtime value - share the source entity
+                        fields[i] = state.results[src].refinement;
+                    },
+                    .interned => |init_ty| {
+                        // Comptime value - create entity from type
+                        const field_ref = try typeToRefinement(init_ty, state.refinements);
+                        fields[i] = try state.refinements.appendEntity(field_ref);
+                    },
+                    .other => @panic("UnionInit: .other source not yet implemented"),
+                }
+            } else {
+                // Inactive field
+                fields[i] = null;
+            }
+            field_names[i] = field.name;
+        }
+
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .field_names = field_names } });
+        try splat(.union_init, state, index, self);
+    }
+};
+
 pub const AnyTag = union(enum) {
     // Noop for unreferenced instructions
     noop: Noop,
@@ -839,6 +949,11 @@ pub const AnyTag = union(enum) {
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
     wrap_errunion_err: Unimplemented(.{}),
     wrap_errunion_payload: Unimplemented(.{}),
+
+    // Union tags - variant safety not implemented yet
+    set_union_tag: SetUnionTag,
+    get_union_tag: GetUnionTag,
+    union_init: UnionInit,
 };
 
 pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {

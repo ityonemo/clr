@@ -100,9 +100,18 @@ pub const Undefined = union(enum) {
                     setDefinedRecursive(refinements, field_idx);
                 }
             },
+            .@"union" => |*u| {
+                // Set union's analyte to defined
+                u.analyte.undefined = .{ .defined = {} };
+                // Also recurse into active fields (non-null)
+                for (u.fields) |field_idx_opt| {
+                    if (field_idx_opt) |field_idx| {
+                        setDefinedRecursive(refinements, field_idx);
+                    }
+                }
+            },
             .void, .unimplemented, .noreturn, .retval_future => {},
             .region => @panic("setDefinedRecursive: region not yet implemented"),
-            .@"union" => @panic("setDefinedRecursive: union not yet implemented"),
         }
     }
 
@@ -226,9 +235,18 @@ pub const Undefined = union(enum) {
                     setUndefinedRecursive(refinements, field_idx, undef_state);
                 }
             },
+            .@"union" => |*u| {
+                // Set analyte.undefined on union - used when activating inactive fields later
+                u.analyte.undefined = undef_state;
+                // Also set on active fields
+                for (u.fields) |field_idx_opt| {
+                    if (field_idx_opt) |field_idx| {
+                        setUndefinedRecursive(refinements, field_idx, undef_state);
+                    }
+                }
+            },
             .void, .unimplemented, .noreturn, .retval_future => {},
             .region => @panic("setUndefinedRecursive: region not yet implemented"),
-            .@"union" => @panic("setUndefinedRecursive: union not yet implemented"),
         }
     }
 
@@ -292,9 +310,28 @@ pub const Undefined = union(enum) {
                     else => setDefinedRecursive(refinements, idx),
                 }
             },
+            .@"union" => |fields| {
+                // Apply field-level undefined state for unions
+                switch (refinements.at(idx).*) {
+                    .@"union" => |*u| {
+                        // Mark union itself as defined (since we're storing a value, not undefined)
+                        u.analyte.undefined = .{ .defined = {} };
+                        for (fields, 0..) |field, i| {
+                            if (i < u.fields.len) {
+                                if (u.fields[i]) |field_idx| {
+                                    applyInternedType(refinements, field_idx, field.ty, ctx);
+                                }
+                            }
+                        }
+                    },
+                    else => {
+                        // Non-union refinement - just mark as defined
+                        setDefinedRecursive(refinements, idx);
+                    },
+                }
+            },
             .void => {},
             .region => @panic("applyInternedType: region not yet implemented"),
-            .@"union" => @panic("applyInternedType: union not yet implemented"),
         }
     }
 
@@ -362,10 +399,24 @@ pub const Undefined = union(enum) {
                                 else => {},
                             }
                         },
-                        .@"struct" => {},
+                        .@"struct" => |*s| {
+                            // When storing a struct value, mark all fields as defined
+                            s.analyte.undefined = .{ .defined = {} };
+                            for (s.fields) |field_idx| {
+                                setDefinedRecursive(refinements, field_idx);
+                            }
+                        },
+                        .@"union" => |*u| {
+                            // When storing a union value, mark union and active fields as defined
+                            u.analyte.undefined = .{ .defined = {} };
+                            for (u.fields) |field_idx_opt| {
+                                if (field_idx_opt) |field_idx| {
+                                    setDefinedRecursive(refinements, field_idx);
+                                }
+                            }
+                        },
                         .void, .unimplemented, .noreturn, .retval_future => {},
                         .region => @panic("store: region not yet implemented"),
-                        .@"union" => @panic("store: union not yet implemented"),
                     }
                 },
                 .interned => |ty| {
@@ -384,11 +435,7 @@ pub const Undefined = union(enum) {
         const ptr = params.ptr orelse @panic("load: ptr is null (interned/global) - not yet supported");
         const ptr_idx = results[ptr].refinement orelse @panic("load: ptr inst has no refinement");
         // Follow pointer to get to pointee
-        const pointee_idx = switch (refinements.at(ptr_idx).*) {
-            .pointer => |ind| ind.to,
-            .unimplemented => @panic("load: ptr refinement is unimplemented"),
-            else => |t| std.debug.panic("load: expected pointer, got {s}", .{@tagName(t)}),
-        };
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
         switch (refinements.at(pointee_idx).*) {
             .scalar => |s| {
                 // undefined is null when value wasn't allocated through our tracked mechanisms
@@ -455,7 +502,11 @@ pub const Undefined = union(enum) {
                 // Loading a struct doesn't error - individual field access will check
                 // The loaded struct value will carry the field refinements
             },
-            .region, .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
+            .@"union" => {
+                // Loading a union doesn't error - individual field access will check
+                // The loaded union value will carry the field refinements
+            },
+            .region => @panic("load: region - undefined tracking not yet implemented"),
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
         }
@@ -469,26 +520,47 @@ pub const Undefined = union(enum) {
             refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
             return;
         };
-        const struct_ref = results[operand].refinement orelse {
+        const container_ref = results[operand].refinement orelse {
             // No struct refinement - result was created as fresh scalar, set to defined
             refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
             return;
         };
 
-        const s = switch (refinements.at(struct_ref).*) {
-            .@"struct" => |st| st,
-            else => {
-                // Not a struct - result was created as fresh scalar, set to defined
-                refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
-                return;
+        switch (refinements.at(container_ref).*) {
+            .@"struct" => |s| {
+                // Zig's bounds checking handles out-of-bounds access
+                const field_idx = s.fields[params.field_index];
+
+                // When field is in bounds, result shares field's refinement (undefined state already set).
+                // Check if this field is undefined and report error if accessed.
+                try checkFieldUndefined(refinements, field_idx, ctx);
             },
-        };
+            .@"union" => |u| {
+                // For unions, if the field is inactive (was null in tag handler), it was just created
+                // and needs to inherit the union's undefined state
+                if (u.fields[params.field_index]) |field_idx| {
+                    // Active field - check its state
+                    try checkFieldUndefined(refinements, field_idx, ctx);
+                } else {
+                    // Field was inactive - the tag handler created a fresh entity
+                    // Check the union's analyte undefined state instead
+                    if (u.analyte.undefined) |undef| {
+                        switch (undef) {
+                            .undefined => return undef.reportUseBeforeAssign(ctx),
+                            .inconsistent => return undef.reportInconsistentBranches(ctx),
+                            .defined => {},
+                        }
+                    }
+                }
+            },
+            else => {
+                // Not a struct or union - result was created as fresh scalar, set to defined
+                refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+            },
+        }
+    }
 
-        // Zig's bounds checking handles out-of-bounds access
-        const field_idx = s.fields[params.field_index];
-
-        // When field is in bounds, result shares field's refinement (undefined state already set).
-        // Check if this field is undefined and report error if accessed.
+    fn checkFieldUndefined(refinements: *Refinements, field_idx: Refinements.EIdx, ctx: *Context) !void {
         switch (refinements.at(field_idx).*) {
             .scalar => |sc| {
                 const undef = sc.undefined orelse @panic("struct_field_val: field scalar has no undefined state");
@@ -508,7 +580,7 @@ pub const Undefined = union(enum) {
             },
             // Optional and struct containers don't track undefined on themselves
             // Their children carry the undefined state
-            .optional, .@"struct" => {},
+            .optional, .@"struct", .@"union" => {},
             else => |t| std.debug.panic("struct_field_val: unexpected field refinement type {s}", .{@tagName(t)}),
         }
     }
@@ -577,19 +649,7 @@ pub const Undefined = union(enum) {
                     .{ false_branch[0], false_ref.errorunion.to },
                 );
             },
-            .region => |*r| {
-                if (true_ref.region.analyte.undefined) |true_undef| {
-                    if (false_ref.region.analyte.undefined) |false_undef| {
-                        r.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
-                    }
-                }
-                mergeRefinement(
-                    ctx,
-                    .{ orig[0], r.to },
-                    .{ true_branch[0], true_ref.region.to },
-                    .{ false_branch[0], false_ref.region.to },
-                );
-            },
+            .region => @panic("regions not implemented yet"),
             // Types without undefined tracking - no merge needed
             .void, .unimplemented, .noreturn => {},
             .@"struct" => |*s| {
@@ -603,8 +663,23 @@ pub const Undefined = union(enum) {
                     );
                 }
             },
-            // Types with undefined tracking not yet implemented
-            .@"union" => @panic("mergeRefinement: union merge not yet implemented"),
+            .@"union" => |*u| {
+                // Union "dumb merge": union all active fields from both branches
+                // Only recurse into fields that are active in all three (orig, true, false)
+                const true_union = true_ref.@"union";
+                const false_union = false_ref.@"union";
+                for (u.fields, 0..) |orig_field_opt, i| {
+                    const orig_field = orig_field_opt orelse continue;
+                    const true_field = true_union.fields[i] orelse continue;
+                    const false_field = false_union.fields[i] orelse continue;
+                    mergeRefinement(
+                        ctx,
+                        .{ orig[0], orig_field },
+                        .{ true_branch[0], true_field },
+                        .{ false_branch[0], false_field },
+                    );
+                }
+            },
             .retval_future => @panic("mergeRefinement: cannot merge .retval_future"),
         }
     }

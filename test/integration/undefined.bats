@@ -147,3 +147,76 @@ load test_helper
     [[ "$output" =~ "use of undefined value found in" ]]
     [[ "$output" =~ "partial_init_const_undefined_field.zig" ]]
 }
+
+# =============================================================================
+# Union Tests - Tagged
+# =============================================================================
+
+@test "detects undefined tagged union field access" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_undefined_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in tagged_undefined_field.main" ]]
+    [[ "$output" =~ "tagged_undefined_field.zig" ]]
+}
+
+@test "no error when tagged union field is defined" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_defined_field.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when undefined tagged union field is not accessed" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_field_not_accessed.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when tagged union is set via pointer" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_set_via_pointer.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined tagged union passed to function" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_passed_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in" ]]
+    [[ "$output" =~ "tagged_passed_undefined.zig" ]]
+}
+
+@test "detects undefined tagged union field accessed through pass" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_accessed_through_pass.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in" ]]
+    [[ "$output" =~ "tagged_accessed_through_pass.zig" ]]
+}
+
+@test "no error when tagged union field is defined via pass" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_defined_via_pass.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined when callee misses setting tagged union field" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_field_missed_when_passed.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in tagged_field_missed_when_passed.main" ]]
+    [[ "$output" =~ "tagged_field_missed_when_passed.zig" ]]
+}
+
+# =============================================================================
+# Union Tests - Untagged
+# =============================================================================
+
+@test "detects undefined untagged union field access" {
+    run compile_and_run "$TEST_CASES/undefined/unions/untagged_undefined_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in untagged_undefined_field.main" ]]
+    [[ "$output" =~ "untagged_undefined_field.zig" ]]
+}
+
+@test "no error when untagged union field is defined" {
+    run compile_and_run "$TEST_CASES/undefined/unions/untagged_defined_field.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when untagged union is set via pointer" {
+    run compile_and_run "$TEST_CASES/undefined/unions/untagged_set_via_pointer.zig"
+    [ "$status" -eq 0 ]
+}

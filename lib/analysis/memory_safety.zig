@@ -37,7 +37,7 @@ pub const Allocation = struct {
 pub const MemorySafety = union(enum) {
     stack_ptr: StackPtr,
     allocation: Allocation,
-    passed: void, 
+    passed: void,
 
     pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
         _ = params;
@@ -422,11 +422,7 @@ pub const MemorySafety = union(enum) {
                     mergeRefinement(.{ orig[0], e.to }, .{ true_branch[0], true_ref.errorunion.to });
                 }
             },
-            .region => |r| {
-                if (true_ref.* == .region) {
-                    mergeRefinement(.{ orig[0], r.to }, .{ true_branch[0], true_ref.region.to });
-                }
-            },
+            .region => @panic("regions not implemented yet"),
             .@"struct" => |s| {
                 if (true_ref.* == .@"struct") {
                     for (s.fields, true_ref.@"struct".fields) |of, tf| {

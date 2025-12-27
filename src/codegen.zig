@@ -406,7 +406,7 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
             break :blk clr_allocator.allocPrint(arena, ".{{ .errorunion = &{s} }}", .{payload_str}, null);
         },
         .struct_type => structTypeToString(arena, ip, ty, visited),
-        .union_type => ".{ .@\"union\" = {} }",
+        .union_type => unionTypeToString(arena, ip, ty, visited),
         // All other types treated as scalar (int, float, array, enum, etc.)
         else => ".{ .scalar = {} }",
     };
@@ -450,6 +450,67 @@ fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_inde
 
     result.appendSlice(arena, " } }") catch @panic("out of memory");
     return result.items;
+}
+
+/// Convert a union type to a Type string with field types.
+fn unionTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    const loaded = ip.loadUnionType(type_index);
+    const field_types = loaded.field_types.get(ip);
+
+    if (field_types.len == 0) {
+        return ".{ .@\"union\" = &.{} }";
+    }
+
+    // Limit recursion depth - treat deeply nested unions as unknown
+    if (visited.count() > 20) {
+        return ".{ .unknown = {} }";
+    }
+
+    // Get tag type for field names (if it's a tagged union)
+    const tag_type = loaded.enum_tag_ty;
+
+    // Build field types string
+    var result = std.ArrayListUnmanaged(u8){};
+    result.appendSlice(arena, ".{ .@\"union\" = &.{ ") catch @panic("out of memory");
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        const field_type_str = typeToStringInner(arena, ip, field_type, visited);
+
+        // Try to get field name from the tag enum type
+        const field_name_opt = getUnionFieldName(ip, tag_type, i);
+        if (field_name_opt) |field_name| {
+            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s}, .name = \"{s}\" }}", .{ field_type_str, field_name }, null);
+            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        } else {
+            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{field_type_str}, null);
+            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        }
+    }
+
+    result.appendSlice(arena, " } }") catch @panic("out of memory");
+    return result.items;
+}
+
+/// Get field name from union's tag enum type.
+fn getUnionFieldName(ip: *const InternPool, tag_type_idx: InternPool.Index, field_index: usize) ?[]const u8 {
+    // If tag type is none/invalid, no field names available
+    if (tag_type_idx == .none) return null;
+
+    const key = ip.indexToKey(tag_type_idx);
+    switch (key) {
+        .enum_type => {
+            const loaded_enum = ip.loadEnumType(tag_type_idx);
+            const names = loaded_enum.names.get(ip);
+            if (field_index < names.len) {
+                return names[field_index].toSlice(ip);
+            }
+        },
+        else => {},
+    }
+    return null;
 }
 
 /// Convert an aggregate VALUE (not just type) to a Type string with field-level undefined.

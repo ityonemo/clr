@@ -251,6 +251,24 @@ fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Ref
                 propagatePointee(local_refs, local_field_idx, caller_refs, caller.@"struct".fields[i]);
             }
         },
+        .@"union" => |src| {
+            if (caller.* != .@"union") std.debug.panic("backPropagate: local pointee is union but caller pointee is {s}", .{@tagName(caller.*)});
+            caller.@"union".analyte = src.analyte;
+            // Propagate active fields - if local has active field that caller doesn't, activate it in caller
+            const mutable_caller_fields = @constCast(caller.@"union".fields);
+            for (src.fields, 0..) |local_field_opt, i| {
+                if (local_field_opt) |local_field_idx| {
+                    if (mutable_caller_fields[i]) |caller_field_idx| {
+                        // Both have field active - propagate
+                        propagatePointee(local_refs, local_field_idx, caller_refs, caller_field_idx);
+                    } else {
+                        // Local has field that caller doesn't - copy to caller
+                        const new_idx = local_refs.at(local_field_idx).*.copy_to(local_refs, caller_refs) catch @panic("out of memory");
+                        mutable_caller_fields[i] = new_idx;
+                    }
+                }
+            }
+        },
         .optional => |src| {
             caller.optional.analyte = src.analyte;
             propagatePointee(local_refs, src.to, caller_refs, caller.optional.to);
@@ -293,6 +311,17 @@ pub fn backPropagate(state: State) void {
                 caller_entity.@"struct".analyte = local_struct.analyte;
                 for (local_struct.fields, 0..) |local_field_idx, i| {
                     propagatePointee(state.refinements, local_field_idx, cp, caller_entity.@"struct".fields[i]);
+                }
+            },
+            .@"union" => |local_union| {
+                caller_entity.@"union".analyte = local_union.analyte;
+                // Only propagate active fields (non-null in both local and caller)
+                for (local_union.fields, 0..) |local_field_opt, i| {
+                    if (local_field_opt) |local_field_idx| {
+                        if (caller_entity.@"union".fields[i]) |caller_field_idx| {
+                            propagatePointee(state.refinements, local_field_idx, cp, caller_field_idx);
+                        }
+                    }
                 }
             },
             else => |t| std.debug.panic("backPropagate: local refinement is {s} - propagation not yet implemented", .{@tagName(t)}),

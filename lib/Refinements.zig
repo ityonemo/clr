@@ -25,16 +25,27 @@ pub const Refinement = union(enum) {
         field_names: []const ?[]const u8 = &.{},
     };
 
+    pub const Union = struct {
+        /// Analyte for tracking on the whole union
+        analyte: Analyte = .{},
+        /// Field refinement indices - each field has its own refinement.  Any field
+        /// that is null, is NOT active in this variable.
+        fields: []const ?EIdx,
+        /// Field names - each field has an optional name (null for tuple fields)
+        /// Strings are static (embedded in generated .air.zig) so no allocation needed
+        field_names: []const ?[]const u8 = &.{},
+    };
+
     scalar: Analyte,
     pointer: Indirected,
     optional: Indirected,
     errorunion: Indirected,
     region: Indirected, // unused, for now, will represent slices (maybe)
-    @"struct": Struct, // struct with field refinements
-    @"union": void, // unused, for now, temporarily void. Will be a slice EIdx.
+    @"struct": Struct,
+    @"union": Union,
     noreturn: void, // specific return value for error paths.
     retval_future: void, // special-case for retvals before a return has been called.
-    unimplemented: void, // this means we have an operation that is unimplemented but does carry a value.
+    unimplemented: void, // this is the result of an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
 
     /// clobbers one refinement over another.  The dst structure must be identical.
@@ -51,7 +62,7 @@ pub const Refinement = union(enum) {
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             .retval_future => @panic("clobber_structured: use clobber_structured_idx for .retval_future destinations"),
-            .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
+            .region => @panic("regions not implemented yet"),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -75,7 +86,7 @@ pub const Refinement = union(enum) {
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             // retval_future is a placeholder for return values, to be filled in by ret_safe
             .retval_future => try clobber_retval_future(dst_idx, dst_list, src, src_list),
-            .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
+            .region => @panic("regions not implemented yet"),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -105,10 +116,7 @@ pub const Refinement = union(enum) {
                 .analyte = e.analyte,
                 .to = if (same_list) e.to else try copy_to(src_list.at(e.to).*, src_list, dst_list),
             } },
-            .region => |r| .{ .region = .{
-                .analyte = r.analyte,
-                .to = if (same_list) r.to else try copy_to(src_list.at(r.to).*, src_list, dst_list),
-            } },
+            .region => @panic("regions not implemented yet"),
             .@"struct" => |s| blk: {
                 const allocator = dst_list.list.allocator;
                 const new_fields = try allocator.alloc(EIdx, s.fields.len);
@@ -129,7 +137,26 @@ pub const Refinement = union(enum) {
                 } else &.{};
                 break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .field_names = new_field_names } };
             },
-            .@"union" => .{ .@"union" = {} },
+            .@"union" => |u| blk: {
+                const allocator = dst_list.list.allocator;
+                const new_fields = try allocator.alloc(?EIdx, u.fields.len);
+                if (same_list) {
+                    @memcpy(new_fields, u.fields);
+                } else {
+                    for (u.fields, 0..) |field_idx_opt, i| {
+                        new_fields[i] = if (field_idx_opt) |field_idx|
+                            try copy_to(src_list.at(field_idx).*, src_list, dst_list)
+                        else
+                            null;
+                    }
+                }
+                const new_field_names = if (u.field_names.len > 0) names_blk: {
+                    const names = try allocator.alloc(?[]const u8, u.field_names.len);
+                    @memcpy(names, u.field_names);
+                    break :names_blk names;
+                } else &.{};
+                break :blk .{ .@"union" = .{ .analyte = u.analyte, .fields = new_fields, .field_names = new_field_names } };
+            },
             .unimplemented => .{ .unimplemented = {} },
             .void => .{ .void = {} },
             .noreturn => .{ .noreturn = {} },
@@ -149,12 +176,28 @@ pub const Refinement = union(enum) {
     }
 
     fn recurse_fields(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
-        // currently do nothing, since struct and union fields aren't implemented.
-        _ = dst;
-        _ = dst_list;
-        _ = src;
-        _ = src_list;
-        _ = tag;
+        if (src != tag) std.debug.panic("clobber mismatch: src is .{s} and dst is .{s}", .{ @tagName(src), @tagName(tag) });
+        // Copy over analytes
+        @field(dst, @tagName(tag)).analyte = @field(src, @tagName(tag)).analyte;
+        // Recurse into each field
+        const dst_fields = @field(dst, @tagName(tag)).fields;
+        const src_fields = @field(src, @tagName(tag)).fields;
+        for (dst_fields, src_fields) |dst_field, src_field| {
+            // if we are in a union, we'll have to unwrap only fields that
+            // are non-null, otherwise jump.  For structs no need to unwrap.
+            const new_dst_idx, const new_src_idx = new: {
+                if (tag == .@"union") {
+                    if (dst_field == null or src_field == null) continue;
+                    break :new .{dst_field.?, src_field.?};
+                } else {
+                    break :new .{dst_field, src_field};
+                }
+            };
+
+            const new_dst = dst_list.at(new_dst_idx);
+            const new_src = src_list.at(new_src_idx);
+            clobber_structured(new_dst, dst_list, new_src.*, src_list) catch @panic("out of memory");
+        }
     }
 
     /// Recursively copies a refinement into dst_list.  Returns the entity index of the result.
@@ -166,7 +209,7 @@ pub const Refinement = union(enum) {
             .optional => try src.copy_to_indirected(src_list, dst_list, .optional),
             .errorunion => try src.copy_to_indirected(src_list, dst_list, .errorunion),
             .retval_future => @panic("cannot copy from .retval_future"),
-            .region => try src.copy_to_indirected(src_list, dst_list, .region),
+            .region => @panic("regions not implemented yet"),
             .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copy_to_fields(src_list, dst_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -187,28 +230,37 @@ pub const Refinement = union(enum) {
     }
 
     fn copy_to_fields(src: Refinement, src_list: *Refinements, dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
-        if (tag == .@"union") {
-            // Union not yet implemented
-            return dst_list.appendEntity(.{ .unimplemented = {} });
-        }
-        // Copy struct fields
-        const src_struct = src.@"struct";
         const allocator = dst_list.list.allocator;
-        const new_fields = try allocator.alloc(EIdx, src_struct.fields.len);
-        for (src_struct.fields, 0..) |field_idx, i| {
-            new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
+        const src_data = @field(src, @tagName(tag));
+        const src_fields = src_data.fields;
+
+        // Allocate new fields array (same type as source)
+        const new_fields = try allocator.alloc(@TypeOf(src_fields[0]), src_fields.len);
+        for (src_fields, 0..) |src_field, i| {
+            // For unions, fields are optional; for structs, they're not
+            const src_field_idx = if (tag == .@"union")
+                src_field orelse {
+                    new_fields[i] = null;
+                    continue;
+                }
+            else
+                src_field;
+            const new_idx = try copy_to(src_list.at(src_field_idx).*, src_list, dst_list);
+            new_fields[i] = if (tag == .@"union") new_idx else new_idx;
         }
+
         // Copy field names if present
-        const new_field_names = if (src_struct.field_names.len > 0) blk: {
-            const names = try allocator.alloc(?[]const u8, src_struct.field_names.len);
-            @memcpy(names, src_struct.field_names);
+        const new_field_names = if (src_data.field_names.len > 0) blk: {
+            const names = try allocator.alloc(?[]const u8, src_data.field_names.len);
+            @memcpy(names, src_data.field_names);
             break :blk names;
         } else &.{};
-        return dst_list.appendEntity(.{ .@"struct" = .{
-            .analyte = src_struct.analyte,
+
+        return dst_list.appendEntity(@unionInit(Refinement, @tagName(tag), .{
+            .analyte = src_data.analyte,
             .fields = new_fields,
             .field_names = new_field_names,
-        } });
+        }));
     }
 };
 
@@ -225,13 +277,16 @@ pub fn init(allocator: Allocator) Refinements {
 
 pub fn deinit(self: *Refinements) void {
     const allocator = self.list.allocator;
-    // Free any struct field allocations
+    // Free any struct and union field allocations
     for (self.list.items) |item| {
-        if (item == .@"struct") {
-            allocator.free(item.@"struct".fields);
-            if (item.@"struct".field_names.len > 0) {
-                allocator.free(item.@"struct".field_names);
-            }
+        switch (item) {
+            inline .@"struct", .@"union" => |data| {
+                allocator.free(data.fields);
+                if (data.field_names.len > 0) {
+                    allocator.free(data.field_names);
+                }
+            },
+            else => {},
         }
     }
     self.list.deinit();
@@ -251,28 +306,29 @@ pub fn appendEntity(self: *Refinements, value: Refinement) !EIdx {
 
 /// Deep clone the entire refinements table.
 /// EIdx references remain valid because indices are preserved.
-/// Struct field slices are deep copied so each refinements list owns its own memory.
+/// Struct and union field slices are deep copied so each refinements list owns its own memory.
 pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     var new = Refinements.init(allocator);
     try new.list.ensureTotalCapacity(self.list.items.len);
     for (self.list.items) |item| {
-        if (item == .@"struct") {
-            // Deep copy struct fields
-            const new_fields = try allocator.alloc(EIdx, item.@"struct".fields.len);
-            @memcpy(new_fields, item.@"struct".fields);
-            // Deep copy field names if present
-            const new_field_names = if (item.@"struct".field_names.len > 0) blk: {
-                const names = try allocator.alloc(?[]const u8, item.@"struct".field_names.len);
-                @memcpy(names, item.@"struct".field_names);
-                break :blk names;
-            } else &.{};
-            try new.list.append(.{ .@"struct" = .{
-                .analyte = item.@"struct".analyte,
-                .fields = new_fields,
-                .field_names = new_field_names,
-            } });
-        } else {
-            try new.list.append(item);
+        switch (item) {
+            inline .@"struct", .@"union" => |data, tag| {
+                // Deep copy fields
+                const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
+                @memcpy(new_fields, data.fields);
+                // Deep copy field names if present
+                const new_field_names = if (data.field_names.len > 0) blk: {
+                    const names = try allocator.alloc(?[]const u8, data.field_names.len);
+                    @memcpy(names, data.field_names);
+                    break :blk names;
+                } else &.{};
+                try new.list.append(@unionInit(Refinement, @tagName(tag), .{
+                    .analyte = data.analyte,
+                    .fields = new_fields,
+                    .field_names = new_field_names,
+                }));
+            },
+            else => try new.list.append(item),
         }
     }
     return new;
