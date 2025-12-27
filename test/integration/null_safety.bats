@@ -37,3 +37,11 @@ load test_helper
     [[ "$output" =~ "assigned_null.main" ]]
     [[ "$output" =~ "assigned_null.zig:4:" ]]
 }
+
+@test "detects unwrap of ambiguous optional" {
+    run compile_and_run "$TEST_CASES/null_safety/ambiguous_unwrap.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "unchecked optional unwrap" ]]
+    [[ "$output" =~ "ambiguous_unwrap.main" ]]
+    [[ "$output" =~ "ambiguous_unwrap.zig:8:" ]]
+}

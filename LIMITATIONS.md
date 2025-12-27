@@ -2,20 +2,15 @@
 
 ## Currently Not Implemented, But Planned
 
-### Standard Library Function Analysis
+### Recursive Type Tracking
 
-Currently, CLR only analyzes functions from the user's root module. Standard library functions (start.*, os.*, debug.*, posix.*, fs.*, etc.) are skipped because their AIR instructions contain uninitialized/garbage data in some fields.
+Self-referential types like linked lists (`struct { next: ?*@This(), data: T }`) currently have their recursive fields replaced with `.{ .unknown = {} }` during type extraction. This prevents infinite recursion but loses type information for the recursive field.
 
-**Symptoms**: When processing stdlib functions, the `block` instruction's `ty_pl.ty` field contains garbage (0xAA patterns in debug mode), causing segfaults when trying to extract type information.
+**Impact**: Analysis of linked list nodes, tree nodes, or other recursive data structures may have incomplete type information for the recursive pointer fields.
 
-**Impact**: Analysis cannot trace through stdlib function calls. If a stdlib function modifies memory or affects control flow, those effects are not tracked.
+**Future improvement**: Track type names and emit proper forward references instead of unknown placeholders. This would allow full type information to be preserved for recursive types.
 
-**Investigation needed**:
-- Determine why stdlib AIR has uninitialized instruction fields
-- Check if this is an issue with how libclr.so receives data from the compiler
-- Consider whether stdlib functions need special handling (they may not have the same type annotation requirements)
-
-**Workaround**: Filter functions by checking if their FQN starts with the root module name, skipping all others.
+**Test plan**: Will be tested alongside ownership tracking for linked lists.
 
 ### Large Return Value Tracking (ret_load, ret_ptr)
 
@@ -100,6 +95,14 @@ Struct field tracking is partially implemented:
 **Example not detected**: Setting `.x` but not `.y` through field pointers (as opposed to struct literals) may not be caught.
 
 **Planned fix**: Add undefined analysis handler for `struct_field_ptr` to track stores through field pointers.
+
+### DbgVarVal Analysis Handlers
+
+The `dbg_var_ptr` instruction requires analysis module handlers to retroactively set variable names on analysis states (because in AIR, `dbg_var_ptr` comes after `store` instructions that create the states).
+
+The similar `dbg_var_val` instruction (for non-pointer values) does not currently have analysis handlers. If value variables need names in error messages, handlers would need to be added.
+
+**Investigation needed**: Test whether undefined tracking for value variables (not pointers) produces error messages that would benefit from variable names.
 
 ### Global Types and Variables
 
@@ -202,7 +205,15 @@ Slice and array bounds checking is not performed. Out-of-bounds access is not de
 
 ### Optional/Null Safety
 
-Basic optional type tracking exists (refinements can be `.optional` with an inner type), but unwrapping optionals without null checks is not detected. The `is_non_null` and `optional_payload` instructions are currently no-ops.
+**IMPLEMENTED** - The analyzer now detects:
+- Unchecked `.?` unwraps (optional in unknown state)
+- Known-null `.?` unwraps (optional assigned `null` or initialized to `null`)
+- Ambiguous `.?` unwraps (optional could be null or non-null after branch merge)
+
+Safe patterns recognized:
+- Explicit `if (x != null)` or `if (x == null)` checks before unwrap
+- Assignment of non-null value before unwrap
+- Comptime-known non-null optionals
 
 ### Union Variant Safety
 

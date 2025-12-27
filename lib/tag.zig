@@ -307,9 +307,16 @@ pub const DbgStmt = struct {
 };
 
 /// DbgVarPtr associates a variable name with a pointer instruction.
-/// Unlike DbgStmt, this IS splatted to analyses because they use the variable
-/// name for meaningful error messages (e.g., "variable 'x' used before initialization"
-/// instead of "instruction 5 used before initialization").
+/// Sets the name on the instruction for use in error messages.
+///
+/// NOTE: We still call splat() here because in AIR, dbg_var_ptr comes AFTER
+/// the initial store instruction. Analysis modules need to retroactively update
+/// their states with the variable name (e.g., undefined.setNameOnUndefined sets
+/// name_when_set, memory_safety updates stack_ptr.name). Without this, error
+/// messages would lack variable names.
+///
+/// TODO: dbg_var_val may need similar handling if it affects analysis states.
+/// See LIMITATIONS.md for details.
 pub const DbgVarPtr = struct {
     /// Index into results[] array for the pointer. Null when the pointer is comptime.
     ptr: ?usize,
@@ -317,14 +324,14 @@ pub const DbgVarPtr = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        const inst = self.ptr orelse return;
+        state.results[inst].name = self.name;
         try splat(.dbg_var_ptr, state, index, self);
     }
 };
 
 /// DbgVarVal associates a variable name with a value (non-pointer) instruction.
-/// Unlike DbgVarPtr, this is NOT used for stack pointer tracking since values
-/// don't have memory locations that can escape. Analyses that only care about
-/// pointers (like memory_safety) can ignore this.
+/// Sets the name on the instruction for use in error messages.
 pub const DbgVarVal = struct {
     /// Index into results[] array for the value. Null when the value is comptime.
     ptr: ?usize,
@@ -332,7 +339,8 @@ pub const DbgVarVal = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-        try splat(.dbg_var_val, state, index, self);
+        const inst = self.ptr orelse return;
+        state.results[inst].name = self.name;
     }
 };
 
@@ -963,4 +971,82 @@ pub fn splatMerge(
             }
         }
     }
+}
+
+// Tests
+
+fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_eidx = 0,
+        .caller_refinements = null,
+    };
+}
+
+test "dbg_var_ptr sets name on target instruction" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // First alloc to create a pointer
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try std.testing.expect(results[1].name == null);
+
+    // dbg_var_ptr should set the name on the target instruction
+    try Inst.apply(state, 2, .{ .dbg_var_ptr = .{ .ptr = 1, .name = "my_var" } });
+
+    try std.testing.expectEqualStrings("my_var", results[1].name.?);
+}
+
+test "dbg_var_ptr with null ptr does nothing" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // dbg_var_ptr with null ptr should not crash
+    try Inst.apply(state, 1, .{ .dbg_var_ptr = .{ .ptr = null, .name = "my_var" } });
+}
+
+test "dbg_var_val sets name on target instruction" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Set up a result at index 1
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
+    try std.testing.expect(results[1].name == null);
+
+    // dbg_var_val should set the name on the target instruction
+    try Inst.apply(state, 2, .{ .dbg_var_val = .{ .ptr = 1, .name = "my_val" } });
+
+    try std.testing.expectEqualStrings("my_val", results[1].name.?);
 }

@@ -106,6 +106,51 @@ pub const Undefined = union(enum) {
         }
     }
 
+    /// Recursively set name_when_set on undefined states that don't have a name yet.
+    /// Called by DbgVarPtr to retroactively name undefined states that were created
+    /// before the variable name was known (since dbg_var_ptr comes AFTER stores in AIR).
+    pub fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: []const u8) void {
+        switch (refinements.at(idx).*) {
+            .scalar => |*s| {
+                if (s.undefined) |*undef| {
+                    if (undef.* == .undefined and undef.undefined.name_when_set == null) {
+                        undef.undefined.name_when_set = name;
+                    }
+                }
+            },
+            .pointer => |*p| {
+                if (p.analyte.undefined) |*undef| {
+                    if (undef.* == .undefined and undef.undefined.name_when_set == null) {
+                        undef.undefined.name_when_set = name;
+                    }
+                }
+                setNameOnUndefined(refinements, p.to, name);
+            },
+            .optional => |o| setNameOnUndefined(refinements, o.to, name),
+            .errorunion => |e| setNameOnUndefined(refinements, e.to, name),
+            .@"struct" => |s| {
+                for (s.fields) |field_idx| {
+                    setNameOnUndefined(refinements, field_idx, name);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Retroactively set variable name on undefined states.
+    /// The name is already set on the instruction by DbgVarPtr.apply().
+    pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
+        _ = index;
+        _ = ctx;
+        const inst = params.ptr orelse return;
+        const ptr_idx = results[inst].refinement orelse return;
+        const pointee_idx = switch (refinements.at(ptr_idx).*) {
+            .pointer => |p| p.to,
+            else => return,
+        };
+        setNameOnUndefined(refinements, pointee_idx, params.name);
+    }
+
     // Handlers for operations that produce defined scalar results
     pub fn cmp_eq(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Simple(.cmp_eq)) !void {
         _ = ctx;
@@ -364,52 +409,6 @@ pub const Undefined = union(enum) {
             .region, .@"union" => @panic("load: pointee is compound type - undefined tracking not yet implemented"),
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
-        }
-    }
-
-    pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
-        _ = index;
-        _ = ctx;
-        // Set the name on the instruction - names are now tracked on instructions, not entities
-        const inst = params.ptr orelse return;
-        results[inst].name = params.name;
-
-        // In AIR, dbg_var_ptr comes AFTER the initial store, so we need to retroactively
-        // set the name on any undefined state that was created by the store.
-        const ptr_idx = results[inst].refinement orelse return;
-        const pointee_idx = switch (refinements.at(ptr_idx).*) {
-            .pointer => |p| p.to,
-            else => return,
-        };
-        setNameOnUndefined(refinements, pointee_idx, params.name);
-    }
-
-    /// Recursively set name_when_set on undefined states that don't have a name yet.
-    fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: []const u8) void {
-        switch (refinements.at(idx).*) {
-            .scalar => |*s| {
-                if (s.undefined) |*undef| {
-                    if (undef.* == .undefined and undef.undefined.name_when_set == null) {
-                        undef.undefined.name_when_set = name;
-                    }
-                }
-            },
-            .pointer => |*p| {
-                if (p.analyte.undefined) |*undef| {
-                    if (undef.* == .undefined and undef.undefined.name_when_set == null) {
-                        undef.undefined.name_when_set = name;
-                    }
-                }
-                setNameOnUndefined(refinements, p.to, name);
-            },
-            .optional => |o| setNameOnUndefined(refinements, o.to, name),
-            .errorunion => |e| setNameOnUndefined(refinements, e.to, name),
-            .@"struct" => |s| {
-                for (s.fields) |field_idx| {
-                    setNameOnUndefined(refinements, field_idx, name);
-                }
-            },
-            else => {},
         }
     }
 
@@ -839,71 +838,6 @@ test "load from inst without undefined tracking does not return error" {
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
 
     try Undefined.load(&results, 0, &ctx, &refinements, .{ .ptr = 1, .ty = .{ .scalar = {} } });
-}
-
-test "dbg_var_ptr sets name on instruction" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .undefined = .{
-        .meta = .{
-            .function = "test_func",
-            .file = "test.zig",
-            .line = 5,
-            .column = 3,
-        },
-    } } } });
-
-    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = 1, .name = "my_var" });
-
-    // dbg_var_ptr sets name on the instruction, not on the undefined state
-    try std.testing.expectEqualStrings("my_var", results[1].name.?);
-}
-
-test "dbg_var_ptr does not affect defined inst" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
-
-    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = 1, .name = "my_var" });
-
-    // Should still be defined, no crash
-    const undef = refinements.at(results[1].refinement.?).scalar.undefined.?;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
-}
-
-test "dbg_var_ptr with null ptr does nothing" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-
-    // Should not crash with null ptr
-    try Undefined.dbg_var_ptr(&results, 0, &ctx, &refinements, .{ .ptr = null, .name = "my_var" });
 }
 
 test "reportUseBeforeAssign with name_when_set returns error" {

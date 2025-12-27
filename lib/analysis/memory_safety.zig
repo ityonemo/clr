@@ -102,14 +102,12 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Retroactively set variable name on stack_ptr for escape detection messages.
+    /// The name is already set on the instruction by DbgVarPtr.apply().
     pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
         _ = index;
         _ = ctx;
-        // Set the name on the instruction - names are now tracked on instructions, not entities
         const inst = params.ptr orelse return;
-        results[inst].name = params.name;
-
-        // Also set stack_ptr variable name for stack pointer escape detection
         const ptr_idx = results[inst].refinement orelse return;
         if (refinements.at(ptr_idx).* == .pointer) {
             const outer_analyte = &refinements.at(ptr_idx).pointer.analyte;

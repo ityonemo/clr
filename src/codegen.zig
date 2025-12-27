@@ -322,9 +322,18 @@ fn isWellKnownType(ty: InternPool.Index) bool {
     };
 }
 
+/// Set of visited type indices for cycle detection in recursive types.
+const VisitedTypes = std.AutoArrayHashMapUnmanaged(InternPool.Index, void);
+
 /// Convert an InternPool type to a Type union string.
 /// Recursively handles nested types like pointers and optionals.
 fn typeToString(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
+    var visited = VisitedTypes{};
+    return typeToStringInner(arena, ip, ty, &visited);
+}
+
+/// Inner function with cycle detection via visited set.
+fn typeToStringInner(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     // Handle well-known type indices first (no InternPool lookup needed)
     return switch (ty) {
         .void_type => ".{ .void = {} }",
@@ -340,12 +349,19 @@ fn typeToString(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.
         .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => ".{ .pointer = &.{ .scalar = {} } }",
         .slice_const_u8_type, .slice_const_u8_sentinel_0_type => ".{ .pointer = &.{ .scalar = {} } }",
         // For other types, need to look up in InternPool
-        else => typeToStringLookup(arena, ip, ty),
+        else => typeToStringLookup(arena, ip, ty, visited),
     };
 }
 
 /// Look up a non-well-known type in the InternPool.
-fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
+fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    // Check for cycles in recursive types (e.g., struct { next: ?*@This() })
+    if (visited.contains(ty)) {
+        // Already visiting this type - break the cycle with an unknown placeholder
+        return ".{ .unknown = {} }";
+    }
+    visited.put(arena, ty, {}) catch @panic("out of memory");
+
     const type_key = ip.indexToKey(ty);
     return switch (type_key) {
         .simple_type => |simple| switch (simple) {
@@ -353,21 +369,21 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
             .noreturn => ".{ .void = {} }",
             else => ".{ .scalar = {} }",
         },
-        .ptr_type => |ptr| {
-            const child_str = typeToString(arena, ip, ptr.child);
-            return clr_allocator.allocPrint(arena, ".{{ .pointer = &{s} }}", .{child_str}, null);
+        .ptr_type => |ptr| blk: {
+            const child_str = typeToStringInner(arena, ip, ptr.child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .pointer = &{s} }}", .{child_str}, null);
         },
-        .opt_type => |child| {
+        .opt_type => |child| blk: {
             // opt_type payload is the child type directly (not a struct with .child)
-            const child_str = typeToString(arena, ip, child);
-            return clr_allocator.allocPrint(arena, ".{{ .optional = &{s} }}", .{child_str}, null);
+            const child_str = typeToStringInner(arena, ip, child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .optional = &{s} }}", .{child_str}, null);
         },
-        .error_union_type => |eu| {
+        .error_union_type => |eu| blk: {
             // error_union_type has payload_type field
-            const payload_str = typeToString(arena, ip, eu.payload_type);
-            return clr_allocator.allocPrint(arena, ".{{ .errorunion = &{s} }}", .{payload_str}, null);
+            const payload_str = typeToStringInner(arena, ip, eu.payload_type, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .errorunion = &{s} }}", .{payload_str}, null);
         },
-        .struct_type => structTypeToString(arena, ip, ty),
+        .struct_type => structTypeToString(arena, ip, ty, visited),
         .union_type => ".{ .@\"union\" = {} }",
         // All other types treated as scalar (int, float, array, enum, etc.)
         else => ".{ .scalar = {} }",
@@ -375,12 +391,17 @@ fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: Inter
 }
 
 /// Convert a struct type to a Type string with field types and names.
-fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index) []const u8 {
+fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
     const loaded = ip.loadStructType(type_index);
     const field_types = loaded.field_types.get(ip);
 
     if (field_types.len == 0) {
         return ".{ .@\"struct\" = &.{} }";
+    }
+
+    // Limit recursion depth - treat deeply nested structs as unknown to avoid complexity
+    if (visited.count() > 20) {
+        return ".{ .unknown = {} }";
     }
 
     // Build field types string with proper type inspection
@@ -391,7 +412,7 @@ fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_inde
         if (i > 0) {
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
-        const field_type_str = typeToString(arena, ip, field_type);
+        const field_type_str = typeToStringInner(arena, ip, field_type, visited);
         // Get field name (null for tuples)
         const field_name_opt = loaded.fieldName(ip, i).toSlice(ip);
         if (field_name_opt) |field_name| {
