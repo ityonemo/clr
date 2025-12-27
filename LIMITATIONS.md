@@ -53,6 +53,18 @@ For runtime allocators (e.g., `var gpa = GeneralPurposeAllocator(.{}){}` or `con
 2. **Allocator type through typing system**: Track allocator types through the slot typing system - when a variable is declared as a specific allocator type, propagate that type label to any `Allocator` derived from it via `.allocator()`
 3. **Vtable field tracing**: Search for `struct_field_ptr_index_1` (vtable field) stores to find the vtable global for runtime-constructed Allocator structs
 
+### Struct/Union Field Clobber Memory Leaks
+
+When a struct or union field containing an allocated pointer is overwritten (clobbered) without first freeing the old value, this might create a memory leak. This case is not currently tested.
+
+**Example**:
+```zig
+var container: Container = .{ .ptr = try allocator.create(u8) };
+container.ptr = try allocator.create(u8);  // Leaks the first allocation!
+```
+
+**Planned**: Add test cases for detecting leaks when struct/union pointer fields are clobbered.
+
 ### Struct Field Tracking
 
 Struct field tracking is partially implemented:
