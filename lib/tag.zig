@@ -38,7 +38,8 @@ pub const Type = union(enum) {
     pointer: *const Type,
     optional: *const Type,
     errorunion: *const Type, // error union payload type
-    null: *const Type, // used to signal that an optional is being set to null.
+    null: *const Type, // used to signal that an optional is being set to null.  Inner type must be optional.
+    undefined: *const Type, // used to signal that the type is undefined, must be scalar, pointer, optional
     region: *const Type, // unused, for now, will represent slices (maybe)
     @"struct": []const Field, // field types and names for struct
     @"union": void, // unused, for now, temporarily void. Will use Field later.
@@ -84,6 +85,11 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
+        },
+        .undefined => |child| {
+            // .undefined wraps a type - recurse into inner type.
+            // The undefined.store handler checks for .undefined wrapper and marks as undefined.
+            return typeToRefinement(child.*, refinements);
         },
         .region => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
@@ -614,7 +620,6 @@ pub const RetSafe = struct {
 /// AIR Semantics:
 /// - `ptr` is the instruction containing a pointer entity (from alloc, arg, etc.)
 /// - `src` is the instruction containing the value to store (may be null for constants)
-/// - is_undef indicates whether we're storing an undefined value
 ///
 /// Entity Structure:
 /// - The ptr instruction contains a pointer entity: .pointer = { .to = pointee_idx }
@@ -635,7 +640,6 @@ pub const Store = struct {
     ptr: ?usize,
     /// Source value being stored.
     src: Src,
-    is_undef: bool,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);

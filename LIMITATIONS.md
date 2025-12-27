@@ -23,19 +23,16 @@ Functions that return large values (structs, arrays) use `ret_load` or `ret_ptr`
 
 **Planned fix**: Implement handlers for `ret_load` and `ret_ptr` that properly track the data flow through the return pointer.
 
-### Refinement Type Tracking
+### @fieldParentPtr Safety
 
-Refinements track basic type structure (scalar, pointer, optional) but don't capture the full Zig type. This makes it difficult to reason about:
-- Whether a pointer is const or mutable
-- Struct vs slice vs primitive types
-- Specific integer/float types
-- How to correctly propagate analysis information through different type categories
+The `@fieldParentPtr` builtin allows converting a pointer to a struct field back to a pointer to the containing struct. This is commonly used in intrusive data structures but can be unsafe if misused.
 
-**Current state**: Codegen extracts type info from the InternPool for interned values and passes it via the `Type` union. Refinements can be scalars, pointers, optionals, or regions with nested structure.
+**Potential issues to detect**:
+- Using `@fieldParentPtr` on a field that isn't actually embedded in the expected struct type
+- Using `@fieldParentPtr` on stack-allocated fields passed to functions expecting heap-allocated containers
+- Lifetime issues where the parent struct is freed but the field pointer is still used
 
-**Impact**: Type-specific analysis decisions are limited. For example, we can't distinguish `*u8` from `*u32`.
-
-**Planned fix**: Extend the type system to capture more detail when needed for specific analyses.
+**Investigation needed**: Determine what AIR instructions are generated for `@fieldParentPtr` and whether we can track the field-to-parent relationship to validate safety.
 
 ### GeneralPurposeAllocator Type Complexity
 
@@ -44,8 +41,6 @@ Using `std.heap.GeneralPurposeAllocator` generates deeply nested struct types th
 **Status**: Codegen succeeds, but the generated analyzer fails to compile due to missing `unknown` in `Type` union.
 
 **Planned fix**: Add `unknown` variant to `lib/tag.zig` Type union to handle complex types that exceed the depth limit.
-
-**Workaround**: Use simpler allocators like `std.heap.FixedBufferAllocator` for testing allocator mismatch scenarios.
 
 ### Runtime Allocator Type Identification
 
@@ -96,17 +91,6 @@ When a compile-time constant pointer is passed as a function argument (e.g., a p
 
 **Investigation needed**: Determine if interned pointer arguments need memory safety state initialization.
 
-### Compile-Time Constants with Undefined Fields
-
-Currently, we assume all compile-time constants (interned values) passed as function arguments are fully defined. However, Zig allows structs with undefined fields at comptime:
-
-```zig
-const s = .{ .x = 5, .y = undefined };
-foo(s);  // Passes interned struct with undefined field
-```
-
-**Investigation needed**: Determine if/how the InternPool represents undefined fields in interned structs, and whether we need to extract that information during codegen to properly track partial undefined state.
-
 ### Region Allocation/Freeing
 
 Region-based memory management (allocating from a region, freeing entire regions) is not tracked.
@@ -115,18 +99,26 @@ Region-based memory management (allocating from a region, freeing entire regions
 
 ### Branching and Control Flow
 
-Basic infrastructure for conditional branching (`cond_br`) exists, with partial support in undefined analysis:
+Switch statements are not fully supported:
 
-**What works**:
-- Simple if/else branches that both assign or both leave undefined
-- Detection of inconsistent branches (one assigns, one doesn't)
-- Merging undefined states at join points for scalar and optional types
+- In AIR, switch generates a series of `cond_br` instructions comparing against each case value
+- Multiple case branches can target the same block (for fallthrough or shared outcomes like `1, 2, 3 => doSomething()`)
+- Current merge logic only handles binary if/else merging from a single `cond_br`
+- N-way state merging is needed: after a switch, we must merge states from ALL case branches, not just two
 
-**What doesn't work**:
-- Memory safety analysis doesn't merge states at join points
-- Multiple branches targeting the same block (complex control flow)
-- Nested conditionals may have edge cases
-- Early returns from one branch need more testing
+**Example of AIR pattern for switch**:
+```
+%10 = cmp_eq(value, 1)
+%11 = cond_br(%10, case1_block, {
+  %12 = cmp_eq(value, 2)
+  %13 = cond_br(%12, case2_block, {
+    %14 = cmp_eq(value, 3)
+    %15 = cond_br(%14, case3_block, else_block)
+  })
+})
+```
+
+**Planned fix**: Implement n-way merge that collects states from all branches targeting the same continuation block.
 
 ### Loops
 
@@ -193,6 +185,20 @@ Safe patterns recognized:
 - Assignment of non-null value before unwrap
 - Comptime-known non-null optionals
 
+### Optional Pointers in AIR
+
+**Investigation needed**: AIR instructions `is_non_null`, `is_null`, and `optional_payload` can apply to BOTH optional types (`?T`) AND pointer types (`*T`). The current implementation handles both cases, but the semantics need further examination:
+
+- For optionals: These instructions check/unwrap the optional wrapper
+- For pointers: The semantics are unclear - possibly checking for null pointers?
+
+**Questions to investigate**:
+1. When does Zig generate `is_non_null` for a pointer vs an optional?
+2. What does `optional_payload` mean when applied to a pointer?
+3. Are there cases where pointer null checks should trigger null_safety analysis?
+
+**Current behavior**: The handlers check if the refinement is `.optional` or `.pointer` and only perform null_safety tracking for optionals. Pointers are handled but don't update null_safety state. This may need revision after investigation.
+
 ### Union Variant Safety
 
 Accessing the wrong variant of a tagged union is not detected. (This might become necessary in the future.)
@@ -209,8 +215,26 @@ Non-memory resources (file handles, sockets, mutexes) that aren't properly close
 
 Potential integer overflow in arithmetic operations is not detected.
 
+### ConstCast
+
+@constCast may break assumptions that CLR is able to make about code/data propagation through dataflow.
+
 ## Not Necessary (Handled by Zig)
+
+### Const-correctness
+
+General const-correctness is handled by Zig.
 
 ### Error Value Propagation
 
 Tracking whether errors are properly handled is not implemented. Zig's error handling system (with `try`, `catch`, and explicit error returns) already enforces this at compile time.
+
+### Exhaustive Switch Coverage
+
+Zig requires switches on enums and tagged unions to be exhaustive at compile time. Missing cases are a compile error, so CLR does not need to detect:
+
+- Missing enum cases in switch statements
+- Missing union tag cases
+- Unreachable patterns in switch arms
+
+CLR only needs to track state merging across switch branches, not validate that all cases are covered.

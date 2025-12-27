@@ -20,6 +20,7 @@ OUTPUT="${SCRIPT_DIR}/${BASENAME}.air.zig"
     -fair-out="$LIBCLR" \
     -ofmt=air \
     -femit-bin="$OUTPUT" \
+    -lc \
     "$INPUT"
 
 zig run --dep clr -Mroot="$OUTPUT" -Mclr="${LIB_DIR}/lib.zig"

@@ -184,7 +184,7 @@ test "instLine for store_safe" {
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .store_safe, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 3, .src = .{ .eidx = 4 }, .is_undef = false } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 3, .src = .{ .eidx = 4 } } });\n", result);
 }
 
 test "instLine for load" {
@@ -560,7 +560,7 @@ test "generateFunction with simple cond_br block" {
         \\
         \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = 3 } });
-        \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 }, .is_undef = false } });
+        \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 } } });
         \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } });
         \\}
         \\
@@ -581,7 +581,7 @@ test "generateFunction with simple cond_br block" {
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
+        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .undefined = &.{ .scalar = {} } } } } });
         \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });
         \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .scalar = {} } } });
         \\    try Inst.apply(state, 4, .{ .noop = .{} });

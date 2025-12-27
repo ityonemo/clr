@@ -29,6 +29,7 @@ compile_air() {
         -fair-out="$LIBCLR" \
         -ofmt=air \
         -femit-bin="$output" \
+        -lc \
         "$input" 2>&1
 }
 

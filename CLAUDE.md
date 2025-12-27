@@ -179,13 +179,11 @@ If you find yourself writing `.analyte.undefined = ...` or `.analyte.memory_safe
       else => return,  // Bug hidden - we expected a pointer!
   };
 
-  // GOOD: Panic on unexpected types, explicit handling for known cases
-  const pointee_idx = switch (refinements.at(ptr_idx).*) {
-      .pointer => |ind| ind.to,
-      .unimplemented => return,  // TODO: explicit handling
-      else => |t| std.debug.panic("store_safe: expected pointer, got {s}", .{@tagName(t)}),
-  };
+  // GOOD: Panic on unexpected types - let Zig's union access panic naturally
+  const pointee_idx = refinements.at(ptr_idx).pointer.to;
   ```
+
+- **Always crash on `.unimplemented`** - Never silently handle or propagate `.unimplemented` refinements. If code encounters `.unimplemented`, it should crash immediately. This surfaces issues that need to be fixed (missing tag handlers, incomplete type tracking) rather than hiding them. The crash tells us exactly what needs to be implemented.
 
 - **Rely on Zig's bounds checking** - Don't write explicit bounds checks before array access. Zig's runtime safety already panics on out-of-bounds access with a clear error message. Add a comment explaining why the access is guaranteed valid:
   ```zig

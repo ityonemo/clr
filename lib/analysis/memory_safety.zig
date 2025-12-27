@@ -812,7 +812,7 @@ test "load detects use after free" {
     // Create, unwrap, store (to make it defined), and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
     try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
     // Load after free should error
@@ -839,7 +839,7 @@ test "load from live allocation does not error" {
     // Create, unwrap, and store to allocation (not freed)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Load from live allocation should succeed
     try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
@@ -922,7 +922,7 @@ test "onFinish allows passed allocation" {
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
     // Store to make the pointee defined
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Return the pointer (marks as passed)
     try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 1 } } });
@@ -972,13 +972,13 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     // inst 1: unwrap_errunion_payload - get the pointer
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
     // inst 2: store_safe - make pointee defined
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // inst 3: alloc - create struct on stack with a pointer field
     const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .scalar = {} } } }} };
     try Inst.apply(state, 3, .{ .alloc = .{ .ty = struct_ty } });
     // inst 4: store_safe - initialize struct with undefined
-    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 3, .src = .{ .interned = struct_ty }, .is_undef = true } });
+    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 3, .src = .{ .interned = .{ .undefined = &struct_ty } } } });
 
     // inst 5: struct_field_ptr - get pointer to field 0
     try Inst.apply(state, 5, .{ .struct_field_ptr = .{
@@ -987,7 +987,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
         .ty = .{ .pointer = &.{ .pointer = &.{ .scalar = {} } } },
     } });
     // inst 6: store_safe - store the allocation pointer into struct field
-    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = 5, .src = .{ .eidx = 1 }, .is_undef = false } });
+    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = 5, .src = .{ .eidx = 1 } } });
 
     // === LOAD POINTER FROM STRUCT FIELD ===
     // inst 7: load - load struct from stack alloc
@@ -1048,11 +1048,11 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     const struct_ty: tag.Type = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .scalar = {} } } }} };
     try Inst.apply(caller_state, 2, .{ .alloc = .{ .ty = struct_ty } });
     // inst 3 = store undefined struct
-    try Inst.apply(caller_state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = struct_ty }, .is_undef = true } });
+    try Inst.apply(caller_state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = .{ .undefined = &struct_ty } } } });
     // inst 4 = struct_field_ptr to field 0
     try Inst.apply(caller_state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .pointer = &.{ .pointer = &.{ .scalar = {} } } } } });
     // inst 5 = store allocation pointer into struct field
-    try Inst.apply(caller_state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 }, .is_undef = false } });
+    try Inst.apply(caller_state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 } } });
 
     // Get the allocation entity for later verification
     const alloc_ptr_ref = caller_results[1].refinement.?;

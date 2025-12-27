@@ -25,19 +25,24 @@ pub const NullSafety = union(enum) {
 
     /// is_non_null sets the optional's null_safety to .unknown with check info
     pub fn is_non_null(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.IsNonNull) !void {
-        const optional_idx = switch (params.src) {
+        const src_idx = switch (params.src) {
             .eidx => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
         };
 
-        const opt = refinements.at(optional_idx);
-        if (opt.* != .optional) return;
+        // is_non_null can apply to optionals or pointers
+        const ref = refinements.at(src_idx);
+        const analyte = switch (ref.*) {
+            .optional => |*o| &o.analyte,
+            .pointer => |*p| &p.analyte,
+            else => return, // Other types (e.g., error unions) - no null tracking
+        };
 
         // Only record check if we don't already know the null state
         // If we already know it's null or non_null, keep that information
-        const ns = opt.optional.analyte.null_safety;
+        const ns = analyte.null_safety;
         if (ns == null or ns.? == .unknown) {
-            opt.optional.analyte.null_safety = .{ .unknown = Checked{
+            analyte.null_safety = .{ .unknown = Checked{
                 .function = ctx.meta.function,
                 .inst = index,
                 .kind = .non_null,
@@ -47,18 +52,23 @@ pub const NullSafety = union(enum) {
 
     /// is_null sets the optional's null_safety to .unknown with check info
     pub fn is_null(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.IsNull) !void {
-        const optional_idx = switch (params.src) {
+        const src_idx = switch (params.src) {
             .eidx => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
         };
 
-        const opt = refinements.at(optional_idx);
-        if (opt.* != .optional) return;
+        // is_null can apply to optionals or pointers
+        const ref = refinements.at(src_idx);
+        const analyte = switch (ref.*) {
+            .optional => |*o| &o.analyte,
+            .pointer => |*p| &p.analyte,
+            else => return, // Other types (e.g., error unions) - no null tracking
+        };
 
         // Only record check if we don't already know the null state
-        const ns = opt.optional.analyte.null_safety;
+        const ns = analyte.null_safety;
         if (ns == null or ns.? == .unknown) {
-            opt.optional.analyte.null_safety = .{ .unknown = Checked{
+            analyte.null_safety = .{ .unknown = Checked{
                 .function = ctx.meta.function,
                 .inst = index,
                 .kind = .@"null",
@@ -132,10 +142,11 @@ pub const NullSafety = union(enum) {
         };
 
         const optional_idx = results[src_idx].refinement orelse return;
-        const opt = refinements.at(optional_idx);
-        if (opt.* != .optional) return;
+        const ref = refinements.at(optional_idx);
+        // optional_payload can apply to optionals or pointers (for error union unwrapping)
+        if (ref.* != .optional) return;
 
-        const ns = opt.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name);
+        const ns = ref.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name);
         switch (ns) {
             .unknown => return reportUncheckedUnwrap(ctx, results[src_idx].name),
             .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name),

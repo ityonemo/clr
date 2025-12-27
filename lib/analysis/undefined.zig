@@ -144,10 +144,8 @@ pub const Undefined = union(enum) {
         _ = ctx;
         const inst = params.ptr orelse return;
         const ptr_idx = results[inst].refinement orelse return;
-        const pointee_idx = switch (refinements.at(ptr_idx).*) {
-            .pointer => |p| p.to,
-            else => return,
-        };
+        // Follow pointer to get pointee - panic on unexpected types
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
         setNameOnUndefined(refinements, pointee_idx, params.name);
     }
 
@@ -206,7 +204,7 @@ pub const Undefined = union(enum) {
     }
 
     /// Recursively set undefined state on a refinement and its children.
-    /// Only called when storing an undefined value (is_undef = true).
+    /// Only called when storing an undefined value (src type is .undefined).
     fn setUndefinedRecursive(refinements: *Refinements, idx: EIdx, undef_state: Undefined) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| s.undefined = undef_state,
@@ -234,20 +232,88 @@ pub const Undefined = union(enum) {
         }
     }
 
+    /// Apply defined/undefined state from an interned type to a refinement.
+    /// Handles field-level undefined for structs where some fields may be undefined.
+    fn applyInternedType(refinements: *Refinements, idx: EIdx, ty: tag.Type, ctx: *Context) void {
+        switch (ty) {
+            .undefined => {
+                // Mark as undefined - don't recurse further, undefined is terminal
+                const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta } };
+                setUndefinedRecursive(refinements, idx, undef_state);
+            },
+            .@"struct" => |fields| {
+                // Apply field-level undefined state
+                switch (refinements.at(idx).*) {
+                    .@"struct" => |s| {
+                        for (fields, 0..) |field, i| {
+                            if (i < s.fields.len) {
+                                applyInternedType(refinements, s.fields[i], field.ty, ctx);
+                            }
+                        }
+                    },
+                    else => {
+                        // Non-struct refinement - just mark as defined
+                        setDefinedRecursive(refinements, idx);
+                    },
+                }
+            },
+            .scalar => {
+                switch (refinements.at(idx).*) {
+                    .scalar => |*s| s.undefined = .{ .defined = {} },
+                    .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
+                    else => {},
+                }
+            },
+            .pointer => |inner| {
+                switch (refinements.at(idx).*) {
+                    .pointer => |*p| {
+                        p.analyte.undefined = .{ .defined = {} };
+                        applyInternedType(refinements, p.to, inner.*, ctx);
+                    },
+                    else => setDefinedRecursive(refinements, idx),
+                }
+            },
+            .optional => |inner| {
+                switch (refinements.at(idx).*) {
+                    .optional => |o| applyInternedType(refinements, o.to, inner.*, ctx),
+                    else => setDefinedRecursive(refinements, idx),
+                }
+            },
+            .errorunion => |inner| {
+                switch (refinements.at(idx).*) {
+                    .errorunion => |e| applyInternedType(refinements, e.to, inner.*, ctx),
+                    else => setDefinedRecursive(refinements, idx),
+                }
+            },
+            .null => {
+                // Null value - mark inner as defined (it's explicitly null, not undefined)
+                switch (refinements.at(idx).*) {
+                    .optional => |o| setDefinedRecursive(refinements, o.to),
+                    else => setDefinedRecursive(refinements, idx),
+                }
+            },
+            .void => {},
+            .region => @panic("applyInternedType: region not yet implemented"),
+            .@"union" => @panic("applyInternedType: union not yet implemented"),
+        }
+    }
+
     pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
         _ = index;
 
         const ptr = params.ptr orelse @panic("store: ptr is null (interned/global) - not yet supported");
         // Follow pointer to get to pointee (local only - propagation happens on function close)
         const ptr_idx = results[ptr].refinement orelse @panic("store: ptr inst has no refinement");
-        const pointee_idx = switch (refinements.at(ptr_idx).*) {
-            .pointer => |ind| ind.to,
-            // TODO: remove when struct_field_ptr is implemented
-            .unimplemented => return,
-            else => |t| std.debug.panic("store: expected pointer, got {s}", .{@tagName(t)}),
+        // Follow pointer to get pointee - panic on unexpected types
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+
+        // Check if source is an undefined type (interned with .undefined wrapper)
+        const is_undef = switch (params.src) {
+            .interned => |ty| ty == .undefined,
+            else => false,
         };
 
-        if (params.is_undef) {
+        if (is_undef) {
             // Undefined stores: mark pointee and all children as undefined (recursive)
             // Capture name from the destination pointer instruction
             const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta, .name_when_set = results[ptr].name } };
@@ -302,30 +368,13 @@ pub const Undefined = union(enum) {
                         .@"union" => @panic("store: union not yet implemented"),
                     }
                 },
-                .interned, .other => {
-                    // Compile-time source - just mark as defined
-                    switch (refinements.at(pointee_idx).*) {
-                        .scalar => |*s| s.undefined = .{ .defined = {} },
-                        .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                        .optional => |o| {
-                            switch (refinements.at(o.to).*) {
-                                .scalar => |*s| s.undefined = .{ .defined = {} },
-                                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                                else => {},
-                            }
-                        },
-                        .errorunion => |e| {
-                            switch (refinements.at(e.to).*) {
-                                .scalar => |*s| s.undefined = .{ .defined = {} },
-                                .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
-                                else => {},
-                            }
-                        },
-                        .@"struct" => {},
-                        .void, .unimplemented, .noreturn, .retval_future => {},
-                        .region => @panic("store: region not yet implemented"),
-                        .@"union" => @panic("store: union not yet implemented"),
-                    }
+                .interned => |ty| {
+                    // Compile-time source - apply defined/undefined based on type
+                    applyInternedType(refinements, pointee_idx, ty, ctx);
+                },
+                .other => {
+                    // Other sources (globals) - just mark as defined
+                    setDefinedRecursive(refinements, pointee_idx);
                 },
             }
         }
@@ -690,7 +739,7 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
 }
 
-test "store with is_undef=true sets undefined" {
+test "store with .undefined type wrapper sets undefined" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -704,9 +753,9 @@ test "store with is_undef=true sets undefined" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // First alloc at instruction 1, then store with is_undef=true
+    // First alloc at instruction 1, then store with .undefined wrapper
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .undefined = &.{ .scalar = {} } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -714,7 +763,7 @@ test "store with is_undef=true sets undefined" {
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
 
-test "store with is_undef=false sets defined" {
+test "store with defined value sets defined" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -728,9 +777,9 @@ test "store with is_undef=false sets defined" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // First alloc at instruction 1, then store with is_undef=false
+    // First alloc at instruction 1, then store a defined value
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -755,7 +804,7 @@ test "store with .null to optional sets inner to defined" {
     // Alloc at instruction 1 with optional type, then store null
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } }, .is_undef = false } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } } } });
 
     // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;

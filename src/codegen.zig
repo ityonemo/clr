@@ -299,12 +299,34 @@ fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const 
                     return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .null = &{s} }} }}", .{child_str}, null);
                 }
             }
+            // Check for aggregate value (struct) with field-level undefined
+            if (type_key == .struct_type) {
+                const val_key = ip.indexToKey(interned_idx);
+                if (val_key == .aggregate) {
+                    const agg = val_key.aggregate;
+                    const struct_str = aggregateValueToString(arena, ip, ty, agg);
+                    return clr_allocator.allocPrint(arena, ".{{ .interned = {s} }}", .{struct_str}, null);
+                }
+            }
         }
         const type_str = typeToString(arena, ip, ty);
         return clr_allocator.allocPrint(arena, ".{{ .interned = {s} }}", .{type_str}, null);
     }
     // Other (globals, etc.)
     return ".{ .other = {} }";
+}
+
+/// Convert an AIR Ref to a Src union string with .undefined wrapper.
+/// Used when storing undefined values - wraps the type in .undefined.
+fn srcStringUndef(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const u8 {
+    // For undefined stores, we wrap the type in .undefined
+    if (ref.toInterned()) |interned_idx| {
+        const ty = ip.typeOf(interned_idx);
+        const type_str = typeToString(arena, ip, ty);
+        return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .undefined = &{s} }} }}", .{type_str}, null);
+    }
+    // Fallback - shouldn't happen for undefined stores
+    return ".{ .interned = .{ .undefined = &.{ .scalar = {} } } }";
 }
 
 /// Check if a type index is a well-known type (doesn't require InternPool lookup).
@@ -430,12 +452,62 @@ fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_inde
     return result.items;
 }
 
+/// Convert an aggregate VALUE (not just type) to a Type string with field-level undefined.
+/// This inspects each field's value to determine if it's undefined.
+fn aggregateValueToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, agg: InternPool.Key.Aggregate) []const u8 {
+    const loaded = ip.loadStructType(type_index);
+    const field_types = loaded.field_types.get(ip);
+    const field_values = agg.storage.values();
+
+    if (field_types.len == 0) {
+        return ".{ .@\"struct\" = &.{} }";
+    }
+
+    var visited = VisitedTypes{};
+
+    // Build field types string with undefined info from values
+    var result = std.ArrayListUnmanaged(u8){};
+    result.appendSlice(arena, ".{ .@\"struct\" = &.{ ") catch @panic("out of memory");
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+
+        // Check if this field's value is undefined
+        const is_field_undef = if (i < field_values.len) ip.isUndef(field_values[i]) else false;
+
+        const inner_type_str = typeToStringInner(arena, ip, field_type, &visited);
+        const field_type_str = if (is_field_undef)
+            clr_allocator.allocPrint(arena, ".{{ .undefined = &{s} }}", .{inner_type_str}, null)
+        else
+            inner_type_str;
+
+        // Get field name (null for tuples)
+        const field_name_opt = loaded.fieldName(ip, i).toSlice(ip);
+        if (field_name_opt) |field_name| {
+            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s}, .name = \"{s}\" }}", .{ field_type_str, field_name }, null);
+            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        } else {
+            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{field_type_str}, null);
+            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        }
+    }
+
+    result.appendSlice(arena, " } }") catch @panic("out of memory");
+    return result.items;
+}
+
 fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(ip, datum.bin_op.rhs);
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
-    const src_str = srcString(arena, ip, datum.bin_op.rhs);
-    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {s}, .is_undef = {} }}", .{ ptr, src_str, is_undef }, null);
+    const src_str = if (is_undef)
+        // Wrap the type in .undefined when storing undefined
+        srcStringUndef(arena, ip, datum.bin_op.rhs)
+    else
+        srcString(arena, ip, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {s} }}", .{ ptr, src_str }, null);
 }
 
 fn payloadLoad(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {

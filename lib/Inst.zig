@@ -371,7 +371,7 @@ test "store_safe with undef keeps state undefined" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .undefined = &.{ .scalar = {} } } } } });
 
     // alloc's pointee stays undefined after store_safe with undef
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -395,7 +395,7 @@ test "store_safe with value sets state to defined" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // alloc's pointee becomes defined after store_safe with real value
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -419,9 +419,9 @@ test "load from undefined instruction reports use before assign" {
 
     const state = testState(&ctx, results, &refinements);
 
-    // Set up: alloc creates pointer to future, store with is_undef transforms to scalar+undefined
+    // Set up: alloc creates pointer to future, store with .undefined transforms to scalar+undefined
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = true } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .undefined = &.{ .scalar = {} } } } } });
 
     // Load from undefined instruction should return error
     try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } }));
@@ -445,7 +445,7 @@ test "load from defined instruction does not report error" {
 
     // Set up: alloc then store a real value
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Load from defined instruction should NOT return error
     try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
@@ -470,7 +470,7 @@ test "all instructions get valid refinements after operations" {
     // Apply various operations that should all set refinements
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
     try Inst.apply(state, 3, .{ .load = .{ .ptr = 1, .ty = .{ .scalar = {} } } });
     try Inst.apply(state, 4, .{ .block = .{ .ty = .{ .void = {} } } });
 
@@ -512,7 +512,7 @@ test "ret_safe copies scalar return value to caller_refinements" {
 
     // In callee: allocate and store a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Return the value from instruction 0
     try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
@@ -576,7 +576,7 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
 
     // Allocate a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Return with null caller_refinements (entrypoint case) - should just succeed without error
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
@@ -858,8 +858,7 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     try Inst.apply(caller_state, 1, .{ .alloc = .{ .ty = struct_ty } });
     try Inst.apply(caller_state, 2, .{ .store_safe = .{
         .ptr = 1,
-        .src = .{ .interned = struct_ty },
-        .is_undef = true,
+        .src = .{ .interned = .{ .undefined = &struct_ty } },
     } });
 
     // Verify caller's struct has undefined fields
@@ -888,7 +887,7 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
 
     // Callee: inst 1 = alloc (pointer to struct), inst 2 = store inst 0's pointer to inst 1
     try Inst.apply(callee_state, 1, .{ .alloc = .{ .ty = .{ .pointer = &struct_ty } } });
-    try Inst.apply(callee_state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .eidx = 0 }, .is_undef = false } });
+    try Inst.apply(callee_state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .eidx = 0 } } });
 
     // Callee: inst 3 = bitcast inst 1 (shares refinement)
     try Inst.apply(callee_state, 3, .{ .bitcast = .{ .src = .{ .eidx = 1 } } });
@@ -904,7 +903,7 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     } });
 
     // Callee: inst 7 = store_safe to inst 6 (sets field0 to defined)
-    try Inst.apply(callee_state, 7, .{ .store_safe = .{ .ptr = 6, .src = .{ .interned = .{ .scalar = {} } }, .is_undef = false } });
+    try Inst.apply(callee_state, 7, .{ .store_safe = .{ .ptr = 6, .src = .{ .interned = .{ .scalar = {} } } } });
 
     // Check that callee's local field0 is now defined
     const local_ptr_idx = callee_results[0].refinement.?;
