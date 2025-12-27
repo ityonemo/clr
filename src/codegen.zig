@@ -47,6 +47,8 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .struct_field_ptr_index_3 => payloadStructFieldPtr(arena, ip, datum, 3),
         // Note: All struct_field_ptr_index_N are mapped to struct_field_ptr via safeName()
         .struct_field_val => payloadStructFieldVal(arena, ip, datum, extra),
+        .ret_ptr => payloadRetPtr(arena, ip, datum),
+        .ret_load => payloadRetLoad(arena, datum),
         else => ".{}",
     };
 }
@@ -588,6 +590,34 @@ fn payloadLoad(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []c
     } else {
         return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
     }
+}
+
+/// ret_ptr returns a pointer to the return value storage.
+/// Uses .ty field which contains the pointer type.
+fn payloadRetPtr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    // datum.ty is the pointer type (e.g., *Container)
+    // We need to extract the pointee type for the handler
+    const ptr_type = datum.ty.toIntern();
+    const ptr_key = ip.indexToKey(ptr_type);
+    const pointee_type: InternPool.Index = switch (ptr_key) {
+        .ptr_type => |p| p.child,
+        else => .none,
+    };
+    if (pointee_type == .none) {
+        return ".{ .ty = .{ .unknown = {} } }";
+    }
+    const ty_str = typeToString(arena, ip, pointee_type);
+    return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{ty_str}, null);
+}
+
+/// ret_load loads from ret_ptr to complete return.
+/// Uses .un_op field which is the ret_ptr instruction index.
+fn payloadRetLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
+    // un_op is the operand (ret_ptr instruction)
+    if (datum.un_op.toIndex()) |idx| {
+        return clr_allocator.allocPrint(arena, ".{{ .ptr = {d} }}", .{@intFromEnum(idx)}, null);
+    }
+    return ".{}";
 }
 
 fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {

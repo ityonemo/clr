@@ -170,9 +170,80 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Called on function close to check for memory leaks.
+    /// Check ret_load for stack pointer escapes in struct/union fields.
+    /// ret_load returns a value through ret_ptr storage - used for large returns (structs, unions).
+    pub fn ret_load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetLoad) !void {
+        _ = index;
+
+        // Get the ret_ptr pointer and its pointee (the struct/union being returned)
+        const ptr_refinement_idx = results[params.ptr].refinement orelse return;
+        const ptr_refinement = refinements.at(ptr_refinement_idx);
+        if (ptr_refinement.* != .pointer) return;
+
+        const pointee_idx = ptr_refinement.pointer.to;
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+
+        // Check for stack pointers escaping via struct/union fields
+        try checkStackEscapeRecursive(refinements, pointee_idx, ctx, func_name);
+    }
+
+    /// Recursively check refinement tree for escaping stack pointers.
+    /// Only checks for stack_ptr escapes - does NOT modify allocation state.
+    fn checkStackEscapeRecursive(refinements: *Refinements, idx: EIdx, ctx: *Context, func_name: []const u8) !void {
+        switch (refinements.at(idx).*) {
+            .pointer => |p| {
+                const ms = p.analyte.memory_safety orelse return;
+                switch (ms) {
+                    .stack_ptr => |sp| {
+                        if (std.mem.eql(u8, sp.meta.function, func_name)) {
+                            return reportStackEscape(ms, ctx);
+                        }
+                    },
+                    // Don't mark allocations as passed here - that only happens in ret_safe
+                    // when actually returning a pointer. Here we're just checking for stack escapes.
+                    .allocation, .passed => {},
+                }
+            },
+            .@"struct" => |s| {
+                for (s.fields) |field_idx| {
+                    try checkStackEscapeRecursive(refinements, field_idx, ctx, func_name);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |field_idx_opt| {
+                    if (field_idx_opt) |field_idx| {
+                        try checkStackEscapeRecursive(refinements, field_idx, ctx, func_name);
+                    }
+                }
+            },
+            .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
+            .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
+            .scalar, .void, .noreturn, .unimplemented, .retval_future, .region => {},
+        }
+    }
+
+    /// Called on function close to check for memory leaks and stack pointer escapes.
     /// Backward propagation is handled centrally by Inst.backPropagate().
     pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
+        // Check for stack pointer escapes via pointer arguments
+        // If a pointer arg's pointee contains a stack pointer from this function,
+        // backPropagate would escape it to the caller
+        if (ctx.stacktrace.items.len > 0) {
+            const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+            for (results) |inst| {
+                // Only check args that have caller entity (will be back-propagated)
+                if (inst.caller_eidx == null) continue;
+                const idx = inst.refinement orelse continue;
+                const refinement = refinements.at(idx);
+
+                // Only check pointer args - scalar args are copied by value
+                if (refinement.* != .pointer) continue;
+
+                // Check the pointee for stack pointers
+                try checkStackEscapeRecursive(refinements, refinement.pointer.to, ctx, func_name);
+            }
+        }
+
         // Check for memory leaks
         for (results) |inst| {
             const idx = inst.refinement orelse continue;

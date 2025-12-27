@@ -85,6 +85,16 @@ pub const Undefined = union(enum) {
         refinements.at(ptr_idx).pointer.analyte.undefined = .{ .defined = {} };
     }
 
+    pub fn ret_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetPtr) !void {
+        _ = params;
+        // The pointer itself is defined (it exists)
+        const ptr_idx = results[index].refinement.?;
+        refinements.at(ptr_idx).pointer.analyte.undefined = .{ .defined = {} };
+        // The pointee starts as undefined (must be set before ret_load)
+        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = ctx.meta } });
+    }
+
     /// Helper to recursively set all scalars/pointers in a refinement tree to defined.
     fn setDefinedRecursive(refinements: *Refinements, idx: EIdx) void {
         switch (refinements.at(idx).*) {

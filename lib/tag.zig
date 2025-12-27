@@ -664,6 +664,65 @@ pub const RetSafe = struct {
     }
 };
 
+/// RetPtr returns a pointer to the return value storage.
+/// Used for large return values (structs, unions) where caller provides storage.
+///
+/// Flow:
+/// 1. ret_ptr creates a local entity (the return value) and a pointer to it
+/// 2. Operations (store_safe, struct_field_ptr, etc.) modify through the pointer
+/// 3. ret_load copies the entity to caller's return slot
+pub const RetPtr = struct {
+    /// The return value type (pointee type, not pointer type)
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create a local entity for the return value based on type
+        const return_ref = try typeToRefinement(self.ty, state.refinements);
+        const return_idx = try state.refinements.appendEntity(return_ref);
+
+        // Create a pointer to this entity as the result
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = return_idx } });
+
+        try splat(.ret_ptr, state, index, self);
+    }
+};
+
+/// RetLoad loads from ret_ptr to complete the return.
+/// Copies the return value entity to caller's return slot.
+pub const RetLoad = struct {
+    /// The ret_ptr instruction index
+    ptr: usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+
+        // Get the entity from ret_ptr's pointer
+        const ptr_ref = state.results[self.ptr].refinement orelse @panic("ret_load: ret_ptr has no refinement");
+        const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
+
+        // Copy to caller's return slot
+        if (state.caller_refinements) |caller_refinements| {
+            const return_eidx = state.return_eidx;
+            switch (caller_refinements.at(return_eidx).*) {
+                .retval_future, .noreturn => {
+                    // Copy return value from callee to caller's return slot
+                    // copy_to creates a new entity with properly allocated memory
+                    const new_idx = try state.refinements.at(pointee_idx).*.copy_to(state.refinements, caller_refinements);
+                    // Move the value to return_eidx and clear the intermediate entity
+                    // This avoids double-free since only return_eidx owns the allocations
+                    caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
+                    caller_refinements.at(new_idx).* = .{ .void = {} };
+                },
+                else => {
+                    @panic("ret_load: multiple returns in same branch - merge not yet implemented");
+                },
+            }
+        }
+
+        try splat(.ret_load, state, index, self);
+    }
+};
+
 /// Store writes a value through a pointer. The store instruction itself is void.
 /// Used for both `store` and `store_safe` AIR instructions (semantically identical
 /// for our analysis - the difference is only runtime safety checks).
@@ -936,8 +995,8 @@ pub const AnyTag = union(enum) {
     noop_pruned_debug: Unimplemented(.{ .void = true }),
     ptr_add: Unimplemented(.{}),
     ret_addr: Unimplemented(.{}),
-    ret_load: Unimplemented(.{}),
-    ret_ptr: Unimplemented(.{}),
+    ret_load: RetLoad,
+    ret_ptr: RetPtr,
     slice: Unimplemented(.{}),
     slice_len: Unimplemented(.{}),
     stack_trace_frames: Unimplemented(.{}),
