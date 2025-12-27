@@ -554,10 +554,12 @@ test "generateFunction with simple cond_br block" {
 
     const expected =
         \\fn fn_42_cond_br_false_7(state: State) anyerror!void {
+        \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = false, .condition_idx = 3 } });
         \\    try Inst.apply(state, 6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } });
         \\}
         \\
         \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
+        \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = 3 } });
         \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 }, .is_undef = false } });
         \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .void = {} } } } });
         \\}

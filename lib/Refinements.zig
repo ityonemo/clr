@@ -280,8 +280,10 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
 
 const undefined_analysis = @import("analysis/undefined.zig");
 const memory_safety_analysis = @import("analysis/memory_safety.zig");
+const null_safety_analysis = @import("analysis/null_safety.zig");
 
 pub fn testValid(self: *Refinements) void {
     undefined_analysis.testValid(self);
     memory_safety_analysis.testValid(self);
+    null_safety_analysis.testValid(self);
 }

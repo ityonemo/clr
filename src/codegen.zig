@@ -38,6 +38,7 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .ret_safe => payloadRetSafe2(arena, ip, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
         .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
+        .is_non_null, .is_null => payloadUnOp(arena, ip, datum),
         .br => payloadBr(arena, ip, datum),
         .block => payloadBlock(arena, ip, datum),
         .struct_field_ptr_index_0 => payloadStructFieldPtr(arena, ip, datum, 0),
@@ -56,6 +57,12 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
 fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(arena, ip, operand);
+    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for un_op instructions (is_non_null, is_null, etc.) that use datum.un_op
+fn payloadUnOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const src_str = srcString(arena, ip, datum.un_op);
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
@@ -964,6 +971,41 @@ fn extractCondBrBodies(cond_br_idx: usize, data: []const Data, extra: []const u3
     };
 }
 
+/// Check if this cond_br is part of the .? (optional unwrap) pattern.
+/// The .? operator in debug/safe modes injects a runtime null check:
+/// is_non_null + cond_br(call unwrapNull + unreach).
+/// We detect this pattern to noop the compiler-injected safety check,
+/// allowing our static null detection via optional_payload to work correctly.
+///
+/// Pattern: condition is is_non_null, else branch contains call to unwrapNull
+fn isDotQPattern(ip: *const InternPool, cond_br_idx: usize, tags: []const Tag, data: []const Data, extra: []const u32) bool {
+    // 1. Get condition operand from cond_br
+    const cond_br_datum = data[cond_br_idx];
+    const condition_ref = cond_br_datum.pl_op.operand;
+    const condition_idx = condition_ref.toIndex() orelse return false;
+    const condition_idx_u32: u32 = @intFromEnum(condition_idx);
+
+    // 2. Check if condition is is_non_null
+    if (tags[condition_idx_u32] != .is_non_null) return false;
+
+    // 3. Extract else branch body
+    const bodies = extractCondBrBodies(cond_br_idx, data, extra) orelse return false;
+
+    // 4. Check else branch for unwrapNull call
+    for (bodies.@"else") |else_idx| {
+        const else_tag = tags[else_idx];
+        if (else_tag == .call or else_tag == .call_always_tail or
+            else_tag == .call_never_tail or else_tag == .call_never_inline)
+        {
+            const fqn = getCallFqn(ip, data[else_idx]) orelse continue;
+            if (std.mem.endsWith(u8, fqn, "unwrapNull")) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// Generate Zig source code for a function from AIR instructions using worklist algorithm.
 /// This processes the main function and any nested conditionals, outputting branch functions
 /// first (so they're in scope) followed by the main function.
@@ -1132,9 +1174,14 @@ fn generateOneFunction(
                 const tag = tags[idx];
                 const datum = data[idx];
 
-                // Check for cond_br - add branches to worklist
+                // Check for cond_br - add branches to worklist (unless it's a .? pattern)
+                var is_dotq_noop = false;
                 if (tag == .cond_br) {
-                    if (extractCondBrBodies(idx, data, extra)) |bodies| {
+                    if (isDotQPattern(ip, idx, tags, data, extra)) {
+                        // .? pattern detected - noop the cond_br, skip branch functions
+                        is_dotq_noop = true;
+                        // Don't add branch functions to worklist
+                    } else if (extractCondBrBodies(idx, data, extra)) |bodies| {
                         worklist.append(arena, .{ .sub = .{
                             .func_index = func_index,
                             .instr_index = idx,
@@ -1150,7 +1197,7 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = false }) catch @panic("out of memory");
+                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
         .sub => {
@@ -1169,9 +1216,13 @@ fn generateOneFunction(
                 const tag = tags[idx];
                 const datum = data[idx];
 
-                // Check for nested cond_br
+                // Check for nested cond_br (unless it's a .? pattern)
+                var is_dotq_noop = false;
                 if (tag == .cond_br) {
-                    if (extractCondBrBodies(idx, data, extra)) |bodies| {
+                    if (isDotQPattern(ip, idx, tags, data, extra)) {
+                        // .? pattern detected - noop the cond_br, skip branch functions
+                        is_dotq_noop = true;
+                    } else if (extractCondBrBodies(idx, data, extra)) |bodies| {
                         worklist.append(arena, .{ .sub = .{
                             .func_index = func_index,
                             .instr_index = idx,
@@ -1187,7 +1238,7 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = false }) catch @panic("out of memory");
+                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
     }
@@ -1196,6 +1247,21 @@ fn generateOneFunction(
     var lines: std.ArrayListUnmanaged([]const u8) = .empty;
     var total_len: usize = 0;
     var arg_counter: u32 = 0;
+
+    // For sub functions, inject CondBr line at the start to trigger null_safety refinement
+    switch (item) {
+        .sub => |s| {
+            // Get the condition operand from the cond_br instruction
+            const cond_br_datum = data[s.instr_index];
+            const condition_ref = cond_br_datum.pl_op.operand;
+            const condition_idx: ?usize = if (condition_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+            const is_true_branch = s.tag == .cond_br_true;
+            const cond_br_line = generateCondBrTagLine(arena, is_true_branch, condition_idx);
+            lines.append(arena, cond_br_line) catch @panic("out of memory");
+            total_len += cond_br_line.len;
+        },
+        .full => {},
+    }
 
     while (stack.items.len > 0) {
         const instr = stack.pop().?;
@@ -1264,6 +1330,14 @@ fn generateNoopLine(arena: std.mem.Allocator, idx: u32) []const u8 {
         \\    try Inst.apply(state, {d}, .{{ .noop = .{{}} }});
         \\
     , .{idx}, null);
+}
+
+/// Generate CondBr tag line at the start of branch functions for null_safety refinement
+fn generateCondBrTagLine(arena: std.mem.Allocator, is_true_branch: bool, condition_idx: ?usize) []const u8 {
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d} }} }});
+        \\
+    , .{ is_true_branch, condition_idx }, null);
 }
 
 /// Generate epilogue with imports and main function
