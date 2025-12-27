@@ -135,3 +135,15 @@ load test_helper
     [[ "$output" =~ "use of undefined value found in full_undefined_with_default.main" ]]
     [[ "$output" =~ "full_undefined_with_default.zig:9:" ]]
 }
+
+@test "no error when accessing defined field from partial init const" {
+    run compile_and_run "$TEST_CASES/undefined/structs/partial_init_const_defined_field.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined field from partial init const" {
+    run compile_and_run "$TEST_CASES/undefined/structs/partial_init_const_undefined_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in" ]]
+    [[ "$output" =~ "partial_init_const_undefined_field.zig" ]]
+}

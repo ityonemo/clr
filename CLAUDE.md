@@ -67,7 +67,7 @@ bats test/integration/allocator.bats -f "double-free"
 
 **Important**: Always run BATS from the project root directory. The test helper uses relative paths from its location to find the compiler, libclr.so, and test cases.
 
-**Important**: Do NOT modify integration tests to make them pass, unless we have decided to materially change the shape of the output. Integration tests should simply call `compile_and_run` and check the result. If a test fails, fix the codegen or runtime - not the test.
+**CRITICAL**: NEVER materially modify, comment out, or skip integration tests to make the test suite pass without permission. Failing tests are intentional - they serve as reminders of work to be done. If a test fails, fix the codegen or runtime - not the test. Minor updates like fixing line numbers after test file changes are fine. Integration tests should simply call `compile_and_run` and check the result.
 
 **Important**: Do NOT report integration test failures as "pre-existing" unless you are CERTAIN the previous sprint left them as failures. Report failures without assuming they were already broken.
 
