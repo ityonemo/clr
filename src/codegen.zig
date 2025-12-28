@@ -37,7 +37,8 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .load => payloadLoad(arena, ip, datum),
         .ret_safe => payloadRetSafe2(arena, ip, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
-        .bitcast, .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
+        .bitcast => payloadBitcast(arena, ip, datum),
+        .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
         .is_non_null, .is_null => payloadUnOp(arena, ip, datum),
         .br => payloadBr(arena, ip, datum),
         .block => payloadBlock(arena, ip, datum),
@@ -49,17 +50,30 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .struct_field_val => payloadStructFieldVal(arena, ip, datum, extra),
         .ret_ptr => payloadRetPtr(arena, ip, datum),
         .ret_load => payloadRetLoad(arena, datum),
+        .set_union_tag => payloadSetUnionTag(arena, ip, datum),
+        .get_union_tag => payloadGetUnionTag(arena, datum),
         else => ".{}",
     };
 }
 
 /// Payload for operations that transfer all properties from source to result.
-/// Used for bitcast, unwrap_errunion_payload, etc. where the result carries
+/// Used for unwrap_errunion_payload, optional_payload, etc. where the result carries
 /// the same memory safety / allocation state as the source.
 fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(arena, ip, operand);
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for bitcast - includes destination type to handle pointer-to-optional coercion.
+fn payloadBitcast(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const operand = datum.ty_op.operand;
+    const src_str = srcString(arena, ip, operand);
+    const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
+        typeToString(arena, ip, ty_idx)
+    else
+        ".{ .scalar = {} }";
+    return clr_allocator.allocPrint(arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
 }
 
 /// Payload for un_op instructions (is_non_null, is_null, etc.) that use datum.un_op
@@ -620,6 +634,71 @@ fn payloadRetLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
     return ".{}";
 }
 
+/// Payload for set_union_tag - sets the active tag of a union.
+/// Extracts union pointer, field index, and field type from the interned tag value.
+fn payloadSetUnionTag(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    // bin_op: lhs = union ptr, rhs = new tag value (interned enum)
+    const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
+
+    // Extract field index and field type from interned enum tag value
+    var field_index: ?u32 = null;
+    var field_type: ?InternPool.Index = null;
+
+    const tag_ref = datum.bin_op.rhs;
+    if (tag_ref.toInterned()) |interned_idx| {
+        const key = ip.indexToKey(interned_idx);
+        if (key == .enum_tag) {
+            // Get the integer value from the enum tag
+            const int_idx = key.enum_tag.int;
+            const int_key = ip.indexToKey(int_idx);
+            if (int_key == .int) {
+                // Extract the actual integer value
+                field_index = switch (int_key.int.storage) {
+                    .u64 => |v| @intCast(v),
+                    .i64 => |v| @intCast(v),
+                    .big_int => |big| big.toInt(u32) catch null,
+                    .lazy_align, .lazy_size => null,
+                };
+
+                // Try to get field type from the enum's associated union
+                const enum_type_idx = key.enum_tag.ty;
+                const enum_key = ip.indexToKey(enum_type_idx);
+                if (enum_key == .enum_type) {
+                    // Check if this enum is a generated tag from a union
+                    switch (enum_key.enum_type) {
+                        .generated_tag => |gt| {
+                            // Found the union! Get field type at field_index
+                            const union_type_idx = gt.union_type;
+                            const loaded_union = ip.loadUnionType(union_type_idx);
+                            if (field_index) |idx| {
+                                const field_types = loaded_union.field_types.get(ip);
+                                if (idx < field_types.len) {
+                                    field_type = field_types[idx];
+                                }
+                            }
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+    }
+
+    const ty_str = if (field_type) |ft|
+        typeToString(arena, ip, ft)
+    else
+        ".{ .scalar = {} }"; // Fallback for untagged unions or errors
+
+    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .field_index = {?d}, .ty = {s} }}", .{ ptr, field_index, ty_str }, null);
+}
+
+/// Payload for get_union_tag - gets the active tag from a union.
+/// Uses ty_op: operand is the union value.
+fn payloadGetUnionTag(arena: std.mem.Allocator, datum: Data) []const u8 {
+    const operand: ?usize = if (datum.ty_op.operand.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(arena, ".{{ .operand = {?d} }}", .{operand}, null);
+}
+
 fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
     const operand = datum.pl_op.operand;
     const name_index = datum.pl_op.payload;
@@ -1155,6 +1234,55 @@ fn extractCondBrBodies(cond_br_idx: usize, data: []const Data, extra: []const u3
     };
 }
 
+/// Union tag check info for variant safety
+const UnionTagCheck = struct {
+    union_inst: usize, // instruction index that holds the union
+    field_index: u32, // the variant field being checked
+};
+
+/// Check if the condition is a union tag comparison (get_union_tag + cmp_eq).
+/// Returns the union instruction and field_index if it's a tag check pattern.
+fn getUnionTagCheck(ip: *const InternPool, condition_idx: usize, tags: []const Tag, data: []const Data) ?UnionTagCheck {
+    // Check if condition is cmp_eq
+    if (tags[condition_idx] != .cmp_eq) return null;
+
+    const cmp_datum = data[condition_idx];
+    const lhs_ref = cmp_datum.bin_op.lhs;
+    const rhs_ref = cmp_datum.bin_op.rhs;
+
+    // Check if lhs is get_union_tag (instruction) and rhs is interned enum tag
+    const lhs_idx = lhs_ref.toIndex() orelse return null;
+    const lhs_idx_u32: u32 = @intFromEnum(lhs_idx);
+
+    if (tags[lhs_idx_u32] != .get_union_tag) return null;
+
+    // Get the union instruction from get_union_tag's operand
+    const get_tag_datum = data[lhs_idx_u32];
+    const union_ref = get_tag_datum.ty_op.operand;
+    const union_idx = union_ref.toIndex() orelse return null;
+
+    // Extract field_index from rhs interned enum tag
+    const interned_idx = rhs_ref.toInterned() orelse return null;
+    const key = ip.indexToKey(interned_idx);
+    if (key != .enum_tag) return null;
+
+    const int_idx = key.enum_tag.int;
+    const int_key = ip.indexToKey(int_idx);
+    if (int_key != .int) return null;
+
+    const field_index: ?u32 = switch (int_key.int.storage) {
+        .u64 => |v| @intCast(v),
+        .i64 => |v| @intCast(v),
+        .big_int => |big| big.toInt(u32) catch null,
+        .lazy_align, .lazy_size => null,
+    };
+
+    return .{
+        .union_inst = @intFromEnum(union_idx),
+        .field_index = field_index orelse return null,
+    };
+}
+
 /// Check if this cond_br is part of the .? (optional unwrap) pattern.
 /// The .? operator in debug/safe modes injects a runtime null check:
 /// is_non_null + cond_br(call unwrapNull + unreach).
@@ -1440,7 +1568,14 @@ fn generateOneFunction(
             const condition_ref = cond_br_datum.pl_op.operand;
             const condition_idx: ?usize = if (condition_ref.toIndex()) |idx| @intFromEnum(idx) else null;
             const is_true_branch = s.tag == .cond_br_true;
-            const cond_br_line = generateCondBrTagLine(arena, is_true_branch, condition_idx);
+
+            // Check if this is a union tag comparison pattern
+            const union_tag: ?UnionTagCheck = if (condition_idx) |cond_idx|
+                getUnionTagCheck(ip, cond_idx, tags, data)
+            else
+                null;
+
+            const cond_br_line = generateCondBrTagLine(arena, is_true_branch, condition_idx, union_tag);
             lines.append(arena, cond_br_line) catch @panic("out of memory");
             total_len += cond_br_line.len;
         },
@@ -1517,11 +1652,19 @@ fn generateNoopLine(arena: std.mem.Allocator, idx: u32) []const u8 {
 }
 
 /// Generate CondBr tag line at the start of branch functions for null_safety refinement
-fn generateCondBrTagLine(arena: std.mem.Allocator, is_true_branch: bool, condition_idx: ?usize) []const u8 {
-    return clr_allocator.allocPrint(arena,
-        \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d} }} }});
-        \\
-    , .{ is_true_branch, condition_idx }, null);
+fn generateCondBrTagLine(arena: std.mem.Allocator, is_true_branch: bool, condition_idx: ?usize, union_tag: ?UnionTagCheck) []const u8 {
+    // Only emit union_tag if it's set (defaults to null in tag.zig)
+    if (union_tag) |ut| {
+        return clr_allocator.allocPrint(arena,
+            \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d}, .union_tag = .{{ .union_inst = {d}, .field_index = {d} }} }} }});
+            \\
+        , .{ is_true_branch, condition_idx, ut.union_inst, ut.field_index }, null);
+    } else {
+        return clr_allocator.allocPrint(arena,
+            \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d} }} }});
+            \\
+        , .{ is_true_branch, condition_idx }, null);
+    }
 }
 
 /// Generate epilogue with imports and main function

@@ -24,7 +24,10 @@ pub const NullSafety = union(enum) {
     @"null": Meta,
 
     /// is_non_null sets the optional's null_safety to .unknown with check info
-    pub fn is_non_null(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.IsNonNull) !void {
+    pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
         const src_idx = switch (params.src) {
             .eidx => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
@@ -51,7 +54,10 @@ pub const NullSafety = union(enum) {
     }
 
     /// is_null sets the optional's null_safety to .unknown with check info
-    pub fn is_null(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.IsNull) !void {
+    pub fn is_null(state: State, index: usize, params: tag.IsNull) !void {
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
         const src_idx = switch (params.src) {
             .eidx => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
@@ -78,9 +84,10 @@ pub const NullSafety = union(enum) {
 
     /// cond_br is emitted at branch start - search for optionals with matching check info
     /// and update to .non_null or .null based on the branch
-    pub fn cond_br(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.CondBr) !void {
-        _ = results;
+    pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
         _ = index;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
 
         const condition_idx = params.condition_idx orelse return;
 
@@ -134,8 +141,11 @@ pub const NullSafety = union(enum) {
     }
 
     /// optional_payload errors on unchecked unwrap or known null unwrap
-    pub fn optional_payload(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.OptionalPayload) !void {
+    pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
         const src_idx = switch (params.src) {
             .eidx => |s| s,
             else => return, // Comptime - always safe
@@ -155,8 +165,11 @@ pub const NullSafety = union(enum) {
     }
 
     /// store tracks assignments to optionals
-    pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
+    pub fn store(state: State, index: usize, params: tag.Store) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
 
         const ptr = params.ptr orelse return;
         const ptr_idx = results[ptr].refinement orelse return;
@@ -234,18 +247,21 @@ pub const NullSafety = union(enum) {
     }
 };
 
-pub fn testValid(refinements: *Refinements) void {
-    for (refinements.list.items) |ref| {
-        switch (ref) {
-            .optional => |opt| {
-                // If null_safety is set, verify the tag is valid
-                if (opt.analyte.null_safety) |ns| {
-                    _ = switch (ns) {
-                        .unknown, .non_null, .@"null" => {},
-                    };
-                }
-            },
-            else => {},
-        }
+pub fn testValid(refinement: Refinements.Refinement) void {
+    switch (refinement) {
+        // null_safety is valid on optionals and pointers (for ?*T pointer-like optionals)
+        .optional, .pointer => {},
+        // null_safety should not exist on non-optional/non-pointer types
+        .scalar => |s| {
+            if (s.null_safety != null) {
+                std.debug.panic("null_safety should only exist on optionals/pointers, got scalar", .{});
+            }
+        },
+        inline .errorunion, .@"struct", .@"union" => |data, t| {
+            if (data.analyte.null_safety != null) {
+                std.debug.panic("null_safety should only exist on optionals/pointers, got {s}", .{@tagName(t)});
+            }
+        },
+        .void, .noreturn, .retval_future, .unimplemented, .region => {},
     }
 }

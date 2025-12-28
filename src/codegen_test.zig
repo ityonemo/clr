@@ -357,7 +357,7 @@ test "instLine for bitcast" {
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
     const result = codegen._instLine(arena.allocator(), dummy_ip, .bitcast, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .eidx = 7 } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .eidx = 7 }, .ty = .{ .scalar = {} } } });\n", result);
 }
 
 test "instLine for unwrap_errunion_payload" {

@@ -236,23 +236,19 @@ fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Ref
     switch (local.*) {
         .scalar => |src| {
             // caller should already be scalar from type info
-            if (caller.* != .scalar) std.debug.panic("backPropagate: local pointee is scalar but caller pointee is {s}", .{@tagName(caller.*)});
             caller.scalar = src;
         },
         .pointer => |src| {
-            if (caller.* != .pointer) std.debug.panic("backPropagate: local pointee is pointer but caller pointee is {s}", .{@tagName(caller.*)});
             caller.pointer.analyte = src.analyte;
             propagatePointee(local_refs, src.to, caller_refs, caller.pointer.to);
         },
         .@"struct" => |src| {
-            if (caller.* != .@"struct") std.debug.panic("backPropagate: local pointee is struct but caller pointee is {s}", .{@tagName(caller.*)});
             caller.@"struct".analyte = src.analyte;
             for (src.fields, 0..) |local_field_idx, i| {
                 propagatePointee(local_refs, local_field_idx, caller_refs, caller.@"struct".fields[i]);
             }
         },
         .@"union" => |src| {
-            if (caller.* != .@"union") std.debug.panic("backPropagate: local pointee is union but caller pointee is {s}", .{@tagName(caller.*)});
             caller.@"union".analyte = src.analyte;
             // Propagate active fields - if local has active field that caller doesn't, activate it in caller
             const mutable_caller_fields = @constCast(caller.@"union".fields);
@@ -314,11 +310,33 @@ pub fn backPropagate(state: State) void {
                 }
             },
             .@"union" => |local_union| {
+                // Copy analyte (including variant_safety) from local to caller
+                // But we need to ensure any active variants have field entities in caller
+                const mutable_caller_fields = @constCast(caller_entity.@"union".fields);
+
+                // If local has variant_safety with active fields, ensure caller has those field entities
+                if (local_union.analyte.variant_safety) |vs| {
+                    for (vs.active_metas, 0..) |meta_opt, i| {
+                        if (meta_opt != null and mutable_caller_fields[i] == null) {
+                            // Active variant in local but no field entity in caller - create one
+                            if (local_union.fields[i]) |local_field_idx| {
+                                // Copy from local
+                                const new_idx = state.refinements.at(local_field_idx).*.copy_to(state.refinements, cp) catch @panic("out of memory");
+                                mutable_caller_fields[i] = new_idx;
+                            } else {
+                                // No local field either - create a defined scalar placeholder
+                                mutable_caller_fields[i] = cp.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } }) catch @panic("out of memory");
+                            }
+                        }
+                    }
+                }
+
                 caller_entity.@"union".analyte = local_union.analyte;
-                // Only propagate active fields (non-null in both local and caller)
+
+                // Propagate active fields (non-null in both local and caller)
                 for (local_union.fields, 0..) |local_field_opt, i| {
                     if (local_field_opt) |local_field_idx| {
-                        if (caller_entity.@"union".fields[i]) |caller_field_idx| {
+                        if (mutable_caller_fields[i]) |caller_field_idx| {
                             propagatePointee(state.refinements, local_field_idx, cp, caller_field_idx);
                         }
                     }
@@ -919,7 +937,7 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     try Inst.apply(callee_state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .eidx = 0 } } });
 
     // Callee: inst 3 = bitcast inst 1 (shares refinement)
-    try Inst.apply(callee_state, 3, .{ .bitcast = .{ .src = .{ .eidx = 1 } } });
+    try Inst.apply(callee_state, 3, .{ .bitcast = .{ .src = .{ .eidx = 1 }, .ty = .{ .scalar = {} } } });
 
     // Callee: inst 5 = load from inst 3 (gets the pointer stored in inst 1)
     try Inst.apply(callee_state, 5, .{ .load = .{ .ptr = 3, .ty = .{ .pointer = &.{ .@"struct" = &.{ .{ .ty = .{ .scalar = {} } }, .{ .ty = .{ .scalar = {} } } } } } } });

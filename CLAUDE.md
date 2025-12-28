@@ -472,6 +472,19 @@ The `Simple` type currently just produces a scalar without tracking operands. Fo
 - Pass operand parameters to track where values flow from
 - Currently affects: `bit_and`, `cmp_eq`, `cmp_gt`, `cmp_lte`, `ctz`, `sub`
 
+### Runtime union tag comparisons not tracked
+
+Variant safety only recognizes the pattern `if (some_union == .variant_name)` where `.variant_name` is a comptime-known enum literal. Comparisons against runtime union tags are not tracked:
+
+```zig
+const some_tag: SomeUnion = get_tag_at_runtime();
+if (my_union == some_tag) {  // NOT recognized - some_tag is runtime value
+    _ = my_union.field;  // May incorrectly report inactive variant access
+}
+```
+
+This is an intentional limitation - tracking runtime tag values would require complex value flow analysis.
+
 ### `dbg_inline_block` not implemented
 
 The `dbg_inline_block` instruction is used for inlined function calls. This needs investigation to understand how it affects data flow tracking - inlined code may need special handling to maintain correct interprocedural analysis.

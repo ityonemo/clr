@@ -19,7 +19,8 @@ const State = Inst.State;
 const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 const NullSafety = @import("analysis/null_safety.zig").NullSafety;
-pub const analyses = .{ Undefined, MemorySafety, NullSafety };
+const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
+pub const analyses = .{ Undefined, MemorySafety, NullSafety, VariantSafety };
 
 // Type
 
@@ -63,12 +64,12 @@ pub const Src = union(enum) {
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
     return switch (ty) {
-        .scalar => .{ .scalar = .{ .undefined = .{ .defined = {} } } },
+        .scalar => .{ .scalar = .{} },
         .void => .void,
         .pointer => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .pointer = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .to = child_idx } };
+            return .{ .pointer = .{ .analyte = .{}, .to = child_idx } };
         },
         .optional => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
@@ -207,16 +208,24 @@ pub const Arg = struct {
 pub const Bitcast = struct {
     /// Source value being bitcast.
     src: Src,
+    /// Destination type - available for analysis but bitcast shares source refinement.
+    /// Zig's ?*T is represented as a nullable pointer, so we track null_safety on pointers.
+    ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Share source instruction's entity (intraprocedural - no copy needed).
-        // TODO: When we add analyte fields to pointer entities, we may need to
-        // copy/merge analyte data from the source entity to the destination here.
+        // For pointer-to-optional coercion (?*T), we keep the pointer refinement
+        // and track null_safety on the pointer's analyte.
         switch (self.src) {
             .eidx => |src| state.results[index].refinement = state.results[src].refinement,
-            .interned, .other => {
-                // Comptime/global source - create fresh scalar
-                // TODO: use type info from .interned to determine structure
+            .interned => |ty| {
+                // Comptime/global source - create from type
+                const ref = try typeToRefinement(ty, state.refinements);
+                const ref_idx = try state.refinements.appendEntity(ref);
+                state.results[index].refinement = ref_idx;
+            },
+            .other => {
+                // Comptime/global source without type info - create fresh scalar
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             },
         }
@@ -233,6 +242,7 @@ pub const Block = struct {
         // Create block result from type info
         const result_ref = try typeToRefinement(self.ty, state.refinements);
         _ = try Inst.clobberInst(state.refinements, state.results, index, result_ref);
+        try splat(.block, state, index, self);
     }
 };
 
@@ -387,32 +397,8 @@ pub const Load = struct {
             },
         };
 
-        // For pointers and scalars, share the entity directly. This ensures that
-        // modifications (like alloc_destroy marking a pointer as freed) are visible
-        // everywhere the pointer is used.
-        //
-        // For structs, we need to create a new struct entity with copied fields and field_names slices
-        // to avoid double-free on deinit. However, the field indices are shared so
-        // modifications to fields are still visible.
-        const pointee = state.refinements.at(pointee_idx).*;
-        switch (pointee) {
-            .@"struct" => |s| {
-                const allocator = state.refinements.list.allocator;
-                const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
-                @memcpy(new_fields, s.fields);
-                // Copy field_names if present
-                const new_field_names = if (s.field_names.len > 0) blk: {
-                    const names = allocator.alloc(?[]const u8, s.field_names.len) catch @panic("out of memory");
-                    @memcpy(names, s.field_names);
-                    break :blk names;
-                } else &.{};
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .field_names = new_field_names } });
-            },
-            else => {
-                // Share the entity directly (no copy needed)
-                state.results[index].refinement = pointee_idx;
-            },
-        }
+        // Share the entity directly. This ensures modifications are visible everywhere.
+        state.results[index].refinement = pointee_idx;
         // Propagate name from source pointer to load result.
         // When we load a value through a named pointer (e.g., `container.ptr`),
         // the loaded value should inherit that name for error reporting.
@@ -453,14 +439,14 @@ pub const StructFieldPtr = struct {
 
         switch (container) {
             inline .@"struct", .@"union" => |data, tag| {
-                // Get field index - for unions, activate inactive fields
+                // Get field index - for unions, create entity for inactive fields
+                // (variant_safety analysis will report error via splat)
                 const field_idx = idx: {
                     if (tag == .@"union") {
                         if (data.fields[self.field_index]) |idx| break :idx idx;
-                        // Inactive field - create a fresh entity and activate it
+                        // Inactive field - create a fresh entity for structure
                         const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
                         const new_idx = try state.refinements.appendEntity(new_field_ref);
-                        @constCast(data.fields)[self.field_index] = new_idx;
                         break :idx new_idx;
                     } else {
                         break :idx data.fields[self.field_index];
@@ -514,29 +500,15 @@ pub const StructFieldVal = struct {
         // Get the struct or union and find the field
         switch (state.refinements.at(container_ref).*) {
             inline .@"struct", .@"union" => |data, tag| {
-                // Get field index - for unions, inactive fields create a fresh entity
+                // Get field index - for unions, create entity for inactive fields
+                // (variant_safety analysis will report error via splat)
                 const field_idx = idx: {
                     if (tag == .@"union") {
-                        break :idx data.fields[self.field_index] orelse {
-                            // Inactive field - create a fresh entity with the result type
-                            const new_field_ref = try typeToRefinement(self.ty, state.refinements);
-                            const new_idx = try state.refinements.appendEntity(new_field_ref);
-                            state.results[index].refinement = new_idx;
-                            // Build access path and return early
-                            const field_name: ?[]const u8 = if (data.field_names.len > self.field_index)
-                                data.field_names[self.field_index]
-                            else
-                                null;
-                            const base_name = state.results[operand].name;
-                            state.results[index].name = if (base_name) |bn| blk: {
-                                if (field_name) |fn_| {
-                                    break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
-                                }
-                                break :blk bn;
-                            } else field_name;
-                            try splat(.struct_field_val, state, index, self);
-                            return;
-                        };
+                        if (data.fields[self.field_index]) |idx| break :idx idx;
+                        // Inactive field - create a fresh entity for structure
+                        const new_field_ref = try typeToRefinement(self.ty, state.refinements);
+                        const new_idx = try state.refinements.appendEntity(new_field_ref);
+                        break :idx new_idx;
                     } else {
                         break :idx data.fields[self.field_index];
                     }
@@ -638,11 +610,10 @@ pub const RetSafe = struct {
                             else => @panic("void function retval incorrectly set to some value"),
                         }
                     } else {
-                        // Non-void comptime value - create scalar for now
-                        // TODO: use type info to determine structure
+                        // Non-void comptime value - create structure from type info
                         switch (caller_refinements.at(return_eidx).*) {
                             .retval_future, .void => {
-                                caller_refinements.at(return_eidx).* = .{ .scalar = .{} };
+                                caller_refinements.at(return_eidx).* = try typeToRefinement(ty, caller_refinements);
                             },
                             else => {
                                 // Multiple returns within same branch - need to merge
@@ -787,7 +758,7 @@ pub const UnwrapErrunionPayload = struct {
 pub fn Simple(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             try splat(instr, state, index, self);
         }
     };
@@ -795,15 +766,15 @@ pub fn Simple(comptime instr: anytype) type {
 
 /// Overflow operations (add_with_overflow, sub_with_overflow, etc.) return a
 /// struct { result: T, overflow: u1 }. We create a two-field struct with both
-/// fields as defined scalars.
+/// fields as scalars. The Undefined analysis marks them as defined via splat.
 pub fn OverflowOp(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
             const allocator = state.refinements.list.allocator;
 
             // Create two scalar fields (result and overflow flag)
-            const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
-            const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
+            const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{} });
 
             // clobberInst takes ownership of fields slice
             const fields = allocator.alloc(EIdx, 2) catch @panic("out of memory");
@@ -845,7 +816,7 @@ pub const IsNonNull = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.is_non_null, state, index, self);
     }
 };
@@ -858,9 +829,15 @@ pub const IsNull = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.is_null, state, index, self);
     }
+};
+
+/// Union tag check info - set when condition is a union tag comparison (get_union_tag + cmp_eq)
+pub const UnionTagCheck = struct {
+    union_inst: usize, // instruction index that holds the union
+    field_index: u32, // the variant field being checked
 };
 
 /// CondBr is emitted at the start of each branch to trigger null_safety refinement.
@@ -872,6 +849,9 @@ pub const CondBr = struct {
     /// Instruction index that produced the condition (e.g., is_non_null).
     /// Null when condition comes from a comptime value.
     condition_idx: ?usize,
+    /// If the condition is a union tag comparison, this contains the union and variant info.
+    /// Used by variant_safety to know which variant is active in the true branch.
+    union_tag: ?UnionTagCheck = null,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = index;
@@ -891,18 +871,43 @@ pub const Noop = struct {
 };
 
 /// SetUnionTag sets the active tag on a union without setting the payload.
-/// This is a no-op for now since we're not implementing variant safety.
+/// This marks the specified field as active (undefined) and all others as inactive.
 pub const SetUnionTag = struct {
-    pub fn apply(_: @This(), state: State, index: usize) !void {
+    ptr: ?usize, // union pointer instruction
+    field_index: ?usize, // which field is being activated
+    ty: Type, // type of the activated field
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Result is void (no new entity created)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+
+        // Follow the pointer to get the union refinement - Zig's safety checks will panic on wrong types
+        const field_idx = self.field_index.?;
+        const ptr_eidx = state.results[self.ptr.?].refinement.?;
+        const union_eidx = state.refinements.at(ptr_eidx).pointer.to;
+
+        // Deactivate all fields, then create fresh entity for active field
+        const fields = state.refinements.at(union_eidx).@"union".fields;
+        for (fields) |*field| field.* = null;
+
+        // Create a fresh entity with the correct type for the active field
+        // NOTE: This may reallocate the refinements list, so we store by index
+        // The Undefined analysis handler will mark this as undefined via splat()
+        const field_ref = try typeToRefinement(self.ty, state.refinements);
+        fields[field_idx] = try state.refinements.appendEntity(field_ref);
+
+        try splat(.set_union_tag, state, index, self);
     }
 };
 
 /// GetUnionTag gets the active tag from a union.
 /// Produces a scalar result (the tag value).
 pub const GetUnionTag = struct {
-    pub fn apply(_: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .undefined = .{ .defined = {} } } });
+    operand: ?usize, // the union instruction we're getting the tag from
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        try splat(.get_union_tag, state, index, self);
     }
 };
 
@@ -1018,7 +1023,7 @@ pub const AnyTag = union(enum) {
 pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, @tagName(tag))) {
-            try @field(Analysis, @tagName(tag))(state.results, index, state.ctx, state.refinements, payload);
+            try @field(Analysis, @tagName(tag))(state, index, payload);
         }
     }
 }
@@ -1034,6 +1039,17 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !v
     }
 }
 
+/// Check if a branch contains any .noreturn result, making it unreachable.
+fn branchIsUnreachable(branch_results: []const Inst, branch_refinements: *Refinements) bool {
+    for (branch_results) |result| {
+        const eidx = result.refinement orelse continue;
+        if (branch_refinements.at(eidx).* == .noreturn) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Merge branch results after a conditional.
 /// Walks through all result slots and calls each analysis's merge function.
 /// Analysis modules can implement `merge` to handle their specific fields.
@@ -1047,6 +1063,11 @@ pub fn splatMerge(
     false_results: []Inst,
     false_refinements: *Refinements,
 ) !void {
+    // Check if either branch is unreachable (contains any .noreturn result)
+    // If a branch is unreachable, don't merge its state - use only the reachable branch
+    const true_is_unreachable = branchIsUnreachable(true_results, true_refinements);
+    const false_is_unreachable = branchIsUnreachable(false_results, false_refinements);
+
     // Walk through all result slots
     for (results, true_results, false_results) |*result, true_result, false_result| {
         // Only merge if the original result has a refinement
@@ -1055,6 +1076,27 @@ pub fn splatMerge(
         // Get refinement indices from each branch (may be null if not touched)
         const true_eidx = true_result.refinement;
         const false_eidx = false_result.refinement;
+
+        // Handle unreachable branches: if a branch is unreachable (contains noreturn),
+        // use only the reachable branch's state without merging
+        if (true_is_unreachable and false_is_unreachable) {
+            // Both branches unreachable - nothing to merge
+            continue;
+        }
+        if (true_is_unreachable) {
+            // True branch is unreachable - use false branch's state only
+            if (false_eidx) |fidx| {
+                try Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(fidx).*, false_refinements);
+            }
+            continue;
+        }
+        if (false_is_unreachable) {
+            // False branch is unreachable - use true branch's state only
+            if (true_eidx) |tidx| {
+                try Refinement.clobber_structured_idx(orig_eidx, refinements, true_refinements.at(tidx).*, true_refinements);
+            }
+            continue;
+        }
 
         // If a branch changed which entity this result points to (e.g., br sharing),
         // propagate that to the original. Clone preserves indices, so this is valid.

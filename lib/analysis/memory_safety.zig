@@ -39,15 +39,18 @@ pub const MemorySafety = union(enum) {
     allocation: Allocation,
     passed: void,
 
-    pub fn alloc(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Alloc) !void {
+    pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
         // Inst contains .pointer = Indirected, set memory_safety on the pointer's analyte
-        const ptr_idx = results[index].refinement.?;
-        refinements.at(ptr_idx).pointer.analyte.memory_safety = .{ .stack_ptr = .{ .meta = ctx.meta } };
+        const ptr_idx = state.results[index].refinement.?;
+        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .{ .stack_ptr = .{ .meta = state.ctx.meta } };
     }
 
-    pub fn store(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Store) !void {
+    pub fn store(state: State, index: usize, params: tag.Store) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
         // ptr is null for stores to interned/global locations - no memory safety tracking needed
         const ptr = params.ptr orelse return;
         const src = switch (params.src) {
@@ -104,13 +107,12 @@ pub const MemorySafety = union(enum) {
 
     /// Retroactively set variable name on stack_ptr for escape detection messages.
     /// The name is already set on the instruction by DbgVarPtr.apply().
-    pub fn dbg_var_ptr(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.DbgVarPtr) !void {
+    pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtr) !void {
         _ = index;
-        _ = ctx;
         const inst = params.ptr orelse return;
-        const ptr_idx = results[inst].refinement orelse return;
-        if (refinements.at(ptr_idx).* == .pointer) {
-            const outer_analyte = &refinements.at(ptr_idx).pointer.analyte;
+        const ptr_idx = state.results[inst].refinement orelse return;
+        if (state.refinements.at(ptr_idx).* == .pointer) {
+            const outer_analyte = &state.refinements.at(ptr_idx).pointer.analyte;
             if (outer_analyte.memory_safety) |*ms| {
                 if (ms.* == .stack_ptr) {
                     if (ms.stack_ptr.name == .other) {
@@ -124,18 +126,19 @@ pub const MemorySafety = union(enum) {
     /// For interned args, no memory safety tracking needed (constants have no allocation state).
     /// For eidx args, memory safety state was already copied from caller.
     /// TODO: See LIMITATIONS.md - interned pointer args may need special handling.
-    pub fn arg(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Arg) !void {
-        _ = results;
+    pub fn arg(state: State, index: usize, params: tag.Arg) !void {
+        _ = state;
         _ = index;
-        _ = ctx;
-        _ = refinements;
         _ = params;
         // Nothing to do - interned values have no memory safety state,
         // and eidx values already have their state copied from caller.
     }
 
-    pub fn ret_safe(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetSafe) !void {
+    pub fn ret_safe(state: State, index: usize, params: tag.RetSafe) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
 
         const src = switch (params.src) {
             .eidx => |idx| idx,
@@ -172,8 +175,11 @@ pub const MemorySafety = union(enum) {
 
     /// Check ret_load for stack pointer escapes in struct/union fields.
     /// ret_load returns a value through ret_ptr storage - used for large returns (structs, unions).
-    pub fn ret_load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.RetLoad) !void {
+    pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
 
         // Get the ret_ptr pointer and its pointee (the struct/union being returned)
         const ptr_refinement_idx = results[params.ptr].refinement orelse return;
@@ -268,19 +274,22 @@ pub const MemorySafety = union(enum) {
     // =========================================================================
 
     /// Handle allocator.create() - marks pointer as heap allocation
-    pub fn alloc_create(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocCreate) !void {
+    pub fn alloc_create(state: State, index: usize, params: tag.AllocCreate) !void {
         // Result is errorunion -> ptr -> pointee
-        const eu_idx = results[index].refinement.?;
-        const ptr_idx = refinements.at(eu_idx).errorunion.to;
-        refinements.at(ptr_idx).pointer.analyte.memory_safety = .{ .allocation = .{
-            .allocated = ctx.meta,
+        const eu_idx = state.results[index].refinement.?;
+        const ptr_idx = state.refinements.at(eu_idx).errorunion.to;
+        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .{ .allocation = .{
+            .allocated = state.ctx.meta,
             .allocator_type = params.allocator_type,
         } };
     }
 
     /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator
-    pub fn alloc_destroy(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.AllocDestroy) !void {
+    pub fn alloc_destroy(state: State, index: usize, params: tag.AllocDestroy) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
         const ptr = params.ptr;
 
         const ptr_idx = results[ptr].refinement orelse @panic("alloc_destroy: inst has no refinement");
@@ -308,8 +317,11 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Handle load - detect use-after-free
-    pub fn load(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, params: tag.Load) !void {
+    pub fn load(state: State, index: usize, params: tag.Load) !void {
         _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
         // ptr is null for interned/global loads - no memory safety tracking needed
         const ptr = params.ptr orelse return;
         // refinement may be null for uninitialized instructions - skip
@@ -512,35 +524,23 @@ pub const MemorySafety = union(enum) {
 
 const debug = @import("builtin").mode == .Debug;
 
-/// Validate that refinements conform to memory_safety tracking rules:
+/// Validate that a refinement conforms to memory_safety tracking rules:
 /// - Pointers and scalars CAN have memory_safety (scalars for ptr-to-int casts)
 /// - Containers (optional, errorunion, struct) must NOT have memory_safety at the container level
-pub fn testValid(refinements: *Refinements) void {
+pub fn testValid(refinement: Refinements.Refinement) void {
     if (!debug) return;
-    for (refinements.list.items) |ref| {
-        switch (ref) {
-            .pointer, .scalar => {
-                // Pointers CAN have memory_safety (stack_ptr or allocation)
-                // Scalars CAN have memory_safety (pointer cast to integer)
-                // No requirement that they MUST have it (untracked values are OK)
-            },
-            .optional => |o| {
-                if (o.analyte.memory_safety != null) {
-                    @panic("OptionalContainerHasMemorySafetyState");
-                }
-            },
-            .errorunion => |e| {
-                if (e.analyte.memory_safety != null) {
-                    @panic("ErrorUnionContainerHasMemorySafetyState");
-                }
-            },
-            .@"struct" => |s| {
-                if (s.analyte.memory_safety != null) {
-                    @panic("StructContainerHasMemorySafetyState");
-                }
-            },
-            else => {},
-        }
+    switch (refinement) {
+        .pointer, .scalar => {
+            // Pointers CAN have memory_safety (stack_ptr or allocation)
+            // Scalars CAN have memory_safety (pointer cast to integer)
+            // No requirement that they MUST have it (untracked values are OK)
+        },
+        inline .optional, .errorunion, .@"struct" => |data, t| {
+            if (data.analyte.memory_safety != null) {
+                std.debug.panic("memory_safety should not exist on container types, got {s}", .{@tagName(t)});
+            }
+        },
+        else => {},
     }
 }
 
@@ -651,7 +651,7 @@ test "bitcast propagates stack_ptr metadata" {
     } });
 
     // Bitcast shares the refinement
-    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .eidx = 0 }, .ty = .{ .scalar = {} } } });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
@@ -689,9 +689,10 @@ test "ret_safe detects escape when returning stack pointer from same function" {
         .to = pointee_idx,
     } });
 
+    const state = testState(&ctx, &results, &refinements);
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .src = .{ .eidx = 0 } }),
+        MemorySafety.ret_safe(state, 1, .{ .src = .{ .eidx = 0 } }),
     );
 }
 
@@ -725,7 +726,8 @@ test "ret_safe allows returning arg (empty function name)" {
     } });
 
     // Should NOT error - returning pointer from caller is fine
-    try MemorySafety.ret_safe(&results, 1, &ctx, &refinements, .{ .src = .{ .eidx = 0 } });
+    const state = testState(&ctx, &results, &refinements);
+    try MemorySafety.ret_safe(state, 1, .{ .src = .{ .eidx = 0 } });
 }
 
 test "alloc_create sets allocation metadata on pointer analyte" {

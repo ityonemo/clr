@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Meta = @import("Meta.zig");
 
 /// Entity Index - index into the Refinements entity table.
 pub const EIdx = u32;
@@ -29,8 +30,9 @@ pub const Refinement = union(enum) {
         /// Analyte for tracking on the whole union
         analyte: Analyte = .{},
         /// Field refinement indices - each field has its own refinement.  Any field
-        /// that is null, is NOT active in this variable.
-        fields: []const ?EIdx,
+        /// that is null, is NOT active in this variable. Mutable because set_union_tag
+        /// needs to activate/deactivate fields.
+        fields: []?EIdx,
         /// Field names - each field has an optional name (null for tuple fields)
         /// Strings are static (embedded in generated .air.zig) so no allocation needed
         field_names: []const ?[]const u8 = &.{},
@@ -177,20 +179,46 @@ pub const Refinement = union(enum) {
 
     fn recurse_fields(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
         if (src != tag) std.debug.panic("clobber mismatch: src is .{s} and dst is .{s}", .{ @tagName(src), @tagName(tag) });
-        // Copy over analytes
-        @field(dst, @tagName(tag)).analyte = @field(src, @tagName(tag)).analyte;
+
+        // Copy analyte - deep copy only when crossing between different refinement tables
+        var new_analyte = @field(src, @tagName(tag)).analyte;
+        if (tag == .@"union" and src_list != dst_list) {
+            // Different tables - deep copy variant_safety.active_metas to avoid sharing
+            if (@field(src, @tagName(tag)).analyte.variant_safety) |vs| {
+                const allocator = dst_list.list.allocator;
+                const new_active_metas = allocator.alloc(?Meta, vs.active_metas.len) catch @panic("out of memory");
+                @memcpy(new_active_metas, vs.active_metas);
+                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+            }
+        }
+        // Same table: shallow copy is fine - mutations should be visible
+        @field(dst, @tagName(tag)).analyte = new_analyte;
+
         // Recurse into each field
         const dst_fields = @field(dst, @tagName(tag)).fields;
         const src_fields = @field(src, @tagName(tag)).fields;
-        for (dst_fields, src_fields) |dst_field, src_field| {
+        const mutable_dst_fields = @constCast(dst_fields);
+        for (mutable_dst_fields, src_fields, 0..) |*dst_field, src_field, i| {
             // if we are in a union, we'll have to unwrap only fields that
             // are non-null, otherwise jump.  For structs no need to unwrap.
             const new_dst_idx, const new_src_idx = new: {
                 if (tag == .@"union") {
-                    if (dst_field == null or src_field == null) continue;
-                    break :new .{dst_field.?, src_field.?};
+                    // If src has a field that dst doesn't, need to check if it's active
+                    if (src_field != null and dst_field.* == null) {
+                        // Check if this field is active in variant_safety
+                        if (new_analyte.variant_safety) |vs| {
+                            if (vs.active_metas[i] != null) {
+                                // Active field in src but not in dst - copy it
+                                const new_idx = copy_to(src_list.at(src_field.?).*, src_list, dst_list) catch @panic("out of memory");
+                                dst_field.* = new_idx;
+                            }
+                        }
+                        continue;
+                    }
+                    if (dst_field.* == null or src_field == null) continue;
+                    break :new .{ dst_field.*.?, src_field.? };
                 } else {
-                    break :new .{dst_field, src_field};
+                    break :new .{ dst_field.*, src_field };
                 }
             };
 
@@ -256,8 +284,18 @@ pub const Refinement = union(enum) {
             break :blk names;
         } else &.{};
 
+        // Deep copy analyte - variant_safety.active_metas is a slice that must not be shared
+        var new_analyte = src_data.analyte;
+        if (tag == .@"union") {
+            if (src_data.analyte.variant_safety) |vs| {
+                const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
+                @memcpy(new_active_metas, vs.active_metas);
+                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+            }
+        }
+
         return dst_list.appendEntity(@unionInit(Refinement, @tagName(tag), .{
-            .analyte = src_data.analyte,
+            .analyte = new_analyte,
             .fields = new_fields,
             .field_names = new_field_names,
         }));
@@ -322,8 +360,17 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                     @memcpy(names, data.field_names);
                     break :blk names;
                 } else &.{};
+                // Deep copy analyte, including variant_safety.active_metas if present
+                var new_analyte = data.analyte;
+                if (tag == .@"union") {
+                    if (data.analyte.variant_safety) |vs| {
+                        const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
+                        @memcpy(new_active_metas, vs.active_metas);
+                        new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+                    }
+                }
                 try new.list.append(@unionInit(Refinement, @tagName(tag), .{
-                    .analyte = data.analyte,
+                    .analyte = new_analyte,
                     .fields = new_fields,
                     .field_names = new_field_names,
                 }));
@@ -337,9 +384,13 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
 const undefined_analysis = @import("analysis/undefined.zig");
 const memory_safety_analysis = @import("analysis/memory_safety.zig");
 const null_safety_analysis = @import("analysis/null_safety.zig");
+const variant_safety_analysis = @import("analysis/variant_safety.zig");
 
 pub fn testValid(self: *Refinements) void {
-    undefined_analysis.testValid(self);
-    memory_safety_analysis.testValid(self);
-    null_safety_analysis.testValid(self);
+    for (self.list.items, 0..) |refinement, i| {
+        undefined_analysis.testValid(refinement, i);
+        memory_safety_analysis.testValid(refinement);
+        null_safety_analysis.testValid(refinement);
+        variant_safety_analysis.testValid(refinement);
+    }
 }
