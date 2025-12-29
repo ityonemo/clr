@@ -583,7 +583,7 @@ fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         // We need ".{ .id = FIELD_NAME_ID, .ty = .{ ... } }"
         if (field_name_id != 0) {
             // Replace ".{ .id = N," with ".{ .id = FIELD_NAME_ID,"
-            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d},", .{field_name_id}, null);
+            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}", .{field_name_id}, null);
             // Find the position after ".{ .id = " and before the comma
             if (std.mem.indexOf(u8, field_type_inner, ".{ .id = ")) |start| {
                 const after_prefix = field_type_inner[start + ".{ .id = ".len ..];
@@ -651,7 +651,7 @@ fn unionTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field
 
         // Replace existing .id with field_name_id if we have a name
         if (field_name_id != 0) {
-            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d},", .{field_name_id}, null);
+            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}", .{field_name_id}, null);
             // Find the position after ".{ .id = " and before the comma
             if (std.mem.indexOf(u8, field_type_inner, ".{ .id = ")) |start| {
                 const after_prefix = field_type_inner[start + ".{ .id = ".len ..];

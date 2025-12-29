@@ -85,30 +85,39 @@ pub const FieldParentPtrSafety = struct {
         }
     }
 
+    fn getFieldName(ctx: *Context, type_id: Tid, field_index: usize) []const u8 {
+        if (ctx.getFieldId(type_id, @intCast(field_index))) |name_id| {
+            return ctx.getName(name_id);
+        }
+        return "unknown";
+    }
+
     fn reportNotFieldPointer(ctx: *Context, params: tag.FieldParentPtr) !void {
         _ = params;
-        try ctx.writer.print("fieldParentPtr on non-field pointer in ", .{});
-        try ctx.meta.print(ctx.writer, "", .{});
-        try ctx.writer.print("\n", .{});
+        try ctx.meta.print(ctx.writer, "fieldParentPtr on non-field pointer in ", .{});
         return error.InvalidFieldParentPtr;
     }
 
     fn reportWrongContainerType(ctx: *Context, origin: FieldParentPtrSafety, expected_type_id: Tid) !void {
-        try ctx.writer.print("fieldParentPtr type mismatch in ", .{});
-        try ctx.meta.print(ctx.writer, "", .{});
-        try ctx.writer.print(": pointer is from type {d}, but @fieldParentPtr claims type {d}\n", .{
+        const origin_field = getFieldName(ctx, origin.container_type_id, origin.field_index);
+        const expected_field = getFieldName(ctx, expected_type_id, origin.field_index);
+        try ctx.meta.print(ctx.writer, "fieldParentPtr type mismatch in ", .{});
+        try ctx.writer.print("pointer is from type {d}.{s}, but @fieldParentPtr claims type {d}.{s}\n", .{
             origin.container_type_id,
+            origin_field,
             expected_type_id,
+            expected_field,
         });
         return error.FieldParentPtrTypeMismatch;
     }
 
     fn reportWrongFieldIndex(ctx: *Context, origin: FieldParentPtrSafety, expected_field_index: usize) !void {
-        try ctx.writer.print("fieldParentPtr field mismatch in ", .{});
-        try ctx.meta.print(ctx.writer, "", .{});
-        try ctx.writer.print(": pointer is from field {d}, but @fieldParentPtr claims field {d}\n", .{
-            origin.field_index,
-            expected_field_index,
+        const origin_field = getFieldName(ctx, origin.container_type_id, origin.field_index);
+        const expected_field = getFieldName(ctx, origin.container_type_id, expected_field_index);
+        try ctx.meta.print(ctx.writer, "fieldParentPtr field mismatch in ", .{});
+        try ctx.writer.print("pointer is from field {s}, but @fieldParentPtr claims field {s}\n", .{
+            origin_field,
+            expected_field,
         });
         return error.FieldParentPtrFieldMismatch;
     }
