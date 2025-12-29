@@ -115,11 +115,26 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Extract parameter names from ZIR
     const param_names = extractParamNames(zcu, ip, func, file_scope);
 
+    // Per-function arena for temporary allocations during code generation
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
     // Create per-function name map (no global state - avoids race conditions)
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
-    // Generate Zig source for this function, passing name_map to collect mappings
-    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path, param_names, &name_map);
+    // Create FnInfo struct to pass to generateFunction
+    const info = clr_codegen.FnInfo{
+        .arena = arena.allocator(),
+        .name_map = &name_map,
+        .ip = ip,
+        .tags = tags,
+        .data = data,
+        .extra = extra,
+        .param_names = param_names,
+    };
+
+    // Generate Zig source for this function
+    const text = clr_codegen.generateFunction(func_index, fqn, &info, base_line, file_path);
 
     // Convert hash map to slice for storage on FuncMir
     const name_mappings = convertNameMapToSlice(&name_map);

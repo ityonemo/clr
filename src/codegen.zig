@@ -20,6 +20,18 @@ const std = @import("std");
 /// Tuple that represents a InternPool index / name pairing.
 pub const NameMap = struct { u32, []const u8 };
 
+/// Per-function context for code generation.
+/// Aggregates commonly-passed parameters to reduce function signatures.
+pub const FnInfo = struct {
+    arena: std.mem.Allocator,
+    name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
+    ip: *const InternPool,
+    tags: []const Tag,
+    data: []const Data,
+    extra: []const u32,
+    param_names: []const []const u8,
+};
+
 /// Register a name in the per-function name map.
 /// Returns an existing ID if the name is already registered, otherwise assigns a new ID.
 fn registerName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), name: []const u8) u32 {
@@ -53,32 +65,32 @@ fn altName(tag: Tag) []const u8 {
 
 /// Returns the payload string for a given tag and data.
 /// Note: call tags are handled separately in buildInstLines via payloadCallParts.
-fn payload(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
+fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
-        .alloc => payloadAlloc(name_map, arena, ip, datum),
-        .arg => payloadArg(arena, datum, param_names, arg_counter),
-        .dbg_stmt => payloadDbgStmt(arena, datum),
-        .store, .store_safe => payloadStore(name_map, arena, ip, datum),
-        .load => payloadLoad(name_map, arena, ip, datum),
-        .ret_safe => payloadRetSafe2(arena, ip, datum),
-        .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
-        .bitcast => payloadBitcast(name_map, arena, ip, datum),
-        .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
-        .is_non_null, .is_null => payloadUnOp(arena, ip, datum),
-        .br => payloadBr(name_map, arena, ip, datum),
-        .block => payloadBlock(name_map, arena, ip, datum),
-        .struct_field_ptr_index_0 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 0),
-        .struct_field_ptr_index_1 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 1),
-        .struct_field_ptr_index_2 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 2),
-        .struct_field_ptr_index_3 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 3),
+        .alloc => payloadAlloc(info, datum),
+        .arg => payloadArg(info, datum, arg_counter),
+        .dbg_stmt => payloadDbgStmt(info, datum),
+        .store, .store_safe => payloadStore(info, datum),
+        .load => payloadLoad(info, datum),
+        .ret_safe => payloadRetSafe(info, datum),
+        .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(info, datum),
+        .bitcast => payloadBitcast(info, datum),
+        .unwrap_errunion_payload, .optional_payload => payloadTransferOp(info, datum),
+        .is_non_null, .is_null => payloadUnOp(info, datum),
+        .br => payloadBr(info, datum),
+        .block => payloadBlock(info, datum),
+        .struct_field_ptr_index_0 => payloadStructFieldPtr(info, datum, 0),
+        .struct_field_ptr_index_1 => payloadStructFieldPtr(info, datum, 1),
+        .struct_field_ptr_index_2 => payloadStructFieldPtr(info, datum, 2),
+        .struct_field_ptr_index_3 => payloadStructFieldPtr(info, datum, 3),
         // Note: All struct_field_ptr_index_N are mapped to struct_field_ptr via altName()
-        .struct_field_val => payloadStructFieldVal(name_map, arena, ip, tags, data, datum, extra),
-        .field_parent_ptr => payloadFieldParentPtr(name_map, arena, ip, datum, extra),
-        .ret_ptr => payloadRetPtr(name_map, arena, ip, datum),
-        .ret_load => payloadRetLoad(arena, datum),
-        .set_union_tag => payloadSetUnionTag(arena, ip, datum),
-        .get_union_tag => payloadGetUnionTag(arena, datum),
-        .@"try", .try_cold => payloadTry(arena, ip, datum),
+        .struct_field_val => payloadStructFieldVal(info, datum),
+        .field_parent_ptr => payloadFieldParentPtr(info, datum),
+        .ret_ptr => payloadRetPtr(info, datum),
+        .ret_load => payloadRetLoad(info, datum),
+        .set_union_tag => payloadSetUnionTag(info, datum),
+        .get_union_tag => payloadGetUnionTag(info, datum),
+        .@"try", .try_cold => payloadTry(info, datum),
         else => ".{}",
     };
 }
@@ -86,45 +98,45 @@ fn payload(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.
 /// Payload for operations that transfer all properties from source to result.
 /// Used for unwrap_errunion_payload, optional_payload, etc. where the result carries
 /// the same memory safety / allocation state as the source.
-fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadTransferOp(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
-    const src_str = srcString(arena, ip, operand);
-    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+    const src_str = srcString(info.arena, info.ip, operand);
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
 /// Payload for .try/.try_cold - extracts success payload from error union.
 /// Uses pl_op.operand to get the error union source.
-fn payloadTry(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadTry(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.pl_op.operand;
-    const src_str = srcString(arena, ip, operand);
-    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+    const src_str = srcString(info.arena, info.ip, operand);
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
 /// Payload for bitcast - includes destination type for analysis.
-fn payloadBitcast(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadBitcast(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
-    const src_str = srcString(arena, ip, operand);
+    const src_str = srcString(info.arena, info.ip, operand);
     const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
-        typeToString(name_map, arena, ip, ty_idx)
+        typeToString(info.name_map, info.arena, info.ip, ty_idx)
     else
         ".{ .id = 0, .ty = .{ .scalar = {} } }";
-    return clr_allocator.allocPrint(arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
 }
 
 /// Payload for un_op instructions (is_non_null, is_null, etc.) that use datum.un_op
-fn payloadUnOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
-    const src_str = srcString(arena, ip, datum.un_op);
-    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+fn payloadUnOp(info: *const FnInfo, datum: Data) []const u8 {
+    const src_str = srcString(info.arena, info.ip, datum.un_op);
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
 /// Payload for ret_safe - just the src, caller_refinements and return_eidx come from State.
-fn payloadRetSafe2(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
-    const src_str = srcString(arena, ip, datum.un_op);
-    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+fn payloadRetSafe(info: *const FnInfo, datum: Data) []const u8 {
+    const src_str = srcString(info.arena, info.ip, datum.un_op);
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
 /// Payload for alloc - extracts pointee type from the pointer type.
-fn payloadAlloc(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadAlloc(info: *const FnInfo, datum: Data) []const u8 {
     const ptr_type = datum.ty.toIntern();
     // Extract pointee type from pointer type
     const pointee_type: InternPool.Index = switch (ptr_type) {
@@ -134,15 +146,15 @@ fn payloadAlloc(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std
         .slice_const_u8_type, .slice_const_u8_sentinel_0_type => .u8_type,
         else => blk: {
             // For other types, look up in InternPool
-            const ptr_key = ip.indexToKey(ptr_type);
+            const ptr_key = info.ip.indexToKey(ptr_type);
             break :blk switch (ptr_key) {
                 .ptr_type => |p| p.child,
                 else => .none, // fallback
             };
         },
     };
-    const pointee_str = typeToString(name_map, arena, ip, pointee_type);
-    return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
+    const pointee_str = typeToString(info.name_map, info.arena, info.ip, pointee_type);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
 }
 
 /// Extract type info for AllocCreate payload.
@@ -191,75 +203,74 @@ fn extractAllocCreateType(arena: std.mem.Allocator, ip: *const InternPool, datum
 }
 
 /// Payload for struct_field_ptr_index_N - gets pointer to a struct field.
-fn payloadStructFieldPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, datum: Data, field_index: usize) []const u8 {
+fn payloadStructFieldPtr(info: *const FnInfo, datum: Data, field_index: usize) []const u8 {
     // ty_op.ty is the result type (pointer to field), ty_op.operand is the base struct pointer
     const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
-        typeToString(name_map, arena, ip, ty_idx)
+        typeToString(info.name_map, info.arena, info.ip, ty_idx)
     else
         ".{ .unknown = {} }"; // Will cause compile error if hit
     const base_ptr: ?usize = if (datum.ty_op.operand.toIndex()) |idx| @intFromEnum(idx) else null;
     // Look up field name from the container type
-    const field_name_id = getFieldNameId(name_map, ip, tags, data, datum.ty_op.operand, field_index);
-    return clr_allocator.allocPrint(arena, ".{{ .base = {?d}, .field_index = {d}, .field_name_id = {d}, .ty = {s} }}", .{ base_ptr, field_index, field_name_id, ty_str }, null);
+    const field_name_id = getFieldNameId(info, datum.ty_op.operand, field_index);
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d}, .field_index = {d}, .field_name_id = {d}, .ty = {s} }}", .{ base_ptr, field_index, field_name_id, ty_str }, null);
 }
 
 /// Payload for struct_field_val - extracts a field value from a struct by value.
 /// Uses ty_pl with StructField payload: struct_operand and field_index.
-fn payloadStructFieldVal(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, datum: Data, extra: []const u32) []const u8 {
+fn payloadStructFieldVal(info: *const FnInfo, datum: Data) []const u8 {
     // ty_pl has ty (Ref) and payload index (u32)
     const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
-        typeToString(name_map, arena, ip, ty_idx)
+        typeToString(info.name_map, info.arena, info.ip, ty_idx)
     else
         ".{ .unknown = {} }"; // Will cause compile error if hit
     const payload_index = datum.ty_pl.payload;
 
     // StructField: struct_operand (Ref as u32), field_index (u32)
-    const struct_operand_raw = extra[payload_index];
-    const field_index = extra[payload_index + 1];
+    const struct_operand_raw = info.extra[payload_index];
+    const field_index = info.extra[payload_index + 1];
 
     // Convert the raw u32 to a Ref and extract the index
     const struct_operand: Ref = @enumFromInt(struct_operand_raw);
     const operand: ?usize = if (struct_operand.toIndex()) |idx| @intFromEnum(idx) else null;
 
     // Look up field name from the container type (operand is struct value, not pointer)
-    const field_name_id = getFieldNameIdFromValue(name_map, ip, tags, data, struct_operand, field_index);
+    const field_name_id = getFieldNameIdFromValue(info, struct_operand, field_index);
 
-    return clr_allocator.allocPrint(arena, ".{{ .operand = {?d}, .field_index = {d}, .field_name_id = {d}, .ty = {s} }}", .{ operand, field_index, field_name_id, ty_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .operand = {?d}, .field_index = {d}, .field_name_id = {d}, .ty = {s} }}", .{ operand, field_index, field_name_id, ty_str }, null);
 }
 
 /// Payload for field_parent_ptr - gets parent container pointer from field pointer.
 /// Uses ty_pl with FieldParentPtr payload: field_ptr and field_index.
-fn payloadFieldParentPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32) []const u8 {
+fn payloadFieldParentPtr(info: *const FnInfo, datum: Data) []const u8 {
     // ty_pl has ty (result type - pointer to parent) and payload index
     const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
-        typeToString(name_map, arena, ip, ty_idx)
+        typeToString(info.name_map, info.arena, info.ip, ty_idx)
     else
         ".{ .unknown = {} }";
     const payload_index = datum.ty_pl.payload;
 
     // FieldParentPtr: field_ptr (Ref as u32), field_index (u32)
-    const field_ptr_raw = extra[payload_index];
-    const field_index = extra[payload_index + 1];
+    const field_ptr_raw = info.extra[payload_index];
+    const field_index = info.extra[payload_index + 1];
 
     // Convert the raw u32 to a Ref and extract the index
     const field_ptr_ref: Ref = @enumFromInt(field_ptr_raw);
     const field_ptr: ?usize = if (field_ptr_ref.toIndex()) |idx| @intFromEnum(idx) else null;
 
-    return clr_allocator.allocPrint(arena, ".{{ .field_ptr = {?d}, .field_index = {d}, .ty = {s} }}", .{ field_ptr, field_index, ty_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .field_ptr = {?d}, .field_index = {d}, .ty = {s} }}", .{ field_ptr, field_index, ty_str }, null);
 }
 
 /// Payload for br (branch to block with value).
 /// Transfers properties from operand to target block.
-fn payloadBr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
-    _ = name_map;
+fn payloadBr(info: *const FnInfo, datum: Data) []const u8 {
     const block_inst = @intFromEnum(datum.br.block_inst);
     const operand = datum.br.operand;
-    const src_str = srcString(arena, ip, operand);
-    return clr_allocator.allocPrint(arena, ".{{ .block = {d}, .src = {s} }}", .{ block_inst, src_str }, null);
+    const src_str = srcString(info.arena, info.ip, operand);
+    return clr_allocator.allocPrint(info.arena, ".{{ .block = {d}, .src = {s} }}", .{ block_inst, src_str }, null);
 }
 
 /// Payload for block - extracts the block's result type.
-fn payloadBlock(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadBlock(info: *const FnInfo, datum: Data) []const u8 {
     const ty_ref = datum.ty_pl.ty;
 
     // Check for well-known types that don't require InternPool lookup
@@ -277,41 +288,41 @@ fn payloadBlock(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std
     const ty_idx = ty_ref.toInternedAllowNone() orelse return ".{ .ty = .{ .id = 0, .ty = .{ .void = {} } } }";
 
     // Use typeToString which handles well-known types first
-    const ty_str = typeToString(name_map, arena, ip, ty_idx);
-    return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{ty_str}, null);
+    const ty_str = typeToString(info.name_map, info.arena, info.ip, ty_idx);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{ty_str}, null);
 }
 
 /// Generate a single inst line for a given tag and data.
 /// Exposed for testing with underscore prefix to indicate internal use.
 /// arg_counter tracks sequential arg indices (may differ from zir_param_index).
-pub fn _instLine(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
+pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
-            if (isDebugCall(ip, datum)) {
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .noop_pruned_debug = .{{}} }});\n", .{inst_index}, null);
+            if (isDebugCall(info.ip, datum)) {
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .noop_pruned_debug = .{{}} }});\n", .{inst_index}, null);
             }
-            if (isAllocatorCreate(ip, datum)) {
+            if (isAllocatorCreate(info.ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
-                const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                const created_type = extractAllocCreateType(arena, ip, datum);
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\", .ty = {s} }} }});\n", .{ inst_index, allocator_type, created_type }, null);
+                const allocator_type = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                const created_type = extractAllocCreateType(info.arena, info.ip, datum);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\", .ty = {s} }} }});\n", .{ inst_index, allocator_type, created_type }, null);
             }
-            if (isAllocatorDestroy(ip, datum)) {
+            if (isAllocatorDestroy(info.ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
-                const ptr_inst = extractDestroyPtrInst(datum, extra, tags, data) orelse {
+                const ptr_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
                     // Can't determine ptr instruction, fall through to regular call
-                    const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-                    break :blk clr_allocator.allocPrint(arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+                    const call_parts = payloadCallParts(info, datum);
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
                 };
-                const allocator_type = extractAllocatorType(ip, datum, extra, tags, data);
-                break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .allocator_type = \"{s}\" }} }});\n", .{ inst_index, ptr_inst, allocator_type }, null);
+                const allocator_type = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .allocator_type = \"{s}\" }} }});\n", .{ inst_index, ptr_inst, allocator_type }, null);
             }
-            const call_parts = payloadCallParts(arena, ip, datum, extra, tags, data);
-            break :blk clr_allocator.allocPrint(arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+            const call_parts = payloadCallParts(info, datum);
+            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
         },
         else => blk: {
-            const tag_payload = payload(name_map, arena, ip, tag, datum, inst_index, extra, tags, data, param_names, arg_counter);
-            break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
+            const tag_payload = payload(info, tag, datum, arg_counter);
+            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
         },
     };
 }
@@ -329,19 +340,19 @@ pub fn _instLine(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: st
 /// arg_counter is optional to support unit tests that test single tags in isolation
 /// without needing to set up a counter. When null, falls back to zir_param_index
 /// (works for tests since they typically use index 0).
-fn payloadArg(arena: std.mem.Allocator, datum: Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
+fn payloadArg(info: *const FnInfo, datum: Data, arg_counter: ?*u32) []const u8 {
     const zir_param_index = datum.arg.zir_param_index;
-    const name = if (zir_param_index < param_names.len) param_names[zir_param_index] else "";
+    const name = if (zir_param_index < info.param_names.len) info.param_names[zir_param_index] else "";
     const arg_index = if (arg_counter) |counter| blk: {
         const idx = counter.*;
         counter.* += 1;
         break :blk idx;
     } else zir_param_index;
-    return clr_allocator.allocPrint(arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ arg_index, name }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ arg_index, name }, null);
 }
 
-fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
-    return clr_allocator.allocPrint(arena, ".{{ .line = {d}, .column = {d} }}", .{
+fn payloadDbgStmt(info: *const FnInfo, datum: Data) []const u8 {
+    return clr_allocator.allocPrint(info.arena, ".{{ .line = {d}, .column = {d} }}", .{
         datum.dbg_stmt.line,
         datum.dbg_stmt.column,
     }, null);
@@ -688,45 +699,44 @@ fn aggregateValueToString(arena: std.mem.Allocator, ip: *const InternPool, type_
     return result.items;
 }
 
-fn payloadStore(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
-    _ = name_map;
+fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
     // bin_op: lhs = destination ptr, rhs = source value
-    const is_undef = isUndefRef(ip, datum.bin_op.rhs);
+    const is_undef = isUndefRef(info.ip, datum.bin_op.rhs);
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
     const src_str = if (is_undef)
         // Wrap the type in .undefined when storing undefined
-        srcStringUndef(arena, ip, datum.bin_op.rhs)
+        srcStringUndef(info.arena, info.ip, datum.bin_op.rhs)
     else
-        srcString(arena, ip, datum.bin_op.rhs);
-    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {s} }}", .{ ptr, src_str }, null);
+        srcString(info.arena, info.ip, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .src = {s} }}", .{ ptr, src_str }, null);
 }
 
-fn payloadLoad(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadLoad(info: *const FnInfo, datum: Data) []const u8 {
     // ty_op.ty is a Ref to the result type
     const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
-        typeToString(name_map, arena, ip, ty_idx)
+        typeToString(info.name_map, info.arena, info.ip, ty_idx)
     else
         ".{ .id = 0, .ty = .{ .scalar = {} } }"; // Fallback for unknown types
     // Check for .none first (toIndex asserts on .none)
     if (datum.ty_op.operand == .none) {
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
     }
     // TODO: handle global/interned pointers - for now emit null
     if (datum.ty_op.operand.toIndex()) |idx| {
         const ptr = @intFromEnum(idx);
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = {d}, .ty = {s} }}", .{ ptr, ty_str }, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {d}, .ty = {s} }}", .{ ptr, ty_str }, null);
     } else {
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
     }
 }
 
 /// ret_ptr returns a pointer to the return value storage.
 /// Uses .ty field which contains the pointer type.
-fn payloadRetPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadRetPtr(info: *const FnInfo, datum: Data) []const u8 {
     // datum.ty is the pointer type (e.g., *Container)
     // We need to extract the pointee type for the handler
     const ptr_type = datum.ty.toIntern();
-    const ptr_key = ip.indexToKey(ptr_type);
+    const ptr_key = info.ip.indexToKey(ptr_type);
     const pointee_type: InternPool.Index = switch (ptr_key) {
         .ptr_type => |p| p.child,
         else => .none,
@@ -734,23 +744,23 @@ fn payloadRetPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: st
     if (pointee_type == .none) {
         return ".{ .ty = .{ .unknown = {} } }";
     }
-    const ty_str = typeToString(name_map, arena, ip, pointee_type);
-    return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{ty_str}, null);
+    const ty_str = typeToString(info.name_map, info.arena, info.ip, pointee_type);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{ty_str}, null);
 }
 
 /// ret_load loads from ret_ptr to complete return.
 /// Uses .un_op field which is the ret_ptr instruction index.
-fn payloadRetLoad(arena: std.mem.Allocator, datum: Data) []const u8 {
+fn payloadRetLoad(info: *const FnInfo, datum: Data) []const u8 {
     // un_op is the operand (ret_ptr instruction)
     if (datum.un_op.toIndex()) |idx| {
-        return clr_allocator.allocPrint(arena, ".{{ .ptr = {d} }}", .{@intFromEnum(idx)}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {d} }}", .{@intFromEnum(idx)}, null);
     }
     return ".{}";
 }
 
 /// Payload for set_union_tag - sets the active tag of a union.
 /// Extracts union pointer, field index, and field type from the interned tag value.
-fn payloadSetUnionTag(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadSetUnionTag(info: *const FnInfo, datum: Data) []const u8 {
     // bin_op: lhs = union ptr, rhs = new tag value (interned enum)
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
 
@@ -760,11 +770,11 @@ fn payloadSetUnionTag(arena: std.mem.Allocator, ip: *const InternPool, datum: Da
 
     const tag_ref = datum.bin_op.rhs;
     if (tag_ref.toInterned()) |interned_idx| {
-        const key = ip.indexToKey(interned_idx);
+        const key = info.ip.indexToKey(interned_idx);
         if (key == .enum_tag) {
             // Get the integer value from the enum tag
             const int_idx = key.enum_tag.int;
-            const int_key = ip.indexToKey(int_idx);
+            const int_key = info.ip.indexToKey(int_idx);
             if (int_key == .int) {
                 // Extract the actual integer value
                 field_index = switch (int_key.int.storage) {
@@ -776,16 +786,16 @@ fn payloadSetUnionTag(arena: std.mem.Allocator, ip: *const InternPool, datum: Da
 
                 // Try to get field type from the enum's associated union
                 const enum_type_idx = key.enum_tag.ty;
-                const enum_key = ip.indexToKey(enum_type_idx);
+                const enum_key = info.ip.indexToKey(enum_type_idx);
                 if (enum_key == .enum_type) {
                     // Check if this enum is a generated tag from a union
                     switch (enum_key.enum_type) {
                         .generated_tag => |gt| {
                             // Found the union! Get field type at field_index
                             const union_type_idx = gt.union_type;
-                            const loaded_union = ip.loadUnionType(union_type_idx);
+                            const loaded_union = info.ip.loadUnionType(union_type_idx);
                             if (field_index) |idx| {
-                                const field_types = loaded_union.field_types.get(ip);
+                                const field_types = loaded_union.field_types.get(info.ip);
                                 if (idx < field_types.len) {
                                     field_type = field_types[idx];
                                 }
@@ -799,21 +809,21 @@ fn payloadSetUnionTag(arena: std.mem.Allocator, ip: *const InternPool, datum: Da
     }
 
     const ty_str = if (field_type) |ft|
-        typeToString(null, arena, ip, ft)
+        typeToString(null, info.arena, info.ip, ft)
     else
         ".{ .id = 0, .ty = .{ .scalar = {} } }"; // Fallback for untagged unions or errors
 
-    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .field_index = {?d}, .ty = {s} }}", .{ ptr, field_index, ty_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .field_index = {?d}, .ty = {s} }}", .{ ptr, field_index, ty_str }, null);
 }
 
 /// Payload for get_union_tag - gets the active tag from a union.
 /// Uses ty_op: operand is the union value.
-fn payloadGetUnionTag(arena: std.mem.Allocator, datum: Data) []const u8 {
+fn payloadGetUnionTag(info: *const FnInfo, datum: Data) []const u8 {
     const operand: ?usize = if (datum.ty_op.operand.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(arena, ".{{ .operand = {?d} }}", .{operand}, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .operand = {?d} }}", .{operand}, null);
 }
 
-fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const u8 {
+fn payloadDbg(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.pl_op.operand;
     const name_index = datum.pl_op.payload;
 
@@ -821,9 +831,9 @@ fn payloadDbg(arena: std.mem.Allocator, datum: Data, extra: []const u32) []const
     const ptr: ?usize = if (operand.toIndex()) |idx| @intFromEnum(idx) else null;
 
     // Extract the variable name from extra as NullTerminatedString
-    const name = extractString(extra, name_index);
+    const name = extractString(info.extra, name_index);
 
-    return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .name = \"{s}\" }}", .{ ptr, name }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .name = \"{s}\" }}", .{ ptr, name }, null);
 }
 
 fn extractString(extra: []const u32, start: u32) []const u8 {
@@ -840,24 +850,23 @@ const CallParts = struct {
     args: []const u8,
 };
 
-fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) CallParts {
-    _ = data; // TODO: may need for resolving callee
+fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     // Call uses pl_op: operand is callee, payload indexes into extra
     // extra[payload] is args_len, followed by args_len Refs
     const callee_ref = datum.pl_op.operand;
     const payload_index = datum.pl_op.payload;
-    const args_len = extra[payload_index];
+    const args_len = info.extra[payload_index];
 
     // Get called function - look up the instruction that produces the callee
     const called_str = if (callee_ref.toIndex()) |idx| blk: {
         // Indirect call through function pointer (load, slice_elem_val, etc.)
         const callee_idx = @intFromEnum(idx);
-        const callee_tag = tags[callee_idx];
+        const callee_tag = info.tags[callee_idx];
         _ = callee_tag;
         break :blk "null"; // TODO: handle indirect calls
     } else if (callee_ref.toInterned()) |ip_idx| blk: {
         // Direct call to known function - use InternPool index as func_index
-        break :blk clr_allocator.allocPrint(arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
+        break :blk clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
     } else "null";
 
     // Build args tuple string: .{ Arg, Arg, ... }
@@ -867,31 +876,31 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
 
     var i: u32 = 0;
     while (i < args_len) : (i += 1) {
-        const arg_ref: Ref = @enumFromInt(extra[payload_index + 1 + i]);
+        const arg_ref: Ref = @enumFromInt(info.extra[payload_index + 1 + i]);
         if (arg_ref.toIndex()) |idx| {
             // Runtime value from local instruction - look up entity index from results
             const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
-            const val_type = ip.typeOf(interned_idx);
-            if (isZeroSizedType(ip, val_type)) continue;
+            const val_type = info.ip.typeOf(interned_idx);
+            if (isZeroSizedType(info.ip, val_type)) continue;
             // Interned constant - pass type info so runtime can create entity
-            const type_str = typeToString(null, arena, ip, val_type);
+            const type_str = typeToString(null, info.arena, info.ip, val_type);
             if (first) {
-                args_str = clr_allocator.allocPrint(arena, "{s} Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(arena, "{s}, Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
             }
         }
     }
-    args_str = clr_allocator.allocPrint(arena, "{s} }}", .{args_str}, null);
+    args_str = clr_allocator.allocPrint(info.arena, "{s} }}", .{args_str}, null);
 
     return .{ .called = called_str, .args = args_str };
 }
@@ -1002,22 +1011,22 @@ fn getContainerType(ip: *const InternPool, tags: []const Tag, data: []const Data
 /// Get the field name ID for a field access operation (struct_field_ptr).
 /// The operand is a pointer to the container - we dereference it.
 /// Returns 0 if the container type cannot be traced.
-fn getFieldNameId(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *const InternPool, tags: []const Tag, data: []const Data, operand: Ref, field_index: usize) u32 {
+fn getFieldNameId(info: *const FnInfo, operand: Ref, field_index: usize) u32 {
     // First check for interned operand (comptime known)
     if (operand.toInterned()) |interned_idx| {
-        const ty = ip.typeOf(interned_idx);
-        const type_key = ip.indexToKey(ty);
+        const ty = info.ip.typeOf(interned_idx);
+        const type_key = info.ip.indexToKey(ty);
         const container = switch (type_key) {
             .ptr_type => |pt| pt.child,
             else => return 0,
         };
-        return lookupFieldName(name_map, ip, container, field_index);
+        return lookupFieldName(info.name_map, info.ip, container, field_index);
     }
 
     // Operand is an instruction reference
     if (operand.toIndex()) |_| {
-        const container = getContainerType(ip, tags, data, operand) orelse return 0;
-        return lookupFieldName(name_map, ip, container, field_index);
+        const container = getContainerType(info.ip, info.tags, info.data, operand) orelse return 0;
+        return lookupFieldName(info.name_map, info.ip, container, field_index);
     }
 
     return 0;
@@ -1026,17 +1035,17 @@ fn getFieldNameId(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *con
 /// Get the field name ID for a field access operation (struct_field_val).
 /// The operand is the container value itself (not a pointer).
 /// Returns 0 if the container type cannot be traced.
-fn getFieldNameIdFromValue(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *const InternPool, tags: []const Tag, data: []const Data, operand: Ref, field_index: usize) u32 {
+fn getFieldNameIdFromValue(info: *const FnInfo, operand: Ref, field_index: usize) u32 {
     // If operand is interned, get its type directly (it IS the container)
     if (operand.toInterned()) |interned_idx| {
-        const container = ip.typeOf(interned_idx);
-        return lookupFieldName(name_map, ip, container, field_index);
+        const container = info.ip.typeOf(interned_idx);
+        return lookupFieldName(info.name_map, info.ip, container, field_index);
     }
 
     // Operand is an instruction reference - get its result type directly
     if (operand.toIndex()) |idx| {
-        const container = getInstResultType(ip, tags, data, @intFromEnum(idx)) orelse return 0;
-        return lookupFieldName(name_map, ip, container, field_index);
+        const container = getInstResultType(info.ip, info.tags, info.data, @intFromEnum(idx)) orelse return 0;
+        return lookupFieldName(info.name_map, info.ip, container, field_index);
     }
 
     return 0;
@@ -1554,18 +1563,14 @@ fn isDotQPattern(ip: *const InternPool, cond_br_idx: usize, tags: []const Tag, d
 /// Generate Zig source code for a function from AIR instructions using worklist algorithm.
 /// This processes the main function and any nested conditionals, outputting branch functions
 /// first (so they're in scope) followed by the main function.
-pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, base_line: u32, file_path: []const u8, param_names: []const []const u8, name_map: *std.AutoHashMapUnmanaged(u32, []const u8)) []u8 {
-    if (tags.len == 0) @panic("function with no instructions encountered");
-
-    // Per-function arena for temporary allocations
-    var arena = clr_allocator.newArena();
-    defer arena.deinit();
+pub fn generateFunction(func_index: u32, fqn: []const u8, info: *const FnInfo, base_line: u32, file_path: []const u8) []u8 {
+    if (info.tags.len == 0) @panic("function with no instructions encountered");
 
     // Count args and build parameter list (only for full functions)
-    const arg_count = countArgs(tags);
-    const param_list = buildParamList(arena.allocator(), arg_count);
+    const arg_count = countArgs(info.tags);
+    const param_list = buildParamList(info.arena, arg_count);
     const params: []const u8 = if (arg_count > 0)
-        clr_allocator.allocPrint(arena.allocator(), ", {s}", .{param_list}, null)
+        clr_allocator.allocPrint(info.arena, ", {s}", .{param_list}, null)
     else
         "";
 
@@ -1576,7 +1581,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
     var sub_functions_len: usize = 0;
 
     // Start with the main function
-    worklist.append(arena.allocator(), .{ .full = .{ .func_index = func_index } }) catch @panic("out of memory");
+    worklist.append(info.arena, .{ .full = .{ .func_index = func_index } }) catch @panic("out of memory");
 
     var main_function: []const u8 = "";
 
@@ -1584,19 +1589,13 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         const item = worklist.pop().?;
         // Generate this function
         const func_str = generateOneFunction(
-            name_map,
-            arena.allocator(),
+            info,
             item,
             func_index,
             fqn,
-            ip,
-            tags,
-            data,
-            extra,
             params,
             file_path,
             base_line,
-            param_names,
             &worklist,
         );
 
@@ -1605,7 +1604,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
                 main_function = func_str;
             },
             .sub => {
-                sub_functions.append(arena.allocator(), func_str) catch @panic("out of memory");
+                sub_functions.append(info.arena, func_str) catch @panic("out of memory");
                 sub_functions_len += func_str.len;
             },
         }
@@ -1637,19 +1636,13 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
 
 /// Generate a single function (full or sub) using backwards walk + stack approach
 fn generateOneFunction(
-    name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
-    arena: std.mem.Allocator,
+    info: *const FnInfo,
     item: FunctionGen,
     func_index: u32,
     fqn: []const u8,
-    ip: *const InternPool,
-    tags: []const Tag,
-    data: []const Data,
-    extra: []const u32,
     params: []const u8,
     file_path: []const u8,
     base_line: u32,
-    param_names: []const []const u8,
     worklist: *std.ArrayListUnmanaged(FunctionGen),
 ) []const u8 {
     // Build body_set: the set of instruction indices that are in this function's body.
@@ -1664,16 +1657,16 @@ fn generateOneFunction(
             // Main body from extra data (mirrors Air.getMainBody())
             // extra[0] = block_index, points to Block structure
             // Block structure: body_len (u32), followed by body_len instruction indices
-            const block_index = extra[0];
-            const body_len = extra[block_index];
-            for (extra[block_index + 1 ..][0..body_len]) |body_idx| {
-                pending.append(arena, body_idx) catch @panic("out of memory");
+            const block_index = info.extra[0];
+            const body_len = info.extra[block_index];
+            for (info.extra[block_index + 1 ..][0..body_len]) |body_idx| {
+                pending.append(info.arena, body_idx) catch @panic("out of memory");
             }
         },
         .sub => |s| {
             // Sub-function body indices passed from parent
             for (s.body_indices) |body_idx| {
-                pending.append(arena, body_idx) catch @panic("out of memory");
+                pending.append(info.arena, body_idx) catch @panic("out of memory");
             }
         },
     }
@@ -1682,13 +1675,13 @@ fn generateOneFunction(
     while (pending.items.len > 0) {
         const idx = pending.pop().?;
         if (body_set.contains(idx)) continue;
-        body_set.put(arena, idx, {}) catch @panic("out of memory");
+        body_set.put(info.arena, idx, {}) catch @panic("out of memory");
 
         // If this is a block, add its body to pending (blocks are inlined)
-        if (tags[idx] == .block) {
-            if (extractBlockBody(idx, data, extra)) |block_body| {
+        if (info.tags[idx] == .block) {
+            if (extractBlockBody(idx, info.data, info.extra)) |block_body| {
                 for (block_body) |body_idx| {
-                    pending.append(arena, body_idx) catch @panic("out of memory");
+                    pending.append(info.arena, body_idx) catch @panic("out of memory");
                 }
             }
         }
@@ -1707,35 +1700,35 @@ fn generateOneFunction(
     // For sub functions: only iterate body indices (no noops needed outside body)
     switch (item) {
         .full => {
-            var i: usize = tags.len;
+            var i: usize = info.tags.len;
             while (i > 0) {
                 i -= 1;
                 const idx: u32 = @intCast(i);
 
                 if (!body_set.contains(idx)) {
                     // Not in body - emit noop
-                    stack.append(arena, .{ .idx = idx, .tag = undefined, .datum = undefined, .is_noop = true }) catch @panic("out of memory");
+                    stack.append(info.arena, .{ .idx = idx, .tag = undefined, .datum = undefined, .is_noop = true }) catch @panic("out of memory");
                     continue;
                 }
 
-                const tag = tags[idx];
-                const datum = data[idx];
+                const tag = info.tags[idx];
+                const datum = info.data[idx];
 
                 // Check for cond_br - add branches to worklist (unless it's a .? pattern)
                 var is_dotq_noop = false;
                 if (tag == .cond_br) {
-                    if (isDotQPattern(ip, idx, tags, data, extra)) {
+                    if (isDotQPattern(info.ip, idx, info.tags, info.data, info.extra)) {
                         // .? pattern detected - noop the cond_br, skip branch functions
                         is_dotq_noop = true;
                         // Don't add branch functions to worklist
-                    } else if (extractCondBrBodies(idx, data, extra)) |bodies| {
-                        worklist.append(arena, .{ .sub = .{
+                    } else if (extractCondBrBodies(idx, info.data, info.extra)) |bodies| {
+                        worklist.append(info.arena, .{ .sub = .{
                             .func_index = func_index,
                             .instr_index = idx,
                             .tag = .cond_br_true,
                             .body_indices = bodies.then,
                         } }) catch @panic("out of memory");
-                        worklist.append(arena, .{ .sub = .{
+                        worklist.append(info.arena, .{ .sub = .{
                             .func_index = func_index,
                             .instr_index = idx,
                             .tag = .cond_br_false,
@@ -1744,7 +1737,7 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
         .sub => {
@@ -1754,29 +1747,29 @@ fn generateOneFunction(
             var body_indices_list: std.ArrayListUnmanaged(u32) = .empty;
             var it = body_set.iterator();
             while (it.next()) |entry| {
-                body_indices_list.append(arena, entry.key_ptr.*) catch @panic("out of memory");
+                body_indices_list.append(info.arena, entry.key_ptr.*) catch @panic("out of memory");
             }
             // Sort in descending order for stack (will be reversed when popped)
             std.mem.sort(u32, body_indices_list.items, {}, std.sort.desc(u32));
 
             for (body_indices_list.items) |idx| {
-                const tag = tags[idx];
-                const datum = data[idx];
+                const tag = info.tags[idx];
+                const datum = info.data[idx];
 
                 // Check for nested cond_br (unless it's a .? pattern)
                 var is_dotq_noop = false;
                 if (tag == .cond_br) {
-                    if (isDotQPattern(ip, idx, tags, data, extra)) {
+                    if (isDotQPattern(info.ip, idx, info.tags, info.data, info.extra)) {
                         // .? pattern detected - noop the cond_br, skip branch functions
                         is_dotq_noop = true;
-                    } else if (extractCondBrBodies(idx, data, extra)) |bodies| {
-                        worklist.append(arena, .{ .sub = .{
+                    } else if (extractCondBrBodies(idx, info.data, info.extra)) |bodies| {
+                        worklist.append(info.arena, .{ .sub = .{
                             .func_index = func_index,
                             .instr_index = idx,
                             .tag = .cond_br_true,
                             .body_indices = bodies.then,
                         } }) catch @panic("out of memory");
-                        worklist.append(arena, .{ .sub = .{
+                        worklist.append(info.arena, .{ .sub = .{
                             .func_index = func_index,
                             .instr_index = idx,
                             .tag = .cond_br_false,
@@ -1785,7 +1778,7 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
     }
@@ -1799,19 +1792,19 @@ fn generateOneFunction(
     switch (item) {
         .sub => |s| {
             // Get the condition operand from the cond_br instruction
-            const cond_br_datum = data[s.instr_index];
+            const cond_br_datum = info.data[s.instr_index];
             const condition_ref = cond_br_datum.pl_op.operand;
             const condition_idx: ?usize = if (condition_ref.toIndex()) |idx| @intFromEnum(idx) else null;
             const is_true_branch = s.tag == .cond_br_true;
 
             // Check if this is a union tag comparison pattern
             const union_tag: ?UnionTagCheck = if (condition_idx) |cond_idx|
-                getUnionTagCheck(ip, cond_idx, tags, data)
+                getUnionTagCheck(info.ip, cond_idx, info.tags, info.data)
             else
                 null;
 
-            const cond_br_line = generateCondBrTagLine(arena, is_true_branch, condition_idx, union_tag);
-            lines.append(arena, cond_br_line) catch @panic("out of memory");
+            const cond_br_line = generateCondBrTagLine(info.arena, is_true_branch, condition_idx, union_tag);
+            lines.append(info.arena, cond_br_line) catch @panic("out of memory");
             total_len += cond_br_line.len;
         },
         .full => {},
@@ -1823,20 +1816,20 @@ fn generateOneFunction(
 
         if (instr.is_noop) {
             // Generate noop for unreferenced instruction
-            line = generateNoopLine(arena, instr.idx);
+            line = generateNoopLine(info.arena, instr.idx);
         } else if (instr.tag == .cond_br) {
             // Generate Inst.cond_br call with function references
-            line = generateCondBrLine(arena, instr.idx, func_index);
+            line = generateCondBrLine(info.arena, instr.idx, func_index);
         } else {
-            line = _instLine(name_map, arena, ip, instr.tag, instr.datum, instr.idx, extra, tags, data, param_names, &arg_counter);
+            line = _instLine(info, instr.tag, instr.datum, instr.idx, &arg_counter);
         }
 
-        lines.append(arena, line) catch @panic("out of memory");
+        lines.append(info.arena, line) catch @panic("out of memory");
         total_len += line.len;
     }
 
     // Concatenate all lines
-    const body_lines = arena.alloc(u8, total_len) catch @panic("out of memory");
+    const body_lines = info.arena.alloc(u8, total_len) catch @panic("out of memory");
     var pos: usize = 0;
     for (lines.items) |line| {
         @memcpy(body_lines[pos..][0..line.len], line);
@@ -1848,18 +1841,18 @@ fn generateOneFunction(
         .full => false, // doesn't matter for full functions
         .sub => |s| blk: {
             for (s.body_indices) |body_idx| {
-                if (tags[body_idx] == .ret_safe) break :blk false;
+                if (info.tags[body_idx] == .ret_safe) break :blk false;
             }
             break :blk true;
         },
     };
 
     // Generate complete function with header/footer
-    const header_str = item.header(arena, params, fqn, file_path, base_line, tags.len, discard_caller_params);
-    const footer_str = item.footer(arena);
+    const header_str = item.header(info.arena, params, fqn, file_path, base_line, info.tags.len, discard_caller_params);
+    const footer_str = item.footer(info.arena);
 
     const func_len = header_str.len + body_lines.len + footer_str.len;
-    const func_buf = arena.alloc(u8, func_len) catch @panic("out of memory");
+    const func_buf = info.arena.alloc(u8, func_len) catch @panic("out of memory");
     pos = 0;
     @memcpy(func_buf[pos..][0..header_str.len], header_str);
     pos += header_str.len;
