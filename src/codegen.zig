@@ -65,7 +65,7 @@ fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Dat
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
-/// Payload for bitcast - includes destination type to handle pointer-to-optional coercion.
+/// Payload for bitcast - includes destination type for analysis.
 fn payloadBitcast(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(arena, ip, operand);

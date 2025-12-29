@@ -152,7 +152,7 @@ fn mergeCallerReturn(
         if (true_set and false_set) {
             // Both branches returned - need to merge
             // For now, copy true branch's value, then let analyses merge
-            const true_idx = try true_return.*.copy_to(true_cp, caller_refinements);
+            const true_idx = try true_return.*.copyTo(true_cp, caller_refinements);
             orig_return.* = caller_refinements.at(true_idx).*;
 
             // Call each analysis's merge function for the return value
@@ -229,45 +229,88 @@ pub fn onFinish(state: State) !void {
 }
 
 /// Recursively propagate pointee state from local to caller.
+/// Note: Uses indices and re-fetches pointers after any operation that could reallocate.
 fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Refinements, caller_idx: EIdx) void {
     const local = local_refs.at(local_idx);
-    const caller = caller_refs.at(caller_idx);
 
     switch (local.*) {
         .scalar => |src| {
             // caller should already be scalar from type info
-            caller.scalar = src;
+            caller_refs.at(caller_idx).scalar = src;
         },
         .pointer => |src| {
-            caller.pointer.analyte = src.analyte;
-            propagatePointee(local_refs, src.to, caller_refs, caller.pointer.to);
+            const caller_to = caller_refs.at(caller_idx).pointer.to;
+            caller_refs.at(caller_idx).pointer.analyte = src.analyte;
+            propagatePointee(local_refs, src.to, caller_refs, caller_to);
         },
         .@"struct" => |src| {
-            caller.@"struct".analyte = src.analyte;
+            caller_refs.at(caller_idx).@"struct".analyte = src.analyte;
             for (src.fields, 0..) |local_field_idx, i| {
-                propagatePointee(local_refs, local_field_idx, caller_refs, caller.@"struct".fields[i]);
+                const caller_field_idx = caller_refs.at(caller_idx).@"struct".fields[i];
+                propagatePointee(local_refs, local_field_idx, caller_refs, caller_field_idx);
             }
         },
         .@"union" => |src| {
-            caller.@"union".analyte = src.analyte;
             // Propagate active fields - if local has active field that caller doesn't, activate it in caller
-            const mutable_caller_fields = @constCast(caller.@"union".fields);
+            // Note: fields slice is stable (allocated separately), but we must re-fetch after append operations
+            const mutable_caller_fields = @constCast(caller_refs.at(caller_idx).@"union".fields);
+
+            // If local has variant_safety with active_metas[i] != null, ensure caller has field entity
+            // This must happen BEFORE copying analyte to maintain testValid invariant
+            if (src.analyte.variant_safety) |vs| {
+                for (vs.active_metas, 0..) |meta_opt, i| {
+                    if (meta_opt != null and mutable_caller_fields[i] == null) {
+                        // Active variant in local but no field entity in caller - create one
+                        if (src.fields[i]) |local_field_idx| {
+                            // Copy from local - may reallocate caller_refs
+                            const new_idx = local_refs.at(local_field_idx).*.copyTo(local_refs, caller_refs) catch @panic("out of memory");
+                            // Re-fetch fields pointer after potential reallocation
+                            @constCast(caller_refs.at(caller_idx).@"union".fields)[i] = new_idx;
+                        } else {
+                            // No local field either - create a defined scalar placeholder
+                            const new_idx = caller_refs.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } }) catch @panic("out of memory");
+                            // Re-fetch fields pointer after potential reallocation
+                            @constCast(caller_refs.at(caller_idx).@"union".fields)[i] = new_idx;
+                        }
+                    }
+                }
+            }
+
+            // Copy analyte, but deep copy variant_safety.active_metas to caller's allocator
+            // First free the old active_metas if it exists
+            const allocator = caller_refs.list.allocator;
+            if (caller_refs.at(caller_idx).@"union".analyte.variant_safety) |old_vs| {
+                allocator.free(old_vs.active_metas);
+            }
+
+            var new_analyte = src.analyte;
+            if (src.analyte.variant_safety) |vs| {
+                const new_active_metas = allocator.alloc(?@import("Meta.zig"), vs.active_metas.len) catch @panic("out of memory");
+                @memcpy(new_active_metas, vs.active_metas);
+                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+            }
+            caller_refs.at(caller_idx).@"union".analyte = new_analyte;
+
+            // Propagate field values for fields that are active in both
             for (src.fields, 0..) |local_field_opt, i| {
                 if (local_field_opt) |local_field_idx| {
-                    if (mutable_caller_fields[i]) |caller_field_idx| {
+                    // Re-fetch caller fields after any potential reallocation above
+                    const caller_field_opt = caller_refs.at(caller_idx).@"union".fields[i];
+                    if (caller_field_opt) |caller_field_idx| {
                         // Both have field active - propagate
                         propagatePointee(local_refs, local_field_idx, caller_refs, caller_field_idx);
                     } else {
                         // Local has field that caller doesn't - copy to caller
-                        const new_idx = local_refs.at(local_field_idx).*.copy_to(local_refs, caller_refs) catch @panic("out of memory");
-                        mutable_caller_fields[i] = new_idx;
+                        const new_idx = local_refs.at(local_field_idx).*.copyTo(local_refs, caller_refs) catch @panic("out of memory");
+                        @constCast(caller_refs.at(caller_idx).@"union".fields)[i] = new_idx;
                     }
                 }
             }
         },
         .optional => |src| {
-            caller.optional.analyte = src.analyte;
-            propagatePointee(local_refs, src.to, caller_refs, caller.optional.to);
+            const caller_to = caller_refs.at(caller_idx).optional.to;
+            caller_refs.at(caller_idx).optional.analyte = src.analyte;
+            propagatePointee(local_refs, src.to, caller_refs, caller_to);
         },
         else => |t| std.debug.panic("backPropagate: local pointee is {s} - propagation not yet implemented", .{@tagName(t)}),
     }
@@ -313,6 +356,7 @@ pub fn backPropagate(state: State) void {
                 // Copy analyte (including variant_safety) from local to caller
                 // But we need to ensure any active variants have field entities in caller
                 const mutable_caller_fields = @constCast(caller_entity.@"union".fields);
+                const allocator = cp.list.allocator;
 
                 // If local has variant_safety with active fields, ensure caller has those field entities
                 if (local_union.analyte.variant_safety) |vs| {
@@ -321,7 +365,7 @@ pub fn backPropagate(state: State) void {
                             // Active variant in local but no field entity in caller - create one
                             if (local_union.fields[i]) |local_field_idx| {
                                 // Copy from local
-                                const new_idx = state.refinements.at(local_field_idx).*.copy_to(state.refinements, cp) catch @panic("out of memory");
+                                const new_idx = state.refinements.at(local_field_idx).*.copyTo(state.refinements, cp) catch @panic("out of memory");
                                 mutable_caller_fields[i] = new_idx;
                             } else {
                                 // No local field either - create a defined scalar placeholder
@@ -331,7 +375,19 @@ pub fn backPropagate(state: State) void {
                     }
                 }
 
-                caller_entity.@"union".analyte = local_union.analyte;
+                // Free old active_metas before overwriting
+                if (caller_entity.@"union".analyte.variant_safety) |old_vs| {
+                    allocator.free(old_vs.active_metas);
+                }
+
+                // Deep copy analyte with variant_safety.active_metas to caller's allocator
+                var new_analyte = local_union.analyte;
+                if (local_union.analyte.variant_safety) |vs| {
+                    const new_active_metas = allocator.alloc(?@import("Meta.zig"), vs.active_metas.len) catch @panic("out of memory");
+                    @memcpy(new_active_metas, vs.active_metas);
+                    new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+                }
+                caller_entity.@"union".analyte = new_analyte;
 
                 // Propagate active fields (non-null in both local and caller)
                 for (local_union.fields, 0..) |local_field_opt, i| {

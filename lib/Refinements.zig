@@ -99,24 +99,24 @@ pub const Refinement = union(enum) {
     }
 
     /// Clobber a .retval_future slot with a src refinement, copying the structure without checks.
-    /// Takes dst_idx instead of pointer because copy_to may reallocate dst_list.
+    /// Takes dst_idx instead of pointer because copyTo may reallocate dst_list.
     fn clobber_retval_future(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const same_list = src_list == dst_list;
         // Note: We must compute the new value BEFORE getting a pointer to dst,
-        // because copy_to may reallocate dst_list's backing memory.
+        // because copyTo may reallocate dst_list's backing memory.
         const new_value: Refinement = switch (src) {
             .scalar => src,
             .pointer => |p| .{ .pointer = .{
                 .analyte = p.analyte,
-                .to = if (same_list) p.to else try copy_to(src_list.at(p.to).*, src_list, dst_list),
+                .to = if (same_list) p.to else try copyTo(src_list.at(p.to).*, src_list, dst_list),
             } },
             .optional => |o| .{ .optional = .{
                 .analyte = o.analyte,
-                .to = if (same_list) o.to else try copy_to(src_list.at(o.to).*, src_list, dst_list),
+                .to = if (same_list) o.to else try copyTo(src_list.at(o.to).*, src_list, dst_list),
             } },
             .errorunion => |e| .{ .errorunion = .{
                 .analyte = e.analyte,
-                .to = if (same_list) e.to else try copy_to(src_list.at(e.to).*, src_list, dst_list),
+                .to = if (same_list) e.to else try copyTo(src_list.at(e.to).*, src_list, dst_list),
             } },
             .region => @panic("regions not implemented yet"),
             .@"struct" => |s| blk: {
@@ -128,7 +128,7 @@ pub const Refinement = union(enum) {
                 } else {
                     // Different lists: need to copy field entities too
                     for (s.fields, 0..) |field_idx, i| {
-                        new_fields[i] = try copy_to(src_list.at(field_idx).*, src_list, dst_list);
+                        new_fields[i] = try copyTo(src_list.at(field_idx).*, src_list, dst_list);
                     }
                 }
                 // Copy field names if present
@@ -147,7 +147,7 @@ pub const Refinement = union(enum) {
                 } else {
                     for (u.fields, 0..) |field_idx_opt, i| {
                         new_fields[i] = if (field_idx_opt) |field_idx|
-                            try copy_to(src_list.at(field_idx).*, src_list, dst_list)
+                            try copyTo(src_list.at(field_idx).*, src_list, dst_list)
                         else
                             null;
                     }
@@ -180,12 +180,20 @@ pub const Refinement = union(enum) {
     fn recurse_fields(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) void {
         if (src != tag) std.debug.panic("clobber mismatch: src is .{s} and dst is .{s}", .{ @tagName(src), @tagName(tag) });
 
+        const allocator = dst_list.list.allocator;
+
+        // For unions, free old active_metas before overwriting
+        if (tag == .@"union") {
+            if (@field(dst, @tagName(tag)).analyte.variant_safety) |old_vs| {
+                allocator.free(old_vs.active_metas);
+            }
+        }
+
         // Copy analyte - deep copy only when crossing between different refinement tables
         var new_analyte = @field(src, @tagName(tag)).analyte;
         if (tag == .@"union" and src_list != dst_list) {
             // Different tables - deep copy variant_safety.active_metas to avoid sharing
             if (@field(src, @tagName(tag)).analyte.variant_safety) |vs| {
-                const allocator = dst_list.list.allocator;
                 const new_active_metas = allocator.alloc(?Meta, vs.active_metas.len) catch @panic("out of memory");
                 @memcpy(new_active_metas, vs.active_metas);
                 new_analyte.variant_safety = .{ .active_metas = new_active_metas };
@@ -209,7 +217,7 @@ pub const Refinement = union(enum) {
                         if (new_analyte.variant_safety) |vs| {
                             if (vs.active_metas[i] != null) {
                                 // Active field in src but not in dst - copy it
-                                const new_idx = copy_to(src_list.at(src_field.?).*, src_list, dst_list) catch @panic("out of memory");
+                                const new_idx = copyTo(src_list.at(src_field.?).*, src_list, dst_list) catch @panic("out of memory");
                                 dst_field.* = new_idx;
                             }
                         }
@@ -228,18 +236,19 @@ pub const Refinement = union(enum) {
         }
     }
 
-    /// Recursively copies a refinement into dst_list.  Returns the entity index of the result.
-    pub fn copy_to(src: Refinement, src_list: *Refinements, dst_list: *Refinements) !EIdx {
-        std.debug.assert(src_list != dst_list); // use index directly if same list
+    /// Cross-table copy: copies refinement from src_list to dst_list.
+    /// Uses noalias to assert tables are different.
+    /// Follows semideep copy rules - pointers reference same pointee across tables.
+    pub fn copyTo(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !EIdx {
         return switch (src) {
             .scalar => try dst_list.appendEntity(src),
-            .pointer => try src.copy_to_indirected(src_list, dst_list, .pointer),
-            .optional => try src.copy_to_indirected(src_list, dst_list, .optional),
-            .errorunion => try src.copy_to_indirected(src_list, dst_list, .errorunion),
+            .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
+            .optional => try src.copyToIndirected(src_list, dst_list, .optional),
+            .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
             .retval_future => @panic("cannot copy from .retval_future"),
             .region => @panic("regions not implemented yet"),
-            .@"struct" => try src.copy_to_fields(src_list, dst_list, .@"struct"),
-            .@"union" => try src.copy_to_fields(src_list, dst_list, .@"union"),
+            .@"struct" => try src.copyToFields(src_list, dst_list, .@"struct"),
+            .@"union" => try src.copyToFields(src_list, dst_list, .@"union"),
             // following types don't have any metadata associated with them.
             .unimplemented => try dst_list.appendEntity(.{ .unimplemented = {} }),
             .void => try dst_list.appendEntity(.{ .void = {} }),
@@ -247,9 +256,9 @@ pub const Refinement = union(enum) {
         };
     }
 
-    fn copy_to_indirected(src: Refinement, src_list: *Refinements, dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
+    fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
         const src_inner_idx = @field(src, @tagName(tag)).to;
-        const dst_inner_idx = try copy_to(src_list.at(src_inner_idx).*, src_list, dst_list);
+        const dst_inner_idx = try copyTo(src_list.at(src_inner_idx).*, src_list, dst_list);
         const to_insert: Refinement = @unionInit(Refinement, @tagName(tag), .{
             .to = dst_inner_idx,
             .analyte = @field(src, @tagName(tag)).analyte,
@@ -257,7 +266,7 @@ pub const Refinement = union(enum) {
         return dst_list.appendEntity(to_insert);
     }
 
-    fn copy_to_fields(src: Refinement, src_list: *Refinements, dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
+    fn copyToFields(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
         const allocator = dst_list.list.allocator;
         const src_data = @field(src, @tagName(tag));
         const src_fields = src_data.fields;
@@ -273,7 +282,7 @@ pub const Refinement = union(enum) {
                 }
             else
                 src_field;
-            const new_idx = try copy_to(src_list.at(src_field_idx).*, src_list, dst_list);
+            const new_idx = try copyTo(src_list.at(src_field_idx).*, src_list, dst_list);
             new_fields[i] = if (tag == .@"union") new_idx else new_idx;
         }
 
@@ -318,10 +327,16 @@ pub fn deinit(self: *Refinements) void {
     // Free any struct and union field allocations
     for (self.list.items) |item| {
         switch (item) {
-            inline .@"struct", .@"union" => |data| {
+            inline .@"struct", .@"union" => |data, tag| {
                 allocator.free(data.fields);
                 if (data.field_names.len > 0) {
                     allocator.free(data.field_names);
+                }
+                // Free variant_safety.active_metas for unions
+                if (tag == .@"union") {
+                    if (data.analyte.variant_safety) |vs| {
+                        allocator.free(vs.active_metas);
+                    }
                 }
             },
             else => {},
@@ -379,6 +394,106 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
         }
     }
     return new;
+}
+
+/// Semideep copy within same table: creates new entity, copying values but sharing pointer targets.
+/// For struct/union, recursively copies value fields, but pointer fields reference same pointee.
+/// Always deep copies variant_safety.active_metas.
+pub fn semideepCopy(self: *Refinements, src_eidx: EIdx) error{OutOfMemory}!EIdx {
+    const src = self.at(src_eidx).*;
+    return self.semideepCopyRefinement(src);
+}
+
+fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory}!EIdx {
+    const allocator = self.list.allocator;
+    return switch (src) {
+        // Scalars: copy analyte state to new entity
+        .scalar => try self.appendEntity(src),
+
+        // Pointers: new pointer entity, same .to (reference existing pointee)
+        .pointer => |p| try self.appendEntity(.{ .pointer = .{
+            .analyte = p.analyte,
+            .to = p.to, // Same pointee - this is the "boundary"
+        } }),
+
+        // Optionals/errorunions: recurse into payload (semideep copy the inner value)
+        .optional => |o| blk: {
+            const new_inner = try self.semideepCopy(o.to);
+            break :blk try self.appendEntity(.{ .optional = .{
+                .analyte = o.analyte,
+                .to = new_inner,
+            } });
+        },
+        .errorunion => |e| blk: {
+            const new_inner = try self.semideepCopy(e.to);
+            break :blk try self.appendEntity(.{ .errorunion = .{
+                .analyte = e.analyte,
+                .to = new_inner,
+            } });
+        },
+
+        // Structs: new struct with semideep copied fields
+        .@"struct" => |s| blk: {
+            const new_fields = try allocator.alloc(EIdx, s.fields.len);
+            for (s.fields, 0..) |field_idx, i| {
+                new_fields[i] = try self.semideepCopy(field_idx);
+            }
+            const new_field_names = if (s.field_names.len > 0) names_blk: {
+                const names = try allocator.alloc(?[]const u8, s.field_names.len);
+                @memcpy(names, s.field_names);
+                break :names_blk names;
+            } else &.{};
+            break :blk try self.appendEntity(.{ .@"struct" = .{
+                .analyte = s.analyte,
+                .fields = new_fields,
+                .field_names = new_field_names,
+            } });
+        },
+
+        // Unions: new union with semideep copied active fields
+        .@"union" => |u| blk: {
+            const new_fields = try allocator.alloc(?EIdx, u.fields.len);
+            for (u.fields, 0..) |field_idx_opt, i| {
+                new_fields[i] = if (field_idx_opt) |field_idx|
+                    try self.semideepCopy(field_idx)
+                else
+                    null;
+            }
+            const new_field_names = if (u.field_names.len > 0) names_blk: {
+                const names = try allocator.alloc(?[]const u8, u.field_names.len);
+                @memcpy(names, u.field_names);
+                break :names_blk names;
+            } else &.{};
+            // Always deep copy variant_safety.active_metas
+            var new_analyte = u.analyte;
+            if (u.analyte.variant_safety) |vs| {
+                const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
+                @memcpy(new_active_metas, vs.active_metas);
+                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+            }
+            break :blk try self.appendEntity(.{ .@"union" = .{
+                .analyte = new_analyte,
+                .fields = new_fields,
+                .field_names = new_field_names,
+            } });
+        },
+
+        .region => @panic("regions not implemented yet"),
+        .retval_future => @panic("cannot semideep copy .retval_future"),
+
+        // Simple types: just copy
+        .unimplemented => try self.appendEntity(.{ .unimplemented = {} }),
+        .void => try self.appendEntity(.{ .void = {} }),
+        .noreturn => try self.appendEntity(.{ .noreturn = {} }),
+    };
+}
+
+/// Create pointer entity referencing existing entity (for struct_field_ptr, bitcast on pointer, etc.)
+pub fn createPointerTo(self: *Refinements, pointee_eidx: EIdx, analyte: Analyte) !EIdx {
+    return self.appendEntity(.{ .pointer = .{
+        .analyte = analyte,
+        .to = pointee_eidx,
+    } });
 }
 
 const undefined_analysis = @import("analysis/undefined.zig");

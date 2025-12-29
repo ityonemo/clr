@@ -23,7 +23,8 @@ pub const NullSafety = union(enum) {
     non_null: Meta,
     @"null": Meta,
 
-    /// is_non_null sets the optional's null_safety to .unknown with check info
+    /// is_non_null sets the optional's null_safety to .unknown with check info.
+    /// Only operates on optionals - null_safety must not be set on pointers (iron rule).
     pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {
         const results = state.results;
         const refinements = state.refinements;
@@ -33,13 +34,10 @@ pub const NullSafety = union(enum) {
             else => return, // Comptime - no tracking needed
         };
 
-        // is_non_null can apply to optionals or pointers
+        // Only optionals can have null_safety (testValid enforces this)
         const ref = refinements.at(src_idx);
-        const analyte = switch (ref.*) {
-            .optional => |*o| &o.analyte,
-            .pointer => |*p| &p.analyte,
-            else => return, // Other types (e.g., error unions) - no null tracking
-        };
+        if (ref.* != .optional) return;
+        const analyte = &ref.optional.analyte;
 
         // Only record check if we don't already know the null state
         // If we already know it's null or non_null, keep that information
@@ -53,7 +51,8 @@ pub const NullSafety = union(enum) {
         }
     }
 
-    /// is_null sets the optional's null_safety to .unknown with check info
+    /// is_null sets the optional's null_safety to .unknown with check info.
+    /// Only operates on optionals - null_safety must not be set on pointers (iron rule).
     pub fn is_null(state: State, index: usize, params: tag.IsNull) !void {
         const results = state.results;
         const refinements = state.refinements;
@@ -63,13 +62,10 @@ pub const NullSafety = union(enum) {
             else => return, // Comptime - no tracking needed
         };
 
-        // is_null can apply to optionals or pointers
+        // Only optionals can have null_safety (testValid enforces this)
         const ref = refinements.at(src_idx);
-        const analyte = switch (ref.*) {
-            .optional => |*o| &o.analyte,
-            .pointer => |*p| &p.analyte,
-            else => return, // Other types (e.g., error unions) - no null tracking
-        };
+        if (ref.* != .optional) return;
+        const analyte = &ref.optional.analyte;
 
         // Only record check if we don't already know the null state
         const ns = analyte.null_safety;
@@ -249,17 +245,17 @@ pub const NullSafety = union(enum) {
 
 pub fn testValid(refinement: Refinements.Refinement) void {
     switch (refinement) {
-        // null_safety is valid on optionals and pointers (for ?*T pointer-like optionals)
-        .optional, .pointer => {},
-        // null_safety should not exist on non-optional/non-pointer types
+        // null_safety is valid on optionals
+        .optional => {},
+        // null_safety should not exist on non-optional types
         .scalar => |s| {
             if (s.null_safety != null) {
-                std.debug.panic("null_safety should only exist on optionals/pointers, got scalar", .{});
+                std.debug.panic("null_safety should only exist on optionals, got scalar", .{});
             }
         },
-        inline .errorunion, .@"struct", .@"union" => |data, t| {
+        inline .pointer, .errorunion, .@"struct", .@"union" => |data, t| {
             if (data.analyte.null_safety != null) {
-                std.debug.panic("null_safety should only exist on optionals/pointers, got {s}", .{@tagName(t)});
+                std.debug.panic("null_safety should only exist on optionals, got {s}", .{@tagName(t)});
             }
         },
         .void, .noreturn, .retval_future, .unimplemented, .region => {},

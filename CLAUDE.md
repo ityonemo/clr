@@ -121,6 +121,12 @@ Output goes to stderr.
 - **Do not modify the zig/ submodule** - Any changes to the Zig compiler must be made by humans, not AI
 - **Use debug.zig for debugging** - Use `src/debug.zig` for debug output. It uses `std.fmt.bufPrint` with raw Linux syscalls. Do not modify this file - it works correctly in the DLL context where `std.debug.print` does not.
 
+## Iron Rules (DO NOT VIOLATE)
+
+1. **testValid functions are IMMUTABLE** - The `testValid` functions in `lib/analysis/*.zig` define what analysis states are valid on which refinement types. These represent fundamental invariants of the analysis system. NEVER modify these functions to "fix" a test failure. If testValid is failing, the bug is in how refinements are being created or manipulated, not in testValid itself.
+
+2. **Optional pointers are special** - In Zig, `?*T` (optional pointer) is the ONLY optional type with the same bit width as its non-optional form (null = address 0). This is why `bitcast` can convert `*T` to `?*T`. Other optionals have a separate null flag.
+
 ## Architecture: Tag Handlers vs Analysis Modules
 
 **IMPORTANT**: Tag handlers in `lib/tag.zig` must NOT reach into analyte fields directly (e.g., `.analyte.undefined`, `.analyte.memory_safety`). Analyte manipulation is the responsibility of analysis modules in `lib/analysis/`.

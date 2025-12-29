@@ -8,6 +8,39 @@
 // If you find yourself writing `.analyte.undefined = ...` in a tag handler,
 // that logic belongs in an analysis module instead.
 // =============================================================================
+//
+// =============================================================================
+// ENTITY OPERATION CLASSIFICATION
+// =============================================================================
+//
+// Each tag performs one of these entity operations:
+//
+// CREATE - Allocate new independent entity
+//   Tags: alloc, alloc_create, arg, bitcast (on value), bit_and, cmp_*,
+//         ctz, sub, add_with_overflow, sub_with_overflow, is_non_err,
+//         is_non_null, is_null, get_union_tag, unwrap_errunion_err,
+//         wrap_errunion_err, wrap_errunion_payload, block, br, cond_br,
+//         intcast, ptr_add, array_to_slice, slice, slice_len, aggregate_init
+//
+// CREATE-SEMIDEEP - Create new entity with semideep copy from source
+//   (Copy values recursively, but pointers reference same target)
+//   Tags: load, union_init, optional_payload, unwrap_errunion_payload,
+//         struct_field_val
+//
+// CREATE-THAT-REFERENCES - Create new pointer entity referencing existing entity
+//   Tags: struct_field_ptr, bitcast (on pointer), optional_payload_ptr (TODO),
+//         unwrap_errunion_payload_ptr (TODO)
+//
+// MODIFY - Update pre-existing entity
+//   Tags: store, store_safe, ret_safe, ret_load, ret_ptr, set_union_tag,
+//         alloc_destroy, memset_safe
+//
+// NO-OP / METADATA - No entity impact
+//   Tags: noop, noop_pruned_debug, dbg_stmt, dbg_var_ptr, dbg_var_val,
+//         dbg_arg_inline, dbg_inline_block, unreach, ret_addr,
+//         stack_trace_frames, @"try" (TODO)
+//
+// =============================================================================
 
 const std = @import("std");
 const Inst = @import("Inst.zig");
@@ -113,6 +146,8 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
 
 // Tag payload types
 
+/// Entity operation: CREATE
+/// Creates pointer entity + pointee entity
 pub const Alloc = struct {
     ty: Type,
 
@@ -154,6 +189,9 @@ pub const AllocDestroy = struct {
     }
 };
 
+/// Entity operation: CREATE
+/// Creates new entity for the argument value (via cross-table copyTo).
+///
 /// Arg copies caller's entity into local refinements directly - NO pointer wrapper.
 ///
 /// AIR Semantics:
@@ -184,7 +222,7 @@ pub const Arg = struct {
                 const caller_eidx: EIdx = @intCast(eidx);
                 const cp = state.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
                 // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
-                const local_copy_idx = try cp.at(caller_eidx).*.copy_to(cp, state.refinements);
+                const local_copy_idx = try cp.at(caller_eidx).*.copyTo(cp, state.refinements);
                 state.results[index].refinement = local_copy_idx;
                 // Set caller_eidx for backward propagation on function close
                 state.results[index].caller_eidx = caller_eidx;
@@ -205,30 +243,39 @@ pub const Arg = struct {
     }
 };
 
+/// Entity operation: CREATE (on value) or CREATE-THAT-REFERENCES (on pointer)
+/// For pointers: creates new pointer entity referencing same pointee.
+/// For values: creates new entity.
 pub const Bitcast = struct {
     /// Source value being bitcast.
     src: Src,
-    /// Destination type - available for analysis but bitcast shares source refinement.
-    /// Zig's ?*T is represented as a nullable pointer, so we track null_safety on pointers.
+    /// Destination type - available for analysis handlers.
+    /// NOTE: Optional pointers (?*T) are the ONLY optional type with the same
+    /// bit width as their non-optional form (null = address 0). This is why
+    /// bitcast can convert *T to ?*T without changing the value.
     ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Share source instruction's entity (intraprocedural - no copy needed).
-        // For pointer-to-optional coercion (?*T), we keep the pointer refinement
-        // and track null_safety on the pointer's analyte.
         switch (self.src) {
-            .eidx => |src| state.results[index].refinement = state.results[src].refinement,
-            .interned => |ty| {
-                // Comptime/global source - create from type
-                const ref = try typeToRefinement(ty, state.refinements);
-                const ref_idx = try state.refinements.appendEntity(ref);
-                state.results[index].refinement = ref_idx;
+            .eidx => |src| {
+                const src_eidx = state.results[src].refinement orelse return;
+                const src_ref = state.refinements.at(src_eidx);
+
+                // Check if we're converting pointer to optional (e.g., *T to ?*T)
+                if (self.ty == .optional and src_ref.* == .pointer) {
+                    // Create optional wrapper that points to the existing pointer entity
+                    const opt_idx = try state.refinements.appendEntity(.{
+                        .optional = .{ .analyte = .{}, .to = src_eidx },
+                    });
+                    state.results[index].refinement = opt_idx;
+                } else {
+                    // Default: share the source refinement directly
+                    state.results[index].refinement = src_eidx;
+                }
             },
-            .other => {
-                // Comptime/global source without type info - create fresh scalar
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-            },
+            .interned, .other => {},
         }
+
         try splat(.bitcast, state, index, self);
     }
 };
@@ -359,10 +406,11 @@ pub const DbgVarVal = struct {
     }
 };
 
-/// Load dereferences a pointer and produces the value stored at that memory location.
+/// Entity operation: CREATE-SEMIDEEP
+/// Creates new entity via semideep copy from pointee.
 ///
-/// For compound types (structs, pointers), loading shares the pointee's entity.
-/// For scalars, creates a fresh scalar since values are copied.
+/// Load dereferences a pointer and produces the value stored at that memory location.
+/// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
 pub const Load = struct {
     /// Index into results[] array. Null when loading from a global or constant
     /// pointer (interned value with no instruction to trace).
@@ -397,8 +445,9 @@ pub const Load = struct {
             },
         };
 
-        // Share the entity directly. This ensures modifications are visible everywhere.
-        state.results[index].refinement = pointee_idx;
+        // Semideep copy: create new entity copying values, but pointers reference same target
+        const new_idx = try state.refinements.semideepCopy(pointee_idx);
+        state.results[index].refinement = new_idx;
         // Propagate name from source pointer to load result.
         // When we load a value through a named pointer (e.g., `container.ptr`),
         // the loaded value should inherit that name for error reporting.
@@ -407,6 +456,9 @@ pub const Load = struct {
     }
 };
 
+/// Entity operation: CREATE-THAT-REFERENCES
+/// Creates new pointer entity referencing existing field entity.
+///
 /// StructFieldPtr gets a pointer to a specific field within a struct or union.
 /// Used by struct_field_ptr_index_N instructions.
 /// Note: Zig AIR uses this for both struct and union field access.
@@ -474,6 +526,9 @@ pub const StructFieldPtr = struct {
     }
 };
 
+/// Entity operation: CREATE-SEMIDEEP
+/// Creates new entity via semideep copy from field.
+///
 /// StructFieldVal extracts a field value from a struct or union by value.
 /// This is used when accessing `s.field` where `s` is a struct/union value (not a pointer).
 /// Note: Zig AIR uses this for both struct and union field access.
@@ -536,17 +591,29 @@ pub const StructFieldVal = struct {
     }
 };
 
+/// Entity operation: CREATE-SEMIDEEP
+/// Creates new entity via semideep copy from optional payload.
+///
 /// OptionalPayload extracts the inner value from an optional (e.g., `x.?` or `x orelse`).
-/// The result shares the source's entity - unwrapping doesn't create a copy of the value,
-/// it just accesses what's already there.
+/// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
 pub const OptionalPayload = struct {
     /// Source optional being unwrapped.
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Share source instruction's entity (intraprocedural - no copy needed)
         switch (self.src) {
-            .eidx => |src| state.results[index].refinement = state.results[src].refinement,
+            .eidx => |src| {
+                const src_ref_idx = state.results[src].refinement orelse return;
+                const src_ref = state.refinements.at(src_ref_idx);
+
+                if (src_ref.* == .optional) {
+                    // Extract the payload from the optional (optional.to is the inner value)
+                    state.results[index].refinement = src_ref.optional.to;
+                } else {
+                    // Not an optional - might be error union or direct pass-through
+                    state.results[index].refinement = src_ref_idx;
+                }
+            },
             .interned, .other => {
                 // Comptime/global source - create fresh scalar
                 // TODO: use type info from .interned to determine structure
@@ -557,6 +624,9 @@ pub const OptionalPayload = struct {
     }
 };
 
+/// Entity operation: MODIFY
+/// Modifies the retval entity with the return value's state.
+///
 /// RetSafe returns a value from a function. "Safe" refers to safety-checked returns
 /// (as opposed to naked/inline assembly returns).
 ///
@@ -580,7 +650,7 @@ pub const RetSafe = struct {
                         .retval_future, .noreturn => {
                             // .noreturn can be overwritten - it's from an error path return
                             // Copy return value from callee to caller's return slot
-                            const new_idx = try state.refinements.at(src_idx).*.copy_to(state.refinements, caller_refinements);
+                            const new_idx = try state.refinements.at(src_idx).*.copyTo(state.refinements, caller_refinements);
                             // Deep copy for structs to avoid double-free on deinit
                             const new_val = caller_refinements.at(new_idx).*;
                             caller_refinements.at(return_eidx).* = switch (new_val) {
@@ -678,7 +748,7 @@ pub const RetLoad = struct {
                 .retval_future, .noreturn => {
                     // Copy return value from callee to caller's return slot
                     // copy_to creates a new entity with properly allocated memory
-                    const new_idx = try state.refinements.at(pointee_idx).*.copy_to(state.refinements, caller_refinements);
+                    const new_idx = try state.refinements.at(pointee_idx).*.copyTo(state.refinements, caller_refinements);
                     // Move the value to return_eidx and clear the intermediate entity
                     // This avoids double-free since only return_eidx owns the allocations
                     caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
@@ -694,6 +764,9 @@ pub const RetLoad = struct {
     }
 };
 
+/// Entity operation: MODIFY
+/// Modifies the pointee entity with the stored value's state.
+///
 /// Store writes a value through a pointer. The store instruction itself is void.
 /// Used for both `store` and `store_safe` AIR instructions (semantically identical
 /// for our analysis - the difference is only runtime safety checks).
@@ -729,9 +802,11 @@ pub const Store = struct {
     }
 };
 
+/// Entity operation: CREATE-SEMIDEEP
+/// Creates new entity via semideep copy from error union payload.
+///
 /// UnwrapErrunionPayload extracts the success value from an error union (e.g., `try x` or `x catch`).
-/// The result shares the source's payload entity - unwrapping doesn't create a copy of the value,
-/// it just accesses what's already there.
+/// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
 pub const UnwrapErrunionPayload = struct {
     /// Source error union being unwrapped.
     src: Src,
@@ -870,6 +945,9 @@ pub const Noop = struct {
     }
 };
 
+/// Entity operation: MODIFY
+/// Modifies the union entity to activate the specified field.
+///
 /// SetUnionTag sets the active tag on a union without setting the payload.
 /// This marks the specified field as active (undefined) and all others as inactive.
 pub const SetUnionTag = struct {
@@ -886,15 +964,18 @@ pub const SetUnionTag = struct {
         const ptr_eidx = state.results[self.ptr.?].refinement.?;
         const union_eidx = state.refinements.at(ptr_eidx).pointer.to;
 
-        // Deactivate all fields, then create fresh entity for active field
+        // Deactivate all fields
         const fields = state.refinements.at(union_eidx).@"union".fields;
         for (fields) |*field| field.* = null;
 
         // Create a fresh entity with the correct type for the active field
-        // NOTE: This may reallocate the refinements list, so we store by index
-        // The Undefined analysis handler will mark this as undefined via splat()
+        // NOTE: typeToRefinement and appendEntity may reallocate the refinements list,
+        // so we must re-fetch the fields pointer AFTER these calls
         const field_ref = try typeToRefinement(self.ty, state.refinements);
-        fields[field_idx] = try state.refinements.appendEntity(field_ref);
+        const new_field_eidx = try state.refinements.appendEntity(field_ref);
+
+        // Re-fetch fields pointer after potential reallocation
+        state.refinements.at(union_eidx).@"union".fields[field_idx] = new_field_eidx;
 
         try splat(.set_union_tag, state, index, self);
     }
@@ -911,6 +992,9 @@ pub const GetUnionTag = struct {
     }
 };
 
+/// Entity operation: CREATE-SEMIDEEP
+/// Creates new union entity via semideep copy from operand.
+///
 /// UnionInit initializes a union with one active field.
 /// Only the specified field gets a real entity; others are null (inactive).
 pub const UnionInit = struct {
@@ -1269,4 +1353,445 @@ test "dbg_var_val sets name on target instruction" {
     try Inst.apply(state, 2, .{ .dbg_var_val = .{ .ptr = 1, .name = "my_val" } });
 
     try std.testing.expectEqualStrings("my_val", results[1].name.?);
+}
+
+test "arg copies value and sets name" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Caller refinements (simulating the caller)
+    var caller_refinements = Refinements.init(allocator);
+    defer caller_refinements.deinit();
+    const arg_eidx = try caller_refinements.appendEntity(.{ .scalar = .{} });
+
+    // Callee refinements
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_eidx = 0,
+        .caller_refinements = &caller_refinements,
+    };
+
+    // arg should copy the entity from caller and set the name
+    try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .eidx = arg_eidx }, .name = "param" } });
+
+    try std.testing.expect(results[0].refinement != null);
+    try std.testing.expectEqualStrings("param", results[0].name.?);
+}
+
+test "br shares source refinement with block" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a block at index 0
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
+
+    // Create a value at index 1
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
+    const src_eidx = results[1].refinement.?;
+
+    // br should share the source refinement with the block
+    try Inst.apply(state, 2, .{ .br = .{ .block = 0, .src = .{ .eidx = 1 } } });
+
+    // Block should now have the same refinement as source
+    try std.testing.expectEqual(src_eidx, results[0].refinement.?);
+}
+
+test "dbg_stmt does nothing" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    // dbg_stmt should not crash and should set void refinement
+    try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 10, .column = 5 } });
+
+    try std.testing.expect(results[0].refinement != null);
+    try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
+}
+
+test "optional_payload extracts inner value from optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create an optional with a scalar inside, marked as non-null (checked)
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .non_null = .{
+            .function = "test",
+            .file = "test.zig",
+            .line = 1,
+        } } },
+        .to = inner_eidx,
+    } });
+    results[0].refinement = opt_eidx;
+
+    // optional_payload should extract the inner value
+    try Inst.apply(state, 1, .{ .optional_payload = .{ .src = .{ .eidx = 0 } } });
+
+    // Result should point to the inner scalar
+    try std.testing.expectEqual(inner_eidx, results[1].refinement.?);
+}
+
+test "unwrap_errunion_payload extracts payload from error union" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create an error union with a scalar payload
+    const payload_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const eu_eidx = try refinements.appendEntity(.{ .errorunion = .{ .analyte = .{}, .to = payload_eidx } });
+    results[0].refinement = eu_eidx;
+
+    // unwrap_errunion_payload should extract the payload
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+
+    // Result should point to the payload
+    try std.testing.expectEqual(payload_eidx, results[1].refinement.?);
+}
+
+test "Simple tags produce scalar" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 6;
+    const state = testState(&ctx, &results, &refinements);
+
+    // All Simple tags should produce scalar refinements
+    try Inst.apply(state, 0, .{ .bit_and = .{} });
+    try Inst.apply(state, 1, .{ .cmp_eq = .{} });
+    try Inst.apply(state, 2, .{ .cmp_gt = .{} });
+    try Inst.apply(state, 3, .{ .cmp_lte = .{} });
+    try Inst.apply(state, 4, .{ .ctz = .{} });
+    try Inst.apply(state, 5, .{ .sub = .{} });
+
+    for (0..6) |i| {
+        try std.testing.expect(results[i].refinement != null);
+        try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[i].refinement.?).*));
+    }
+}
+
+test "block creates refinement based on type" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Block with scalar type
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
+    try std.testing.expect(results[0].refinement != null);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
+
+    // Block with void type
+    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .void = {} } } });
+    try std.testing.expect(results[1].refinement != null);
+    try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
+}
+
+test "unreach does nothing" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    // unreach should set noreturn refinement
+    try Inst.apply(state, 0, .{ .unreach = .{} });
+
+    try std.testing.expect(results[0].refinement != null);
+    try std.testing.expectEqual(.noreturn, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
+}
+
+test "struct_field_ptr gets pointer to struct field" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a pointer to a struct with two scalar fields
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const fields = try allocator.alloc(EIdx, 2);
+    fields[0] = field0_eidx;
+    fields[1] = field1_eidx;
+    const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{
+        .analyte = .{},
+        .fields = fields,
+    } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .to = struct_eidx } });
+    results[0].refinement = ptr_eidx;
+
+    // struct_field_ptr should return pointer to field 1
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .scalar = {} } } });
+
+    try std.testing.expect(results[1].refinement != null);
+    const result_ref = refinements.at(results[1].refinement.?);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    // The pointer should point to field 1
+    try std.testing.expectEqual(field1_eidx, result_ref.pointer.to);
+}
+
+test "struct_field_val extracts field value from struct" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a struct with two scalar fields (both defined)
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .defined } });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .defined } });
+    const fields = try allocator.alloc(EIdx, 2);
+    fields[0] = field0_eidx;
+    fields[1] = field1_eidx;
+    const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{
+        .analyte = .{},
+        .fields = fields,
+    } });
+    results[0].refinement = struct_eidx;
+
+    // struct_field_val should extract field 0
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } } });
+
+    // Result should share the field's entity
+    try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
+}
+
+test "is_non_null records check on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create an optional
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .to = inner_eidx } });
+    results[0].refinement = opt_eidx;
+
+    // is_non_null should record the check
+    try Inst.apply(state, 1, .{ .is_non_null = .{ .src = .{ .eidx = 0 } } });
+
+    // The optional's null_safety should be set to unknown with check info
+    const opt_ref = refinements.at(opt_eidx);
+    try std.testing.expect(opt_ref.optional.analyte.null_safety != null);
+    try std.testing.expectEqual(.unknown, std.meta.activeTag(opt_ref.optional.analyte.null_safety.?));
+}
+
+test "is_null records check on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create an optional
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .to = inner_eidx } });
+    results[0].refinement = opt_eidx;
+
+    // is_null should record the check
+    try Inst.apply(state, 1, .{ .is_null = .{ .src = .{ .eidx = 0 } } });
+
+    // The optional's null_safety should be set to unknown with check info
+    const opt_ref = refinements.at(opt_eidx);
+    try std.testing.expect(opt_ref.optional.analyte.null_safety != null);
+    try std.testing.expectEqual(.unknown, std.meta.activeTag(opt_ref.optional.analyte.null_safety.?));
+}
+
+test "set_union_tag updates union variant" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a union with two fields
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const fields = try allocator.alloc(?EIdx, 2);
+    fields[0] = field0_eidx;
+    fields[1] = field1_eidx;
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{},
+        .fields = fields,
+    } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .to = union_eidx } });
+    results[0].refinement = ptr_eidx;
+
+    // set_union_tag should update the active variant
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .scalar = {} } } });
+
+    // The union's active field should be set (field 1), others null
+    const union_ref = refinements.at(union_eidx);
+    try std.testing.expect(union_ref.@"union".fields[0] == null);
+    try std.testing.expect(union_ref.@"union".fields[1] != null);
+}
+
+test "get_union_tag produces scalar" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a union
+    const field_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const fields = try allocator.alloc(?EIdx, 1);
+    fields[0] = field_eidx;
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{},
+        .fields = fields,
+    } });
+    results[0].refinement = union_eidx;
+
+    // get_union_tag should produce a scalar (the tag value)
+    try Inst.apply(state, 1, .{ .get_union_tag = .{ .operand = 0 } });
+
+    try std.testing.expect(results[1].refinement != null);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
+}
+
+test "union_init creates union with active variant" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a value to use as the init value
+    const val_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    results[0].refinement = val_eidx;
+
+    // union_init should create a union with active variant set
+    try Inst.apply(state, 1, .{ .union_init = .{
+        .ty = .{ .@"union" = &.{ .{ .ty = .{ .scalar = {} } }, .{ .ty = .{ .scalar = {} } } } },
+        .field_index = 1,
+        .init = .{ .eidx = 0 },
+    } });
+
+    try std.testing.expect(results[1].refinement != null);
+    const union_ref = refinements.at(results[1].refinement.?);
+    try std.testing.expectEqual(.@"union", std.meta.activeTag(union_ref.*));
+    // Field 1 should be active (non-null), field 0 inactive (null)
+    try std.testing.expect(union_ref.@"union".fields[0] == null);
+    try std.testing.expect(union_ref.@"union".fields[1] != null);
 }

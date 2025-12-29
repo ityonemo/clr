@@ -1,6 +1,7 @@
 const std = @import("std");
 const Inst = @import("../Inst.zig");
 const Refinements = @import("../Refinements.zig");
+const Analyte = @import("../Analyte.zig");
 const EIdx = Inst.EIdx;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
@@ -32,12 +33,12 @@ pub const Allocation = struct {
     freed: ?Free = null, // null = still allocated, has value = freed
     allocator_type: []const u8, // Type of allocator that created this allocation
     name_at_alloc: ?[]const u8 = null, // Access path when allocated (e.g., "container.ptr")
+    returned: bool = false, // true if this allocation was returned to caller (not a local leak)
 };
 
 pub const MemorySafety = union(enum) {
     stack_ptr: StackPtr,
     allocation: Allocation,
-    passed: void,
 
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
@@ -59,28 +60,25 @@ pub const MemorySafety = union(enum) {
             .interned, .other => return,
         };
 
-        // When storing a pointer with allocation tracking, transfer ownership to the destination.
-        // Copy the allocation metadata to the destination, then mark source as .passed.
-        // This prevents false positives when the allocation is freed via the destination.
-        const src_ref = results[src].refinement orelse return;
-        const src_refinement = refinements.at(src_ref);
+        // When storing a pointer with allocation tracking, set name_at_alloc on the pointee
+        // This captures the access path (e.g., "container.ptr") for error messages
+        const src_refinement_idx = results[src].refinement orelse return;
+        const src_refinement = refinements.at(src_refinement_idx);
         if (src_refinement.* == .pointer) {
-            if (src_refinement.pointer.analyte.memory_safety) |*ms| {
-                if (ms.* == .allocation) {
-                    // Get the destination pointer's pointee (where the allocation will live)
-                    const dst_ref = results[ptr].refinement orelse return;
-                    const dst_refinement = refinements.at(dst_ref);
-                    if (dst_refinement.* != .pointer) return;
-                    const pointee_idx = dst_refinement.pointer.to;
-                    const pointee = refinements.at(pointee_idx);
-                    if (pointee.* == .pointer) {
-                        // Copy allocation metadata to destination, capturing name from destination instruction
-                        var new_alloc = ms.allocation;
-                        new_alloc.name_at_alloc = results[ptr].name;
-                        pointee.pointer.analyte.memory_safety = .{ .allocation = new_alloc };
+            // Get the destination name (e.g., "container.ptr" from dbg_var_ptr)
+            const dest_name = results[ptr].name;
+            if (dest_name != null) {
+                // Get the pointee and check if it has allocation tracking
+                const pointee_idx = src_refinement.pointer.to;
+                const pointee = refinements.at(pointee_idx);
+                const pointee_analyte = getAnalytePtr(pointee);
+                if (pointee_analyte.memory_safety) |*ms| {
+                    if (ms.* == .allocation) {
+                        // Set name_at_alloc if not already set
+                        if (ms.allocation.name_at_alloc == null) {
+                            ms.allocation.name_at_alloc = dest_name;
+                        }
                     }
-                    // Mark source as passed - ownership transferred to destination
-                    ms.* = .passed;
                 }
             }
         }
@@ -147,33 +145,66 @@ pub const MemorySafety = union(enum) {
         };
         // refinement is null for uninitialized instructions - skip (would be caught by undefined analysis)
         const src_idx = results[src].refinement orelse return;
-        const src_refinement = refinements.at(src_idx);
 
-        // Only pointers can escape - scalars are copied by value, safe to return
-        if (src_refinement.* != .pointer) return;
+        // Recursively check for allocations to mark as returned
+        try markAllocationsAsReturned(refinements, src_idx, ctx);
+    }
 
-        // memory_safety is null for untracked pointers (e.g., external pointers) - skip
-        const ms = &(src_refinement.pointer.analyte.memory_safety orelse return);
+    /// Recursively mark all allocations in a refinement tree as returned (not leaks).
+    /// This handles pointers, optionals containing pointers, unions containing pointers, and structs.
+    fn markAllocationsAsReturned(refinements: *Refinements, idx: EIdx, ctx: *Context) !void {
+        const refinement = refinements.at(idx);
+        switch (refinement.*) {
+            .pointer => |*p| {
+                // Check pointer's memory_safety for stack pointer escape
+                if (p.analyte.memory_safety) |ms| {
+                    if (ms == .stack_ptr) {
+                        const sp = ms.stack_ptr;
+                        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+                        if (std.mem.eql(u8, sp.meta.function, func_name)) {
+                            return reportStackEscape(ms, ctx);
+                        }
+                    }
+                }
 
-        switch (ms.*) {
-            .stack_ptr => |sp| {
-                // Only flag as escape if stack_ptr is from this function
-                const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-                if (std.mem.eql(u8, sp.meta.function, func_name)) {
-                    return reportStackEscape(ms.*, ctx);
+                // Check pointee's memory_safety for allocation state (heap allocation tracking)
+                const pointee_idx = p.to;
+                const pointee = refinements.at(pointee_idx);
+                const pointee_analyte = getAnalytePtr(pointee);
+                if (pointee_analyte.memory_safety) |*ms| {
+                    if (ms.* == .allocation) {
+                        // Mark the allocation as returned - not a leak in this function
+                        ms.allocation.returned = true;
+                    }
                 }
             },
-            .allocation => {
-                // Mark as passed - ownership transferred to caller
-                ms.* = .passed;
+            .optional => |o| {
+                // Check inner for pointers
+                try markAllocationsAsReturned(refinements, o.to, ctx);
             },
-            // TODO: When branches have their own entity lists, .passed here should be a @panic
-            // (can't return the same allocation twice from different branches)
-            .passed => {},
+            .errorunion => |e| {
+                // Check payload for pointers
+                try markAllocationsAsReturned(refinements, e.to, ctx);
+            },
+            .@"struct" => |s| {
+                // Check all fields for pointers
+                for (s.fields) |field_idx| {
+                    try markAllocationsAsReturned(refinements, field_idx, ctx);
+                }
+            },
+            .@"union" => |u| {
+                // Check all fields for pointers
+                for (u.fields) |field_idx_opt| {
+                    if (field_idx_opt) |field_idx| {
+                        try markAllocationsAsReturned(refinements, field_idx, ctx);
+                    }
+                }
+            },
+            .scalar, .void, .noreturn, .unimplemented, .retval_future, .region => {},
         }
     }
 
-    /// Check ret_load for stack pointer escapes in struct/union fields.
+    /// Check ret_load for stack pointer escapes and mark allocations as returned.
     /// ret_load returns a value through ret_ptr storage - used for large returns (structs, unions).
     pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
         _ = index;
@@ -191,6 +222,9 @@ pub const MemorySafety = union(enum) {
 
         // Check for stack pointers escaping via struct/union fields
         try checkStackEscapeRecursive(refinements, pointee_idx, ctx, func_name);
+
+        // Mark any heap allocations in the returned value as "returned" (not leaks)
+        try markAllocationsAsReturned(refinements, pointee_idx, ctx);
     }
 
     /// Recursively check refinement tree for escaping stack pointers.
@@ -205,9 +239,7 @@ pub const MemorySafety = union(enum) {
                             return reportStackEscape(ms, ctx);
                         }
                     },
-                    // Don't mark allocations as passed here - that only happens in ret_safe
-                    // when actually returning a pointer. Here we're just checking for stack escapes.
-                    .allocation, .passed => {},
+                    .allocation => {},
                 }
             },
             .@"struct" => |s| {
@@ -250,21 +282,25 @@ pub const MemorySafety = union(enum) {
             }
         }
 
-        // Check for memory leaks
+        // Check for memory leaks - allocation state is on the POINTEE
         for (results) |inst| {
             const idx = inst.refinement orelse continue;
             const refinement = refinements.at(idx);
             if (refinement.* != .pointer) continue;
 
-            const ms = refinement.pointer.analyte.memory_safety orelse continue;
-            switch (ms) {
-                .allocation => |allocation| {
-                    if (allocation.freed == null) {
-                        return reportMemoryLeak(ctx, allocation);
-                    }
-                },
-                .passed => {}, // Ownership transferred to caller - not a leak
-                .stack_ptr => {},
+            // Get the pointee entity via ptr.to
+            const pointee_idx = refinement.pointer.to;
+            const pointee = refinements.at(pointee_idx);
+            const pointee_analyte = getAnalytePtr(pointee);
+
+            // Check pointee's memory_safety for allocation state
+            const ms = pointee_analyte.memory_safety orelse continue;
+            if (ms != .allocation) continue;
+
+            const allocation = ms.allocation;
+            // Skip if freed or returned to caller
+            if (allocation.freed == null and !allocation.returned) {
+                return reportMemoryLeak(ctx, allocation);
             }
         }
     }
@@ -273,18 +309,43 @@ pub const MemorySafety = union(enum) {
     // Allocation tracking (use-after-free, double-free, memory leak detection)
     // =========================================================================
 
-    /// Handle allocator.create() - marks pointer as heap allocation
+    /// Handle allocator.create() - marks pointee as heap allocation.
+    /// Allocation state is tracked on the POINTEE, not the pointer.
+    /// This way, semideep copies of the pointer share the same pointee
+    /// and see the same allocation state (freed, etc.).
     pub fn alloc_create(state: State, index: usize, params: tag.AllocCreate) !void {
         // Result is errorunion -> ptr -> pointee
         const eu_idx = state.results[index].refinement.?;
-        const ptr_idx = state.refinements.at(eu_idx).errorunion.to;
-        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .{ .allocation = .{
+        const ptr_ref = state.refinements.at(eu_idx).errorunion.to;
+        const ptr = &state.refinements.at(ptr_ref).pointer;
+        const pointee_ref = ptr.to;
+        const pointee = state.refinements.at(pointee_ref);
+
+        // Set allocation state on the POINTEE - this is the shared state all pointers will reference
+        const pointee_analyte = getAnalytePtr(pointee);
+        pointee_analyte.memory_safety = .{ .allocation = .{
             .allocated = state.ctx.meta,
             .allocator_type = params.allocator_type,
         } };
+        // Pointer's memory_safety remains null - we look up via ptr.to
     }
 
-    /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator
+    /// Get a mutable pointer to the Analyte for any refinement type that has one
+    fn getAnalytePtr(ref: *Refinements.Refinement) *Analyte {
+        return switch (ref.*) {
+            .scalar => |*s| s,
+            .pointer => |*p| &p.analyte,
+            .optional => |*o| &o.analyte,
+            .errorunion => |*e| &e.analyte,
+            .@"struct" => |*st| &st.analyte,
+            .@"union" => |*u| &u.analyte,
+            .region => |*r| &r.analyte,
+            else => @panic("refinement type does not have analyte"),
+        };
+    }
+
+    /// Handle allocator.destroy() - marks as freed, detects double-free and mismatched allocator.
+    /// Looks up the pointee via ptr.to to find the allocation state.
     pub fn alloc_destroy(state: State, index: usize, params: tag.AllocDestroy) !void {
         _ = index;
         const results = state.results;
@@ -293,30 +354,47 @@ pub const MemorySafety = union(enum) {
         const ptr = params.ptr;
 
         const ptr_idx = results[ptr].refinement orelse @panic("alloc_destroy: inst has no refinement");
-        // alloc_create always creates pointer refinement with memory_safety
-        const ptr_analyte = &refinements.at(ptr_idx).pointer.analyte;
-        const ms = &(ptr_analyte.memory_safety orelse @panic("alloc_destroy: no memory_safety"));
+        const ptr_refinement = refinements.at(ptr_idx);
 
-        switch (ms.*) {
-            .stack_ptr => |sp| return reportFreeStackMemory(ctx, sp),
-            .allocation => |a| {
-                if (a.freed) |previous_free| {
-                    return reportDoubleFree(ctx, a, previous_free);
+        // Check if pointer itself is a stack pointer (freeing stack memory is an error)
+        if (ptr_refinement.* == .pointer) {
+            if (ptr_refinement.pointer.analyte.memory_safety) |ms| {
+                if (ms == .stack_ptr) {
+                    return reportFreeStackMemory(ctx, ms.stack_ptr);
                 }
-                if (!std.mem.eql(u8, a.allocator_type, params.allocator_type)) {
-                    return reportMismatchedAllocator(ctx, a, params.allocator_type);
-                }
-                // Capture name from the pointer instruction being freed
-                ms.allocation.freed = .{
-                    .meta = ctx.meta,
-                    .name_at_free = results[ptr].name,
-                };
-            },
-            .passed => @panic("alloc_destroy on passed pointer - should not happen"),
+            }
         }
+
+        // Get the pointee entity via ptr.to
+        const pointee_idx = ptr_refinement.pointer.to;
+        const pointee = refinements.at(pointee_idx);
+        const pointee_analyte = getAnalytePtr(pointee);
+
+        // Get allocation state from pointee
+        const ms = &(pointee_analyte.memory_safety orelse
+            @panic("alloc_destroy: pointee has no memory_safety"));
+
+        if (ms.* != .allocation) {
+            @panic("alloc_destroy: pointee memory_safety is not allocation");
+        }
+
+        const a = ms.allocation;
+        if (a.freed) |previous_free| {
+            return reportDoubleFree(ctx, a, previous_free);
+        }
+        if (!std.mem.eql(u8, a.allocator_type, params.allocator_type)) {
+            return reportMismatchedAllocator(ctx, a, params.allocator_type);
+        }
+
+        // Mark as freed
+        ms.allocation.freed = .{
+            .meta = ctx.meta,
+            .name_at_free = results[ptr].name,
+        };
     }
 
-    /// Handle load - detect use-after-free
+    /// Handle load - detect use-after-free.
+    /// Checks the POINTEE's allocation state (via ptr.to) for freed status.
     pub fn load(state: State, index: usize, params: tag.Load) !void {
         _ = index;
         const results = state.results;
@@ -333,8 +411,13 @@ pub const MemorySafety = union(enum) {
             std.debug.panic("memory_safety.load: expected pointer, got {s}", .{@tagName(ptr_refinement.*)});
         }
 
+        // Get the pointee entity via ptr.to
+        const pointee_idx = ptr_refinement.pointer.to;
+        const pointee = refinements.at(pointee_idx);
+        const pointee_analyte = getAnalytePtr(pointee);
+
         // memory_safety may be null for stack allocations or untracked pointers
-        const ms = ptr_refinement.pointer.analyte.memory_safety orelse return;
+        const ms = pointee_analyte.memory_safety orelse return;
         // Only check use-after-free for heap allocations
         if (ms != .allocation) return;
 
@@ -525,19 +608,27 @@ pub const MemorySafety = union(enum) {
 const debug = @import("builtin").mode == .Debug;
 
 /// Validate that a refinement conforms to memory_safety tracking rules:
-/// - Pointers and scalars CAN have memory_safety (scalars for ptr-to-int casts)
+/// - Pointers CAN have memory_safety (stack_ptr for stack pointers)
+/// - Scalars CAN have memory_safety (allocation state for heap pointees)
 /// - Containers (optional, errorunion, struct) must NOT have memory_safety at the container level
 pub fn testValid(refinement: Refinements.Refinement) void {
     if (!debug) return;
     switch (refinement) {
-        .pointer, .scalar => {
-            // Pointers CAN have memory_safety (stack_ptr or allocation)
-            // Scalars CAN have memory_safety (pointer cast to integer)
-            // No requirement that they MUST have it (untracked values are OK)
+        .pointer => {
+            // Pointers CAN have memory_safety (stack_ptr for stack pointers)
+            // Heap allocation tracking is on the pointee, not the pointer
         },
-        inline .optional, .errorunion, .@"struct" => |data, t| {
+        .scalar => {
+            // Scalars CAN have memory_safety (allocation state for heap pointees)
+        },
+        inline .optional, .errorunion => |data, t| {
             if (data.analyte.memory_safety != null) {
                 std.debug.panic("memory_safety should not exist on container types, got {s}", .{@tagName(t)});
+            }
+        },
+        .@"struct" => |s| {
+            if (s.analyte.memory_safety != null) {
+                std.debug.panic("memory_safety should not exist on container types, got struct", .{});
             }
         },
         else => {},
@@ -747,14 +838,24 @@ test "alloc_create sets allocation metadata on pointer analyte" {
     try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
 
     // alloc_create creates errorunion -> ptr -> pointee
+    // With new architecture: allocation state is on the POINTEE, pointer's memory_safety is null
     const eu_idx = results[1].refinement.?;
     const ptr_idx = refinements.at(eu_idx).errorunion.to;
-    const ms = refinements.at(ptr_idx).pointer.analyte.memory_safety.?;
-    try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
-    try std.testing.expectEqualStrings("PageAllocator", ms.allocation.allocator_type);
-    try std.testing.expectEqualStrings("test.zig", ms.allocation.allocated.file);
-    try std.testing.expectEqual(@as(u32, 10), ms.allocation.allocated.line);
-    try std.testing.expectEqual(@as(?Free, null), ms.allocation.freed);
+    const ptr_ref = refinements.at(ptr_idx);
+    const pointee_idx = ptr_ref.pointer.to;
+
+    // Pointer's memory_safety is null for heap allocations
+    try std.testing.expectEqual(@as(?MemorySafety, null), ptr_ref.pointer.analyte.memory_safety);
+
+    // Check pointee has .allocation
+    const pointee_ref = refinements.at(pointee_idx);
+    const pointee_analyte = MemorySafety.getAnalytePtr(pointee_ref);
+    const pointee_ms = pointee_analyte.memory_safety.?;
+    try std.testing.expectEqual(.allocation, std.meta.activeTag(pointee_ms));
+    try std.testing.expectEqualStrings("PageAllocator", pointee_ms.allocation.allocator_type);
+    try std.testing.expectEqualStrings("test.zig", pointee_ms.allocation.allocated.file);
+    try std.testing.expectEqual(@as(u32, 10), pointee_ms.allocation.allocated.line);
+    try std.testing.expectEqual(@as(?Free, null), pointee_ms.allocation.freed);
 }
 
 test "alloc_destroy marks allocation as freed" {
@@ -782,10 +883,16 @@ test "alloc_destroy marks allocation as freed" {
     // Destroy allocation (ptr points to unwrapped pointer at inst 1)
     try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
+    // With new architecture, allocation state is on the POINTEE (accessed via ptr.to)
     const ptr_idx = results[1].refinement.?;
-    const ms = refinements.at(ptr_idx).pointer.analyte.memory_safety.?;
-    try std.testing.expect(ms.allocation.freed != null);
-    try std.testing.expectEqual(@as(u32, 20), ms.allocation.freed.?.meta.line);
+    const ptr_ref = refinements.at(ptr_idx);
+    const pointee_idx = ptr_ref.pointer.to;
+    const pointee = refinements.at(pointee_idx);
+    const pointee_analyte = MemorySafety.getAnalytePtr(pointee);
+    const pointee_ms = pointee_analyte.memory_safety.?;
+    try std.testing.expectEqual(.allocation, std.meta.activeTag(pointee_ms));
+    try std.testing.expect(pointee_ms.allocation.freed != null);
+    try std.testing.expectEqual(@as(u32, 20), pointee_ms.allocation.freed.?.meta.line);
 }
 
 test "alloc_destroy detects double free" {
@@ -802,9 +909,11 @@ test "alloc_destroy detects double free" {
     var results = [_]Inst{.{}} ** 5;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create allocation and unwrap
+    // Create allocation (errorunion -> ptr -> pointee)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    // Unwrap error union to get the pointer (simulating real AIR flow)
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+
     // First free
     try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .allocator_type = "PageAllocator" } });
 
@@ -1079,13 +1188,16 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     const field_ptr_ref = results[5].refinement.?;
     const field_ptr = refinements.at(field_ptr_ref);
 
-    // The field pointer points to the pointer entity that should now be freed
+    // The field pointer points to the pointer entity
     const ptr_entity_idx = field_ptr.pointer.to;
     const ptr_entity = refinements.at(ptr_entity_idx);
-
-    // The pointer should be marked as freed (its memory_safety should have freed != null)
     try std.testing.expect(ptr_entity.* == .pointer);
-    const ms = ptr_entity.pointer.analyte.memory_safety orelse {
+
+    // With new architecture, check the POINTEE's allocation state (via ptr.to)
+    const pointee_idx = ptr_entity.pointer.to;
+    const pointee = refinements.at(pointee_idx);
+    const pointee_analyte = MemorySafety.getAnalytePtr(pointee);
+    const ms = pointee_analyte.memory_safety orelse {
         return error.ExpectedMemorySafetyState;
     };
     try std.testing.expect(ms == .allocation);
@@ -1123,27 +1235,17 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     // inst 5 = store allocation pointer into struct field
     try Inst.apply(caller_state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 } } });
 
-    // Get the allocation entity for later verification
+    // Get the allocation's POINTEE entity for later verification
     const alloc_ptr_ref = caller_results[1].refinement.?;
-    const alloc_scalar_idx = caller_refinements.at(alloc_ptr_ref).pointer.to;
+    const alloc_ptr = caller_refinements.at(alloc_ptr_ref);
+    const alloc_pointee_idx = alloc_ptr.pointer.to;
 
-    // Verify allocation is not freed yet
-    const alloc_scalar_before = caller_refinements.at(alloc_scalar_idx);
-    try std.testing.expect(alloc_scalar_before.* == .scalar);
-    // The allocation tracking is on the pointer, not the scalar
-    const alloc_ptr_ms = caller_refinements.at(alloc_ptr_ref).pointer.analyte.memory_safety.?;
-    try std.testing.expect(alloc_ptr_ms == .passed); // Marked as passed when stored to field
-
-    // But the struct field pointer should point to the same scalar
-    const struct_ptr_ref = caller_results[2].refinement.?;
-    const struct_idx = caller_refinements.at(struct_ptr_ref).pointer.to;
-    const field_ptr_idx = caller_refinements.at(struct_idx).@"struct".fields[0];
-    const field_ptr = caller_refinements.at(field_ptr_idx);
-    try std.testing.expect(field_ptr.* == .pointer);
-    // The field pointer should have the allocation state
-    const field_ptr_ms = field_ptr.pointer.analyte.memory_safety.?;
-    try std.testing.expect(field_ptr_ms == .allocation);
-    try std.testing.expect(field_ptr_ms.allocation.freed == null);
+    // Verify allocation is not freed yet (check POINTEE's memory_safety)
+    const pointee_before = caller_refinements.at(alloc_pointee_idx);
+    const pointee_analyte_before = MemorySafety.getAnalytePtr(pointee_before);
+    const pointee_ms_before = pointee_analyte_before.memory_safety.?;
+    try std.testing.expect(pointee_ms_before == .allocation);
+    try std.testing.expect(pointee_ms_before.allocation.freed == null); // Not freed yet
 
     // === CALLEE SETUP ===
     var callee_refinements = Refinements.init(allocator);
@@ -1151,9 +1253,9 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
 
     var callee_results = [_]Inst{.{}} ** 5;
 
-    // Copy caller's struct pointer using copy_to (simulating arg)
+    // Copy caller's struct pointer using copyTo (simulating arg)
     const caller_ptr_idx = caller_results[2].refinement.?;
-    const local_ptr_idx = try caller_refinements.at(caller_ptr_idx).*.copy_to(&caller_refinements, &callee_refinements);
+    const local_ptr_idx = try caller_refinements.at(caller_ptr_idx).*.copyTo(&caller_refinements, &callee_refinements);
     callee_results[0].refinement = local_ptr_idx;
     callee_results[0].caller_eidx = caller_ptr_idx;
     callee_results[0].name = "container";
@@ -1173,23 +1275,26 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     // Callee: inst 3 = alloc_destroy to free the pointer
     try Inst.apply(callee_state, 3, .{ .alloc_destroy = .{ .ptr = 2, .allocator_type = "PageAllocator" } });
 
-    // Callee's local pointer should be freed
+    // Callee's local pointer's POINTEE should be freed
     const local_loaded_ptr_ref = callee_results[2].refinement.?;
     const local_loaded_ptr = callee_refinements.at(local_loaded_ptr_ref);
     try std.testing.expect(local_loaded_ptr.* == .pointer);
-    const local_ms = local_loaded_ptr.pointer.analyte.memory_safety.?;
-    try std.testing.expect(local_ms == .allocation);
-    try std.testing.expect(local_ms.allocation.freed != null);
+    const local_pointee_idx = local_loaded_ptr.pointer.to;
+    const local_pointee = callee_refinements.at(local_pointee_idx);
+    const local_pointee_analyte = MemorySafety.getAnalytePtr(local_pointee);
+    const local_pointee_ms = local_pointee_analyte.memory_safety.?;
+    try std.testing.expect(local_pointee_ms == .allocation);
+    try std.testing.expect(local_pointee_ms.allocation.freed != null);
 
     // === BACKPROPAGATE ===
     Inst.backPropagate(callee_state);
 
     // === VERIFY CALLER'S STATE IS UPDATED ===
-    // The caller's struct field pointer should now be marked as freed
-    const field_ptr_after = caller_refinements.at(field_ptr_idx);
-    try std.testing.expect(field_ptr_after.* == .pointer);
-    const field_ptr_ms_after = field_ptr_after.pointer.analyte.memory_safety.?;
-    try std.testing.expect(field_ptr_ms_after == .allocation);
-    // This is the key assertion: the caller's field pointer should be marked as freed
-    try std.testing.expect(field_ptr_ms_after.allocation.freed != null);
+    // The caller's allocation pointee should now be marked as freed
+    const pointee_after = caller_refinements.at(alloc_pointee_idx);
+    const pointee_analyte_after = MemorySafety.getAnalytePtr(pointee_after);
+    const pointee_ms_after = pointee_analyte_after.memory_safety.?;
+    try std.testing.expect(pointee_ms_after == .allocation);
+    // This is the key assertion: the caller's allocation should be marked as freed
+    try std.testing.expect(pointee_ms_after.allocation.freed != null);
 }

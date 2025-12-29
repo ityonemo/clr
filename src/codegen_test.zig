@@ -458,6 +458,292 @@ test "instLine for dbg_arg_inline" {
 // Conditional Branch Tests
 // =============================================================================
 
+// =============================================================================
+// Missing Tag Tests - Simple/Unimplemented tags that emit .{}
+// =============================================================================
+
+test "instLine for unreach" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .no_op = {} };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .unreach, datum, 7, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 7, .{ .unreach = .{} });\n", result);
+}
+
+test "instLine for bit_and (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .bit_and, datum, 3, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .bit_and = .{} });\n", result);
+}
+
+test "instLine for cmp_eq (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .cmp_eq, datum, 4, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_eq = .{} });\n", result);
+}
+
+test "instLine for cmp_gt (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .cmp_gt, datum, 4, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_gt = .{} });\n", result);
+}
+
+test "instLine for cmp_lte (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .cmp_lte, datum, 4, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_lte = .{} });\n", result);
+}
+
+test "instLine for ctz (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .ctz, datum, 2, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .ctz = .{} });\n", result);
+}
+
+test "instLine for sub (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .sub, datum, 5, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .sub = .{} });\n", result);
+}
+
+test "instLine for is_non_err (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .un_op = .none };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .is_non_err, datum, 6, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .is_non_err = .{} });\n", result);
+}
+
+test "instLine for unwrap_errunion_err (Simple)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = .none } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .unwrap_errunion_err, datum, 8, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 8, .{ .unwrap_errunion_err = .{} });\n", result);
+}
+
+test "instLine for add_with_overflow (OverflowOp)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .ty_pl = .{ .ty = .none, .payload = 0 } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .add_with_overflow, datum, 9, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 9, .{ .add_with_overflow = .{} });\n", result);
+}
+
+test "instLine for sub_with_overflow (OverflowOp)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const datum: Data = .{ .ty_pl = .{ .ty = .none, .payload = 0 } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .sub_with_overflow, datum, 10, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 10, .{ .sub_with_overflow = .{} });\n", result);
+}
+
+// =============================================================================
+// Missing Tag Tests - is_non_null, is_null (UnOp payload)
+// =============================================================================
+
+test "instLine for is_non_null" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
+    const datum: Data = .{ .un_op = operand_ref };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .is_non_null, datum, 5, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .is_non_null = .{ .src = .{ .eidx = 4 } } });\n", result);
+}
+
+test "instLine for is_null" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
+    const datum: Data = .{ .un_op = operand_ref };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .is_null, datum, 4, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .is_null = .{ .src = .{ .eidx = 3 } } });\n", result);
+}
+
+// =============================================================================
+// Missing Tag Tests - ret_ptr, ret_load
+// =============================================================================
+
+test "instLine for ret_load" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const ptr_ref: Ref = @enumFromInt(@as(u32, 0) | (1 << 31));
+    const datum: Data = .{ .un_op = ptr_ref };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .ret_load, datum, 5, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .ret_load = .{ .ptr = 0 } });\n", result);
+}
+
+// =============================================================================
+// Missing Tag Tests - struct_field_ptr, struct_field_val
+// =============================================================================
+
+test "instLine for struct_field_ptr_index_0" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const base_ref: Ref = @enumFromInt(@as(u32, 2) | (1 << 31));
+    // struct_field_ptr uses ty_op: ty is result type (pointer to field), operand is base
+    // Use .u8_type for a valid type reference
+    const datum: Data = .{ .ty_op = .{ .ty = .u8_type, .operand = base_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .struct_field_ptr_index_0, datum, 3, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .scalar = {} } } });\n", result);
+}
+
+test "instLine for struct_field_ptr_index_1" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const base_ref: Ref = @enumFromInt(@as(u32, 1) | (1 << 31));
+    // Use .u8_type for a valid type reference
+    const datum: Data = .{ .ty_op = .{ .ty = .u8_type, .operand = base_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .struct_field_ptr_index_1, datum, 4, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 1, .field_index = 1, .ty = .{ .scalar = {} } } });\n", result);
+}
+
+test "instLine for get_union_tag" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
+    const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .get_union_tag, datum, 6, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .get_union_tag = .{ .operand = 5 } });\n", result);
+}
+
+test "instLine for block" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    // block uses ty_pl: ty is the block's result type
+    const datum: Data = .{ .ty_pl = .{ .ty = .void_type, .payload = 0 } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .block, datum, 2, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });\n", result);
+}
+
+test "instLine for store (same as store_safe)" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    const Ref = Air.Inst.Ref;
+    const ptr_ref: Ref = @enumFromInt(@as(u32, 1) | (1 << 31));
+    const val_ref: Ref = @enumFromInt(@as(u32, 2) | (1 << 31));
+    const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
+    const result = codegen._instLine(arena.allocator(), dummy_ip, .store, datum, 3, &.{}, &.{}, &.{}, &.{}, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .store = .{ .ptr = 1, .src = .{ .eidx = 2 } } });\n", result);
+}
+
+// =============================================================================
+// Conditional Branch Tests
+// =============================================================================
+
 test "generateFunction with simple cond_br block" {
     // Test a simple if statement:
     //   var x: u8 = undefined;
