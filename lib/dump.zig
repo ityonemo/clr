@@ -113,8 +113,8 @@ fn formatRefinementDeep(buf: []u8, eidx: EIdx, ref: Refinement, refinements: *Re
     return switch (ref) {
         .scalar => |s| std.fmt.bufPrint(buf, "({d}) scalar(undef={s}, mem={s})", .{
             eidx,
-            formatUndefined(s.undefined),
-            formatMemSafety(s.memory_safety),
+            formatUndefined(s.analyte.undefined),
+            formatMemSafety(s.analyte.memory_safety),
         }) catch "scalar(?)",
         .pointer => |p| blk: {
             var inner_buf: [1024]u8 = undefined;

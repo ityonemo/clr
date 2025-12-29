@@ -6,6 +6,14 @@ meta: @import("Meta.zig"),
 base_line: u32 = 0,
 writer: *std.Io.Writer = undefined,
 
+/// Name lookup function pointer - set by generated .air.zig main()
+/// Converts a Name ID (u32) to a string slice
+getName: *const fn (u32) []const u8 = &defaultGetName,
+
+fn defaultGetName(_: u32) []const u8 {
+    return "unknown";
+}
+
 const Context = @This();
 
 pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {

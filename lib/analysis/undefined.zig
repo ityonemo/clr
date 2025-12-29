@@ -96,13 +96,25 @@ pub const Undefined = union(enum) {
         ensureUndefinedStateSet(refinements, ptr.to);
     }
 
+    pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        // The pointer itself is defined (it exists and points to a valid container)
+        const ptr_idx = results[index].refinement.?;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined = .{ .defined = {} };
+        // Ensure the container has undefined state set
+        ensureUndefinedStateSet(refinements, ptr.to);
+    }
+
     /// Ensure an entity and its children have undefined state set.
     /// Only sets state if currently null (newly created), does not overwrite existing state.
     fn ensureUndefinedStateSet(refinements: *Refinements, idx: EIdx) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| {
-                if (s.undefined == null) {
-                    s.undefined = .{ .defined = {} };
+                if (s.analyte.undefined == null) {
+                    s.analyte.undefined = .{ .defined = {} };
                 }
             },
             .pointer => |*p| {
@@ -178,14 +190,14 @@ pub const Undefined = union(enum) {
         const operand = params.operand orelse {
             // No operand (interned) - tag is defined
             const result_idx = results[index].refinement.?;
-            refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+            refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
             return;
         };
 
         const union_ref = results[operand].refinement orelse {
             // No refinement on operand - assume defined
             const result_idx = results[index].refinement.?;
-            refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+            refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
             return;
         };
 
@@ -200,10 +212,10 @@ pub const Undefined = union(enum) {
 
         if (union_undefined) |undef_state| {
             // Propagate undefined state from union to tag
-            refinements.at(result_idx).scalar.undefined = undef_state;
+            refinements.at(result_idx).scalar.analyte.undefined = undef_state;
         } else {
             // Union has no undefined tracking - assume defined
-            refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+            refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
         }
     }
 
@@ -235,21 +247,21 @@ pub const Undefined = union(enum) {
     fn markResultDefined(state: State, index: usize, params: anytype) !void {
         _ = params;
         const result_idx = state.results[index].refinement.?;
-        state.refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+        state.refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
     }
 
     fn markStructFieldsDefined(results: []Inst, index: usize, refinements: *Refinements) void {
         const result_idx = results[index].refinement.?;
         const s = refinements.at(result_idx).@"struct";
         for (s.fields) |field_idx| {
-            refinements.at(field_idx).scalar.undefined = .{ .defined = {} };
+            refinements.at(field_idx).scalar.analyte.undefined = .{ .defined = {} };
         }
     }
 
     /// Helper to recursively set all scalars/pointers in a refinement tree to defined.
     fn setDefinedRecursive(refinements: *Refinements, idx: EIdx) void {
         switch (refinements.at(idx).*) {
-            .scalar => |*s| s.undefined = .{ .defined = {} },
+            .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
             .pointer => |*p| {
                 p.analyte.undefined = .{ .defined = {} };
                 setDefinedRecursive(refinements, p.to);
@@ -282,7 +294,7 @@ pub const Undefined = union(enum) {
     pub fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: []const u8) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| {
-                if (s.undefined) |*undef| {
+                if (s.analyte.undefined) |*undef| {
                     if (undef.* == .undefined and undef.undefined.name_when_set == null) {
                         undef.undefined.name_when_set = name;
                     }
@@ -368,7 +380,7 @@ pub const Undefined = union(enum) {
         const caller_refinements = state.caller_refinements orelse return;
         switch (params.src) {
             .interned => |ty| {
-                if (ty != .void) {
+                if (ty.ty != .void) {
                     // Interned values are compile-time constants, so defined
                     setDefinedRecursive(caller_refinements, state.return_eidx);
                 }
@@ -382,7 +394,7 @@ pub const Undefined = union(enum) {
     /// Only called when storing an undefined value (src type is .undefined).
     fn setUndefinedRecursive(refinements: *Refinements, idx: EIdx, undef_state: Undefined) void {
         switch (refinements.at(idx).*) {
-            .scalar => |*s| s.undefined = undef_state,
+            .scalar => |*s| s.analyte.undefined = undef_state,
             .pointer => |*p| {
                 p.analyte.undefined = undef_state;
                 setUndefinedRecursive(refinements, p.to, undef_state);
@@ -419,19 +431,19 @@ pub const Undefined = union(enum) {
     /// Apply defined/undefined state from an interned type to a refinement.
     /// Handles field-level undefined for structs where some fields may be undefined.
     fn applyInternedType(refinements: *Refinements, idx: EIdx, ty: tag.Type, ctx: *Context) void {
-        switch (ty) {
+        switch (ty.ty) {
             .undefined => {
                 // Mark as undefined - don't recurse further, undefined is terminal
                 const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta } };
                 setUndefinedRecursive(refinements, idx, undef_state);
             },
-            .@"struct" => |fields| {
+            .@"struct" => |field_types| {
                 // Apply field-level undefined state
                 switch (refinements.at(idx).*) {
                     .@"struct" => |s| {
-                        for (fields, 0..) |field, i| {
+                        for (field_types, 0..) |field_type, i| {
                             if (i < s.fields.len) {
-                                applyInternedType(refinements, s.fields[i], field.ty, ctx);
+                                applyInternedType(refinements, s.fields[i], field_type, ctx);
                             }
                         }
                     },
@@ -443,7 +455,7 @@ pub const Undefined = union(enum) {
             },
             .scalar => {
                 switch (refinements.at(idx).*) {
-                    .scalar => |*s| s.undefined = .{ .defined = {} },
+                    .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                     .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
                     else => {},
                 }
@@ -476,16 +488,16 @@ pub const Undefined = union(enum) {
                     else => setDefinedRecursive(refinements, idx),
                 }
             },
-            .@"union" => |fields| {
+            .@"union" => |field_types| {
                 // Apply field-level undefined state for unions
                 switch (refinements.at(idx).*) {
                     .@"union" => |*u| {
                         // Mark union itself as defined (since we're storing a value, not undefined)
                         u.analyte.undefined = .{ .defined = {} };
-                        for (fields, 0..) |field, i| {
+                        for (field_types, 0..) |field_type, i| {
                             if (i < u.fields.len) {
                                 if (u.fields[i]) |field_idx| {
-                                    applyInternedType(refinements, field_idx, field.ty, ctx);
+                                    applyInternedType(refinements, field_idx, field_type, ctx);
                                 }
                             }
                         }
@@ -514,7 +526,7 @@ pub const Undefined = union(enum) {
 
         // Check if source is an undefined type (interned with .undefined wrapper)
         const is_undef = switch (params.src) {
-            .interned => |ty| ty == .undefined,
+            .interned => |ty| ty.ty == .undefined,
             else => false,
         };
 
@@ -531,7 +543,7 @@ pub const Undefined = union(enum) {
                     const src_ref = results[src_idx].refinement orelse {
                         // Source has no refinement - just mark as defined
                         switch (refinements.at(pointee_idx).*) {
-                            .scalar => |*s| s.undefined = .{ .defined = {} },
+                            .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                             .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
                             else => {},
                         }
@@ -540,7 +552,7 @@ pub const Undefined = union(enum) {
                     // When storing a pointer value, update the destination's `to` field
                     // so loads through the destination will reach the same target
                     switch (refinements.at(pointee_idx).*) {
-                        .scalar => |*s| s.undefined = .{ .defined = {} },
+                        .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                         .pointer => |*p| {
                             // If source is also a pointer, copy its structure
                             if (refinements.at(src_ref).* == .pointer) {
@@ -555,14 +567,14 @@ pub const Undefined = union(enum) {
                         },
                         .optional => |o| {
                             switch (refinements.at(o.to).*) {
-                                .scalar => |*s| s.undefined = .{ .defined = {} },
+                                .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                                 .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
                                 else => {},
                             }
                         },
                         .errorunion => |e| {
                             switch (refinements.at(e.to).*) {
-                                .scalar => |*s| s.undefined = .{ .defined = {} },
+                                .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                                 .pointer => |*p| p.analyte.undefined = .{ .defined = {} },
                                 else => {},
                             }
@@ -629,14 +641,14 @@ pub const Undefined = union(enum) {
             .scalar => |s| {
                 // undefined is null when value wasn't allocated through our tracked mechanisms
                 // (e.g., external data, FFI). No undefined tracking available - skip.
-                const undef = s.undefined orelse return;
+                const undef = s.analyte.undefined orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .inconsistent => return undef.reportInconsistentBranches(ctx),
                     .defined => {
                         // Propagate defined state to the loaded value
                         const idx = results[index].refinement.?;
-                        refinements.at(idx).scalar.undefined = .{ .defined = {} };
+                        refinements.at(idx).scalar.analyte.undefined = .{ .defined = {} };
                     },
                 }
             },
@@ -652,7 +664,7 @@ pub const Undefined = union(enum) {
                         // Only propagate for fresh scalars.
                         const idx = results[index].refinement orelse return;
                         switch (refinements.at(idx).*) {
-                            .scalar => |*s| s.undefined = .{ .defined = {} },
+                            .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                             else => {}, // Shared entity - state is already correct
                         }
                     },
@@ -663,7 +675,7 @@ pub const Undefined = union(enum) {
                 // Recurse to check the payload's undefined state
                 switch (refinements.at(o.to).*) {
                     .scalar => |s| {
-                        const undef = s.undefined orelse return;
+                        const undef = s.analyte.undefined orelse return;
                         switch (undef) {
                             .undefined => return undef.reportUseBeforeAssign(ctx),
                             .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -677,7 +689,7 @@ pub const Undefined = union(enum) {
                 // Error union containers don't track undefined - check the payload
                 switch (refinements.at(e.to).*) {
                     .scalar => |s| {
-                        const undef = s.undefined orelse return;
+                        const undef = s.analyte.undefined orelse return;
                         switch (undef) {
                             .undefined => return undef.reportUseBeforeAssign(ctx),
                             .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -709,12 +721,12 @@ pub const Undefined = union(enum) {
 
         const operand = params.operand orelse {
             // Interned/global struct - result was created as fresh scalar, set to defined
-            refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+            refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
             return;
         };
         const container_ref = results[operand].refinement orelse {
             // No struct refinement - result was created as fresh scalar, set to defined
-            refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+            refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
             return;
         };
 
@@ -749,7 +761,7 @@ pub const Undefined = union(enum) {
             },
             else => {
                 // Not a struct or union - result was created as fresh scalar, set to defined
-                refinements.at(result_idx).scalar.undefined = .{ .defined = {} };
+                refinements.at(result_idx).scalar.analyte.undefined = .{ .defined = {} };
             },
         }
     }
@@ -757,7 +769,7 @@ pub const Undefined = union(enum) {
     fn checkFieldUndefined(refinements: *Refinements, field_idx: Refinements.EIdx, ctx: *Context) !void {
         switch (refinements.at(field_idx).*) {
             .scalar => |sc| {
-                const undef = sc.undefined orelse @panic("struct_field_val: field scalar has no undefined state");
+                const undef = sc.analyte.undefined orelse @panic("struct_field_val: field scalar has no undefined state");
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -806,9 +818,9 @@ pub const Undefined = union(enum) {
 
         switch (orig_ref.*) {
             .scalar => |*s| {
-                const true_undef = true_ref.scalar.undefined orelse return;
-                const false_undef = false_ref.scalar.undefined orelse return;
-                s.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
+                const true_undef = true_ref.scalar.analyte.undefined orelse return;
+                const false_undef = false_ref.scalar.analyte.undefined orelse return;
+                s.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
             },
             .pointer => |*p| {
                 // Merge analyte on the pointer itself
@@ -909,7 +921,7 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
     switch (refinement) {
         .scalar => |s| {
-            if (s.undefined == null) {
+            if (s.analyte.undefined == null) {
                 std.debug.panic("undefined state must be set on scalars (refinement idx {})", .{idx});
             }
         },
@@ -962,7 +974,7 @@ test "alloc creates pointer to typed pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer to typed pointee)
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     // alloc creates pointer; pointee type is determined by .ty parameter
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -985,7 +997,7 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .allocator_type = "PageAllocator", .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
     const eu_idx = results[1].refinement.?;
@@ -1011,12 +1023,12 @@ test "store with .undefined type wrapper sets undefined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with .undefined wrapper
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .undefined = &.{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = 0, .ty = .{ .undefined = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    const undef = refinements.at(pointee_idx).scalar.undefined.?;
+    const undef = refinements.at(pointee_idx).scalar.analyte.undefined.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
 
@@ -1035,12 +1047,12 @@ test "store with defined value sets defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store a defined value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = 0, .ty = .{ .scalar = {} } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    const undef = refinements.at(pointee_idx).scalar.undefined.?;
+    const undef = refinements.at(pointee_idx).scalar.analyte.undefined.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
 
@@ -1059,9 +1071,9 @@ test "store with .null to optional sets inner to defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc at instruction 1 with optional type, then store null
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .optional = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } });
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .null = &.{ .scalar = {} } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = 0, .ty = .{ .null = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } });
 
     // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1070,7 +1082,7 @@ test "store with .null to optional sets inner to defined" {
     // Check the optional's inner value is a defined scalar
     const inner_idx = refinements.at(pointee_idx).optional.to;
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(inner_idx).*));
-    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(inner_idx).scalar.undefined.?));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(inner_idx).scalar.analyte.undefined.?));
 }
 
 // TODO: Interprocedural tests disabled during entity system refactoring.
@@ -1090,17 +1102,20 @@ test "load from undefined inst returns error" {
     var results = [_]Inst{.{}} ** 3;
 
     // Create pointer -> undefined scalar
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .undefined = .{ .meta = .{
-        .function = "test_func",
-        .file = "test.zig",
-        .line = 1,
-    } } } } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined = .{ .undefined = .{ .meta = .{
+            .function = "test_func",
+            .file = "test.zig",
+            .line = 1,
+        } } } },
+        .type_id = 0,
+    } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
     try std.testing.expectError(
         error.UseBeforeAssign,
-        Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .scalar = {} } }),
+        Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } }),
     );
 }
 
@@ -1118,14 +1133,14 @@ test "load from defined inst does not return error" {
     var results = [_]Inst{.{}} ** 3;
 
     // Create pointer -> defined scalar
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
     // Set up result for the load instruction (index 0)
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{} });
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
-    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .scalar = {} } });
+    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } });
 }
 
 test "load from inst without undefined tracking does not return error" {
@@ -1142,11 +1157,11 @@ test "load from inst without undefined tracking does not return error" {
     var results = [_]Inst{.{}} ** 3;
 
     // Create pointer -> scalar with no undefined tracking (undefined = null)
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .undefined = null } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = null }, .type_id = 0 } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
-    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .scalar = {} } });
+    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } });
 }
 
 test "reportUseBeforeAssign with name_when_set returns error" {

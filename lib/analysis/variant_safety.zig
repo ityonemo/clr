@@ -18,7 +18,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
         },
         // variant_safety should only exist on unions - check that other types don't have it
         .scalar => |s| {
-            if (s.variant_safety != null) {
+            if (s.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got scalar", .{});
             }
         },
@@ -160,9 +160,11 @@ pub const VariantSafety = struct {
             const first_idx = first_active_idx.?;
             const second_idx = second_active_idx.?;
 
-            // Get field names
-            const first_name: ?[]const u8 = if (u.field_names.len > first_idx) u.field_names[first_idx] else null;
-            const second_name: ?[]const u8 = if (u.field_names.len > second_idx) u.field_names[second_idx] else null;
+            // Get field names via ctx.getName
+            // Note: Field names are stored in Type, not Refinement. For now, use null.
+            // TODO: Pass union type to get field names for better error messages.
+            const first_name: ?[]const u8 = null;
+            const second_name: ?[]const u8 = null;
 
             try ctx.meta.print(ctx.writer, "access of union with ambiguous active variant in ", .{});
 
@@ -185,22 +187,17 @@ pub const VariantSafety = struct {
         if (vs.active_metas[field_index] == null) {
             // Find which field IS active for the error message
             var active_meta: ?Meta = null;
-            var active_name: ?[]const u8 = null;
-            for (vs.active_metas, 0..) |meta_opt, i| {
+            for (vs.active_metas) |meta_opt| {
                 if (meta_opt) |meta| {
                     active_meta = meta;
-                    if (u.field_names.len > i) {
-                        active_name = u.field_names[i];
-                    }
                     break;
                 }
             }
 
-            // Get accessed field name
-            const accessed_name: ?[]const u8 = if (u.field_names.len > field_index)
-                u.field_names[field_index]
-            else
-                null;
+            // Get field names - note: stored in Type, not Refinement. For now, use null.
+            // TODO: Pass union type to get field names for better error messages.
+            const active_name: ?[]const u8 = null;
+            const accessed_name: ?[]const u8 = null;
 
             // Report the access error
             if (accessed_name) |name| {
@@ -296,13 +293,13 @@ pub const VariantSafety = struct {
                         orig_m.* = true_m;
                         // Ensure field entity exists - create new in orig refinements
                         if (u.fields[i] == null) {
-                            u.fields[i] = orig[0].appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } }) catch @panic("out of memory");
+                            u.fields[i] = orig[0].appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
                         }
                     } else if (false_m != null) {
                         orig_m.* = false_m;
                         // Ensure field entity exists - create new in orig refinements
                         if (u.fields[i] == null) {
-                            u.fields[i] = orig[0].appendEntity(.{ .scalar = .{ .undefined = .{ .defined = {} } } }) catch @panic("out of memory");
+                            u.fields[i] = orig[0].appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
                         }
                     } else {
                         orig_m.* = null;

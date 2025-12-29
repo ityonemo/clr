@@ -179,7 +179,7 @@ pub const NullSafety = union(enum) {
         // Check if we're storing null or a value
         switch (params.src) {
             .interned => |ty| {
-                if (ty == .@"null") {
+                if (ty.ty == .@"null") {
                     pointee.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
                 } else {
                     pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
@@ -249,7 +249,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
         .optional => {},
         // null_safety should not exist on non-optional types
         .scalar => |s| {
-            if (s.null_safety != null) {
+            if (s.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got scalar", .{});
             }
         },

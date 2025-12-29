@@ -391,6 +391,18 @@ libclr.so is dynamically loaded via `dlopen()`. This causes a specific class of 
 
 4. **Per-function arenas must share the global vtable** - When creating temporary arenas (e.g., for building inst lines), use `clr_allocator.newArena()` which returns an Arena that uses the shared `arena_vtable`.
 
+5. **Extern union field access can crash** - Accessing fields of `extern union` types (like `Air.Inst.Data`) can crash in DLL context, even when the data is valid and bounds checks pass. The workaround is to read raw bytes and reinterpret manually:
+   ```zig
+   // CRASHES in DLL context:
+   const ty_op = datum.ty_op;
+
+   // WORKS - read raw bytes instead:
+   const raw_ptr: [*]const u32 = @ptrCast(&datum);
+   const ty_raw: u32 = raw_ptr[0];
+   const ty_ref: Ref = @enumFromInt(ty_raw);
+   ```
+   This pattern is used in `src/codegen.zig` in `getInstResultType()` when reading type information from AIR instruction data.
+
 ## Interprocedural Analysis Architecture
 
 ### AIR Arg Semantics (IMPORTANT)

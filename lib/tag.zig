@@ -53,31 +53,32 @@ const Undefined = @import("analysis/undefined.zig").Undefined;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 const NullSafety = @import("analysis/null_safety.zig").NullSafety;
 const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
-pub const analyses = .{ Undefined, MemorySafety, NullSafety, VariantSafety };
+const FieldParentPtrSafety = @import("analysis/fieldparentptr_safety.zig").FieldParentPtrSafety;
+pub const analyses = .{ Undefined, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety };
 
 // Type
 
-/// Represents a struct or union field with type and optional name.
-/// Name is null for tuple fields (anonymous structs).
-pub const Field = struct {
-    ty: Type,
-    name: ?[]const u8 = null,
-};
+pub const Name = u32;
 
+/// Represents a struct or union field with type and optional name.
+/// 
 /// This struct exists to propagate information from the AIR generator into
 /// the parameters of a instruction.  Some operations are expected to set
 /// the type based on interned information; in those cases, the type will be used.
-pub const Type = union(enum) {
-    scalar: void,
-    pointer: *const Type,
-    optional: *const Type,
-    errorunion: *const Type, // error union payload type
-    null: *const Type, // used to signal that an optional is being set to null.  Inner type must be optional.
-    undefined: *const Type, // used to signal that the type is undefined, must be scalar, pointer, optional
-    region: *const Type, // unused, for now, will represent slices (maybe)
-    @"struct": []const Field, // field types and names for struct
-    @"union": []const Field, // field types and names for union
-    void: void,
+pub const Type = struct {
+    id: Name,
+    ty: union(enum) {
+        scalar: void,
+        pointer: *const Type,
+        optional: *const Type,
+        errorunion: *const Type, // error union payload type
+        null: *const Type, // used to signal that an optional is being set to null.  Inner type must be optional.
+        undefined: *const Type, // used to signal that the type is undefined, must be scalar, pointer, optional
+        region: *const Type, // unused, for now, will represent slices (maybe)
+        @"struct": []const Type, // field types for struct
+        @"union": []const Type, // field types for union
+        void: void,
+    }
 };
 
 /// Source reference for instructions - indicates where a value comes from.
@@ -96,29 +97,30 @@ pub const Src = union(enum) {
 /// Used when storing interned values to determine the refinement structure.
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
-    return switch (ty) {
-        .scalar => .{ .scalar = .{} },
+    const type_id = ty.id;
+    return switch (ty.ty) {
+        .scalar => .{ .scalar = .{ .analyte = .{}, .type_id = type_id } },
         .void => .void,
         .pointer => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .pointer = .{ .analyte = .{}, .to = child_idx } };
+            return .{ .pointer = .{ .analyte = .{}, .type_id = type_id, .to = child_idx } };
         },
         .optional => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
+            return .{ .optional = .{ .analyte = .{}, .type_id = type_id, .to = child_idx } };
         },
         .errorunion => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .errorunion = .{ .analyte = .{}, .to = child_idx } };
+            return .{ .errorunion = .{ .analyte = .{}, .type_id = type_id, .to = child_idx } };
         },
         .null => |child| {
             // .null is a null optional value - creates same structure as .optional
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .optional = .{ .analyte = .{}, .to = child_idx } };
+            return .{ .optional = .{ .analyte = .{}, .type_id = type_id, .to = child_idx } };
         },
         .undefined => |child| {
             // .undefined wraps a type - recurse into inner type.
@@ -126,20 +128,18 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             return typeToRefinement(child.*, refinements);
         },
         .region => @panic("regions not implemented yet"),
-        inline .@"struct", .@"union" => |type_fields, tag| blk: {
+        inline .@"struct", .@"union" => |type_fields, class_tag| blk: {
             const allocator = refinements.list.allocator;
-            const FieldType = if (tag == .@"union") ?Refinements.EIdx else Refinements.EIdx;
+            const FieldType = if (class_tag == .@"union") ?Refinements.EIdx else Refinements.EIdx;
             const fields = allocator.alloc(FieldType, type_fields.len) catch @panic("out of memory");
-            const field_names = allocator.alloc(?[]const u8, type_fields.len) catch @panic("out of memory");
-            for (type_fields, 0..) |field, i| {
+            for (type_fields, 0..) |field_type, i| {
                 // For structs, create entities for each field; for unions, all fields start inactive (null)
-                fields[i] = if (tag == .@"union")
+                fields[i] = if (class_tag == .@"union")
                     null
                 else
-                    try refinements.appendEntity(try typeToRefinement(field.ty, refinements));
-                field_names[i] = field.name;
+                    try refinements.appendEntity(try typeToRefinement(field_type, refinements));
             }
-            break :blk @unionInit(Refinement, @tagName(tag), .{ .fields = fields, .field_names = field_names });
+            break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
         },
     };
 }
@@ -156,7 +156,7 @@ pub const Alloc = struct {
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
         const pointee_idx = try state.refinements.appendEntity(pointee_ref);
         // Create pointer entity pointing to the typed pointee
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
         try splat(.alloc, state, index, self);
     }
 };
@@ -171,9 +171,9 @@ pub const AllocCreate = struct {
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
         const pointee_idx = try state.refinements.appendEntity(pointee_ref);
         // Create pointer entity pointing to the typed pointee
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .to = pointee_idx } });
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
         // Wrap in error union
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .analyte = .{}, .to = ptr_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .analyte = .{}, .type_id = 0, .to = ptr_idx } });
         try splat(.alloc_create, state, index, self);
     }
 };
@@ -262,10 +262,10 @@ pub const Bitcast = struct {
                 const src_ref = state.refinements.at(src_eidx);
 
                 // Check if we're converting pointer to optional (e.g., *T to ?*T)
-                if (self.ty == .optional and src_ref.* == .pointer) {
+                if (self.ty.ty == .optional and src_ref.* == .pointer) {
                     // Create optional wrapper that points to the existing pointer entity
                     const opt_idx = try state.refinements.appendEntity(.{
-                        .optional = .{ .analyte = .{}, .to = src_eidx },
+                        .optional = .{ .analyte = .{}, .type_id = 0, .to = src_eidx },
                     });
                     state.results[index].refinement = opt_idx;
                 } else {
@@ -467,6 +467,8 @@ pub const StructFieldPtr = struct {
     base: ?usize,
     /// Index of the field to access
     field_index: usize,
+    /// Name ID for the field (looked up via ctx.getName)
+    field_name_id: u32,
     /// Result type (pointer to field type)
     ty: Type,
 
@@ -497,24 +499,21 @@ pub const StructFieldPtr = struct {
                     if (tag == .@"union") {
                         if (data.fields[self.field_index]) |idx| break :idx idx;
                         // Inactive field - create a fresh entity for structure
-                        const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
+                        const new_field_ref = try typeToRefinement(self.ty.ty.pointer.*, state.refinements);
                         const new_idx = try state.refinements.appendEntity(new_field_ref);
                         break :idx new_idx;
                     } else {
                         break :idx data.fields[self.field_index];
                     }
                 };
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = field_idx } });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = field_idx } });
 
                 // Build access path: base_name + "." + field_name
-                const field_name: ?[]const u8 = if (data.field_names.len > self.field_index)
-                    data.field_names[self.field_index]
-                else
-                    null;
                 const base_name = state.results[base].name;
+                const field_name = if (self.field_name_id != 0) state.ctx.getName(self.field_name_id) else null;
                 state.results[index].name = if (base_name) |bn| blk: {
                     if (field_name) |fn_| {
-                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch bn;
                     }
                     break :blk bn;
                 } else field_name;
@@ -537,6 +536,8 @@ pub const StructFieldVal = struct {
     operand: ?usize,
     /// Index of the field to extract
     field_index: usize,
+    /// Name ID for the field (looked up via ctx.getName)
+    field_name_id: u32,
     /// Result type (the field's type)
     ty: Type,
 
@@ -573,14 +574,11 @@ pub const StructFieldVal = struct {
                 state.results[index].refinement = field_idx;
 
                 // Build access path: operand_name + "." + field_name
-                const field_name: ?[]const u8 = if (data.field_names.len > self.field_index)
-                    data.field_names[self.field_index]
-                else
-                    null;
                 const base_name = state.results[operand].name;
+                const field_name = if (self.field_name_id != 0) state.ctx.getName(self.field_name_id) else null;
                 state.results[index].name = if (base_name) |bn| blk: {
                     if (field_name) |fn_| {
-                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch null;
+                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch bn;
                     }
                     break :blk bn;
                 } else field_name;
@@ -588,6 +586,28 @@ pub const StructFieldVal = struct {
             else => |t| std.debug.panic("struct_field_val: expected struct or union, got {s}", .{@tagName(t)}),
         }
         try splat(.struct_field_val, state, index, self);
+    }
+};
+
+/// Entity operation: CREATE-THAT-REFERENCES
+/// Creates new pointer entity referencing parent container.
+///
+/// FieldParentPtr gets a pointer to the parent container from a field pointer.
+/// This is the inverse of struct_field_ptr - given a pointer to a field, it
+/// computes a pointer to the containing struct/union.
+/// Used by @fieldParentPtr builtin.
+pub const FieldParentPtr = struct {
+    /// Pointer to the field
+    field_ptr: ?usize,
+    /// Index of the field within the container
+    field_index: usize,
+    /// Result type (pointer to parent container)
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create pointer to parent container using type info
+        _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        try splat(.field_parent_ptr, state, index, self);
     }
 };
 
@@ -617,7 +637,7 @@ pub const OptionalPayload = struct {
             .interned, .other => {
                 // Comptime/global source - create fresh scalar
                 // TODO: use type info from .interned to determine structure
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
             },
         }
         try splat(.optional_payload, state, index, self);
@@ -658,7 +678,7 @@ pub const RetSafe = struct {
                                     const allocator = caller_refinements.list.allocator;
                                     const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
                                     @memcpy(new_fields, s.fields);
-                                    break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields } };
+                                    break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .type_id = s.type_id } };
                                 },
                                 else => new_val,
                             };
@@ -672,7 +692,7 @@ pub const RetSafe = struct {
                 },
                 .interned => |ty| {
                     // Comptime return value
-                    if (ty == .void) {
+                    if (ty.ty == .void) {
                         // Void return
                         switch (caller_refinements.at(return_eidx).*) {
                             .retval_future => caller_refinements.at(return_eidx).* = .void,
@@ -722,7 +742,7 @@ pub const RetPtr = struct {
         const return_idx = try state.refinements.appendEntity(return_ref);
 
         // Create a pointer to this entity as the result
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .to = return_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = return_idx } });
 
         try splat(.ret_ptr, state, index, self);
     }
@@ -833,7 +853,7 @@ pub const UnwrapErrunionPayload = struct {
 pub fn Simple(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
             try splat(instr, state, index, self);
         }
     };
@@ -848,15 +868,15 @@ pub fn OverflowOp(comptime instr: anytype) type {
             const allocator = state.refinements.list.allocator;
 
             // Create two scalar fields (result and overflow flag)
-            const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{} });
-            const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
             // clobberInst takes ownership of fields slice
             const fields = allocator.alloc(EIdx, 2) catch @panic("out of memory");
             fields[0] = field0_idx;
             fields[1] = field1_idx;
 
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .fields = fields } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .fields = fields, .type_id = 0 } });
             try splat(instr, state, index, self);
         }
     };
@@ -891,7 +911,7 @@ pub const IsNonNull = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
         try splat(.is_non_null, state, index, self);
     }
 };
@@ -904,7 +924,7 @@ pub const IsNull = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
         try splat(.is_null, state, index, self);
     }
 };
@@ -987,7 +1007,7 @@ pub const GetUnionTag = struct {
     operand: ?usize, // the union instruction we're getting the tag from
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
         try splat(.get_union_tag, state, index, self);
     }
 };
@@ -1004,14 +1024,13 @@ pub const UnionInit = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create union refinement from type info
-        const union_fields = self.ty.@"union";
+        const union_fields = self.ty.ty.@"union";
         const allocator = state.refinements.list.allocator;
 
         // Union fields use ?EIdx - null means inactive, some means active
         const fields = allocator.alloc(?Refinements.EIdx, union_fields.len) catch @panic("out of memory");
-        const field_names = allocator.alloc(?[]const u8, union_fields.len) catch @panic("out of memory");
 
-        for (union_fields, 0..) |field, i| {
+        for (union_fields, 0..) |_, i| {
             if (i == self.field_index) {
                 // Active field - create entity from init value
                 switch (self.init) {
@@ -1030,10 +1049,9 @@ pub const UnionInit = struct {
                 // Inactive field
                 fields[i] = null;
             }
-            field_names[i] = field.name;
         }
 
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .field_names = field_names } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .type_id = self.ty.id } });
         try splat(.union_init, state, index, self);
     }
 };
@@ -1055,6 +1073,7 @@ pub const AnyTag = union(enum) {
     dbg_arg_inline: DbgVarPtr, // Same structure as dbg_var_ptr
     load: Load,
     optional_payload: OptionalPayload,
+    field_parent_ptr: FieldParentPtr,
     ret_safe: RetSafe,
     store: Store,
     store_safe: Store, // Same as store, just with runtime safety checks
@@ -1304,7 +1323,7 @@ test "dbg_var_ptr sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc to create a pointer
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
     try std.testing.expect(results[1].name == null);
 
     // dbg_var_ptr should set the name on the target instruction
@@ -1346,7 +1365,7 @@ test "dbg_var_val sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // Set up a result at index 1
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     try std.testing.expect(results[1].name == null);
 
     // dbg_var_val should set the name on the target instruction
@@ -1366,7 +1385,7 @@ test "arg copies value and sets name" {
     // Caller refinements (simulating the caller)
     var caller_refinements = Refinements.init(allocator);
     defer caller_refinements.deinit();
-    const arg_eidx = try caller_refinements.appendEntity(.{ .scalar = .{} });
+    const arg_eidx = try caller_refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
     // Callee refinements
     var refinements = Refinements.init(allocator);
@@ -1403,10 +1422,10 @@ test "br shares source refinement with block" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a block at index 0
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     // Create a value at index 1
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     const src_eidx = results[1].refinement.?;
 
     // br should share the source refinement with the block
@@ -1452,13 +1471,14 @@ test "optional_payload extracts inner value from optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional with a scalar inside, marked as non-null (checked)
-    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .non_null = .{
             .function = "test",
             .file = "test.zig",
             .line = 1,
         } } },
+        .type_id = 0,
         .to = inner_eidx,
     } });
     results[0].refinement = opt_eidx;
@@ -1485,8 +1505,8 @@ test "unwrap_errunion_payload extracts payload from error union" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an error union with a scalar payload
-    const payload_eidx = try refinements.appendEntity(.{ .scalar = .{} });
-    const eu_eidx = try refinements.appendEntity(.{ .errorunion = .{ .analyte = .{}, .to = payload_eidx } });
+    const payload_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const eu_eidx = try refinements.appendEntity(.{ .errorunion = .{ .analyte = .{}, .type_id = 0, .to = payload_eidx } });
     results[0].refinement = eu_eidx;
 
     // unwrap_errunion_payload should extract the payload
@@ -1539,12 +1559,12 @@ test "block creates refinement based on type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Block with scalar type
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
 
     // Block with void type
-    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .void = {} } } });
+    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .void = {} } } } });
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
@@ -1585,20 +1605,21 @@ test "struct_field_ptr gets pointer to struct field" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a pointer to a struct with two scalar fields
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{} });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     const fields = try allocator.alloc(EIdx, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
     const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{
         .analyte = .{},
         .fields = fields,
+        .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .to = struct_eidx } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = struct_eidx } });
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -1622,19 +1643,20 @@ test "struct_field_val extracts field value from struct" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a struct with two scalar fields (both defined)
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .defined } });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .undefined = .defined } });
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
     const fields = try allocator.alloc(EIdx, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
     const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{
         .analyte = .{},
         .fields = fields,
+        .type_id = 0,
     } });
     results[0].refinement = struct_eidx;
 
     // struct_field_val should extract field 0
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     // Result should share the field's entity
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
@@ -1655,8 +1677,8 @@ test "is_non_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional
-    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .to = inner_eidx } });
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = inner_eidx } });
     results[0].refinement = opt_eidx;
 
     // is_non_null should record the check
@@ -1683,8 +1705,8 @@ test "is_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional
-    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .to = inner_eidx } });
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = inner_eidx } });
     results[0].refinement = opt_eidx;
 
     // is_null should record the check
@@ -1711,20 +1733,21 @@ test "set_union_tag updates union variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a union with two fields
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{} });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     const fields = try allocator.alloc(?EIdx, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{},
         .fields = fields,
+        .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .to = union_eidx } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = union_eidx } });
     results[0].refinement = ptr_eidx;
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     // The union's active field should be set (field 1), others null
     const union_ref = refinements.at(union_eidx);
@@ -1747,12 +1770,13 @@ test "get_union_tag produces scalar" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a union
-    const field_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const field_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     const fields = try allocator.alloc(?EIdx, 1);
     fields[0] = field_eidx;
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{},
         .fields = fields,
+        .type_id = 0,
     } });
     results[0].refinement = union_eidx;
 
@@ -1778,12 +1802,12 @@ test "union_init creates union with active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a value to use as the init value
-    const val_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const val_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     results[0].refinement = val_eidx;
 
     // union_init should create a union with active variant set
     try Inst.apply(state, 1, .{ .union_init = .{
-        .ty = .{ .@"union" = &.{ .{ .ty = .{ .scalar = {} } }, .{ .ty = .{ .scalar = {} } } } },
+        .ty = .{ .id = 0, .ty = .{ .@"union" = &.{ .{ .id = 0, .ty = .{ .scalar = {} } }, .{ .id = 0, .ty = .{ .scalar = {} } } } } },
         .field_index = 1,
         .init = .{ .eidx = 0 },
     } });

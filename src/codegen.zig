@@ -17,8 +17,33 @@ const Ref = Air.Inst.Ref;
 
 const std = @import("std");
 
-/// Returns a keyword-safe tag name using @"..." syntax to handle reserved keywords
-fn safeName(tag: Tag) []const u8 {
+/// Tuple that represents a InternPool index / name pairing.
+pub const NameMap = struct { u32, []const u8 };
+
+/// Register a name in the per-function name map.
+/// Returns an existing ID if the name is already registered, otherwise assigns a new ID.
+fn registerName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), name: []const u8) u32 {
+    const allocator = clr_allocator.allocator();
+
+    // Check if already in map
+    var it = name_map.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.eql(u8, entry.value_ptr.*, name)) {
+            return entry.key_ptr.*;
+        }
+    }
+
+    // New name - assign next ID (starting at 1, 0 = unknown)
+    const id = @as(u32, @intCast(name_map.count())) + 1;
+    const duped = allocator.dupe(u8, name) catch @panic("OOM");
+    name_map.put(allocator, id, duped) catch @panic("OOM");
+    return id;
+}
+
+/// Returns alternative names, used for:
+/// - a keyword-safe tag name using @"..." syntax to handle reserved keywords 
+/// - naming overloads
+fn altName(tag: Tag) []const u8 {
     return switch (tag) {
         .@"try" => "@\"try\"",
         .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => "struct_field_ptr",
@@ -28,27 +53,28 @@ fn safeName(tag: Tag) []const u8 {
 
 /// Returns the payload string for a given tag and data.
 /// Note: call tags are handled separately in buildInstLines via payloadCallParts.
-fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
+fn payload(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, _: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
-        .alloc => payloadAlloc(arena, ip, datum),
+        .alloc => payloadAlloc(name_map, arena, ip, datum),
         .arg => payloadArg(arena, datum, param_names, arg_counter),
         .dbg_stmt => payloadDbgStmt(arena, datum),
-        .store, .store_safe => payloadStore(arena, ip, datum),
-        .load => payloadLoad(arena, ip, datum),
+        .store, .store_safe => payloadStore(name_map, arena, ip, datum),
+        .load => payloadLoad(name_map, arena, ip, datum),
         .ret_safe => payloadRetSafe2(arena, ip, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(arena, datum, extra),
-        .bitcast => payloadBitcast(arena, ip, datum),
+        .bitcast => payloadBitcast(name_map, arena, ip, datum),
         .unwrap_errunion_payload, .optional_payload => payloadTransferOp(arena, ip, datum),
         .is_non_null, .is_null => payloadUnOp(arena, ip, datum),
-        .br => payloadBr(arena, ip, datum),
-        .block => payloadBlock(arena, ip, datum),
-        .struct_field_ptr_index_0 => payloadStructFieldPtr(arena, ip, datum, 0),
-        .struct_field_ptr_index_1 => payloadStructFieldPtr(arena, ip, datum, 1),
-        .struct_field_ptr_index_2 => payloadStructFieldPtr(arena, ip, datum, 2),
-        .struct_field_ptr_index_3 => payloadStructFieldPtr(arena, ip, datum, 3),
-        // Note: All struct_field_ptr_index_N are mapped to struct_field_ptr via safeName()
-        .struct_field_val => payloadStructFieldVal(arena, ip, datum, extra),
-        .ret_ptr => payloadRetPtr(arena, ip, datum),
+        .br => payloadBr(name_map, arena, ip, datum),
+        .block => payloadBlock(name_map, arena, ip, datum),
+        .struct_field_ptr_index_0 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 0),
+        .struct_field_ptr_index_1 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 1),
+        .struct_field_ptr_index_2 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 2),
+        .struct_field_ptr_index_3 => payloadStructFieldPtr(name_map, arena, ip, tags, data, datum, 3),
+        // Note: All struct_field_ptr_index_N are mapped to struct_field_ptr via altName()
+        .struct_field_val => payloadStructFieldVal(name_map, arena, ip, tags, data, datum, extra),
+        .field_parent_ptr => payloadFieldParentPtr(name_map, arena, ip, datum, extra),
+        .ret_ptr => payloadRetPtr(name_map, arena, ip, datum),
         .ret_load => payloadRetLoad(arena, datum),
         .set_union_tag => payloadSetUnionTag(arena, ip, datum),
         .get_union_tag => payloadGetUnionTag(arena, datum),
@@ -75,13 +101,13 @@ fn payloadTry(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []co
 }
 
 /// Payload for bitcast - includes destination type for analysis.
-fn payloadBitcast(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadBitcast(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(arena, ip, operand);
     const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
-        typeToString(arena, ip, ty_idx)
+        typeToString(name_map, arena, ip, ty_idx)
     else
-        ".{ .scalar = {} }";
+        ".{ .id = 0, .ty = .{ .scalar = {} } }";
     return clr_allocator.allocPrint(arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
 }
 
@@ -98,7 +124,7 @@ fn payloadRetSafe2(arena: std.mem.Allocator, ip: *const InternPool, datum: Data)
 }
 
 /// Payload for alloc - extracts pointee type from the pointer type.
-fn payloadAlloc(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadAlloc(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const ptr_type = datum.ty.toIntern();
     // Extract pointee type from pointer type
     const pointee_type: InternPool.Index = switch (ptr_type) {
@@ -115,7 +141,7 @@ fn payloadAlloc(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []
             };
         },
     };
-    const pointee_str = typeToString(arena, ip, pointee_type);
+    const pointee_str = typeToString(name_map, arena, ip, pointee_type);
     return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
 }
 
@@ -161,26 +187,28 @@ fn extractAllocCreateType(arena: std.mem.Allocator, ip: *const InternPool, datum
         };
     };
 
-    return typeToString(arena, ip, pointee_type);
+    return typeToString(null, arena, ip, pointee_type);
 }
 
 /// Payload for struct_field_ptr_index_N - gets pointer to a struct field.
-fn payloadStructFieldPtr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, field_index: usize) []const u8 {
+fn payloadStructFieldPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, datum: Data, field_index: usize) []const u8 {
     // ty_op.ty is the result type (pointer to field), ty_op.operand is the base struct pointer
     const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
-        typeToString(arena, ip, ty_idx)
+        typeToString(name_map, arena, ip, ty_idx)
     else
         ".{ .unknown = {} }"; // Will cause compile error if hit
     const base_ptr: ?usize = if (datum.ty_op.operand.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(arena, ".{{ .base = {?d}, .field_index = {d}, .ty = {s} }}", .{ base_ptr, field_index, ty_str }, null);
+    // Look up field name from the container type
+    const field_name_id = getFieldNameId(name_map, ip, tags, data, datum.ty_op.operand, field_index);
+    return clr_allocator.allocPrint(arena, ".{{ .base = {?d}, .field_index = {d}, .field_name_id = {d}, .ty = {s} }}", .{ base_ptr, field_index, field_name_id, ty_str }, null);
 }
 
 /// Payload for struct_field_val - extracts a field value from a struct by value.
 /// Uses ty_pl with StructField payload: struct_operand and field_index.
-fn payloadStructFieldVal(arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32) []const u8 {
+fn payloadStructFieldVal(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, datum: Data, extra: []const u32) []const u8 {
     // ty_pl has ty (Ref) and payload index (u32)
     const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
-        typeToString(arena, ip, ty_idx)
+        typeToString(name_map, arena, ip, ty_idx)
     else
         ".{ .unknown = {} }"; // Will cause compile error if hit
     const payload_index = datum.ty_pl.payload;
@@ -193,12 +221,37 @@ fn payloadStructFieldVal(arena: std.mem.Allocator, ip: *const InternPool, datum:
     const struct_operand: Ref = @enumFromInt(struct_operand_raw);
     const operand: ?usize = if (struct_operand.toIndex()) |idx| @intFromEnum(idx) else null;
 
-    return clr_allocator.allocPrint(arena, ".{{ .operand = {?d}, .field_index = {d}, .ty = {s} }}", .{ operand, field_index, ty_str }, null);
+    // Look up field name from the container type (operand is struct value, not pointer)
+    const field_name_id = getFieldNameIdFromValue(name_map, ip, tags, data, struct_operand, field_index);
+
+    return clr_allocator.allocPrint(arena, ".{{ .operand = {?d}, .field_index = {d}, .field_name_id = {d}, .ty = {s} }}", .{ operand, field_index, field_name_id, ty_str }, null);
+}
+
+/// Payload for field_parent_ptr - gets parent container pointer from field pointer.
+/// Uses ty_pl with FieldParentPtr payload: field_ptr and field_index.
+fn payloadFieldParentPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data, extra: []const u32) []const u8 {
+    // ty_pl has ty (result type - pointer to parent) and payload index
+    const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
+        typeToString(name_map, arena, ip, ty_idx)
+    else
+        ".{ .unknown = {} }";
+    const payload_index = datum.ty_pl.payload;
+
+    // FieldParentPtr: field_ptr (Ref as u32), field_index (u32)
+    const field_ptr_raw = extra[payload_index];
+    const field_index = extra[payload_index + 1];
+
+    // Convert the raw u32 to a Ref and extract the index
+    const field_ptr_ref: Ref = @enumFromInt(field_ptr_raw);
+    const field_ptr: ?usize = if (field_ptr_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+
+    return clr_allocator.allocPrint(arena, ".{{ .field_ptr = {?d}, .field_index = {d}, .ty = {s} }}", .{ field_ptr, field_index, ty_str }, null);
 }
 
 /// Payload for br (branch to block with value).
 /// Transfers properties from operand to target block.
-fn payloadBr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadBr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    _ = name_map;
     const block_inst = @intFromEnum(datum.br.block_inst);
     const operand = datum.br.operand;
     const src_str = srcString(arena, ip, operand);
@@ -206,32 +259,32 @@ fn payloadBr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []con
 }
 
 /// Payload for block - extracts the block's result type.
-fn payloadBlock(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadBlock(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const ty_ref = datum.ty_pl.ty;
 
     // Check for well-known types that don't require InternPool lookup
     if (ty_ref == .none) {
-        return ".{ .ty = .{ .void = {} } }";
+        return ".{ .ty = .{ .id = 0, .ty = .{ .void = {} } } }";
     }
     if (ty_ref == .void_type) {
-        return ".{ .ty = .{ .void = {} } }";
+        return ".{ .ty = .{ .id = 0, .ty = .{ .void = {} } } }";
     }
     if (ty_ref == .noreturn_type) {
-        return ".{ .ty = .{ .void = {} } }";
+        return ".{ .ty = .{ .id = 0, .ty = .{ .void = {} } } }";
     }
 
     // Try to get interned index
-    const ty_idx = ty_ref.toInternedAllowNone() orelse return ".{ .ty = .{ .void = {} } }";
+    const ty_idx = ty_ref.toInternedAllowNone() orelse return ".{ .ty = .{ .id = 0, .ty = .{ .void = {} } } }";
 
     // Use typeToString which handles well-known types first
-    const ty_str = typeToString(arena, ip, ty_idx);
+    const ty_str = typeToString(name_map, arena, ip, ty_idx);
     return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{ty_str}, null);
 }
 
 /// Generate a single inst line for a given tag and data.
 /// Exposed for testing with underscore prefix to indicate internal use.
 /// arg_counter tracks sequential arg indices (may differ from zir_param_index).
-pub fn _instLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
+pub fn _instLine(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Data, inst_index: usize, extra: []const u32, tags: []const Tag, data: []const Data, param_names: []const []const u8, arg_counter: ?*u32) []const u8 {
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(ip, datum)) {
@@ -257,8 +310,8 @@ pub fn _instLine(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datu
             break :blk clr_allocator.allocPrint(arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
         },
         else => blk: {
-            const tag_payload = payload(arena, ip, tag, datum, inst_index, extra, param_names, arg_counter);
-            break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, safeName(tag), tag_payload }, null);
+            const tag_payload = payload(name_map, arena, ip, tag, datum, inst_index, extra, tags, data, param_names, arg_counter);
+            break :blk clr_allocator.allocPrint(arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
         },
     };
 }
@@ -299,7 +352,7 @@ fn payloadDbgStmt(arena: std.mem.Allocator, datum: Data) []const u8 {
 fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const u8 {
     // Check for .none first (void/no value)
     if (ref == .none) {
-        return ".{ .interned = .{ .void = {} } }";
+        return ".{ .interned = .{ .id = 0, .ty = .{ .void = {} } } }";
     }
     if (ref.toIndex()) |idx| {
         // Runtime value from instruction
@@ -308,7 +361,8 @@ fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const 
     if (ref.toInterned()) |interned_idx| {
         // Check for null value first (untyped null)
         if (interned_idx == .null_value) {
-            return ".{ .interned = .{ .null = {} } }";
+            // Untyped null - use scalar as fallback since we don't know the optional type
+            return ".{ .interned = .{ .id = 0, .ty = .{ .scalar = {} } } }";
         }
         // Comptime value - determine structure from type
         const ty = ip.typeOf(interned_idx);
@@ -320,8 +374,8 @@ fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const 
                 const val_key = ip.indexToKey(interned_idx);
                 if (val_key == .opt and val_key.opt.val == .none) {
                     // Include the child type so we know the structure even for null
-                    const child_str = typeToString(arena, ip, type_key.opt_type);
-                    return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .null = &{s} }} }}", .{child_str}, null);
+                    const child_str = typeToString(null, arena, ip, type_key.opt_type);
+                    return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .id = 0, .ty = .{{ .null = &{s} }} }} }}", .{child_str}, null);
                 }
             }
             // Check for aggregate value (struct) with field-level undefined
@@ -334,7 +388,7 @@ fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const 
                 }
             }
         }
-        const type_str = typeToString(arena, ip, ty);
+        const type_str = typeToString(null, arena, ip, ty);
         return clr_allocator.allocPrint(arena, ".{{ .interned = {s} }}", .{type_str}, null);
     }
     // Other (globals, etc.)
@@ -347,11 +401,11 @@ fn srcStringUndef(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []c
     // For undefined stores, we wrap the type in .undefined
     if (ref.toInterned()) |interned_idx| {
         const ty = ip.typeOf(interned_idx);
-        const type_str = typeToString(arena, ip, ty);
-        return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .undefined = &{s} }} }}", .{type_str}, null);
+        const type_str = typeToString(null, arena, ip, ty);
+        return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .id = 0, .ty = .{{ .undefined = &{s} }} }} }}", .{type_str}, null);
     }
     // Fallback - shouldn't happen for undefined stores
-    return ".{ .interned = .{ .undefined = &.{ .scalar = {} } } }";
+    return ".{ .interned = .{ .id = 0, .ty = .{ .undefined = &.{ .id = 0, .ty = .{ .scalar = {} } } } } }";
 }
 
 /// Check if a type index is a well-known type (doesn't require InternPool lookup).
@@ -374,148 +428,204 @@ const VisitedTypes = std.AutoArrayHashMapUnmanaged(InternPool.Index, void);
 
 /// Convert an InternPool type to a Type union string.
 /// Recursively handles nested types like pointers and optionals.
-fn typeToString(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
+/// Note: name_map is optional - pass null when type stringification doesn't need name registration.
+fn typeToString(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
     var visited = VisitedTypes{};
-    return typeToStringInner(arena, ip, ty, &visited);
+    return typeToStringInner(name_map, arena, ip, ty, &visited);
 }
 
 /// Inner function with cycle detection via visited set.
-fn typeToStringInner(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
+fn typeToStringInner(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     // Handle well-known type indices first (no InternPool lookup needed)
     return switch (ty) {
-        .void_type => ".{ .void = {} }",
-        .noreturn_type => ".{ .void = {} }",
-        .none => ".{ .scalar = {} }",
+        .void_type => ".{ .id = 0, .ty = .{ .void = {} } }",
+        .noreturn_type => ".{ .id = 0, .ty = .{ .void = {} } }",
+        .none => ".{ .id = 0, .ty = .{ .scalar = {} } }",
         // Common scalar types
-        .u8_type, .u16_type, .u32_type, .u64_type, .u128_type, .usize_type => ".{ .scalar = {} }",
-        .i8_type, .i16_type, .i32_type, .i64_type, .i128_type, .isize_type => ".{ .scalar = {} }",
-        .f16_type, .f32_type, .f64_type, .f80_type, .f128_type => ".{ .scalar = {} }",
-        .bool_type, .c_char_type, .comptime_int_type, .comptime_float_type => ".{ .scalar = {} }",
-        .undefined_type, .null_type, .anyerror_type, .type_type => ".{ .scalar = {} }",
+        .u8_type, .u16_type, .u32_type, .u64_type, .u128_type, .usize_type => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+        .i8_type, .i16_type, .i32_type, .i64_type, .i128_type, .isize_type => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+        .f16_type, .f32_type, .f64_type, .f80_type, .f128_type => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+        .bool_type, .c_char_type, .comptime_int_type, .comptime_float_type => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+        .undefined_type, .null_type, .anyerror_type, .type_type => ".{ .id = 0, .ty = .{ .scalar = {} } }",
         // Pointer types (well-known)
-        .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => ".{ .pointer = &.{ .scalar = {} } }",
-        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => ".{ .pointer = &.{ .scalar = {} } }",
+        .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => ".{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } }",
+        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => ".{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } }",
         // For other types, need to look up in InternPool
-        else => typeToStringLookup(arena, ip, ty, visited),
+        else => if (name_map) |nm| typeToStringLookup(nm, arena, ip, ty, visited) else typeToStringLookupNoNames(arena, ip, ty, visited),
     };
 }
 
-/// Look up a non-well-known type in the InternPool.
-fn typeToStringLookup(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
-    // Check for cycles in recursive types (e.g., struct { next: ?*@This() })
+/// Look up a non-well-known type without name registration (for callers without name_map).
+fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     if (visited.contains(ty)) {
-        // Already visiting this type - break the cycle with an unknown placeholder
-        return ".{ .unknown = {} }";
+        return ".{ .id = 0, .ty = .{ .scalar = {} } }";
     }
     visited.put(arena, ty, {}) catch @panic("out of memory");
 
     const type_key = ip.indexToKey(ty);
     return switch (type_key) {
         .simple_type => |simple| switch (simple) {
-            .void => ".{ .void = {} }",
-            .noreturn => ".{ .void = {} }",
-            else => ".{ .scalar = {} }",
+            .void => ".{ .id = 0, .ty = .{ .void = {} } }",
+            .noreturn => ".{ .id = 0, .ty = .{ .void = {} } }",
+            else => ".{ .id = 0, .ty = .{ .scalar = {} } }",
         },
         .ptr_type => |ptr| blk: {
-            const child_str = typeToStringInner(arena, ip, ptr.child, visited);
-            break :blk clr_allocator.allocPrint(arena, ".{{ .pointer = &{s} }}", .{child_str}, null);
+            const child_str = typeToStringInner(null, arena, ip, ptr.child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .pointer = &{s} }} }}", .{child_str}, null);
+        },
+        .opt_type => |child| blk: {
+            const child_str = typeToStringInner(null, arena, ip, child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .optional = &{s} }} }}", .{child_str}, null);
+        },
+        .error_union_type => |eu| blk: {
+            const payload_str = typeToStringInner(null, arena, ip, eu.payload_type, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .errorunion = &{s} }} }}", .{payload_str}, null);
+        },
+        // Skip struct/union field names when no name_map
+        .struct_type, .union_type => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+        else => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+    };
+}
+
+/// Look up a non-well-known type in the InternPool.
+fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    // Check for cycles in recursive types (e.g., struct { next: ?*@This() })
+    if (visited.contains(ty)) {
+        // Already visiting this type - break the cycle with an unknown placeholder
+        return ".{ .id = 0, .ty = .{ .scalar = {} } }";
+    }
+    visited.put(arena, ty, {}) catch @panic("out of memory");
+
+    const type_key = ip.indexToKey(ty);
+    return switch (type_key) {
+        .simple_type => |simple| switch (simple) {
+            .void => ".{ .id = 0, .ty = .{ .void = {} } }",
+            .noreturn => ".{ .id = 0, .ty = .{ .void = {} } }",
+            else => ".{ .id = 0, .ty = .{ .scalar = {} } }",
+        },
+        .ptr_type => |ptr| blk: {
+            const child_str = typeToStringInner(name_map, arena, ip, ptr.child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .pointer = &{s} }} }}", .{child_str}, null);
         },
         .opt_type => |child| blk: {
             // opt_type payload is the child type directly (not a struct with .child)
-            const child_str = typeToStringInner(arena, ip, child, visited);
-            break :blk clr_allocator.allocPrint(arena, ".{{ .optional = &{s} }}", .{child_str}, null);
+            const child_str = typeToStringInner(name_map, arena, ip, child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .optional = &{s} }} }}", .{child_str}, null);
         },
         .error_union_type => |eu| blk: {
             // error_union_type has payload_type field
-            const payload_str = typeToStringInner(arena, ip, eu.payload_type, visited);
-            break :blk clr_allocator.allocPrint(arena, ".{{ .errorunion = &{s} }}", .{payload_str}, null);
+            const payload_str = typeToStringInner(name_map, arena, ip, eu.payload_type, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .errorunion = &{s} }} }}", .{payload_str}, null);
         },
-        .struct_type => structTypeToString(arena, ip, ty, visited),
-        .union_type => unionTypeToString(arena, ip, ty, visited),
+        .struct_type => structTypeToString(name_map, arena, ip, ty, visited),
+        .union_type => unionTypeToString(name_map, arena, ip, ty, visited),
         // All other types treated as scalar (int, float, array, enum, etc.)
-        else => ".{ .scalar = {} }",
+        else => ".{ .id = 0, .ty = .{ .scalar = {} } }",
     };
 }
 
 /// Convert a struct type to a Type string with field types and names.
-fn structTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+/// New format: .{ .id = 0, .ty = .{ .@"struct" = &.{ .{ .id = FIELD_ID, .ty = TYPE_INNER }, ... } } }
+fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
     const loaded = ip.loadStructType(type_index);
     const field_types = loaded.field_types.get(ip);
 
     if (field_types.len == 0) {
-        return ".{ .@\"struct\" = &.{} }";
+        return ".{ .id = 0, .ty = .{ .@\"struct\" = &.{} } }";
     }
 
     // Limit recursion depth - treat deeply nested structs as unknown to avoid complexity
     if (visited.count() > 20) {
-        return ".{ .unknown = {} }";
+        return ".{ .id = 0, .ty = .{ .scalar = {} } }";
     }
 
-    // Build field types string with proper type inspection
+    // Build field types string - each field is a Type with its own .id
     var result = std.ArrayListUnmanaged(u8){};
-    result.appendSlice(arena, ".{ .@\"struct\" = &.{ ") catch @panic("out of memory");
+    result.appendSlice(arena, ".{ .id = 0, .ty = .{ .@\"struct\" = &.{ ") catch @panic("out of memory");
 
     for (field_types, 0..) |field_type, i| {
         if (i > 0) {
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
-        const field_type_str = typeToStringInner(arena, ip, field_type, visited);
-        // Get field name (null for tuples)
-        const field_name_opt = loaded.fieldName(ip, i).toSlice(ip);
-        if (field_name_opt) |field_name| {
-            // Emit Field with type and name
-            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s}, .name = \"{s}\" }}", .{ field_type_str, field_name }, null);
-            result.appendSlice(arena, field_str) catch @panic("out of memory");
+
+        // Get field name and register it
+        const field_name_id: u32 = if (loaded.fieldName(ip, i).unwrap()) |name_str| blk: {
+            const name = name_str.toSlice(ip);
+            break :blk registerName(name_map, name);
+        } else 0;
+
+        // Get the inner type string (without the .id wrapper since we'll add our own)
+        const field_type_inner = typeToStringInner(name_map, arena, ip, field_type, visited);
+
+        // Extract just the .ty = {...} part from the full Type and rebuild with our field name ID
+        // typeToStringInner returns ".{ .id = 0, .ty = .{ ... } }"
+        // We need ".{ .id = FIELD_ID, .ty = .{ ... } }"
+        if (field_name_id != 0) {
+            // Replace ".{ .id = 0," with ".{ .id = N,"
+            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d},", .{field_name_id}, null);
+            if (std.mem.startsWith(u8, field_type_inner, ".{ .id = 0,")) {
+                result.appendSlice(arena, prefix) catch @panic("out of memory");
+                result.appendSlice(arena, field_type_inner[".{ .id = 0,".len..]) catch @panic("out of memory");
+            } else {
+                result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
+            }
         } else {
-            // Tuple field - emit Field with type only (name defaults to null)
-            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{field_type_str}, null);
-            result.appendSlice(arena, field_str) catch @panic("out of memory");
+            result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
         }
     }
 
-    result.appendSlice(arena, " } }") catch @panic("out of memory");
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
     return result.items;
 }
 
 /// Convert a union type to a Type string with field types.
-fn unionTypeToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+/// New format: .{ .id = 0, .ty = .{ .@"union" = &.{ .{ .id = FIELD_ID, .ty = TYPE_INNER }, ... } } }
+fn unionTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
     const loaded = ip.loadUnionType(type_index);
     const field_types = loaded.field_types.get(ip);
 
     if (field_types.len == 0) {
-        return ".{ .@\"union\" = &.{} }";
+        return ".{ .id = 0, .ty = .{ .@\"union\" = &.{} } }";
     }
 
     // Limit recursion depth - treat deeply nested unions as unknown
     if (visited.count() > 20) {
-        return ".{ .unknown = {} }";
+        return ".{ .id = 0, .ty = .{ .scalar = {} } }";
     }
 
-    // Get tag type for field names (if it's a tagged union)
-    const tag_type = loaded.enum_tag_ty;
-
-    // Build field types string
+    // Build field types string - each field is a Type with its own .id
     var result = std.ArrayListUnmanaged(u8){};
-    result.appendSlice(arena, ".{ .@\"union\" = &.{ ") catch @panic("out of memory");
+    result.appendSlice(arena, ".{ .id = 0, .ty = .{ .@\"union\" = &.{ ") catch @panic("out of memory");
 
     for (field_types, 0..) |field_type, i| {
         if (i > 0) {
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
-        const field_type_str = typeToStringInner(arena, ip, field_type, visited);
 
-        // Try to get field name from the tag enum type
-        const field_name_opt = getUnionFieldName(ip, tag_type, i);
-        if (field_name_opt) |field_name| {
-            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s}, .name = \"{s}\" }}", .{ field_type_str, field_name }, null);
-            result.appendSlice(arena, field_str) catch @panic("out of memory");
+        // Get field name from union's tag type and register it
+        const field_name_id: u32 = if (getUnionFieldName(ip, loaded.enum_tag_ty, i)) |name|
+            registerName(name_map, name)
+        else
+            0;
+
+        // Get the inner type string
+        const field_type_inner = typeToStringInner(name_map, arena, ip, field_type, visited);
+
+        // Replace .id = 0 with .id = FIELD_ID if we have a name
+        if (field_name_id != 0) {
+            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d},", .{field_name_id}, null);
+            if (std.mem.startsWith(u8, field_type_inner, ".{ .id = 0,")) {
+                result.appendSlice(arena, prefix) catch @panic("out of memory");
+                result.appendSlice(arena, field_type_inner[".{ .id = 0,".len..]) catch @panic("out of memory");
+            } else {
+                result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
+            }
         } else {
-            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{field_type_str}, null);
-            result.appendSlice(arena, field_str) catch @panic("out of memory");
+            result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
         }
     }
 
-    result.appendSlice(arena, " } }") catch @panic("out of memory");
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
     return result.items;
 }
 
@@ -540,20 +650,21 @@ fn getUnionFieldName(ip: *const InternPool, tag_type_idx: InternPool.Index, fiel
 
 /// Convert an aggregate VALUE (not just type) to a Type string with field-level undefined.
 /// This inspects each field's value to determine if it's undefined.
+/// New format: .{ .id = 0, .ty = .{ .@"struct" = &.{ .{ .id = 0, .ty = TYPE_OR_UNDEFINED }, ... } } }
 fn aggregateValueToString(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, agg: InternPool.Key.Aggregate) []const u8 {
     const loaded = ip.loadStructType(type_index);
     const field_types = loaded.field_types.get(ip);
     const field_values = agg.storage.values();
 
     if (field_types.len == 0) {
-        return ".{ .@\"struct\" = &.{} }";
+        return ".{ .id = 0, .ty = .{ .@\"struct\" = &.{} } }";
     }
 
     var visited = VisitedTypes{};
 
     // Build field types string with undefined info from values
     var result = std.ArrayListUnmanaged(u8){};
-    result.appendSlice(arena, ".{ .@\"struct\" = &.{ ") catch @panic("out of memory");
+    result.appendSlice(arena, ".{ .id = 0, .ty = .{ .@\"struct\" = &.{ ") catch @panic("out of memory");
 
     for (field_types, 0..) |field_type, i| {
         if (i > 0) {
@@ -563,28 +674,22 @@ fn aggregateValueToString(arena: std.mem.Allocator, ip: *const InternPool, type_
         // Check if this field's value is undefined
         const is_field_undef = if (i < field_values.len) ip.isUndef(field_values[i]) else false;
 
-        const inner_type_str = typeToStringInner(arena, ip, field_type, &visited);
+        const inner_type_str = typeToStringInner(null, arena, ip, field_type, &visited);
+        // If field is undefined, wrap it in .undefined
         const field_type_str = if (is_field_undef)
-            clr_allocator.allocPrint(arena, ".{{ .undefined = &{s} }}", .{inner_type_str}, null)
+            clr_allocator.allocPrint(arena, ".{{ .id = 0, .ty = .{{ .undefined = &{s} }} }}", .{inner_type_str}, null)
         else
             inner_type_str;
 
-        // Get field name (null for tuples)
-        const field_name_opt = loaded.fieldName(ip, i).toSlice(ip);
-        if (field_name_opt) |field_name| {
-            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s}, .name = \"{s}\" }}", .{ field_type_str, field_name }, null);
-            result.appendSlice(arena, field_str) catch @panic("out of memory");
-        } else {
-            const field_str = clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{field_type_str}, null);
-            result.appendSlice(arena, field_str) catch @panic("out of memory");
-        }
+        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
     }
 
-    result.appendSlice(arena, " } }") catch @panic("out of memory");
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
     return result.items;
 }
 
-fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadStore(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    _ = name_map;
     // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(ip, datum.bin_op.rhs);
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
@@ -596,12 +701,12 @@ fn payloadStore(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []
     return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .src = {s} }}", .{ ptr, src_str }, null);
 }
 
-fn payloadLoad(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadLoad(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     // ty_op.ty is a Ref to the result type
     const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
-        typeToString(arena, ip, ty_idx)
+        typeToString(name_map, arena, ip, ty_idx)
     else
-        ".{ .unknown = {} }"; // Will cause compile error if hit - needs investigation
+        ".{ .id = 0, .ty = .{ .scalar = {} } }"; // Fallback for unknown types
     // Check for .none first (toIndex asserts on .none)
     if (datum.ty_op.operand == .none) {
         return clr_allocator.allocPrint(arena, ".{{ .ptr = null, .ty = {s} }}", .{ty_str}, null);
@@ -617,7 +722,7 @@ fn payloadLoad(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []c
 
 /// ret_ptr returns a pointer to the return value storage.
 /// Uses .ty field which contains the pointer type.
-fn payloadRetPtr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn payloadRetPtr(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     // datum.ty is the pointer type (e.g., *Container)
     // We need to extract the pointee type for the handler
     const ptr_type = datum.ty.toIntern();
@@ -629,7 +734,7 @@ fn payloadRetPtr(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) [
     if (pointee_type == .none) {
         return ".{ .ty = .{ .unknown = {} } }";
     }
-    const ty_str = typeToString(arena, ip, pointee_type);
+    const ty_str = typeToString(name_map, arena, ip, pointee_type);
     return clr_allocator.allocPrint(arena, ".{{ .ty = {s} }}", .{ty_str}, null);
 }
 
@@ -694,9 +799,9 @@ fn payloadSetUnionTag(arena: std.mem.Allocator, ip: *const InternPool, datum: Da
     }
 
     const ty_str = if (field_type) |ft|
-        typeToString(arena, ip, ft)
+        typeToString(null, arena, ip, ft)
     else
-        ".{ .scalar = {} }"; // Fallback for untagged unions or errors
+        ".{ .id = 0, .ty = .{ .scalar = {} } }"; // Fallback for untagged unions or errors
 
     return clr_allocator.allocPrint(arena, ".{{ .ptr = {?d}, .field_index = {?d}, .ty = {s} }}", .{ ptr, field_index, ty_str }, null);
 }
@@ -777,7 +882,7 @@ fn payloadCallParts(arena: std.mem.Allocator, ip: *const InternPool, datum: Data
             const val_type = ip.typeOf(interned_idx);
             if (isZeroSizedType(ip, val_type)) continue;
             // Interned constant - pass type info so runtime can create entity
-            const type_str = typeToString(arena, ip, val_type);
+            const type_str = typeToString(null, arena, ip, val_type);
             if (first) {
                 args_str = clr_allocator.allocPrint(arena, "{s} Arg{{ .interned = {s} }}", .{ args_str, type_str }, null);
                 first = false;
@@ -838,6 +943,125 @@ fn isZeroSizedType(ip: *const InternPool, type_index: InternPool.Index) bool {
             break :blk isZeroSizedType(ip, loaded.field_types.get(ip)[0]);
         },
         else => false,
+    };
+}
+
+/// Get the result type of an AIR instruction by its index.
+/// Returns null if the type can't be determined.
+fn getInstResultType(_: *const InternPool, tags: []const Tag, data: []const Data, inst_idx: usize) ?InternPool.Index {
+    if (inst_idx >= tags.len or inst_idx >= data.len) return null;
+    const tag = tags[inst_idx];
+
+    // Read the data safely
+    const datum = data[inst_idx];
+
+    return switch (tag) {
+        // Tags that store result type in ty_op.ty
+        .alloc,
+        .bitcast,
+        .load,
+        .struct_field_ptr_index_0,
+        .struct_field_ptr_index_1,
+        .struct_field_ptr_index_2,
+        .struct_field_ptr_index_3,
+        => blk: {
+            // Read raw bytes to avoid DLL relocation issues with union field access
+            const raw_ptr: [*]const u32 = @ptrCast(&datum);
+            const ty_raw: u32 = raw_ptr[0];
+            const ty_ref: Ref = @enumFromInt(ty_raw);
+            break :blk ty_ref.toInterned();
+        },
+        else => null,
+    };
+}
+
+/// Get the container type for a struct/union field access operation.
+/// The operand is a pointer to the container - we get its type and dereference it.
+fn getContainerType(ip: *const InternPool, tags: []const Tag, data: []const Data, operand: Ref) ?InternPool.Index {
+    // If operand is interned, get its type directly
+    if (operand.toInterned()) |interned_idx| {
+        const ty = ip.typeOf(interned_idx);
+        const type_key = ip.indexToKey(ty);
+        return switch (type_key) {
+            .ptr_type => |pt| pt.child, // Dereference pointer to get container
+            else => null,
+        };
+    }
+    // If operand is an instruction, get its result type
+    if (operand.toIndex()) |idx| {
+        const ptr_type = getInstResultType(ip, tags, data, @intFromEnum(idx)) orelse return null;
+        const type_key = ip.indexToKey(ptr_type);
+        return switch (type_key) {
+            .ptr_type => |pt| pt.child, // Dereference pointer to get container
+            else => null,
+        };
+    }
+    return null;
+}
+
+/// Get the field name ID for a field access operation (struct_field_ptr).
+/// The operand is a pointer to the container - we dereference it.
+/// Returns 0 if the container type cannot be traced.
+fn getFieldNameId(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *const InternPool, tags: []const Tag, data: []const Data, operand: Ref, field_index: usize) u32 {
+    // First check for interned operand (comptime known)
+    if (operand.toInterned()) |interned_idx| {
+        const ty = ip.typeOf(interned_idx);
+        const type_key = ip.indexToKey(ty);
+        const container = switch (type_key) {
+            .ptr_type => |pt| pt.child,
+            else => return 0,
+        };
+        return lookupFieldName(name_map, ip, container, field_index);
+    }
+
+    // Operand is an instruction reference
+    if (operand.toIndex()) |_| {
+        const container = getContainerType(ip, tags, data, operand) orelse return 0;
+        return lookupFieldName(name_map, ip, container, field_index);
+    }
+
+    return 0;
+}
+
+/// Get the field name ID for a field access operation (struct_field_val).
+/// The operand is the container value itself (not a pointer).
+/// Returns 0 if the container type cannot be traced.
+fn getFieldNameIdFromValue(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *const InternPool, tags: []const Tag, data: []const Data, operand: Ref, field_index: usize) u32 {
+    // If operand is interned, get its type directly (it IS the container)
+    if (operand.toInterned()) |interned_idx| {
+        const container = ip.typeOf(interned_idx);
+        return lookupFieldName(name_map, ip, container, field_index);
+    }
+
+    // Operand is an instruction reference - get its result type directly
+    if (operand.toIndex()) |idx| {
+        const container = getInstResultType(ip, tags, data, @intFromEnum(idx)) orelse return 0;
+        return lookupFieldName(name_map, ip, container, field_index);
+    }
+
+    return 0;
+}
+
+/// Look up field name from a container type (struct or union)
+/// Returns 0 if the container type is invalid or not a struct/union.
+fn lookupFieldName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *const InternPool, container_type: InternPool.Index, field_index: usize) u32 {
+    // Validate container_type is within reasonable bounds
+    // InternPool indices shouldn't be extremely large values like 0x10000000
+    if (@intFromEnum(container_type) > 100000) return 0;
+
+    const type_key = ip.indexToKey(container_type);
+    return switch (type_key) {
+        .struct_type => blk: {
+            const loaded = ip.loadStructType(container_type);
+            const name_str = loaded.fieldName(ip, field_index).unwrap() orelse break :blk 0;
+            break :blk registerName(name_map, name_str.toSlice(ip));
+        },
+        .union_type => blk: {
+            const loaded = ip.loadUnionType(container_type);
+            const name = getUnionFieldName(ip, loaded.enum_tag_ty, field_index) orelse break :blk 0;
+            break :blk registerName(name_map, name);
+        },
+        else => 0,
     };
 }
 
@@ -1330,7 +1554,7 @@ fn isDotQPattern(ip: *const InternPool, cond_br_idx: usize, tags: []const Tag, d
 /// Generate Zig source code for a function from AIR instructions using worklist algorithm.
 /// This processes the main function and any nested conditionals, outputting branch functions
 /// first (so they're in scope) followed by the main function.
-pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, base_line: u32, file_path: []const u8, param_names: []const []const u8) []u8 {
+pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32, base_line: u32, file_path: []const u8, param_names: []const []const u8, name_map: *std.AutoHashMapUnmanaged(u32, []const u8)) []u8 {
     if (tags.len == 0) @panic("function with no instructions encountered");
 
     // Per-function arena for temporary allocations
@@ -1360,6 +1584,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
         const item = worklist.pop().?;
         // Generate this function
         const func_str = generateOneFunction(
+            name_map,
             arena.allocator(),
             item,
             func_index,
@@ -1412,6 +1637,7 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, ip: *const InternPool,
 
 /// Generate a single function (full or sub) using backwards walk + stack approach
 fn generateOneFunction(
+    name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
     arena: std.mem.Allocator,
     item: FunctionGen,
     func_index: u32,
@@ -1602,7 +1828,7 @@ fn generateOneFunction(
             // Generate Inst.cond_br call with function references
             line = generateCondBrLine(arena, instr.idx, func_index);
         } else {
-            line = _instLine(arena, ip, instr.tag, instr.datum, instr.idx, extra, tags, data, param_names, &arg_counter);
+            line = _instLine(name_map, arena, ip, instr.tag, instr.datum, instr.idx, extra, tags, data, param_names, &arg_counter);
         }
 
         lines.append(arena, line) catch @panic("out of memory");
@@ -1676,8 +1902,44 @@ fn generateCondBrTagLine(arena: std.mem.Allocator, is_true_branch: bool, conditi
     }
 }
 
+/// Generate the getName function that maps field IDs to field names.
+pub fn emitGetName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8)) []const u8 {
+    const allocator = clr_allocator.allocator();
+
+    if (name_map.count() == 0) {
+        return "";
+    }
+
+    // Build switch arms
+    var arms = std.ArrayListUnmanaged(u8){};
+
+    var it = name_map.iterator();
+    while (it.next()) |entry| {
+        const id = entry.key_ptr.*;
+        const name = entry.value_ptr.*;
+        const arm = clr_allocator.allocPrint(allocator, "        {d} => \"{s}\",\n", .{ id, name }, null);
+        arms.appendSlice(allocator, arm) catch @panic("OOM");
+    }
+
+    // Build final function
+    return clr_allocator.allocPrint(allocator,
+        \\pub fn getName(id: u32) []const u8 {{
+        \\    return switch (id) {{
+        \\{s}        else => "unknown",
+        \\    }};
+        \\}}
+        \\
+    , .{arms.items}, null);
+}
+
 /// Generate epilogue with imports and main function
-pub fn epilogue(entrypoint_index: u32) []u8 {
+pub fn epilogue(entrypoint_index: u32, has_getName: bool) []u8 {
+    const getName_line = if (has_getName)
+        \\    ctx.getName = &getName;
+        \\
+    else
+        "";
+
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\const std = @import("std");
         \\const clr = @import("clr");
@@ -1699,13 +1961,13 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\    defer file_writer.interface.flush() catch {{}};
         \\    var ctx = Context.init(allocator, &file_writer.interface);
         \\    defer ctx.deinit();
-        \\    _ = fn_{d}(&ctx, null) catch {{
+        \\{s}    _ = fn_{d}(&ctx, null) catch {{
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);
         \\    }};
         \\}}
         \\
-    , .{entrypoint_index}, null);
+    , .{ getName_line, entrypoint_index }, null);
 }
 
 /// Generate a stub function for a missing call target

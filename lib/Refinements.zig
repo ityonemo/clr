@@ -5,14 +5,23 @@ const Meta = @import("Meta.zig");
 /// Entity Index - index into the Refinements entity table.
 pub const EIdx = u32;
 
+/// Type ID - InternPool index identifying a type for type safety checks.
+pub const Tid = u32;
+
 pub const Analyte = @import("Analyte.zig");
 
 /// Refinement tracks the type structure of a value along with analysis state.
 /// This is like a refinement type - the base type plus predicates/properties.
 /// EIdx is used for anything that needs indirection (pointers, optionals, etc).
 pub const Refinement = union(enum) {
+    pub const Scalar = struct {
+        analyte: Analyte,
+        type_id: Tid,
+    };
+
     pub const Indirected = struct {
         analyte: Analyte,
+        type_id: Tid,
         to: EIdx,
     };
 
@@ -20,10 +29,9 @@ pub const Refinement = union(enum) {
         /// Analyte for tracking on the whole struct
         analyte: Analyte = .{},
         /// Field refinement indices - each field has its own refinement
+        /// To obtain the fieldname use field_id = ctx.getFieldId(type_id, field_index) and ctx.getName(field_id)
         fields: []const EIdx,
-        /// Field names - each field has an optional name (null for tuple fields)
-        /// Strings are static (embedded in generated .air.zig) so no allocation needed
-        field_names: []const ?[]const u8 = &.{},
+        type_id: Tid,
     };
 
     pub const Union = struct {
@@ -32,13 +40,12 @@ pub const Refinement = union(enum) {
         /// Field refinement indices - each field has its own refinement.  Any field
         /// that is null, is NOT active in this variable. Mutable because set_union_tag
         /// needs to activate/deactivate fields.
+        /// To obtain the field name use field_id = ctx.getFieldId(type_id, field_index) and ctx.getName(field_id)
         fields: []?EIdx,
-        /// Field names - each field has an optional name (null for tuple fields)
-        /// Strings are static (embedded in generated .air.zig) so no allocation needed
-        field_names: []const ?[]const u8 = &.{},
+        type_id: Tid,
     };
 
-    scalar: Analyte,
+    scalar: Scalar,
     pointer: Indirected,
     optional: Indirected,
     errorunion: Indirected,
@@ -108,14 +115,17 @@ pub const Refinement = union(enum) {
             .scalar => src,
             .pointer => |p| .{ .pointer = .{
                 .analyte = p.analyte,
+                .type_id = p.type_id,
                 .to = if (same_list) p.to else try copyTo(src_list.at(p.to).*, src_list, dst_list),
             } },
             .optional => |o| .{ .optional = .{
                 .analyte = o.analyte,
+                .type_id = o.type_id,
                 .to = if (same_list) o.to else try copyTo(src_list.at(o.to).*, src_list, dst_list),
             } },
             .errorunion => |e| .{ .errorunion = .{
                 .analyte = e.analyte,
+                .type_id = e.type_id,
                 .to = if (same_list) e.to else try copyTo(src_list.at(e.to).*, src_list, dst_list),
             } },
             .region => @panic("regions not implemented yet"),
@@ -131,13 +141,7 @@ pub const Refinement = union(enum) {
                         new_fields[i] = try copyTo(src_list.at(field_idx).*, src_list, dst_list);
                     }
                 }
-                // Copy field names if present
-                const new_field_names = if (s.field_names.len > 0) names_blk: {
-                    const names = try allocator.alloc(?[]const u8, s.field_names.len);
-                    @memcpy(names, s.field_names);
-                    break :names_blk names;
-                } else &.{};
-                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .field_names = new_field_names } };
+                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .type_id = s.type_id } };
             },
             .@"union" => |u| blk: {
                 const allocator = dst_list.list.allocator;
@@ -152,12 +156,7 @@ pub const Refinement = union(enum) {
                             null;
                     }
                 }
-                const new_field_names = if (u.field_names.len > 0) names_blk: {
-                    const names = try allocator.alloc(?[]const u8, u.field_names.len);
-                    @memcpy(names, u.field_names);
-                    break :names_blk names;
-                } else &.{};
-                break :blk .{ .@"union" = .{ .analyte = u.analyte, .fields = new_fields, .field_names = new_field_names } };
+                break :blk .{ .@"union" = .{ .analyte = u.analyte, .fields = new_fields, .type_id = u.type_id } };
             },
             .unimplemented => .{ .unimplemented = {} },
             .void => .{ .void = {} },
@@ -262,6 +261,7 @@ pub const Refinement = union(enum) {
         const to_insert: Refinement = @unionInit(Refinement, @tagName(tag), .{
             .to = dst_inner_idx,
             .analyte = @field(src, @tagName(tag)).analyte,
+            .type_id = @field(src, @tagName(tag)).type_id,
         });
         return dst_list.appendEntity(to_insert);
     }
@@ -286,13 +286,6 @@ pub const Refinement = union(enum) {
             new_fields[i] = if (tag == .@"union") new_idx else new_idx;
         }
 
-        // Copy field names if present
-        const new_field_names = if (src_data.field_names.len > 0) blk: {
-            const names = try allocator.alloc(?[]const u8, src_data.field_names.len);
-            @memcpy(names, src_data.field_names);
-            break :blk names;
-        } else &.{};
-
         // Deep copy analyte - variant_safety.active_metas is a slice that must not be shared
         var new_analyte = src_data.analyte;
         if (tag == .@"union") {
@@ -306,7 +299,7 @@ pub const Refinement = union(enum) {
         return dst_list.appendEntity(@unionInit(Refinement, @tagName(tag), .{
             .analyte = new_analyte,
             .fields = new_fields,
-            .field_names = new_field_names,
+            .type_id = src_data.type_id,
         }));
     }
 };
@@ -329,9 +322,6 @@ pub fn deinit(self: *Refinements) void {
         switch (item) {
             inline .@"struct", .@"union" => |data, tag| {
                 allocator.free(data.fields);
-                if (data.field_names.len > 0) {
-                    allocator.free(data.field_names);
-                }
                 // Free variant_safety.active_metas for unions
                 if (tag == .@"union") {
                     if (data.analyte.variant_safety) |vs| {
@@ -369,12 +359,6 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                 // Deep copy fields
                 const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
                 @memcpy(new_fields, data.fields);
-                // Deep copy field names if present
-                const new_field_names = if (data.field_names.len > 0) blk: {
-                    const names = try allocator.alloc(?[]const u8, data.field_names.len);
-                    @memcpy(names, data.field_names);
-                    break :blk names;
-                } else &.{};
                 // Deep copy analyte, including variant_safety.active_metas if present
                 var new_analyte = data.analyte;
                 if (tag == .@"union") {
@@ -387,7 +371,7 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                 try new.list.append(@unionInit(Refinement, @tagName(tag), .{
                     .analyte = new_analyte,
                     .fields = new_fields,
-                    .field_names = new_field_names,
+                    .type_id = data.type_id,
                 }));
             },
             else => try new.list.append(item),
@@ -411,16 +395,20 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
         .scalar => try self.appendEntity(src),
 
         // Pointers: new pointer entity, same .to (reference existing pointee)
-        .pointer => |p| try self.appendEntity(.{ .pointer = .{
-            .analyte = p.analyte,
-            .to = p.to, // Same pointee - this is the "boundary"
-        } }),
+        .pointer => |p| try self.appendEntity(.{
+            .pointer = .{
+                .analyte = p.analyte,
+                .type_id = p.type_id,
+                .to = p.to, // Same pointee - this is the "boundary"
+            },
+        }),
 
         // Optionals/errorunions: recurse into payload (semideep copy the inner value)
         .optional => |o| blk: {
             const new_inner = try self.semideepCopy(o.to);
             break :blk try self.appendEntity(.{ .optional = .{
                 .analyte = o.analyte,
+                .type_id = o.type_id,
                 .to = new_inner,
             } });
         },
@@ -428,6 +416,7 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
             const new_inner = try self.semideepCopy(e.to);
             break :blk try self.appendEntity(.{ .errorunion = .{
                 .analyte = e.analyte,
+                .type_id = e.type_id,
                 .to = new_inner,
             } });
         },
@@ -438,15 +427,10 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
             for (s.fields, 0..) |field_idx, i| {
                 new_fields[i] = try self.semideepCopy(field_idx);
             }
-            const new_field_names = if (s.field_names.len > 0) names_blk: {
-                const names = try allocator.alloc(?[]const u8, s.field_names.len);
-                @memcpy(names, s.field_names);
-                break :names_blk names;
-            } else &.{};
             break :blk try self.appendEntity(.{ .@"struct" = .{
                 .analyte = s.analyte,
                 .fields = new_fields,
-                .field_names = new_field_names,
+                .type_id = s.type_id,
             } });
         },
 
@@ -459,11 +443,6 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
                 else
                     null;
             }
-            const new_field_names = if (u.field_names.len > 0) names_blk: {
-                const names = try allocator.alloc(?[]const u8, u.field_names.len);
-                @memcpy(names, u.field_names);
-                break :names_blk names;
-            } else &.{};
             // Always deep copy variant_safety.active_metas
             var new_analyte = u.analyte;
             if (u.analyte.variant_safety) |vs| {
@@ -474,7 +453,7 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
             break :blk try self.appendEntity(.{ .@"union" = .{
                 .analyte = new_analyte,
                 .fields = new_fields,
-                .field_names = new_field_names,
+                .type_id = u.type_id,
             } });
         },
 

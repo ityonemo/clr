@@ -33,6 +33,7 @@ pub const FuncMir = struct {
     text: []const u8,
     call_targets: []const CallTarget,
     entrypoint: bool = false,
+    name_mappings: []const clr_codegen.NameMap,
 };
 
 // Collection of MIR structs
@@ -114,8 +115,14 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Extract parameter names from ZIR
     const param_names = extractParamNames(zcu, ip, func, file_scope);
 
-    // Generate Zig source for this function
-    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path, param_names);
+    // Create per-function name map (no global state - avoids race conditions)
+    var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
+
+    // Generate Zig source for this function, passing name_map to collect mappings
+    const text = clr_codegen.generateFunction(func_index, fqn, ip, tags, data, extra, base_line, file_path, param_names, &name_map);
+
+    // Convert hash map to slice for storage on FuncMir
+    const name_mappings = convertNameMapToSlice(&name_map);
 
     // Extract call targets from AIR (skips debug.* calls)
     const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), ip, tags, data, extra);
@@ -127,8 +134,21 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         .text = text,
         .call_targets = call_targets,
         .entrypoint = is_entrypoint,
+        .name_mappings = name_mappings,
     };
     return @ptrCast(mir);
+}
+
+fn convertNameMapToSlice(map: *std.AutoHashMapUnmanaged(u32, []const u8)) []const clr_codegen.NameMap {
+    const allocator = clr_allocator.allocator();
+    const result = allocator.alloc(clr_codegen.NameMap, map.count()) catch return &.{};
+    var i: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        result[i] = .{ entry.key_ptr.*, entry.value_ptr.* };
+        i += 1;
+    }
+    return result;
 }
 
 fn linkDeinit(_: c_anyopaque_t) callconv(.c) void {}
@@ -167,6 +187,15 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
     else
         tree_shaker.FuncSet{};
 
+    // Combine name_mappings from reachable functions into one map
+    var combined_map = std.AutoHashMapUnmanaged(u32, []const u8){};
+    for (mir_list.items) |mir| {
+        if (!reachable.contains(mir.func_index)) continue;
+        for (mir.name_mappings) |mapping| {
+            combined_map.put(clr_allocator.allocator(), mapping[0], mapping[1]) catch continue;
+        }
+    }
+
     // Write all reachable function stubs
     for (mir_list.items) |mir| {
         if (!reachable.contains(mir.func_index)) continue;
@@ -183,9 +212,16 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
         file.writeAll("\n") catch return;
     }
 
+    // Emit getName function with combined mappings from reachable functions
+    const has_getName = combined_map.count() > 0;
+    if (has_getName) {
+        const getName_text = clr_codegen.emitGetName(&combined_map);
+        file.writeAll(getName_text) catch return;
+    }
+
     // Write epilogue (imports and main function)
     if (entrypoint_index) |idx| {
-        const entry_text = clr_codegen.epilogue(idx);
+        const entry_text = clr_codegen.epilogue(idx, has_getName);
         file.writeAll(entry_text) catch return;
     }
 
