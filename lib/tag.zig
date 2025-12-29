@@ -1092,7 +1092,7 @@ pub const AnyTag = union(enum) {
     struct_field_ptr: StructFieldPtr,
     struct_field_val: StructFieldVal,
     sub_with_overflow: OverflowOp(.sub_with_overflow),
-    @"try": Unimplemented(.{}),
+    @"try": UnwrapErrunionPayload, // try extracts payload from error union, same as unwrap_errunion_payload
     unreach: Unreach,
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
     wrap_errunion_err: Unimplemented(.{}),

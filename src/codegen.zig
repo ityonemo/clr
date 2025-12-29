@@ -52,6 +52,7 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
         .ret_load => payloadRetLoad(arena, datum),
         .set_union_tag => payloadSetUnionTag(arena, ip, datum),
         .get_union_tag => payloadGetUnionTag(arena, datum),
+        .@"try", .try_cold => payloadTry(arena, ip, datum),
         else => ".{}",
     };
 }
@@ -61,6 +62,14 @@ fn payload(arena: std.mem.Allocator, ip: *const InternPool, tag: Tag, datum: Dat
 /// the same memory safety / allocation state as the source.
 fn payloadTransferOp(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
+    const src_str = srcString(arena, ip, operand);
+    return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for .try/.try_cold - extracts success payload from error union.
+/// Uses pl_op.operand to get the error union source.
+fn payloadTry(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+    const operand = datum.pl_op.operand;
     const src_str = srcString(arena, ip, operand);
     return clr_allocator.allocPrint(arena, ".{{ .src = {s} }}", .{src_str}, null);
 }

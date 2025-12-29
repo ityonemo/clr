@@ -199,3 +199,35 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator/union_pointer_field/no_escape_heap_ptr.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Clobber leak detection tests
+# =============================================================================
+
+@test "detects leak when variable is clobbered" {
+    run compile_and_run "$TEST_CASES/allocator/clobber/variable_clobber.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "variable_clobber" ]]
+}
+
+@test "detects leak when struct field is clobbered" {
+    run compile_and_run "$TEST_CASES/allocator/clobber/struct_field_clobber.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "struct_field_clobber" ]]
+}
+
+@test "detects leak when union variant changes" {
+    run compile_and_run "$TEST_CASES/allocator/clobber/union_variant_change.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "union_variant_change" ]]
+}
+
+@test "detects leak when union field is clobbered" {
+    run compile_and_run "$TEST_CASES/allocator/clobber/union_field_clobber.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "union_field_clobber" ]]
+}
