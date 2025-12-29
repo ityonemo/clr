@@ -212,11 +212,12 @@ pub const AllocDestroy = struct {
 /// - store_safe(ptr=0) follows P1' to S1', marks S1' as defined
 /// - backPropagate: propagates S1'.undefined back to S1.undefined
 pub const Arg = struct {
-    name: []const u8,
+    name_id: u32, // Parameter name ID, resolved via ctx.getName()
     /// Source of the argument value - either runtime (.eidx) or compile-time (.interned)
     value: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
+        const name = if (self.name_id != 0) state.ctx.getName(self.name_id) else "";
         switch (self.value) {
             .eidx => |eidx| {
                 const caller_eidx: EIdx = @intCast(eidx);
@@ -226,7 +227,7 @@ pub const Arg = struct {
                 state.results[index].refinement = local_copy_idx;
                 // Set caller_eidx for backward propagation on function close
                 state.results[index].caller_eidx = caller_eidx;
-                state.results[index].name = self.name;
+                state.results[index].name = name;
             },
             .interned => |ty| {
                 // Compile-time constant - create entity from type info
@@ -235,7 +236,7 @@ pub const Arg = struct {
                 state.results[index].refinement = local_idx;
                 // No backward propagation needed for constants (caller_eidx stays null),
                 // but still record parameter name for error messages
-                state.results[index].name = self.name;
+                state.results[index].name = name;
             },
             .other => @panic("Arg: .other source not yet implemented"),
         }
@@ -1407,6 +1408,7 @@ test "arg copies value and sets name" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
+    ctx.getName = &testGetName;
 
     // Caller refinements (simulating the caller)
     var caller_refinements = Refinements.init(allocator);
@@ -1426,8 +1428,8 @@ test "arg copies value and sets name" {
         .caller_refinements = &caller_refinements,
     };
 
-    // arg should copy the entity from caller and set the name
-    try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .eidx = arg_eidx }, .name = "param" } });
+    // arg should copy the entity from caller and set the name (ID 3 = "param" in testGetName)
+    try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .eidx = arg_eidx }, .name_id = 3 } });
 
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqualStrings("param", results[0].name.?);

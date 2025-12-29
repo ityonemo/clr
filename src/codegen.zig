@@ -345,12 +345,13 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
 fn payloadArg(info: *const FnInfo, datum: Data, arg_counter: ?*u32) []const u8 {
     const zir_param_index = datum.arg.zir_param_index;
     const name = if (zir_param_index < info.param_names.len) info.param_names[zir_param_index] else "";
+    const name_id = registerName(info.name_map, name);
     const arg_index = if (arg_counter) |counter| blk: {
         const idx = counter.*;
         counter.* += 1;
         break :blk idx;
     } else zir_param_index;
-    return clr_allocator.allocPrint(info.arena, ".{{ .value = arg{d}, .name = \"{s}\" }}", .{ arg_index, name }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .value = arg{d}, .name_id = {d} }}", .{ arg_index, name_id }, null);
 }
 
 fn payloadDbgStmt(info: *const FnInfo, datum: Data) []const u8 {

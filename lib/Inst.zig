@@ -1001,7 +1001,7 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     };
 
     // Callee: inst 0 = arg (pointer to struct)
-    try Inst.apply(callee_state, 0, .{ .arg = .{ .value = .{ .eidx = caller_ptr_idx }, .name = "p" } });
+    try Inst.apply(callee_state, 0, .{ .arg = .{ .value = .{ .eidx = caller_ptr_idx }, .name_id = 1 } });
 
     // Callee: inst 1 = alloc (pointer to struct), inst 2 = store inst 0's pointer to inst 1
     try Inst.apply(callee_state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .pointer = &struct_ty } } } });

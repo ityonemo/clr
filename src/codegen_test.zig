@@ -102,7 +102,8 @@ test "instLine for arg" {
     const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{"test_param"});
     const result = codegen._instLine(&info, .arg, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name = \"test_param\" } });\n", result);
+    // Name "test_param" gets registered and assigned ID 1
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = 1 } });\n", result);
 }
 
 test "instLine for arg with sequential zir_param_index uses arg counter" {
@@ -121,20 +122,20 @@ test "instLine for arg with sequential zir_param_index uses arg counter" {
 
     const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, param_names);
 
-    // First arg: zir_param_index=0, should become arg0
+    // First arg: zir_param_index=0, should become arg0, name "a" gets ID 1
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._instLine(&info, .arg, datum0, 0, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name = \"a\" } });\n", result0);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = 1 } });\n", result0);
 
-    // Second arg: zir_param_index=1, should become arg1
+    // Second arg: zir_param_index=1, should become arg1, name "b" gets ID 2
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
     const result1 = codegen._instLine(&info, .arg, datum1, 1, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name = \"b\" } });\n", result1);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name_id = 2 } });\n", result1);
 
-    // Third arg: zir_param_index=2, should become arg2
+    // Third arg: zir_param_index=2, should become arg2, name "c" gets ID 3
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result2 = codegen._instLine(&info, .arg, datum2, 2, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name = \"c\" } });\n", result2);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name_id = 3 } });\n", result2);
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 }
@@ -157,20 +158,20 @@ test "instLine for arg with non-sequential zir_param_index uses sequential arg c
 
     const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, param_names);
 
-    // First arg: zir_param_index=0, should become arg0
+    // First arg: zir_param_index=0, should become arg0, name "self" gets ID 1
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._instLine(&info, .arg, datum0, 0, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name = \"self\" } });\n", result0);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = 1 } });\n", result0);
 
-    // Second arg: zir_param_index=2 (skipped 1), should become arg1
+    // Second arg: zir_param_index=2 (skipped 1), should become arg1, name "byte_count" gets ID 2
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result1 = codegen._instLine(&info, .arg, datum1, 1, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name = \"byte_count\" } });\n", result1);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name_id = 2 } });\n", result1);
 
-    // Third arg: zir_param_index=3, should become arg2
+    // Third arg: zir_param_index=3, should become arg2, name "return_address" gets ID 3
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
     const result2 = codegen._instLine(&info, .arg, datum2, 2, &arg_counter);
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name = \"return_address\" } });\n", result2);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name_id = 3 } });\n", result2);
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
