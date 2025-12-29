@@ -1,0 +1,49 @@
+#!/usr/bin/env bats
+
+load test_helper
+
+@test "detects access to inactive union variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/inactive_access.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of inactive union variant" ]]
+    [[ "$output" =~ "inactive_access.zig" ]]
+}
+
+@test "no error when accessing active union variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/active_access.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects access to old variant after union reassignment" {
+    run compile_and_run "$TEST_CASES/variant_safety/wrong_variant_after_change.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of inactive union variant" ]]
+    [[ "$output" =~ "wrong_variant_after_change.zig" ]]
+}
+
+# Phase 5: tag check filtering
+# This test requires recognizing that `if (v.* == .int)` makes .int active in the true branch
+@test "no error when union variant is checked before access" {
+    run compile_and_run "$TEST_CASES/variant_safety/checked_access.zig"
+    [ "$status" -eq 0 ]
+}
+
+# Phase 6: Branch merge tests
+@test "detects ambiguous variant after branches set different variants" {
+    run compile_and_run "$TEST_CASES/variant_safety/branch_different_variants.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of union with ambiguous active variant" ]]
+    [[ "$output" =~ "branch_different_variants.zig" ]]
+}
+
+@test "no error when both branches set same variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/branch_same_variant.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects ambiguous variant when only one branch changes it" {
+    run compile_and_run "$TEST_CASES/variant_safety/branch_one_changes_variant.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of union with ambiguous active variant" ]]
+    [[ "$output" =~ "branch_one_changes_variant.zig" ]]
+}
