@@ -105,7 +105,7 @@ pub const MemorySafety = union(enum) {
 
     /// Retroactively set variable name on stack_ptr for escape detection messages.
     /// The name is already set on the instruction by DbgVarPtr.apply().
-    pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtr) !void {
+    pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtrParams) !void {
         _ = index;
         const inst = params.ptr orelse return;
         const ptr_idx = state.results[inst].refinement orelse return;
@@ -639,6 +639,17 @@ pub fn testValid(refinement: Refinements.Refinement) void {
 // Tests
 // =========================================================================
 
+/// Test getName function that maps name IDs to strings for tests
+fn testGetName(id: u32) []const u8 {
+    return switch (id) {
+        1 => "my_var",
+        2 => "my_val",
+        3 => "param",
+        4 => "foo",
+        else => "unknown",
+    };
+}
+
 /// Helper to create a test context with specific meta values
 fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Discarding, file: []const u8, line: u32, column: ?u32, base_line: u32) Context {
     var ctx = Context.init(allocator, &discarding.writer);
@@ -647,6 +658,7 @@ fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Disc
     ctx.meta.column = column;
     ctx.meta.function = "test_func";
     ctx.base_line = base_line;
+    ctx.getName = &testGetName;
     return ctx;
 }
 
@@ -704,8 +716,8 @@ test "dbg_var_ptr sets variable name when name is other" {
     const ms1 = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.other, std.meta.activeTag(ms1.stack_ptr.name));
 
-    // dbg_var_ptr should set the variable name
-    try Inst.apply(state, 2, .{ .dbg_var_ptr = .{ .ptr = 1, .name = "foo" } });
+    // dbg_var_ptr should set the variable name (name_id=4 -> "foo")
+    try Inst.apply(state, 2, .{ .dbg_var_ptr = .{ .ptr = 1, .name_id = 4 } });
 
     const ms2 = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.variable, std.meta.activeTag(ms2.stack_ptr.name));

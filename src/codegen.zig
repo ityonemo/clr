@@ -833,7 +833,10 @@ fn payloadDbg(info: *const FnInfo, datum: Data) []const u8 {
     // Extract the variable name from extra as NullTerminatedString
     const name = extractString(info.extra, name_index);
 
-    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .name = \"{s}\" }}", .{ ptr, name }, null);
+    // Register the name and get its ID for interned lookup
+    const name_id = registerName(info.name_map, name);
+
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .name_id = {d} }}", .{ ptr, name_id }, null);
 }
 
 fn extractString(extra: []const u32, start: u32) []const u8 {

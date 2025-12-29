@@ -321,7 +321,7 @@ pub const Undefined = union(enum) {
 
     /// Retroactively set variable name on undefined states.
     /// The name is already set on the instruction by DbgVarPtr.apply().
-    pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtr) !void {
+    pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtrParams) !void {
         _ = index;
         const inst = params.ptr orelse return;
         const ptr_idx = state.results[inst].refinement orelse return;

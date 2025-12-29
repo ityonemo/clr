@@ -490,7 +490,8 @@ test "instLine for dbg_var_ptr" {
     const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_var_ptr, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .dbg_var_ptr = .{ .ptr = 2, .name = \"my_var\" } });\n", result);
+    // Name "my_var" gets registered and assigned ID 1
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .dbg_var_ptr = .{ .ptr = 2, .name_id = 1 } });\n", result);
 }
 
 test "instLine for dbg_var_val" {
@@ -509,7 +510,8 @@ test "instLine for dbg_var_val" {
     const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_var_val, datum, 6, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .dbg_var_val = .{ .ptr = 5, .name = \"value_var\" } });\n", result);
+    // Name "value_var" gets registered and assigned ID 1
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .dbg_var_val = .{ .ptr = 5, .name_id = 1 } });\n", result);
 }
 
 test "instLine for dbg_arg_inline" {
@@ -528,7 +530,8 @@ test "instLine for dbg_arg_inline" {
     const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_arg_inline, datum, 2, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .dbg_arg_inline = .{ .ptr = 1, .name = \"arg_name\" } });\n", result);
+    // Name "arg_name" gets registered and assigned ID 1
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .dbg_arg_inline = .{ .ptr = 1, .name_id = 1 } });\n", result);
 }
 
 // =============================================================================
