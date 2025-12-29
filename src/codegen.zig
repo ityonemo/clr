@@ -304,8 +304,9 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             if (isAllocatorCreate(info.ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
                 const allocator_type = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                const type_id = registerName(info.name_map, allocator_type);
                 const created_type = extractAllocCreateType(info.arena, info.ip, datum);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .allocator_type = \"{s}\", .ty = {s} }} }});\n", .{ inst_index, allocator_type, created_type }, null);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .ty = {s} }} }});\n", .{ inst_index, type_id, created_type }, null);
             }
             if (isAllocatorDestroy(info.ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
@@ -315,7 +316,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                     break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
                 };
                 const allocator_type = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .allocator_type = \"{s}\" }} }});\n", .{ inst_index, ptr_inst, allocator_type }, null);
+                const type_id = registerName(info.name_map, allocator_type);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d} }} }});\n", .{ inst_index, ptr_inst, type_id }, null);
             }
             const call_parts = payloadCallParts(info, datum);
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);

@@ -162,7 +162,7 @@ pub const Alloc = struct {
 };
 
 pub const AllocCreate = struct {
-    allocator_type: []const u8,
+    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
     ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
@@ -181,7 +181,7 @@ pub const AllocCreate = struct {
 pub const AllocDestroy = struct {
     /// Index into results[] array for the pointer being freed
     ptr: usize,
-    allocator_type: []const u8,
+    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);

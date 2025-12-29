@@ -784,7 +784,7 @@ test "backPropagate propagates pointer analyte to caller" {
     const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
         .analyte = .{ .memory_safety = .{ .allocation = .{
             .allocated = .{ .function = "test", .file = "test.zig", .line = 1 },
-            .allocator_type = "TestAllocator",
+            .type_id = 1, // TestAllocator type ID
         } } },
         .type_id = 0,
         .to = callee_pointee_idx,
@@ -815,7 +815,7 @@ test "backPropagate propagates pointer analyte to caller" {
     // Verify caller pointer now has memory_safety
     const ms = caller_refinements.at(caller_ptr_idx).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
-    try std.testing.expectEqualStrings("TestAllocator", ms.allocation.allocator_type);
+    try std.testing.expectEqual(@as(u32, 1), ms.allocation.type_id);
 }
 
 test "backPropagate propagates pointee undefined state to caller" {
