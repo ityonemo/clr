@@ -1182,7 +1182,6 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     try Inst.apply(state, 5, .{ .struct_field_ptr = .{
         .base = 3,
         .field_index = 0,
-        .field_name_id = 0,
         .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } },
     } });
     // inst 6: store_safe - store the allocation pointer into struct field
@@ -1192,7 +1191,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     // inst 7: load - load struct from stack alloc
     try Inst.apply(state, 7, .{ .load = .{ .ptr = 3, .ty = struct_ty } });
     // inst 8: struct_field_val - get pointer field value
-    try Inst.apply(state, 8, .{ .struct_field_val = .{ .operand = 7, .field_index = 0, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } });
+    try Inst.apply(state, 8, .{ .struct_field_val = .{ .operand = 7, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } });
 
     // === FREE THE LOADED POINTER ===
     // inst 9: alloc_destroy - free via the loaded pointer
@@ -1252,7 +1251,7 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     // inst 3 = store undefined struct
     try Inst.apply(caller_state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = .{ .id = 0, .ty = .{ .undefined = &struct_ty } } } } });
     // inst 4 = struct_field_ptr to field 0
-    try Inst.apply(caller_state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } } });
+    try Inst.apply(caller_state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } } });
     // inst 5 = store allocation pointer into struct field
     try Inst.apply(caller_state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 } } });
 
@@ -1290,7 +1289,7 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     };
 
     // Callee: inst 1 = struct_field_ptr to get pointer to field 0
-    try Inst.apply(callee_state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } } });
+    try Inst.apply(callee_state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } } });
     // Callee: inst 2 = load to get the pointer value from field
     try Inst.apply(callee_state, 2, .{ .load = .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } });
     // Callee: inst 3 = alloc_destroy to free the pointer

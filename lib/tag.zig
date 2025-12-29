@@ -480,8 +480,6 @@ pub const StructFieldPtr = struct {
     base: ?usize,
     /// Index of the field to access
     field_index: usize,
-    /// Name ID for the field (looked up via ctx.getName)
-    field_name_id: u32,
     /// Result type (pointer to field type)
     ty: Type,
 
@@ -522,8 +520,12 @@ pub const StructFieldPtr = struct {
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = field_idx } });
 
                 // Build access path: base_name + "." + field_name
+                // Look up field name via ctx.getFieldId(type_id, field_index)
                 const base_name = state.results[base].name;
-                const field_name = if (self.field_name_id != 0) state.ctx.getName(self.field_name_id) else null;
+                const field_name = if (state.ctx.getFieldId(data.type_id, @intCast(self.field_index))) |name_id|
+                    state.ctx.getName(name_id)
+                else
+                    null;
                 state.results[index].name = if (base_name) |bn| blk: {
                     if (field_name) |fn_| {
                         break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch bn;
@@ -549,8 +551,6 @@ pub const StructFieldVal = struct {
     operand: ?usize,
     /// Index of the field to extract
     field_index: usize,
-    /// Name ID for the field (looked up via ctx.getName)
-    field_name_id: u32,
     /// Result type (the field's type)
     ty: Type,
 
@@ -588,7 +588,10 @@ pub const StructFieldVal = struct {
 
                 // Build access path: operand_name + "." + field_name
                 const base_name = state.results[operand].name;
-                const field_name = if (self.field_name_id != 0) state.ctx.getName(self.field_name_id) else null;
+                const field_name = if (state.ctx.getFieldId(data.type_id, @intCast(self.field_index))) |name_id|
+                    state.ctx.getName(name_id)
+                else
+                    null;
                 state.results[index].name = if (base_name) |bn| blk: {
                     if (field_name) |fn_| {
                         break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch bn;
@@ -1647,7 +1650,7 @@ test "struct_field_ptr gets pointer to struct field" {
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -1684,7 +1687,7 @@ test "struct_field_val extracts field value from struct" {
     results[0].refinement = struct_eidx;
 
     // struct_field_val should extract field 0
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
 
     // Result should share the field's entity
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);

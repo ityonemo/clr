@@ -8,13 +8,24 @@ writer: *std.Io.Writer = undefined,
 
 /// Name lookup function pointer - set by generated .air.zig main()
 /// Converts a Name ID (u32) to a string slice
-getName: *const fn (u32) []const u8 = &defaultGetName,
+getName: *const fn (u32) []const u8 = undefined,
 
-fn defaultGetName(_: u32) []const u8 {
+/// Field name lookup function pointer - set by generated .air.zig main()
+/// Converts (type_id, field_index) to a name_id for getName
+/// Returns null for tuple types or unknown fields
+getFieldId: *const fn (u32, u32) ?u32 = undefined,
+
+const Context = @This();
+
+/// Default getName for tests - returns "unknown"
+fn testGetName(_: u32) []const u8 {
     return "unknown";
 }
 
-const Context = @This();
+/// Default getFieldId for tests - returns null
+fn testGetFieldId(_: u32, _: u32) ?u32 {
+    return null;
+}
 
 pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
     return .{
@@ -27,6 +38,8 @@ pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
             .column = null,
         },
         .writer = writer,
+        .getName = &testGetName,
+        .getFieldId = &testGetFieldId,
     };
 }
 

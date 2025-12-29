@@ -53,10 +53,16 @@ fn deinitTestAllocator() void {
 // Dummy InternPool pointer for tests that don't need it
 const dummy_ip: *const InternPool = @ptrFromInt(0x1000);
 
+const clr = @import("clr.zig");
+
+// Empty field map for tests that don't need field mappings
+var empty_field_map = clr.FieldHashMap{};
+
 /// Create a test FnInfo with default/test values
 fn testFnInfo(
     arena: std.mem.Allocator,
     name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
+    field_map: *clr.FieldHashMap,
     tags: []const Tag,
     data: []const Data,
     extra: []const u32,
@@ -65,6 +71,7 @@ fn testFnInfo(
     return .{
         .arena = arena,
         .name_map = name_map,
+        .field_map = field_map,
         .ip = dummy_ip,
         .tags = tags,
         .data = data,
@@ -83,7 +90,7 @@ test "instLine for dbg_stmt" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .dbg_stmt = .{ .line = 10, .column = 5 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .dbg_stmt, datum, 0, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 10, .column = 5 } });\n", result);
@@ -99,7 +106,7 @@ test "instLine for arg" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{"test_param"});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{"test_param"});
     const result = codegen._instLine(&info, .arg, datum, 0, null);
 
     // Name "test_param" gets registered and assigned ID 1
@@ -120,7 +127,7 @@ test "instLine for arg with sequential zir_param_index uses arg counter" {
     const param_names = &[_][]const u8{ "a", "b", "c" };
     var arg_counter: u32 = 0;
 
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, param_names);
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, param_names);
 
     // First arg: zir_param_index=0, should become arg0, name "a" gets ID 1
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
@@ -156,7 +163,7 @@ test "instLine for arg with non-sequential zir_param_index uses sequential arg c
     const param_names = &[_][]const u8{ "self", "comptime_skip", "byte_count", "return_address" };
     var arg_counter: u32 = 0;
 
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, param_names);
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, param_names);
 
     // First arg: zir_param_index=0, should become arg0, name "self" gets ID 1
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
@@ -189,7 +196,7 @@ test "instLine for ret_safe with source" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .un_op = operand_ref };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .ret_safe, datum, 0, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .eidx = 5 } } });\n", result);
@@ -206,7 +213,7 @@ test "instLine for alloc" {
 
     // alloc uses datum.ty which is a pointer type - use well-known manyptr_u8_type
     const datum: Data = .{ .ty = .{ .ip_index = .manyptr_u8_type } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .alloc, datum, 0, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
@@ -225,7 +232,7 @@ test "instLine for store_safe" {
     const ptr_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
     const val_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .store_safe, datum, 0, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 3, .src = .{ .eidx = 4 } } });\n", result);
@@ -243,7 +250,7 @@ test "instLine for load" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .u8_type, .operand = operand_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .load, datum, 0, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = 5, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
@@ -272,7 +279,7 @@ test "generateFunction produces complete function" {
     // extra[block_index+1..] = body instruction indices
     // For 4 instructions (0,1,2,3) all in main body: block_index=1, body_len=4, indices=[0,1,2,3]
     const extra: []const u32 = &.{ 1, 4, 0, 1, 2, 3 };
-    const info = testFnInfo(arena.allocator(), &name_map, tags, data, extra, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, tags, data, extra, &.{});
     const result = codegen.generateFunction(42, "test.main", &info, 10, "test.zig");
 
     const expected =
@@ -309,7 +316,7 @@ test "epilogue generates correct output" {
     initTestAllocator();
     defer deinitTestAllocator();
 
-    const result = codegen.epilogue(123, false);
+    const result = codegen.epilogue(123);
 
     const expected =
         \\const std = @import("std");
@@ -332,10 +339,97 @@ test "epilogue generates correct output" {
         \\    defer file_writer.interface.flush() catch {};
         \\    var ctx = Context.init(allocator, &file_writer.interface);
         \\    defer ctx.deinit();
+        \\    ctx.getName = &getName;
+        \\    ctx.getFieldId = &getFieldId;
         \\    _ = fn_123(&ctx, null) catch {
         \\        file_writer.interface.flush() catch {};
         \\        std.process.exit(1);
         \\    };
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+// =============================================================================
+// Name/Field Lookup Tests
+// =============================================================================
+
+test "emitGetName generates switch for name mappings" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
+    name_map.put(clr_allocator.allocator(), 1, "foo") catch unreachable;
+
+    const result = codegen.emitGetName(&name_map);
+
+    const expected =
+        \\pub fn getName(id: u32) []const u8 {
+        \\    return switch (id) {
+        \\        1 => "foo",
+        \\        else => "unknown",
+        \\    };
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "emitGetName generates default function for empty map" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
+    const result = codegen.emitGetName(&name_map);
+
+    const expected =
+        \\pub fn getName(id: u32) []const u8 {
+        \\    return switch (id) {
+        \\        else => "unknown",
+        \\    };
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "emitGetFieldId generates array lookup for field mappings" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var field_map = clr.FieldHashMap{};
+    // Type 100 has fields 0 -> name 5, 1 -> name 6
+    field_map.put(clr_allocator.allocator(), .{ .type_id = 100, .field_index = 0 }, 5) catch unreachable;
+    field_map.put(clr_allocator.allocator(), .{ .type_id = 100, .field_index = 1 }, 6) catch unreachable;
+
+    const result = codegen.emitGetFieldId(&field_map);
+
+    const expected =
+        \\pub fn getFieldId(type_id: u32, field_index: u32) ?u32 {
+        \\    const fields: []const u32 = switch (type_id) {
+        \\        100 => &.{ 5, 6 },
+        \\        else => return null,
+        \\    };
+        \\    return fields[field_index];
+        \\}
+        \\
+    ;
+    try std.testing.expectEqualStrings(expected, result);
+}
+
+test "emitGetFieldId generates default function for empty map" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var field_map = clr.FieldHashMap{};
+    const result = codegen.emitGetFieldId(&field_map);
+
+    const expected =
+        \\pub fn getFieldId(type_id: u32, field_index: u32) ?u32 {
+        \\    _ = type_id;
+        \\    _ = field_index;
+        \\    return null;
         \\}
         \\
     ;
@@ -391,7 +485,7 @@ test "instLine for br with block and operand" {
         .block_inst = @enumFromInt(3),
         .operand = operand_ref,
     } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .br, datum, 9, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 9, .{ .br = .{ .block = 3, .src = .{ .eidx = 8 } } });\n", result);
@@ -413,7 +507,7 @@ test "instLine for bitcast" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 7) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .bitcast, datum, 0, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .eidx = 7 }, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
@@ -431,7 +525,7 @@ test "instLine for unwrap_errunion_payload" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .unwrap_errunion_payload, datum, 5, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 4 } } });\n", result);
@@ -449,7 +543,7 @@ test "instLine for optional_payload" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .optional_payload, datum, 6, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .optional_payload = .{ .src = .{ .eidx = 3 } } });\n", result);
@@ -488,7 +582,7 @@ test "instLine for dbg_var_ptr" {
     // pl_op: operand is ptr, payload is index into extra for name string
     const extra = makeExtraWithString("my_var");
     const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, extra, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_var_ptr, datum, 3, null);
 
     // Name "my_var" gets registered and assigned ID 1
@@ -508,7 +602,7 @@ test "instLine for dbg_var_val" {
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const extra = makeExtraWithString("value_var");
     const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, extra, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_var_val, datum, 6, null);
 
     // Name "value_var" gets registered and assigned ID 1
@@ -528,7 +622,7 @@ test "instLine for dbg_arg_inline" {
     const operand_ref: Ref = @enumFromInt(@as(u32, 1) | (1 << 31));
     const extra = makeExtraWithString("arg_name");
     const datum: Data = .{ .pl_op = .{ .operand = operand_ref, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, extra, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_arg_inline, datum, 2, null);
 
     // Name "arg_name" gets registered and assigned ID 1
@@ -553,7 +647,7 @@ test "instLine for unreach" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .no_op = {} };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .unreach, datum, 7, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 7, .{ .unreach = .{} });\n", result);
@@ -569,7 +663,7 @@ test "instLine for bit_and (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .bit_and, datum, 3, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .bit_and = .{} });\n", result);
@@ -585,7 +679,7 @@ test "instLine for cmp_eq (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .cmp_eq, datum, 4, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_eq = .{} });\n", result);
@@ -601,7 +695,7 @@ test "instLine for cmp_gt (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .cmp_gt, datum, 4, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_gt = .{} });\n", result);
@@ -617,7 +711,7 @@ test "instLine for cmp_lte (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .cmp_lte, datum, 4, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_lte = .{} });\n", result);
@@ -633,7 +727,7 @@ test "instLine for ctz (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .ctz, datum, 2, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .ctz = .{} });\n", result);
@@ -649,7 +743,7 @@ test "instLine for sub (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .bin_op = .{ .lhs = .none, .rhs = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .sub, datum, 5, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .sub = .{} });\n", result);
@@ -665,7 +759,7 @@ test "instLine for is_non_err (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .un_op = .none };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .is_non_err, datum, 6, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .is_non_err = .{} });\n", result);
@@ -681,7 +775,7 @@ test "instLine for unwrap_errunion_err (Simple)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = .none } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .unwrap_errunion_err, datum, 8, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 8, .{ .unwrap_errunion_err = .{} });\n", result);
@@ -697,7 +791,7 @@ test "instLine for add_with_overflow (OverflowOp)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .ty_pl = .{ .ty = .none, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .add_with_overflow, datum, 9, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 9, .{ .add_with_overflow = .{} });\n", result);
@@ -713,7 +807,7 @@ test "instLine for sub_with_overflow (OverflowOp)" {
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
     const datum: Data = .{ .ty_pl = .{ .ty = .none, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .sub_with_overflow, datum, 10, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 10, .{ .sub_with_overflow = .{} });\n", result);
@@ -735,7 +829,7 @@ test "instLine for is_non_null" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
     const datum: Data = .{ .un_op = operand_ref };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .is_non_null, datum, 5, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .is_non_null = .{ .src = .{ .eidx = 4 } } });\n", result);
@@ -753,7 +847,7 @@ test "instLine for is_null" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31));
     const datum: Data = .{ .un_op = operand_ref };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .is_null, datum, 4, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .is_null = .{ .src = .{ .eidx = 3 } } });\n", result);
@@ -775,7 +869,7 @@ test "instLine for ret_load" {
     const Ref = Air.Inst.Ref;
     const ptr_ref: Ref = @enumFromInt(@as(u32, 0) | (1 << 31));
     const datum: Data = .{ .un_op = ptr_ref };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .ret_load, datum, 5, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .ret_load = .{ .ptr = 0 } });\n", result);
@@ -799,10 +893,10 @@ test "instLine for struct_field_ptr_index_0" {
     // struct_field_ptr uses ty_op: ty is result type (pointer to field), operand is base
     // Use .u8_type for a valid type reference
     const datum: Data = .{ .ty_op = .{ .ty = .u8_type, .operand = base_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_0, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for struct_field_ptr_index_1" {
@@ -818,10 +912,10 @@ test "instLine for struct_field_ptr_index_1" {
     const base_ref: Ref = @enumFromInt(@as(u32, 1) | (1 << 31));
     // Use .u8_type for a valid type reference
     const datum: Data = .{ .ty_op = .{ .ty = .u8_type, .operand = base_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_1, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 1, .field_index = 1, .field_name_id = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 1, .field_index = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for get_union_tag" {
@@ -836,7 +930,7 @@ test "instLine for get_union_tag" {
     const Ref = Air.Inst.Ref;
     const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
     const datum: Data = .{ .ty_op = .{ .ty = .none, .operand = operand_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .get_union_tag, datum, 6, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .get_union_tag = .{ .operand = 5 } });\n", result);
@@ -853,7 +947,7 @@ test "instLine for block" {
 
     // block uses ty_pl: ty is the block's result type
     const datum: Data = .{ .ty_pl = .{ .ty = .void_type, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .block, datum, 2, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .void = {} } } } });\n", result);
@@ -872,7 +966,7 @@ test "instLine for store (same as store_safe)" {
     const ptr_ref: Ref = @enumFromInt(@as(u32, 1) | (1 << 31));
     const val_ref: Ref = @enumFromInt(@as(u32, 2) | (1 << 31));
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
-    const info = testFnInfo(arena.allocator(), &name_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .store, datum, 3, null);
 
     try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .store = .{ .ptr = 1, .src = .{ .eidx = 2 } } });\n", result);
@@ -974,7 +1068,7 @@ test "generateFunction with simple cond_br block" {
         6, // else body indices
     };
 
-    const info = testFnInfo(arena.allocator(), &name_map, tags, data, extra, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, tags, data, extra, &.{});
     const result = codegen.generateFunction(42, "test.main", &info, 10, "test.zig");
 
     // Expected output:

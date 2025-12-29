@@ -1017,7 +1017,6 @@ test "full flow: callee modifies struct field via pointer-to-pointer chain" {
     try Inst.apply(callee_state, 6, .{ .struct_field_ptr = .{
         .base = 5,
         .field_index = 0,
-        .field_name_id = 0,
         .ty = .{ .id = 0, .ty = .{ .pointer = &.{ .id = 0, .ty = .{ .scalar = {} } } } },
     } });
 

@@ -3,6 +3,8 @@ const compiler = @import("compiler");
 const Zcu = compiler.Zcu;
 const Air = compiler.Air;
 const InternPool = compiler.InternPool;
+const Tag = Air.Inst.Tag;
+const Data = Air.Inst.Data;
 const codegen = compiler.codegen;
 const link = compiler.link;
 const air = codegen.importBackend(.stage2_air);
@@ -27,13 +29,54 @@ pub const CallTarget = struct {
     arity: u32,
 };
 
+/// Key for field name lookup: {type_id, field_index}
+pub const FieldKey = struct {
+    type_id: u32,
+    field_index: u32,
+
+    /// Hash context for AutoHashMap - XOR the two field hashes
+    pub const HashContext = struct {
+        pub fn hash(_: HashContext, key: FieldKey) u64 {
+            return std.hash.Wyhash.hash(0, std.mem.asBytes(&key.type_id)) ^
+                std.hash.Wyhash.hash(0, std.mem.asBytes(&key.field_index));
+        }
+
+        pub fn eql(_: HashContext, a: FieldKey, b: FieldKey) bool {
+            return a.type_id == b.type_id and a.field_index == b.field_index;
+        }
+    };
+};
+
+/// Mapping from {type_id, field_index} to name_id
+pub const FieldMap = struct { FieldKey, u32 };
+
+/// Hash map type for field mappings
+pub const FieldHashMap = std.HashMapUnmanaged(FieldKey, u32, FieldKey.HashContext, std.hash_map.default_max_load_percentage);
+
+/// Tuple that represents a InternPool index / name pairing.
+pub const NameMap = struct { u32, []const u8 };
+
+/// Per-function context for code generation.
+/// Aggregates commonly-passed parameters to reduce function signatures.
+pub const FnInfo = struct {
+    arena: std.mem.Allocator,
+    name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
+    field_map: *FieldHashMap,
+    ip: *const InternPool,
+    tags: []const Tag,
+    data: []const Data,
+    extra: []const u32,
+    param_names: []const []const u8,
+};
+
 pub const FuncMir = struct {
     func_index: u32,
     owner_nav: u32,
     text: []const u8,
     call_targets: []const CallTarget,
     entrypoint: bool = false,
-    name_mappings: []const clr_codegen.NameMap,
+    name_mappings: []const NameMap,
+    field_mappings: []const FieldMap,
 };
 
 // Collection of MIR structs
@@ -122,10 +165,14 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Create per-function name map (no global state - avoids race conditions)
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
+    // Create per-function field map for {type_id, field_index} -> name_id
+    var field_map = FieldHashMap{};
+
     // Create FnInfo struct to pass to generateFunction
-    const info = clr_codegen.FnInfo{
+    const info = FnInfo{
         .arena = arena.allocator(),
         .name_map = &name_map,
+        .field_map = &field_map,
         .ip = ip,
         .tags = tags,
         .data = data,
@@ -136,8 +183,9 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Generate Zig source for this function
     const text = clr_codegen.generateFunction(func_index, fqn, &info, base_line, file_path);
 
-    // Convert hash map to slice for storage on FuncMir
+    // Convert hash maps to slices for storage on FuncMir
     const name_mappings = convertNameMapToSlice(&name_map);
+    const field_mappings = convertFieldMapToSlice(&field_map);
 
     // Extract call targets from AIR (skips debug.* calls)
     const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), ip, tags, data, extra);
@@ -150,13 +198,26 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         .call_targets = call_targets,
         .entrypoint = is_entrypoint,
         .name_mappings = name_mappings,
+        .field_mappings = field_mappings,
     };
     return @ptrCast(mir);
 }
 
-fn convertNameMapToSlice(map: *std.AutoHashMapUnmanaged(u32, []const u8)) []const clr_codegen.NameMap {
+fn convertNameMapToSlice(map: *std.AutoHashMapUnmanaged(u32, []const u8)) []const NameMap {
     const allocator = clr_allocator.allocator();
-    const result = allocator.alloc(clr_codegen.NameMap, map.count()) catch return &.{};
+    const result = allocator.alloc(NameMap, map.count()) catch return &.{};
+    var i: usize = 0;
+    var it = map.iterator();
+    while (it.next()) |entry| {
+        result[i] = .{ entry.key_ptr.*, entry.value_ptr.* };
+        i += 1;
+    }
+    return result;
+}
+
+fn convertFieldMapToSlice(map: *FieldHashMap) []const FieldMap {
+    const allocator = clr_allocator.allocator();
+    const result = allocator.alloc(FieldMap, map.count()) catch return &.{};
     var i: usize = 0;
     var it = map.iterator();
     while (it.next()) |entry| {
@@ -203,11 +264,20 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
         tree_shaker.FuncSet{};
 
     // Combine name_mappings from reachable functions into one map
-    var combined_map = std.AutoHashMapUnmanaged(u32, []const u8){};
+    var combined_name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
     for (mir_list.items) |mir| {
         if (!reachable.contains(mir.func_index)) continue;
         for (mir.name_mappings) |mapping| {
-            combined_map.put(clr_allocator.allocator(), mapping[0], mapping[1]) catch continue;
+            combined_name_map.put(clr_allocator.allocator(), mapping[0], mapping[1]) catch continue;
+        }
+    }
+
+    // Combine field_mappings from reachable functions into one map
+    var combined_field_map = FieldHashMap{};
+    for (mir_list.items) |mir| {
+        if (!reachable.contains(mir.func_index)) continue;
+        for (mir.field_mappings) |mapping| {
+            combined_field_map.put(clr_allocator.allocator(), mapping[0], mapping[1]) catch continue;
         }
     }
 
@@ -228,15 +298,16 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
     }
 
     // Emit getName function with combined mappings from reachable functions
-    const has_getName = combined_map.count() > 0;
-    if (has_getName) {
-        const getName_text = clr_codegen.emitGetName(&combined_map);
-        file.writeAll(getName_text) catch return;
-    }
+    const getName_text = clr_codegen.emitGetName(&combined_name_map);
+    file.writeAll(getName_text) catch return;
+
+    // Emit getFieldId function with combined field mappings from reachable functions
+    const getFieldId_text = clr_codegen.emitGetFieldId(&combined_field_map);
+    file.writeAll(getFieldId_text) catch return;
 
     // Write epilogue (imports and main function)
     if (entrypoint_index) |idx| {
-        const entry_text = clr_codegen.epilogue(idx, has_getName);
+        const entry_text = clr_codegen.epilogue(idx);
         file.writeAll(entry_text) catch return;
     }
 
