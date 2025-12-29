@@ -974,7 +974,7 @@ test "alloc creates pointer to typed pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer to typed pointee)
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // alloc creates pointer; pointee type is determined by .ty parameter
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -997,7 +997,7 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
     const eu_idx = results[1].refinement.?;
@@ -1023,8 +1023,8 @@ test "store with .undefined type wrapper sets undefined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with .undefined wrapper
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = 0, .ty = .{ .undefined = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1047,8 +1047,8 @@ test "store with defined value sets defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store a defined value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1071,9 +1071,9 @@ test "store with .null to optional sets inner to defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc at instruction 1 with optional type, then store null
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .optional = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .optional = &.{ .id = null, .ty = .{ .scalar = {} } } } } } });
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = 0, .ty = .{ .null = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .null = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } });
 
     // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1115,7 +1115,7 @@ test "load from undefined inst returns error" {
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
     try std.testing.expectError(
         error.UseBeforeAssign,
-        Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } }),
+        Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } }),
     );
 }
 
@@ -1140,7 +1140,7 @@ test "load from defined inst does not return error" {
     _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
-    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } });
+    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 
 test "load from inst without undefined tracking does not return error" {
@@ -1161,7 +1161,7 @@ test "load from inst without undefined tracking does not return error" {
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
-    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } });
+    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 
 test "reportUseBeforeAssign with name_when_set returns error" {

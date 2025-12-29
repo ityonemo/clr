@@ -66,7 +66,7 @@ pub const Name = u32;
 /// the parameters of a instruction.  Some operations are expected to set
 /// the type based on interned information; in those cases, the type will be used.
 pub const Type = struct {
-    id: Name,
+    id: ?Name,
     ty: union(enum) {
         scalar: void,
         pointer: *const Type,
@@ -97,7 +97,7 @@ pub const Src = union(enum) {
 /// Used when storing interned values to determine the refinement structure.
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
-    const type_id = ty.id;
+    const type_id = ty.id orelse 0;
     return switch (ty.ty) {
         .scalar => .{ .scalar = .{ .analyte = .{}, .type_id = type_id } },
         .void => .void,
@@ -1067,7 +1067,7 @@ pub const UnionInit = struct {
             }
         }
 
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .type_id = self.ty.id } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .type_id = self.ty.id orelse 0 } });
         try splat(.union_init, state, index, self);
     }
 };
@@ -1351,7 +1351,7 @@ test "dbg_var_ptr sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc to create a pointer
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try std.testing.expect(results[1].name == null);
 
     // dbg_var_ptr should set the name on the target instruction (name_id=1 -> "my_var")
@@ -1453,7 +1453,7 @@ test "br shares source refinement with block" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a block at index 0
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // Create a value at index 1
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
@@ -1590,12 +1590,12 @@ test "block creates refinement based on type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Block with scalar type
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
 
     // Block with void type
-    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .void = {} } } } });
+    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .void = {} } } } });
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
@@ -1650,7 +1650,7 @@ test "struct_field_ptr gets pointer to struct field" {
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -1687,7 +1687,7 @@ test "struct_field_val extracts field value from struct" {
     results[0].refinement = struct_eidx;
 
     // struct_field_val should extract field 0
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // Result should share the field's entity
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
@@ -1778,7 +1778,7 @@ test "set_union_tag updates union variant" {
     results[0].refinement = ptr_eidx;
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // The union's active field should be set (field 1), others null
     const union_ref = refinements.at(union_eidx);
@@ -1838,7 +1838,7 @@ test "union_init creates union with active variant" {
 
     // union_init should create a union with active variant set
     try Inst.apply(state, 1, .{ .union_init = .{
-        .ty = .{ .id = 0, .ty = .{ .@"union" = &.{ .{ .id = 0, .ty = .{ .scalar = {} } }, .{ .id = 0, .ty = .{ .scalar = {} } } } } },
+        .ty = .{ .id = null, .ty = .{ .@"union" = &.{ .{ .id = null, .ty = .{ .scalar = {} } }, .{ .id = null, .ty = .{ .scalar = {} } } } } },
         .field_index = 1,
         .init = .{ .eidx = 0 },
     } });

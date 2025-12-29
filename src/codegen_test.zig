@@ -216,7 +216,7 @@ test "instLine for alloc" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .alloc, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for store_safe" {
@@ -253,7 +253,7 @@ test "instLine for load" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .load, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = 5, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = 5, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "generateFunction produces complete function" {
@@ -299,9 +299,9 @@ test "generateFunction produces complete function" {
         \\
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
         \\
-        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
-        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 2 } } });
         \\    try Inst.onFinish(state);
         \\    Inst.backPropagate(state);
@@ -510,7 +510,7 @@ test "instLine for bitcast" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .bitcast, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .eidx = 7 }, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .eidx = 7 }, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for unwrap_errunion_payload" {
@@ -896,7 +896,7 @@ test "instLine for struct_field_ptr_index_0" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_0, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for struct_field_ptr_index_1" {
@@ -915,7 +915,7 @@ test "instLine for struct_field_ptr_index_1" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_1, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 1, .field_index = 1, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 1, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for get_union_tag" {
@@ -950,7 +950,7 @@ test "instLine for block" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .block, datum, 2, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .void = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .void = {} } } } });\n", result);
 }
 
 test "instLine for store (same as store_safe)" {
@@ -1079,13 +1079,13 @@ test "generateFunction with simple cond_br block" {
     const expected =
         \\fn fn_42_cond_br_false_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = false, .condition_idx = 3 } });
-        \\    try Inst.apply(state, 6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .id = 0, .ty = .{ .void = {} } } } } });
+        \\    try Inst.apply(state, 6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .id = null, .ty = .{ .void = {} } } } } });
         \\}
         \\
         \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = 3 } });
         \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 0, .src = .{ .eidx = 3 } } });
-        \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .id = 0, .ty = .{ .void = {} } } } } });
+        \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .id = null, .ty = .{ .void = {} } } } } });
         \\}
         \\
         \\fn fn_42(ctx: *Context, caller_refinements: ?*Refinements) anyerror!EIdx {
@@ -1104,15 +1104,15 @@ test "generateFunction with simple cond_br block" {
         \\
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements };
         \\
-        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
-        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = 0, .ty = .{ .undefined = &.{ .id = 0, .ty = .{ .scalar = {} } } } } } } });
-        \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .id = 0, .ty = .{ .void = {} } } } });
-        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } });
+        \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .void = {} } } } });
+        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 4, .{ .noop = .{} });
         \\    try Inst.apply(state, 5, .{ .noop = .{} });
         \\    try Inst.apply(state, 6, .{ .noop = .{} });
         \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
-        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0, .ty = .{ .id = 0, .ty = .{ .scalar = {} } } } });
+        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .eidx = 8 } } });
         \\    try Inst.onFinish(state);
         \\    Inst.backPropagate(state);
