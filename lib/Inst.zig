@@ -112,7 +112,8 @@ pub fn cond_br(
     results[index].refinement = try refinements.appendEntity(.{ .void = {} });
 
     // Merge: walk results and call analysis merge for each slot that has refinements
-    try tag.splatMerge(.cond_br, results, ctx, refinements, true_results, &true_refinements, false_results, &false_refinements);
+    const branches = [_]State{ true_state, false_state };
+    try tag.splatMerge(.cond_br, results, ctx, refinements, &branches);
 
     // Merge caller_refinements return slot if both branches wrote to it
     if (caller_refinements) |cp| {

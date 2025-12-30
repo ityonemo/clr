@@ -1169,146 +1169,155 @@ fn branchIsUnreachable(branch_results: []const Inst, branch_refinements: *Refine
     return false;
 }
 
-/// Merge branch results after a conditional.
+/// Merge branch results after a conditional or switch.
 /// Walks through all result slots and calls each analysis's merge function.
 /// Analysis modules can implement `merge` to handle their specific fields.
+///
+/// Multiple result slots may reference the same EIdx internally. We track
+/// which EIdx values have been merged to avoid re-merging the same entity.
 pub fn splatMerge(
-    comptime tag: anytype,
+    comptime merge_tag: anytype,
     results: []Inst,
     ctx: *Context,
     refinements: *Refinements,
-    true_results: []Inst,
-    true_refinements: *Refinements,
-    false_results: []Inst,
-    false_refinements: *Refinements,
+    branches: []const State,
 ) !void {
-    // Check if either branch is unreachable (contains any .noreturn result)
-    // If a branch is unreachable, don't merge its state - use only the reachable branch
-    const true_is_unreachable = branchIsUnreachable(true_results, true_refinements);
-    const false_is_unreachable = branchIsUnreachable(false_results, false_refinements);
+    const allocator = ctx.allocator;
+
+    // Build filtered branch array - null for unreachable
+    const filtered = try allocator.alloc(?State, branches.len);
+    defer allocator.free(filtered);
+
+    for (branches, 0..) |branch, i| {
+        filtered[i] = if (branchIsUnreachable(branch.results, branch.refinements))
+            null
+        else
+            branch;
+    }
+
+    // Track merged EIdx to avoid re-merging the same entity
+    var merged = std.AutoHashMap(EIdx, void).init(allocator);
+    defer merged.deinit();
+
+    // Reusable array for branch EIdx values
+    const branch_eidxs = try allocator.alloc(?EIdx, filtered.len);
+    defer allocator.free(branch_eidxs);
 
     // Walk through all result slots
-    for (results, true_results, false_results) |*result, true_result, false_result| {
-        // Only merge if the original result has a refinement
+    for (results, 0..) |*result, result_idx| {
         const orig_eidx = result.refinement orelse continue;
 
-        // Get refinement indices from each branch (may be null if not touched)
-        const true_eidx = true_result.refinement;
-        const false_eidx = false_result.refinement;
-
-        // Handle unreachable branches: if a branch is unreachable (contains noreturn),
-        // use only the reachable branch's state without merging
-        if (true_is_unreachable and false_is_unreachable) {
-            // Both branches unreachable - nothing to merge
-            continue;
-        }
-        if (true_is_unreachable) {
-            // True branch is unreachable - use false branch's state only
-            if (false_eidx) |fidx| {
-                try Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(fidx).*, false_refinements);
-            }
-            continue;
-        }
-        if (false_is_unreachable) {
-            // False branch is unreachable - use true branch's state only
-            if (true_eidx) |tidx| {
-                try Refinement.clobber_structured_idx(orig_eidx, refinements, true_refinements.at(tidx).*, true_refinements);
-            }
-            continue;
+        // Build branch EIdx array for this result slot
+        for (filtered, 0..) |branch_opt, i| {
+            branch_eidxs[i] = if (branch_opt) |branch| branch.results[result_idx].refinement else null;
         }
 
-        // If a branch changed which entity this result points to (e.g., br sharing),
-        // propagate that to the original. Clone preserves indices, so this is valid.
-        // Prefer true branch (success path in error unions).
-        if (true_eidx != null and true_eidx.? != orig_eidx) {
-            result.refinement = true_eidx.?;
-            // Also need to merge analysis state from the branch's entity to the original
-            inline for (analyses) |Analysis| {
-                if (@hasDecl(Analysis, "merge")) {
-                    try Analysis.merge(
-                        ctx,
-                        tag,
-                        .{ refinements, true_eidx.? },
-                        .{ true_refinements, true_eidx.? },
-                        .{ false_refinements, false_eidx orelse orig_eidx },
-                    );
+        // Recursively merge this refinement and all nested refinements
+        try mergeRefinementRecursive(
+            merge_tag,
+            allocator,
+            ctx,
+            refinements,
+            orig_eidx,
+            filtered,
+            branch_eidxs,
+            &merged,
+        );
+    }
+}
+
+/// Follow .to field for each branch's eidx, updating branch_eidxs in place.
+fn followBranchEidxs(
+    comptime tag: std.meta.Tag(Refinement),
+    branches: []const ?State,
+    branch_eidxs: []?EIdx,
+) void {
+    for (branches, branch_eidxs) |branch_opt, *eidx| {
+        const branch = branch_opt orelse continue;
+        eidx.* = @field(branch.refinements.at(eidx.*.?).*, @tagName(tag)).to;
+    }
+}
+
+/// Recursively merge a refinement and its nested refinements.
+/// Calls analysis merge functions at each node, then recurses into children.
+fn mergeRefinementRecursive(
+    comptime merge_tag: anytype,
+    allocator: std.mem.Allocator,
+    ctx: *Context,
+    refinements: *Refinements,
+    orig_eidx: EIdx,
+    branches: []const ?State,
+    branch_eidxs: []?EIdx,
+    merged: *std.AutoHashMap(EIdx, void),
+) !void {
+    // Skip if we've already merged this entity
+    if (merged.contains(orig_eidx)) return;
+    try merged.put(orig_eidx, {});
+
+    // Call each analyzer's merge for this node
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "merge")) {
+            try Analysis.merge(
+                ctx,
+                merge_tag,
+                refinements,
+                orig_eidx,
+                branches,
+                branch_eidxs,
+            );
+        }
+    }
+
+    // Recurse into children based on refinement type
+    const orig_ref = refinements.at(orig_eidx);
+    switch (orig_ref.*) {
+        // Pointer: check rejection logic before following and merging
+        .pointer => |p| {
+            // TODO: pointer rejection logic (all same original OR all new, not mixed)
+            followBranchEidxs(.pointer, branches, branch_eidxs);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, p.to, branches, branch_eidxs, merged);
+        },
+        // For optional/errorunion: follow .to in all branches
+        // Types always match when following the same structural path
+        // If branch exists, eidx exists (they're always in sync)
+        inline .optional, .errorunion => |data, tag| {
+            followBranchEidxs(tag, branches, branch_eidxs);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, data.to, branches, branch_eidxs, merged);
+        },
+        .@"struct" => |s| {
+            // Need separate array for struct fields since we recurse multiple times
+            const field_eidxs = try allocator.alloc(?EIdx, branches.len);
+            defer allocator.free(field_eidxs);
+            for (s.fields, 0..) |field_idx, field_i| {
+                for (branches, branch_eidxs, 0..) |branch_opt, branch_eidx_opt, i| {
+                    const branch = branch_opt orelse {
+                        field_eidxs[i] = null;
+                        continue;
+                    };
+                    // Types always match; if branch exists, eidx exists
+                    field_eidxs[i] = branch.refinements.at(branch_eidx_opt.?).@"struct".fields[field_i];
                 }
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_eidxs, merged);
             }
-            continue;
-        }
-
-        // Trivial cases: one side null, copy the other directly
-        // Use index-based version because orig might be .retval_future
-        if (true_eidx == null and false_eidx == null) continue;
-        if (true_eidx == null) {
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, false_refinements.at(false_eidx.?).*, false_refinements);
-            continue;
-        }
-        if (false_eidx == null) {
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_refinements.at(true_eidx.?).*, true_refinements);
-            continue;
-        }
-
-        // Handle .retval_future: if one branch has retval_future and the other has a resolved value, use the resolved one
-        const true_ref = true_refinements.at(true_eidx.?).*;
-        const false_ref = false_refinements.at(false_eidx.?).*;
-        const true_is_retval_future = true_ref == .retval_future;
-        const false_is_retval_future = false_ref == .retval_future;
-
-        if (true_is_retval_future and false_is_retval_future) {
-            // Both are retval_futures - nothing to merge, leave as is
-            continue;
-        }
-        if (true_is_retval_future) {
-            // True branch didn't return - use false branch's value
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, false_ref, false_refinements);
-            continue;
-        }
-        if (false_is_retval_future) {
-            // False branch didn't return - use true branch's value
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
-            continue;
-        }
-
-        // Handle .noreturn: if one branch is unreachable, use the other branch's state
-        const true_is_noreturn = true_ref == .noreturn;
-        const false_is_noreturn = false_ref == .noreturn;
-
-        if (true_is_noreturn and false_is_noreturn) {
-            // Both are noreturn - nothing to merge, leave as is
-            continue;
-        }
-        if (true_is_noreturn) {
-            // True branch is unreachable - use false branch's value
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, false_ref, false_refinements);
-            continue;
-        }
-        if (false_is_noreturn) {
-            // False branch is unreachable - use true branch's value
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
-            continue;
-        }
-
-        // Handle orig being .retval_future when both branches resolved it
-        const orig_ref = refinements.at(orig_eidx).*;
-        if (orig_ref == .retval_future) {
-            // Both branches resolved the retval_future - copy structure from true branch
-            // then continue to merge analysis states
-            try Refinement.clobber_structured_idx(orig_eidx, refinements, true_ref, true_refinements);
-        }
-
-        // Non-trivial: both branches have resolved states - call each analyzer's merge
-        inline for (analyses) |Analysis| {
-            if (@hasDecl(Analysis, "merge")) {
-                try Analysis.merge(
-                    ctx,
-                    tag,
-                    .{ refinements, orig_eidx },
-                    .{ true_refinements, true_eidx.? },
-                    .{ false_refinements, false_eidx.? },
-                );
+        },
+        .@"union" => |u| {
+            // Need separate array for union fields since we recurse multiple times
+            const field_eidxs = try allocator.alloc(?EIdx, branches.len);
+            defer allocator.free(field_eidxs);
+            for (u.fields, 0..) |field_opt, field_i| {
+                const field_idx = field_opt orelse continue;
+                for (branches, branch_eidxs, 0..) |branch_opt, branch_eidx_opt, i| {
+                    const branch = branch_opt orelse {
+                        field_eidxs[i] = null;
+                        continue;
+                    };
+                    // Types always match; if branch exists, eidx exists
+                    field_eidxs[i] = branch.refinements.at(branch_eidx_opt.?).@"union".fields[field_i];
+                }
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_eidxs, merged);
             }
-        }
+        },
+        else => {},
     }
 }
 

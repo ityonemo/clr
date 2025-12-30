@@ -546,58 +546,52 @@ pub const MemorySafety = union(enum) {
     // Branch merging
     // =========================================================================
 
-    /// Merge memory_safety state from two branches after a conditional.
-    /// If one branch has memory_safety and the original doesn't, copy it.
+    /// Merge memory_safety state from N branches for a single node.
+    /// Called by tag.splatMerge which handles the tree traversal.
     pub fn merge(
         ctx: *Context,
         comptime merge_tag: anytype,
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
+        refinements: *Refinements,
+        orig_eidx: EIdx,
+        branches: []const ?State,
+        branch_eidxs: []const ?EIdx,
     ) !void {
         _ = ctx;
         _ = merge_tag;
-        _ = false_branch; // TODO: handle case where false branch has memory_safety
-        mergeRefinement(orig, true_branch);
-    }
-
-    fn mergeRefinement(
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-    ) void {
-        const orig_ref = orig[0].at(orig[1]);
-        const true_ref = true_branch[0].at(true_branch[1]);
+        const orig_ref = refinements.at(orig_eidx);
 
         switch (orig_ref.*) {
             .pointer => |*op| {
-                if (true_ref.* == .pointer) {
-                    const tp = true_ref.pointer;
-                    // Copy memory_safety if original doesn't have it
-                    if (op.analyte.memory_safety == null and tp.analyte.memory_safety != null) {
-                        op.analyte.memory_safety = tp.analyte.memory_safety;
-                    }
-                    // Recursively merge pointee
-                    mergeRefinement(.{ orig[0], op.to }, .{ true_branch[0], tp.to });
-                }
-            },
-            .optional => |o| {
-                if (true_ref.* == .optional) {
-                    mergeRefinement(.{ orig[0], o.to }, .{ true_branch[0], true_ref.optional.to });
-                }
-            },
-            .errorunion => |e| {
-                if (true_ref.* == .errorunion) {
-                    mergeRefinement(.{ orig[0], e.to }, .{ true_branch[0], true_ref.errorunion.to });
-                }
-            },
-            .region => @panic("regions not implemented yet"),
-            .@"struct" => |s| {
-                if (true_ref.* == .@"struct") {
-                    for (s.fields, true_ref.@"struct".fields) |of, tf| {
-                        mergeRefinement(.{ orig[0], of }, .{ true_branch[0], tf });
+                // Copy memory_safety from first branch that has it if original doesn't
+                if (op.analyte.memory_safety == null) {
+                    for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+                        const branch = branch_opt orelse continue;
+                        const branch_eidx = branch_eidx_opt orelse continue;
+                        const branch_ref = branch.refinements.at(branch_eidx);
+                        if (branch_ref.* != .pointer) continue;
+                        if (branch_ref.pointer.analyte.memory_safety) |ms| {
+                            op.analyte.memory_safety = ms;
+                            break;
+                        }
                     }
                 }
             },
+            .scalar => |*s| {
+                // Copy memory_safety from first branch that has it if original doesn't
+                if (s.analyte.memory_safety == null) {
+                    for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+                        const branch = branch_opt orelse continue;
+                        const branch_eidx = branch_eidx_opt orelse continue;
+                        const branch_ref = branch.refinements.at(branch_eidx);
+                        if (branch_ref.* != .scalar) continue;
+                        if (branch_ref.scalar.analyte.memory_safety) |ms| {
+                            s.analyte.memory_safety = ms;
+                            break;
+                        }
+                    }
+                }
+            },
+            // No memory_safety on container types - recursion handled by tag.zig
             else => {},
         }
     }

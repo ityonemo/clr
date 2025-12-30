@@ -49,12 +49,12 @@ pub const VariantSafety = struct {
                 .{ self.active_metas.len, u.fields.len },
             );
         }
-        for (self.active_metas, u.fields, 0..) |meta_opt, field_opt, i| {
-            // If meta says field is active, the field entity must exist
-            // (But null meta is always valid - could be inactive or ambiguous after merge)
-            if (meta_opt != null and field_opt == null) {
+        for (self.active_metas, u.fields, 0..) |active_meta, field_opt, i| {
+            // If field is marked active, the field entity must exist
+            // (null active_meta is always valid - could be inactive or ambiguous after merge)
+            if (active_meta != null and field_opt == null) {
                 std.debug.panic(
-                    "VariantSafety.testValid: meta says field {d} is active but no field entity exists",
+                    "VariantSafety.testValid: field {d} marked active but no field entity exists",
                     .{i},
                 );
             }
@@ -219,119 +219,70 @@ pub const VariantSafety = struct {
         }
     }
 
-    /// Merge variant_safety state from two branches.
-    /// If both branches have the same active variant, keep it.
-    /// If branches have different active variants, mark both as active (ambiguous).
+    /// Merge variant_safety state from N branches for a single union node.
+    /// Called by tag.splatMerge which handles the tree traversal.
     pub fn merge(
         ctx: *Context,
         comptime merge_tag: anytype,
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
+        refinements: *Refinements,
+        orig_eidx: EIdx,
+        branches: []const ?State,
+        branch_eidxs: []const ?EIdx,
     ) !void {
         _ = ctx;
         _ = merge_tag;
-        mergeRefinement(orig, true_branch, false_branch);
-    }
+        const orig_ref = refinements.at(orig_eidx);
 
-    fn mergeRefinement(
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
-    ) void {
-        const orig_ref = orig[0].at(orig[1]);
-        const true_ref = true_branch[0].at(true_branch[1]);
-        const false_ref = false_branch[0].at(false_branch[1]);
+        // Only unions have variant_safety
+        if (orig_ref.* != .@"union") return;
+        const u = &orig_ref.@"union";
 
-        switch (orig_ref.*) {
-            .@"union" => |*u| {
-                // Get variant_safety from both branches (may be null)
-                const true_vs: ?VariantSafety = if (true_ref.* == .@"union")
-                    true_ref.@"union".analyte.variant_safety
-                else
-                    null;
-                const false_vs: ?VariantSafety = if (false_ref.* == .@"union")
-                    false_ref.@"union".analyte.variant_safety
-                else
-                    null;
+        // Gather variant_safety from all reachable branches
+        var first_vs: ?VariantSafety = null;
 
-                // If neither branch has variant_safety, nothing to merge
-                if (true_vs == null and false_vs == null) return;
+        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+            const branch = branch_opt orelse continue;
+            const branch_eidx = branch_eidx_opt orelse continue;
+            const branch_ref = branch.refinements.at(branch_eidx);
+            if (branch_ref.* != .@"union") continue;
 
-                // If only one branch has variant_safety, use that
-                if (true_vs == null) {
-                    u.analyte.variant_safety = false_vs;
-                    return;
-                }
-                if (false_vs == null) {
-                    u.analyte.variant_safety = true_vs;
-                    return;
-                }
+            const branch_vs = branch_ref.@"union".analyte.variant_safety orelse continue;
+            if (first_vs == null) {
+                first_vs = branch_vs;
+            }
+        }
 
-                // Both branches have variant_safety - check if they agree
-                const tvs = true_vs.?;
-                const fvs = false_vs.?;
+        // If no branch has variant_safety, nothing to merge
+        const vs = first_vs orelse return;
 
-                // Get or create variant_safety on orig
-                if (u.analyte.variant_safety == null) {
-                    // Create a new active_metas array
-                    const allocator = orig[0].list.allocator;
-                    const active_metas = allocator.alloc(?Meta, tvs.active_metas.len) catch @panic("out of memory");
-                    for (active_metas) |*m| m.* = null;
-                    u.analyte.variant_safety = .{ .active_metas = active_metas };
-                }
-                const orig_vs = &u.analyte.variant_safety.?;
+        // Get or create variant_safety on orig
+        if (u.analyte.variant_safety == null) {
+            const allocator = refinements.list.allocator;
+            const active_metas = allocator.alloc(?Meta, vs.active_metas.len) catch @panic("out of memory");
+            for (active_metas) |*m| m.* = null;
+            u.analyte.variant_safety = .{ .active_metas = active_metas };
+        }
+        const orig_vs = &u.analyte.variant_safety.?;
 
-                // Merge: mark as active any variant that was active in EITHER branch
-                // If both branches have the same variant active, we get one active variant
-                // If branches have different variants active, we get multiple active (ambiguous)
-                // Also ensure field entities exist for any active variants
-                for (orig_vs.active_metas, 0..) |*orig_m, i| {
-                    const true_m = tvs.active_metas[i];
-                    const false_m = fvs.active_metas[i];
-                    if (true_m != null) {
-                        orig_m.* = true_m;
-                        // Ensure field entity exists - create new in orig refinements
-                        if (u.fields[i] == null) {
-                            u.fields[i] = orig[0].appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
-                        }
-                    } else if (false_m != null) {
-                        orig_m.* = false_m;
-                        // Ensure field entity exists - create new in orig refinements
-                        if (u.fields[i] == null) {
-                            u.fields[i] = orig[0].appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
-                        }
-                    } else {
-                        orig_m.* = null;
+        // Merge: mark as active any variant that was active in ANY branch
+        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+            const branch = branch_opt orelse continue;
+            const branch_eidx = branch_eidx_opt orelse continue;
+            const branch_ref = branch.refinements.at(branch_eidx);
+            if (branch_ref.* != .@"union") continue;
+
+            const branch_vs = branch_ref.@"union".analyte.variant_safety orelse continue;
+            // Skip if different lengths (shouldn't happen for same union type)
+            if (orig_vs.active_metas.len != branch_vs.active_metas.len) continue;
+            for (orig_vs.active_metas, branch_vs.active_metas, 0..) |*orig_m, branch_m, i| {
+                if (branch_m != null) {
+                    orig_m.* = branch_m;
+                    // Ensure field entity exists
+                    if (u.fields[i] == null) {
+                        u.fields[i] = refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
                     }
                 }
-            },
-            .pointer => |p| {
-                // Follow pointer to pointee
-                if (true_ref.* != .pointer or false_ref.* != .pointer) return;
-                mergeRefinement(
-                    .{ orig[0], p.to },
-                    .{ true_branch[0], true_ref.pointer.to },
-                    .{ false_branch[0], false_ref.pointer.to },
-                );
-            },
-            .optional => |o| {
-                if (true_ref.* != .optional or false_ref.* != .optional) return;
-                mergeRefinement(
-                    .{ orig[0], o.to },
-                    .{ true_branch[0], true_ref.optional.to },
-                    .{ false_branch[0], false_ref.optional.to },
-                );
-            },
-            .errorunion => |e| {
-                if (true_ref.* != .errorunion or false_ref.* != .errorunion) return;
-                mergeRefinement(
-                    .{ orig[0], e.to },
-                    .{ true_branch[0], true_ref.errorunion.to },
-                    .{ false_branch[0], false_ref.errorunion.to },
-                );
-            },
-            else => {},
+            }
         }
     }
 };

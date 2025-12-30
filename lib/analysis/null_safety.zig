@@ -193,50 +193,48 @@ pub const NullSafety = union(enum) {
         }
     }
 
-    /// Merge null_safety states after conditional branches
+    /// Merge null_safety states for a single optional node.
+    /// Called by tag.splatMerge which handles the tree traversal.
     pub fn merge(
         ctx: *Context,
         comptime merge_tag: anytype,
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
+        refinements: *Refinements,
+        orig_eidx: EIdx,
+        branches: []const ?State,
+        branch_eidxs: []const ?EIdx,
     ) !void {
         _ = ctx;
         _ = merge_tag;
-        mergeRefinement(orig, true_branch, false_branch);
-    }
+        const orig_ref = refinements.at(orig_eidx);
 
-    fn mergeRefinement(
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
-    ) void {
-        const orig_ref = orig[0].at(orig[1]);
-        const true_ref = true_branch[0].at(true_branch[1]);
-        const false_ref = false_branch[0].at(false_branch[1]);
+        // Only optionals have null_safety
+        if (orig_ref.* != .optional) return;
+        const o = &orig_ref.optional;
 
-        switch (orig_ref.*) {
-            .optional => |*o| {
-                const true_ns = true_ref.optional.analyte.null_safety orelse return;
-                const false_ns = false_ref.optional.analyte.null_safety orelse return;
-                o.analyte.null_safety = mergeNullStates(true_ns, false_ns);
-            },
-            .pointer => |p| {
-                // Follow pointer to pointee (which might be an optional)
-                mergeRefinement(
-                    .{ orig[0], p.to },
-                    .{ true_branch[0], true_ref.pointer.to },
-                    .{ false_branch[0], false_ref.pointer.to },
-                );
-            },
-            else => {},
+        // Fold null_safety across all reachable branches
+        var result: ?NullSafety = null;
+        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+            const branch = branch_opt orelse continue;
+            const branch_eidx = branch_eidx_opt orelse continue;
+            const branch_ref = branch.refinements.at(branch_eidx);
+            if (branch_ref.* != .optional) continue;
+
+            const branch_ns = branch_ref.optional.analyte.null_safety orelse continue;
+            if (result) |current| {
+                result = mergeNullStates(current, branch_ns);
+            } else {
+                result = branch_ns;
+            }
+        }
+        if (result) |r| {
+            o.analyte.null_safety = r;
         }
     }
 
-    fn mergeNullStates(true_ns: NullSafety, false_ns: NullSafety) NullSafety {
+    fn mergeNullStates(a: NullSafety, b: NullSafety) NullSafety {
         // Same tag - keep it
-        if (std.meta.activeTag(true_ns) == std.meta.activeTag(false_ns)) {
-            return true_ns;
+        if (std.meta.activeTag(a) == std.meta.activeTag(b)) {
+            return a;
         }
         // Different states - reset to unknown (requires re-check)
         return .{ .unknown = null };

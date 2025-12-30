@@ -793,117 +793,84 @@ pub const Undefined = union(enum) {
 
     // Backward propagation is handled centrally by Inst.backPropagate()
 
-    /// Merge undefined states from two branches after a conditional.
-    /// Walks the refinement tree and reports if branches have inconsistent initialization.
+    /// Merge undefined states from N branches for a single node.
+    /// Called by tag.splatMerge which handles the tree traversal.
     pub fn merge(
         ctx: *Context,
         comptime merge_tag: anytype,
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
+        refinements: *Refinements,
+        orig_eidx: EIdx,
+        branches: []const ?State,
+        branch_eidxs: []const ?EIdx,
     ) !void {
-        _ = merge_tag; // Available for context-specific merge behavior
-        mergeRefinement(ctx, orig, true_branch, false_branch);
-    }
-
-    fn mergeRefinement(
-        ctx: *Context,
-        orig: struct { *Refinements, EIdx },
-        true_branch: struct { *Refinements, EIdx },
-        false_branch: struct { *Refinements, EIdx },
-    ) void {
-        const orig_ref = orig[0].at(orig[1]);
-        const true_ref = true_branch[0].at(true_branch[1]);
-        const false_ref = false_branch[0].at(false_branch[1]);
+        _ = merge_tag;
+        const orig_ref = refinements.at(orig_eidx);
 
         switch (orig_ref.*) {
             .scalar => |*s| {
-                const true_undef = true_ref.scalar.analyte.undefined orelse return;
-                const false_undef = false_ref.scalar.analyte.undefined orelse return;
-                s.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
+                if (mergeUndefinedFromBranches(ctx, branches, branch_eidxs, getScalarUndefined)) |merged| {
+                    s.analyte.undefined = merged;
+                }
             },
             .pointer => |*p| {
-                // Merge analyte on the pointer itself
-                if (true_ref.pointer.analyte.undefined) |true_undef| {
-                    if (false_ref.pointer.analyte.undefined) |false_undef| {
-                        p.analyte.undefined = mergeUndefinedStates(ctx, true_undef, false_undef);
-                    }
-                }
-                // Recursively merge pointee
-                mergeRefinement(
-                    ctx,
-                    .{ orig[0], p.to },
-                    .{ true_branch[0], true_ref.pointer.to },
-                    .{ false_branch[0], false_ref.pointer.to },
-                );
-            },
-            .optional => |*o| {
-                // Optional containers don't track undefined - just recurse into payload
-                mergeRefinement(
-                    ctx,
-                    .{ orig[0], o.to },
-                    .{ true_branch[0], true_ref.optional.to },
-                    .{ false_branch[0], false_ref.optional.to },
-                );
-            },
-            .errorunion => |*e| {
-                // Error union containers don't track undefined - just recurse into payload
-                mergeRefinement(
-                    ctx,
-                    .{ orig[0], e.to },
-                    .{ true_branch[0], true_ref.errorunion.to },
-                    .{ false_branch[0], false_ref.errorunion.to },
-                );
-            },
-            .region => @panic("regions not implemented yet"),
-            // Types without undefined tracking - no merge needed
-            .void, .unimplemented, .noreturn => {},
-            .@"struct" => |*s| {
-                // Struct containers don't track undefined - just recurse into fields
-                for (s.fields, 0..) |field_idx, i| {
-                    mergeRefinement(
-                        ctx,
-                        .{ orig[0], field_idx },
-                        .{ true_branch[0], true_ref.@"struct".fields[i] },
-                        .{ false_branch[0], false_ref.@"struct".fields[i] },
-                    );
+                if (mergeUndefinedFromBranches(ctx, branches, branch_eidxs, getPointerUndefined)) |merged| {
+                    p.analyte.undefined = merged;
                 }
             },
-            .@"union" => |*u| {
-                // Union "dumb merge": union all active fields from both branches
-                // Only recurse into fields that are active in all three (orig, true, false)
-                const true_union = true_ref.@"union";
-                const false_union = false_ref.@"union";
-                for (u.fields, 0..) |orig_field_opt, i| {
-                    const orig_field = orig_field_opt orelse continue;
-                    const true_field = true_union.fields[i] orelse continue;
-                    const false_field = false_union.fields[i] orelse continue;
-                    mergeRefinement(
-                        ctx,
-                        .{ orig[0], orig_field },
-                        .{ true_branch[0], true_field },
-                        .{ false_branch[0], false_field },
-                    );
-                }
-            },
-            .retval_future => @panic("mergeRefinement: cannot merge .retval_future"),
+            // No undefined tracking on these container types - recursion handled by tag.zig
+            else => {},
         }
     }
 
-    fn mergeUndefinedStates(ctx: *Context, true_undef: Undefined, false_undef: Undefined) Undefined {
-        // Handle .inconsistent propagation first - once inconsistent, stays inconsistent
-        if (true_undef == .inconsistent) return true_undef;
-        if (false_undef == .inconsistent) return false_undef;
+    /// Get undefined state from a scalar at given EIdx
+    fn getScalarUndefined(branch: State, branch_eidx: EIdx) ?Undefined {
+        const ref = branch.refinements.at(branch_eidx);
+        if (ref.* != .scalar) return null;
+        return ref.scalar.analyte.undefined;
+    }
 
-        const true_is_defined = true_undef == .defined;
-        const false_is_defined = false_undef == .defined;
+    /// Get undefined state from a pointer at given EIdx
+    fn getPointerUndefined(branch: State, branch_eidx: EIdx) ?Undefined {
+        const ref = branch.refinements.at(branch_eidx);
+        if (ref.* != .pointer) return null;
+        return ref.pointer.analyte.undefined;
+    }
 
-        // Both agree
-        if (true_is_defined and false_is_defined) return .{ .defined = {} };
-        if (!true_is_defined and !false_is_defined) return true_undef; // both undefined, use first's meta
+    /// Merge undefined states from all reachable branches.
+    fn mergeUndefinedFromBranches(
+        ctx: *Context,
+        branches: []const ?State,
+        branch_eidxs: []const ?EIdx,
+        comptime getUndefined: fn (State, EIdx) ?Undefined,
+    ) ?Undefined {
+        var result: ?Undefined = null;
 
-        // Inconsistent: one defined, one undefined -> return .inconsistent
-        const undef_state = if (!true_is_defined) true_undef.undefined else false_undef.undefined;
+        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+            const branch = branch_opt orelse continue;
+            const branch_eidx = branch_eidx_opt orelse continue;
+            const branch_undef = getUndefined(branch, branch_eidx) orelse continue;
+
+            if (result) |current| {
+                result = mergeUndefinedStates(ctx, current, branch_undef);
+            } else {
+                result = branch_undef;
+            }
+        }
+
+        return result;
+    }
+
+    fn mergeUndefinedStates(ctx: *Context, a: Undefined, b: Undefined) Undefined {
+        if (a == .inconsistent) return a;
+        if (b == .inconsistent) return b;
+
+        const a_is_defined = a == .defined;
+        const b_is_defined = b == .defined;
+
+        if (a_is_defined and b_is_defined) return .{ .defined = {} };
+        if (!a_is_defined and !b_is_defined) return a;
+
+        const undef_state = if (!a_is_defined) a.undefined else b.undefined;
         return .{ .inconsistent = .{
             .undefined_meta = undef_state.meta,
             .branch_meta = ctx.meta,
