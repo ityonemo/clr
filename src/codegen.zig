@@ -22,49 +22,34 @@ const std = @import("std");
 pub const NameMap = clr.NameMap;
 pub const FnInfo = clr.FnInfo;
 
-/// Register a name in the per-function name map.
-/// Uses a hash of the name as the ID to ensure consistency across functions.
-/// This is critical because each function has its own name_map, and they're
-/// combined at link time - using content-based IDs prevents collisions.
+/// Register a name with a specific ID (typically an InternPool index).
+/// Use this when you have an InternPool NullTerminatedString to ensure globally unique IDs.
+fn registerNameWithId(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), id: u32, name: []const u8) void {
+    const allocator = clr_allocator.allocator();
+
+    // Check if already in map with this ID
+    if (name_map.contains(id)) return;
+
+    const duped = allocator.dupe(u8, name) catch @panic("OOM");
+    name_map.put(allocator, id, duped) catch @panic("OOM");
+}
+
+/// Register a name using a hash-based ID. Use this for names without InternPool indices
+/// (e.g., ZIR param names, constructed strings). Hash ensures same name = same ID across functions.
 fn registerName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), name: []const u8) u32 {
     const allocator = clr_allocator.allocator();
 
-    // Use hash of name as ID (ensures same name = same ID across functions)
-    // We use a non-zero hash to reserve 0 for "unknown"
-    const id: u32 = @truncate(std.hash.Wyhash.hash(0, name));
-    // Ensure non-zero (0 is reserved for unknown)
-    const final_id = if (id == 0) 1 else id;
+    // Use hash of name as ID (ensures same name = same ID globally)
+    // Use upper bit to avoid collision with InternPool indices (which are typically smaller)
+    const hash = std.hash.Wyhash.hash(0, name);
+    const id: u32 = @truncate(hash | 0x80000000); // Set high bit to distinguish from IP indices
 
-    // Check if already in map (same ID should have same name)
-    if (name_map.get(final_id)) |existing| {
-        // Verify it's the same name (hash collision check)
-        if (!std.mem.eql(u8, existing, name)) {
-            // Hash collision - very rare but possible. Use a different ID.
-            // Linear probe for next available slot
-            var probe_id = final_id +% 1;
-            while (probe_id != final_id) {
-                if (name_map.get(probe_id)) |probe_existing| {
-                    if (std.mem.eql(u8, probe_existing, name)) {
-                        return probe_id; // Found existing entry for this name
-                    }
-                } else {
-                    // Found empty slot, use it
-                    const duped = allocator.dupe(u8, name) catch @panic("OOM");
-                    name_map.put(allocator, probe_id, duped) catch @panic("OOM");
-                    return probe_id;
-                }
-                probe_id +%= 1;
-                if (probe_id == 0) probe_id = 1; // Skip 0
-            }
-            @panic("name_map full");
-        }
-        return final_id;
-    }
+    // Check if already in map
+    if (name_map.contains(id)) return id;
 
-    // New name - register it
     const duped = allocator.dupe(u8, name) catch @panic("OOM");
-    name_map.put(allocator, final_id, duped) catch @panic("OOM");
-    return final_id;
+    name_map.put(allocator, id, duped) catch @panic("OOM");
+    return id;
 }
 
 /// Register a field name mapping: {type_id, field_index} -> name_id
@@ -324,10 +309,10 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             }
             if (isAllocatorCreate(info.ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
-                const allocator_type = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                const type_id = registerName(info.name_map, allocator_type);
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 const created_type = extractAllocCreateType(info.arena, info.ip, datum);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .ty = {s} }} }});\n", .{ inst_index, type_id, created_type }, null);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, created_type }, null);
             }
             if (isAllocatorDestroy(info.ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
@@ -336,9 +321,9 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                     const call_parts = payloadCallParts(info, datum);
                     break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
                 };
-                const allocator_type = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                const type_id = registerName(info.name_map, allocator_type);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d} }} }});\n", .{ inst_index, ptr_inst, type_id }, null);
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d} }} }});\n", .{ inst_index, ptr_inst, allocator_info.id }, null);
             }
             const call_parts = payloadCallParts(info, datum);
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
@@ -589,10 +574,11 @@ fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
 
-        // Get field name and register it
+        // Get field name and register it using InternPool index
         const field_name_id: u32 = if (loaded.fieldName(ip, i).unwrap()) |name_str| blk: {
-            const name = name_str.toSlice(ip);
-            break :blk registerName(name_map, name);
+            const name_id = @intFromEnum(name_str);
+            registerNameWithId(name_map, name_id, name_str.toSlice(ip));
+            break :blk name_id;
         } else 0;
 
         // Register field mapping: {type_id, field_index} -> field_name_id
@@ -660,11 +646,11 @@ fn unionTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field
             result.appendSlice(arena, ", ") catch @panic("out of memory");
         }
 
-        // Get field name from union's tag type and register it
-        const field_name_id: u32 = if (getUnionFieldName(ip, loaded.enum_tag_ty, i)) |name|
-            registerName(name_map, name)
-        else
-            0;
+        // Get field name from union's tag type and register it using InternPool index
+        const field_name_id: u32 = if (getUnionFieldNameInfo(ip, loaded.enum_tag_ty, i)) |info| blk: {
+            registerNameWithId(name_map, info.id, info.name);
+            break :blk info.id;
+        } else 0;
 
         // Register field mapping: {type_id, field_index} -> field_name_id
         if (field_map) |fm| {
@@ -699,7 +685,13 @@ fn unionTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field
 }
 
 /// Get field name from union's tag enum type.
-fn getUnionFieldName(ip: *const InternPool, tag_type_idx: InternPool.Index, field_index: usize) ?[]const u8 {
+/// Info about a union field name: ID (InternPool index) and display name
+const UnionFieldNameInfo = struct {
+    id: u32, // InternPool index of the name (globally unique)
+    name: []const u8, // Display name for error messages
+};
+
+fn getUnionFieldNameInfo(ip: *const InternPool, tag_type_idx: InternPool.Index, field_index: usize) ?UnionFieldNameInfo {
     // If tag type is none/invalid, no field names available
     if (tag_type_idx == .none) return null;
 
@@ -709,7 +701,8 @@ fn getUnionFieldName(ip: *const InternPool, tag_type_idx: InternPool.Index, fiel
             const loaded_enum = ip.loadEnumType(tag_type_idx);
             const names = loaded_enum.names.get(ip);
             if (field_index < names.len) {
-                return names[field_index].toSlice(ip);
+                const name_str = names[field_index];
+                return .{ .id = @intFromEnum(name_str), .name = name_str.toSlice(ip) };
             }
         },
         else => {},
@@ -1124,12 +1117,15 @@ fn lookupFieldName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), ip: *co
         .struct_type => blk: {
             const loaded = ip.loadStructType(container_type);
             const name_str = loaded.fieldName(ip, field_index).unwrap() orelse break :blk 0;
-            break :blk registerName(name_map, name_str.toSlice(ip));
+            const name_id = @intFromEnum(name_str);
+            registerNameWithId(name_map, name_id, name_str.toSlice(ip));
+            break :blk name_id;
         },
         .union_type => blk: {
             const loaded = ip.loadUnionType(container_type);
-            const name = getUnionFieldName(ip, loaded.enum_tag_ty, field_index) orelse break :blk 0;
-            break :blk registerName(name_map, name);
+            const info = getUnionFieldNameInfo(ip, loaded.enum_tag_ty, field_index) orelse break :blk 0;
+            registerNameWithId(name_map, info.id, info.name);
+            break :blk info.id;
         },
         else => 0,
     };
@@ -1189,12 +1185,18 @@ fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
     }
 }
 
+/// Info about an allocator type: both the ID (for unique tracking) and display name (for errors)
+const AllocatorTypeInfo = struct {
+    id: u32, // InternPool index of nav.fqn (globally unique) or hash for runtime allocators
+    name: []const u8, // Display name for error messages (e.g., "PageAllocator")
+};
+
 /// Extract allocator type from the first argument to create/destroy
-/// Returns FQN like "PageAllocator" for comptime allocators, or traces inst_ref for runtime
-fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) []const u8 {
+/// Returns InternPool index of nav.fqn (for uniqueness) and display name (for error messages)
+fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) AllocatorTypeInfo {
     const payload_index = datum.pl_op.payload;
     const args_len = extra[payload_index];
-    if (args_len == 0) return "unknown";
+    if (args_len == 0) return .{ .id = 0, .name = "unknown" };
 
     // First argument is the allocator (self)
     const arg_ref: Ref = @enumFromInt(extra[payload_index + 1]);
@@ -1216,10 +1218,12 @@ fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, 
                                         switch (ptr.base_addr) {
                                             .nav => |nav_idx| {
                                                 const nav = ip.getNav(nav_idx);
+                                                // Use InternPool index of fqn as globally unique ID
+                                                const fqn_id = @intFromEnum(nav.fqn);
                                                 const fqn = nav.fqn.toSlice(ip);
                                                 // FQN is like "heap.PageAllocator.vtable"
-                                                // Extract "PageAllocator"
-                                                return extractAllocatorName(fqn);
+                                                // Extract "PageAllocator" for display
+                                                return .{ .id = fqn_id, .name = extractAllocatorName(fqn) };
                                             },
                                             else => {},
                                         }
@@ -1234,15 +1238,18 @@ fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, 
             },
             else => {},
         }
-        return "comptime_unknown";
+        return .{ .id = 0, .name = "comptime_unknown" };
     }
 
-    // It's an inst_ref - trace to find source
+    // It's an inst_ref - trace to find source (use hash for runtime allocators)
     if (arg_ref.toIndex()) |inst_idx| {
-        return traceAllocatorType(tags, data, ip, @intFromEnum(inst_idx), 0);
+        const name = traceAllocatorType(tags, data, ip, @intFromEnum(inst_idx), 0);
+        // Use hash with high bit set for runtime allocators (no InternPool index available)
+        const hash = std.hash.Wyhash.hash(0, name);
+        return .{ .id = @as(u32, @truncate(hash | 0x80000000)), .name = name };
     }
 
-    return "unknown";
+    return .{ .id = 0, .name = "unknown" };
 }
 
 /// Extract allocator name from vtable FQN (e.g., "heap.PageAllocator.vtable" -> "PageAllocator")

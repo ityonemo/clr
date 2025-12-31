@@ -120,9 +120,8 @@ test "instLine for arg" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{"test_param"});
     const result = codegen._instLine(&info, .arg, datum, 0, null);
 
-    // Check the prefix is correct, and verify name_map contains "test_param"
+    // Name "test_param" gets registered with a hash-based ID
     try std.testing.expect(std.mem.startsWith(u8, result, "    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = "));
-    // Verify the name was registered in the map
     try std.testing.expect(nameMapContains(&name_map, "test_param"));
 }
 
