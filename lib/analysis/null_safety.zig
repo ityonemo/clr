@@ -261,3 +261,259 @@ pub fn testValid(refinement: Refinements.Refinement) void {
         .void, .noreturn, .retval_future, .unimplemented, .region => {},
     }
 }
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_eidx = 0,
+        .caller_refinements = null,
+    };
+}
+
+// Helper type for testing null stores
+const test_scalar_type: tag.Type = .{ .id = null, .ty = .{ .scalar = {} } };
+const test_null_type: tag.Type = .{ .id = null, .ty = .{ .@"null" = &test_scalar_type } };
+
+test "is_non_null records check on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.meta.function = "test_func";
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional refinement
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // is_non_null should record the check
+    try NullSafety.is_non_null(state, 1, .{ .src = .{ .eidx = 0 } });
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .unknown);
+    try std.testing.expectEqual(CheckKind.non_null, ns.unknown.?.kind);
+    try std.testing.expectEqual(@as(usize, 1), ns.unknown.?.inst);
+}
+
+test "is_null records check on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.meta.function = "test_func";
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional refinement
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // is_null should record the check
+    try NullSafety.is_null(state, 1, .{ .src = .{ .eidx = 0 } });
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .unknown);
+    try std.testing.expectEqual(CheckKind.@"null", ns.unknown.?.kind);
+}
+
+test "cond_br sets non_null on true branch after is_non_null check" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.meta.function = "test_func";
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional with a recorded is_non_null check at inst 1
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .unknown = .{
+            .function = "test_func",
+            .inst = 1,
+            .kind = .non_null,
+        } } },
+        .type_id = 0, .to = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // cond_br on true branch (branch=true) should set to non_null
+    try NullSafety.cond_br(state, 2, .{ .condition_idx = 1, .branch = true });
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .non_null);
+}
+
+test "cond_br sets null on false branch after is_non_null check" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.meta.function = "test_func";
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional with a recorded is_non_null check at inst 1
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .unknown = .{
+            .function = "test_func",
+            .inst = 1,
+            .kind = .non_null,
+        } } },
+        .type_id = 0, .to = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // cond_br on false branch (branch=false) should set to null
+    try NullSafety.cond_br(state, 2, .{ .condition_idx = 1, .branch = false });
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .@"null");
+}
+
+test "optional_payload errors on unchecked unwrap" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional with NO null_safety set (unchecked)
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // optional_payload should error on unchecked optional
+    const result = NullSafety.optional_payload(state, 1, .{ .src = .{ .eidx = 0 } });
+    try std.testing.expectError(error.UncheckedOptionalUnwrap, result);
+}
+
+test "optional_payload errors on known null unwrap" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional known to be null
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .@"null" = .{ .function = "", .file = "", .line = 0, .column = null } } },
+        .type_id = 0, .to = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // optional_payload should error on null unwrap
+    const result = NullSafety.optional_payload(state, 1, .{ .src = .{ .eidx = 0 } });
+    try std.testing.expectError(error.NullUnwrap, result);
+}
+
+test "optional_payload succeeds on checked non_null" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional known to be non-null
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .non_null = .{ .function = "", .file = "", .line = 0, .column = null } } },
+        .type_id = 0, .to = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // optional_payload should succeed
+    try NullSafety.optional_payload(state, 1, .{ .src = .{ .eidx = 0 } });
+}
+
+test "store to optional with null sets null state" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional and a pointer to it
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .analyte = .{}, .type_id = 0 } });
+
+    var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Store null to the optional
+    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .@"null" = &test_scalar_type } } } });
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .@"null");
+}
+
+test "store to optional with value sets non_null state" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional and a pointer to it
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .analyte = .{}, .type_id = 0 } });
+
+    var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Store a runtime value to the optional
+    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .eidx = 1 } });
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .non_null);
+}

@@ -286,3 +286,216 @@ pub const VariantSafety = struct {
         }
     }
 };
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_eidx = 0,
+        .caller_refinements = null,
+    };
+}
+
+test "set_union_tag sets active variant" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create a union with 3 fields (null entities initially)
+    // Note: fields array is owned by refinements, freed on deinit
+    const fields = try allocator.alloc(?EIdx, 3);
+    for (fields) |*f| f.* = null;
+
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{ .analyte = .{}, .fields = fields, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+
+    var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Set variant 1 as active
+    try VariantSafety.set_union_tag(state, 1, .{ .ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+
+    // Check variant_safety was created
+    const u = refinements.at(union_eidx).@"union";
+    const vs = u.analyte.variant_safety.?;
+    try std.testing.expect(vs.active_metas[0] == null);
+    try std.testing.expect(vs.active_metas[1] != null);
+    try std.testing.expect(vs.active_metas[2] == null);
+}
+
+test "struct_field_ptr allows access to active variant" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create variant_safety with field 1 active
+    // Note: active_metas and fields are owned by refinements, freed on deinit
+    const active_metas = try allocator.alloc(?Meta, 3);
+    for (active_metas) |*m| m.* = null;
+    active_metas[1] = .{ .function = "test", .file = "test.zig", .line = 1, .column = null };
+
+    // Create fields array - only field 1 needs an entity
+    const fields = try allocator.alloc(?EIdx, 3);
+    for (fields) |*f| f.* = null;
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
+        .fields = fields,
+        .type_id = 0,
+    } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+
+    var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Access active field 1 - should succeed
+    try VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+}
+
+test "struct_field_ptr errors on inactive variant" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create variant_safety with field 1 active
+    // Note: active_metas and fields are owned by refinements, freed on deinit
+    const active_metas = try allocator.alloc(?Meta, 3);
+    for (active_metas) |*m| m.* = null;
+    active_metas[1] = .{ .function = "test", .file = "test.zig", .line = 1, .column = null };
+
+    // Create fields array
+    const fields = try allocator.alloc(?EIdx, 3);
+    for (fields) |*f| f.* = null;
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
+        .fields = fields,
+        .type_id = 0,
+    } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+
+    var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Access inactive field 0 - should error
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try std.testing.expectError(error.InactiveVariantAccess, result);
+}
+
+test "struct_field_val errors on inactive variant" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create variant_safety with field 2 active
+    // Note: active_metas and fields are owned by refinements, freed on deinit
+    const active_metas = try allocator.alloc(?Meta, 3);
+    for (active_metas) |*m| m.* = null;
+    active_metas[2] = .{ .function = "test", .file = "test.zig", .line = 1, .column = null };
+
+    // Create fields array
+    const fields = try allocator.alloc(?EIdx, 3);
+    for (fields) |*f| f.* = null;
+    fields[2] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
+        .fields = fields,
+        .type_id = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = union_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Access inactive field 0 - should error
+    const result = VariantSafety.struct_field_val(state, 1, .{ .operand = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try std.testing.expectError(error.InactiveVariantAccess, result);
+}
+
+test "struct_field_ptr errors on ambiguous variant after merge" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create variant_safety with TWO fields active (ambiguous state after merge)
+    // Note: active_metas and fields are owned by refinements, freed on deinit
+    const active_metas = try allocator.alloc(?Meta, 3);
+    for (active_metas) |*m| m.* = null;
+    active_metas[0] = .{ .function = "branch1", .file = "test.zig", .line = 1, .column = null };
+    active_metas[1] = .{ .function = "branch2", .file = "test.zig", .line = 2, .column = null };
+
+    // Create fields array
+    const fields = try allocator.alloc(?EIdx, 3);
+    for (fields) |*f| f.* = null;
+    fields[0] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
+        .fields = fields,
+        .type_id = 0,
+    } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+
+    var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Access any field when ambiguous - should error
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try std.testing.expectError(error.AmbiguousVariantAccess, result);
+}
+
+test "cond_br is no-op" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // cond_br should succeed without modifying anything
+    try VariantSafety.cond_br(state, 1, .{ .branch = true, .condition_idx = 0 });
+}

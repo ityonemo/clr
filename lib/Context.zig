@@ -124,6 +124,16 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
             // Arg has its name in the tag
             return self.getName(a.name_id);
         },
+        .optional_payload => |op| {
+            // Optional unwrap: base.?
+            const src_idx = switch (op.src) {
+                .eidx => |idx| idx,
+                .interned, .other => return null,
+            };
+            const base_path = self.buildPathName(results, refinements, src_idx) orelse return null;
+            const arena_alloc = self.error_name_arena.allocator();
+            return std.fmt.allocPrint(arena_alloc, "{s}.?", .{base_path}) catch return null;
+        },
         else => return null,
     }
 }
@@ -215,4 +225,183 @@ test "pop_fn restores meta.function to caller" {
     // Pop caller - meta.function should be empty
     ctx.pop_fn();
     try std.testing.expectEqualStrings("", ctx.meta.function);
+}
+
+// Test helper: getName that maps specific IDs to names
+fn pathTestGetName(id: u32) []const u8 {
+    return switch (id) {
+        1 => "foo",
+        2 => "bar",
+        3 => "baz",
+        4 => "opt",
+        else => "unknown",
+    };
+}
+
+// Test helper: getFieldId that maps (type_id, field_index) to name_id
+fn pathTestGetFieldId(type_id: u32, field_index: u32) ?u32 {
+    // Type 100 has fields: bar (id=2), baz (id=3)
+    if (type_id == 100) {
+        return switch (field_index) {
+            0 => 2, // bar
+            1 => 3, // baz
+            else => null,
+        };
+    }
+    return null;
+}
+
+test "buildPathName returns name from inst.name_id" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Inst with name_id set directly (e.g., from dbg_var_ptr)
+    var results = [_]Inst{.{ .name_id = 1 }};
+
+    const path = ctx.buildPathName(&results, &refinements, 0);
+    try std.testing.expectEqualStrings("foo", path.?);
+}
+
+test "buildPathName returns name from arg tag" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Inst with arg tag containing name_id
+    var results = [_]Inst{.{ .inst_tag = .{ .arg = .{ .value = .{ .other = {} }, .name_id = 2 } } }};
+
+    const path = ctx.buildPathName(&results, &refinements, 0);
+    try std.testing.expectEqualStrings("bar", path.?);
+}
+
+test "buildPathName for load inherits from pointer source" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Inst 0: named variable "foo"
+    // Inst 1: load from inst 0
+    var results = [_]Inst{
+        .{ .name_id = 1 }, // foo
+        .{ .inst_tag = .{ .load = .{ .ptr = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
+    };
+
+    const path = ctx.buildPathName(&results, &refinements, 1);
+    try std.testing.expectEqualStrings("foo", path.?);
+}
+
+test "buildPathName for optional_payload appends .?" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Inst 0: named variable "opt"
+    // Inst 1: optional_payload unwrap of inst 0
+    var results = [_]Inst{
+        .{ .name_id = 4 }, // opt
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 0 } } } },
+    };
+
+    const path = ctx.buildPathName(&results, &refinements, 1);
+    try std.testing.expectEqualStrings("opt.?", path.?);
+}
+
+test "buildPathName for nested optional unwrap shows chain" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Inst 0: named variable "opt"
+    // Inst 1: optional_payload unwrap of inst 0 -> opt.?
+    // Inst 2: optional_payload unwrap of inst 1 -> opt.?.?
+    var results = [_]Inst{
+        .{ .name_id = 4 }, // opt
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 0 } } } },
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 1 } } } },
+    };
+
+    const path = ctx.buildPathName(&results, &refinements, 2);
+    try std.testing.expectEqualStrings("opt.?.?", path.?);
+}
+
+test "buildPathName for struct_field_ptr builds field path" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+    ctx.getFieldId = &pathTestGetFieldId;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Create a pointer to struct refinement for inst 0
+    // The struct has type_id = 100
+    const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = struct_eidx, .analyte = .{}, .type_id = 0 } });
+
+    // Inst 0: named variable "foo" pointing to struct
+    // Inst 1: struct_field_ptr accessing field 0 (bar) of inst 0
+    var results = [_]Inst{
+        .{ .name_id = 1, .refinement = ptr_eidx }, // foo
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
+    };
+
+    const path = ctx.buildPathName(&results, &refinements, 1);
+    try std.testing.expectEqualStrings("foo.bar", path.?);
+}
+
+test "buildPathName for compound path: foo.?.bar" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.getName = &pathTestGetName;
+    ctx.getFieldId = &pathTestGetFieldId;
+
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    // Create refinements for the path: foo (optional containing ptr to struct)
+    // When unwrapped, gives pointer to struct with type_id = 100
+    const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = struct_eidx, .analyte = .{}, .type_id = 0 } });
+
+    // Inst 0: named variable "foo" (the optional)
+    // Inst 1: optional_payload of inst 0 -> foo.? (gives ptr to struct)
+    // Inst 2: struct_field_ptr of inst 1, field 0 -> foo.?.bar
+    var results = [_]Inst{
+        .{ .name_id = 1 }, // foo
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 0 } } }, .refinement = ptr_eidx },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 1, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
+    };
+
+    const path = ctx.buildPathName(&results, &refinements, 2);
+    try std.testing.expectEqualStrings("foo.?.bar", path.?);
 }
