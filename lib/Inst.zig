@@ -17,10 +17,14 @@ refinement: ?EIdx = null,
 /// Used by backPropagate() along with the caller_refinements parameter.
 caller_eidx: ?EIdx = null,
 
-/// Access path for this instruction's result (e.g., "container.ptr").
-/// Set by dbg_var_ptr for variable names, and by struct_field_ptr for field paths.
-/// this could be either a variable name or a variable name + various fields.
-name: ?[]const u8 = null,
+/// The tag that created this instruction, stored for path building at error time.
+/// Used by Context.buildPathName to walk the instruction chain statelessly.
+inst_tag: ?tag.AnyTag = null,
+
+/// Root variable name ID, set by dbg_var_ptr/dbg_var_val.
+/// Separate from inst_tag because dbg_var_ptr names a different instruction.
+/// Resolved via ctx.getName() at error time.
+name_id: ?u32 = null,
 
 /// Get this instruction's Refinement. Crashes if not initialized.
 pub fn get(self: *Inst, refinements: *Refinements) *Refinement {
@@ -28,6 +32,7 @@ pub fn get(self: *Inst, refinements: *Refinements) *Refinement {
 }
 
 pub fn apply(state: State, index: usize, any_tag: tag.AnyTag) !void {
+    state.results[index].inst_tag = any_tag;
     switch (any_tag) {
         inline else => |t| try t.apply(state, index),
     }
@@ -738,7 +743,7 @@ test "backPropagate propagates scalar analyte to caller" {
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_scalar_idx;
     results[0].caller_eidx = caller_scalar_idx;
-    results[0].name = "arg";
+    results[0].name_id = 1; // Arbitrary test name ID
 
     // Verify caller scalar is initially undefined tracking = null
     try std.testing.expectEqual(@as(?undefined_analysis.Undefined, null), caller_refinements.at(caller_scalar_idx).scalar.analyte.undefined);
@@ -796,7 +801,7 @@ test "backPropagate propagates pointer analyte to caller" {
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_ptr_idx;
     results[0].caller_eidx = caller_ptr_idx;
-    results[0].name = "ptr";
+    results[0].name_id = 1; // Arbitrary test name ID
 
     // Verify caller pointer has no memory_safety initially
     try std.testing.expectEqual(@as(?memory_safety.MemorySafety, null), caller_refinements.at(caller_ptr_idx).pointer.analyte.memory_safety);
@@ -855,7 +860,7 @@ test "backPropagate propagates pointee undefined state to caller" {
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_ptr_idx;
     results[0].caller_eidx = caller_ptr_idx;
-    results[0].name = "ptr";
+    results[0].name_id = 1; // Arbitrary test name ID
 
     // Verify caller's pointee is undefined initially
     try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_pointee_idx).scalar.analyte.undefined.?));
@@ -936,7 +941,7 @@ test "backPropagate propagates struct field undefined state to caller" {
     defer clear_results_list(results, allocator);
     results[0].refinement = callee_ptr_idx;
     results[0].caller_eidx = caller_ptr_idx;
-    results[0].name = "ptr";
+    results[0].name_id = 1; // Arbitrary test name ID
 
     // Verify caller's fields are undefined initially
     try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field0_idx).scalar.analyte.undefined.?));

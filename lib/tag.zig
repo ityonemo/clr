@@ -217,7 +217,6 @@ pub const Arg = struct {
     value: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const name = if (self.name_id != 0) state.ctx.getName(self.name_id) else "";
         switch (self.value) {
             .eidx => |eidx| {
                 const caller_eidx: EIdx = @intCast(eidx);
@@ -227,16 +226,15 @@ pub const Arg = struct {
                 state.results[index].refinement = local_copy_idx;
                 // Set caller_eidx for backward propagation on function close
                 state.results[index].caller_eidx = caller_eidx;
-                state.results[index].name = name;
+                // name_id is in inst_tag (stored by Inst.apply)
             },
             .interned => |ty| {
                 // Compile-time constant - create entity from type info
                 const ref = try typeToRefinement(ty, state.refinements);
                 const local_idx = try state.refinements.appendEntity(ref);
                 state.results[index].refinement = local_idx;
-                // No backward propagation needed for constants (caller_eidx stays null),
-                // but still record parameter name for error messages
-                state.results[index].name = name;
+                // No backward propagation needed for constants (caller_eidx stays null)
+                // name_id is in inst_tag (stored by Inst.apply)
             },
             .other => @panic("Arg: .other source not yet implemented"),
         }
@@ -370,11 +368,9 @@ pub const DbgStmt = struct {
 };
 
 /// Params passed to analysis handlers for dbg_var_ptr.
-/// This is separate from DbgVarPtr because the tag struct uses name_id (interned)
-/// while analysis handlers receive the resolved name string.
 pub const DbgVarPtrParams = struct {
     ptr: ?usize,
-    name: []const u8,
+    name_id: u32,
 };
 
 /// DbgVarPtr associates a variable name with a pointer instruction.
@@ -397,9 +393,8 @@ pub const DbgVarPtr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
         const inst = self.ptr orelse return;
-        const name = if (self.name_id != 0) state.ctx.getName(self.name_id) else "";
-        state.results[inst].name = name;
-        try splat(.dbg_var_ptr, state, index, DbgVarPtrParams{ .ptr = self.ptr, .name = name });
+        state.results[inst].name_id = self.name_id;
+        try splat(.dbg_var_ptr, state, index, DbgVarPtrParams{ .ptr = self.ptr, .name_id = self.name_id });
     }
 };
 
@@ -414,8 +409,7 @@ pub const DbgVarVal = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
         const inst = self.ptr orelse return;
-        const name = if (self.name_id != 0) state.ctx.getName(self.name_id) else "";
-        state.results[inst].name = name;
+        state.results[inst].name_id = self.name_id;
     }
 };
 
@@ -442,7 +436,7 @@ pub const Load = struct {
         const ptr_ref = state.results[ptr].refinement orelse {
             // Pointer has no refinement - use type info to create proper structure
             _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-            state.results[index].name = state.results[ptr].name;
+            // Path derived from inst_tag.load.ptr at error time
             try splat(.load, state, index, self);
             return;
         };
@@ -452,7 +446,7 @@ pub const Load = struct {
             .pointer => |p| p.to,
             else => {
                 _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-                state.results[index].name = state.results[ptr].name;
+                // Path derived from inst_tag.load.ptr at error time
                 try splat(.load, state, index, self);
                 return;
             },
@@ -461,10 +455,7 @@ pub const Load = struct {
         // Semideep copy: create new entity copying values, but pointers reference same target
         const new_idx = try state.refinements.semideepCopy(pointee_idx);
         state.results[index].refinement = new_idx;
-        // Propagate name from source pointer to load result.
-        // When we load a value through a named pointer (e.g., `container.ptr`),
-        // the loaded value should inherit that name for error reporting.
-        state.results[index].name = state.results[ptr].name;
+        // Path derived from inst_tag.load.ptr at error time
         try splat(.load, state, index, self);
     }
 };
@@ -518,20 +509,7 @@ pub const StructFieldPtr = struct {
                     }
                 };
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = field_idx } });
-
-                // Build access path: base_name + "." + field_name
-                // Look up field name via ctx.getFieldId(type_id, field_index)
-                const base_name = state.results[base].name;
-                const field_name = if (state.ctx.getFieldId(data.type_id, @intCast(self.field_index))) |name_id|
-                    state.ctx.getName(name_id)
-                else
-                    null;
-                state.results[index].name = if (base_name) |bn| blk: {
-                    if (field_name) |fn_| {
-                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch bn;
-                    }
-                    break :blk bn;
-                } else field_name;
+                // Path derived from inst_tag (has base and field_index) at error time
             },
             else => |t| std.debug.panic("struct_field_ptr: expected struct or union, got {s}", .{@tagName(t)}),
         }
@@ -585,19 +563,7 @@ pub const StructFieldVal = struct {
 
                 // Share the field entity (reading a field doesn't copy it)
                 state.results[index].refinement = field_idx;
-
-                // Build access path: operand_name + "." + field_name
-                const base_name = state.results[operand].name;
-                const field_name = if (state.ctx.getFieldId(data.type_id, @intCast(self.field_index))) |name_id|
-                    state.ctx.getName(name_id)
-                else
-                    null;
-                state.results[index].name = if (base_name) |bn| blk: {
-                    if (field_name) |fn_| {
-                        break :blk std.fmt.allocPrint(state.ctx.allocator, "{s}.{s}", .{ bn, fn_ }) catch bn;
-                    }
-                    break :blk bn;
-                } else field_name;
+                // Path derived from inst_tag (has operand and field_index) at error time
             },
             else => |t| std.debug.panic("struct_field_val: expected struct or union, got {s}", .{@tagName(t)}),
         }
@@ -1361,12 +1327,12 @@ test "dbg_var_ptr sets name on target instruction" {
 
     // First alloc to create a pointer
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try std.testing.expect(results[1].name == null);
+    try std.testing.expect(results[1].name_id == null);
 
-    // dbg_var_ptr should set the name on the target instruction (name_id=1 -> "my_var")
+    // dbg_var_ptr should set the name_id on the target instruction
     try Inst.apply(state, 2, .{ .dbg_var_ptr = .{ .ptr = 1, .name_id = 1 } });
 
-    try std.testing.expectEqualStrings("my_var", results[1].name.?);
+    try std.testing.expectEqual(@as(u32, 1), results[1].name_id.?);
 }
 
 test "dbg_var_ptr with null ptr does nothing" {
@@ -1405,12 +1371,12 @@ test "dbg_var_val sets name on target instruction" {
 
     // Set up a result at index 1
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    try std.testing.expect(results[1].name == null);
+    try std.testing.expect(results[1].name_id == null);
 
-    // dbg_var_val should set the name on the target instruction (name_id=2 -> "my_val")
+    // dbg_var_val should set the name_id on the target instruction
     try Inst.apply(state, 2, .{ .dbg_var_val = .{ .ptr = 1, .name_id = 2 } });
 
-    try std.testing.expectEqualStrings("my_val", results[1].name.?);
+    try std.testing.expectEqual(@as(u32, 2), results[1].name_id.?);
 }
 
 test "arg copies value and sets name" {
@@ -1440,11 +1406,12 @@ test "arg copies value and sets name" {
         .caller_refinements = &caller_refinements,
     };
 
-    // arg should copy the entity from caller and set the name (ID 3 = "param" in testGetName)
+    // arg should copy the entity from caller and store its tag
     try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .eidx = arg_eidx }, .name_id = 3 } });
 
     try std.testing.expect(results[0].refinement != null);
-    try std.testing.expectEqualStrings("param", results[0].name.?);
+    // name_id is now in the inst_tag, not a separate field
+    try std.testing.expectEqual(@as(u32, 3), results[0].inst_tag.?.arg.name_id);
 }
 
 test "br shares source refinement with block" {

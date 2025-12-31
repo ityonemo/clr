@@ -23,23 +23,48 @@ pub const NameMap = clr.NameMap;
 pub const FnInfo = clr.FnInfo;
 
 /// Register a name in the per-function name map.
-/// Returns an existing ID if the name is already registered, otherwise assigns a new ID.
+/// Uses a hash of the name as the ID to ensure consistency across functions.
+/// This is critical because each function has its own name_map, and they're
+/// combined at link time - using content-based IDs prevents collisions.
 fn registerName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), name: []const u8) u32 {
     const allocator = clr_allocator.allocator();
 
-    // Check if already in map
-    var it = name_map.iterator();
-    while (it.next()) |entry| {
-        if (std.mem.eql(u8, entry.value_ptr.*, name)) {
-            return entry.key_ptr.*;
+    // Use hash of name as ID (ensures same name = same ID across functions)
+    // We use a non-zero hash to reserve 0 for "unknown"
+    const id: u32 = @truncate(std.hash.Wyhash.hash(0, name));
+    // Ensure non-zero (0 is reserved for unknown)
+    const final_id = if (id == 0) 1 else id;
+
+    // Check if already in map (same ID should have same name)
+    if (name_map.get(final_id)) |existing| {
+        // Verify it's the same name (hash collision check)
+        if (!std.mem.eql(u8, existing, name)) {
+            // Hash collision - very rare but possible. Use a different ID.
+            // Linear probe for next available slot
+            var probe_id = final_id +% 1;
+            while (probe_id != final_id) {
+                if (name_map.get(probe_id)) |probe_existing| {
+                    if (std.mem.eql(u8, probe_existing, name)) {
+                        return probe_id; // Found existing entry for this name
+                    }
+                } else {
+                    // Found empty slot, use it
+                    const duped = allocator.dupe(u8, name) catch @panic("OOM");
+                    name_map.put(allocator, probe_id, duped) catch @panic("OOM");
+                    return probe_id;
+                }
+                probe_id +%= 1;
+                if (probe_id == 0) probe_id = 1; // Skip 0
+            }
+            @panic("name_map full");
         }
+        return final_id;
     }
 
-    // New name - assign next ID (starting at 1, 0 = unknown)
-    const id = @as(u32, @intCast(name_map.count())) + 1;
+    // New name - register it
     const duped = allocator.dupe(u8, name) catch @panic("OOM");
-    name_map.put(allocator, id, duped) catch @panic("OOM");
-    return id;
+    name_map.put(allocator, final_id, duped) catch @panic("OOM");
+    return final_id;
 }
 
 /// Register a field name mapping: {type_id, field_index} -> name_id

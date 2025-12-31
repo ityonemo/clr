@@ -114,18 +114,20 @@ pub const NullSafety = union(enum) {
         }
     }
 
-    fn reportUncheckedUnwrap(ctx: *Context, name: ?[]const u8) anyerror!void {
-        if (name) |n| {
-            try ctx.meta.print(ctx.writer, "unchecked optional unwrap of '{s}' in ", .{n});
+    fn reportUncheckedUnwrap(ctx: *Context, name_id: ?u32) anyerror!void {
+        if (name_id) |id| {
+            const name = ctx.getName(id);
+            try ctx.meta.print(ctx.writer, "unchecked optional unwrap of '{s}' in ", .{name});
         } else {
             try ctx.meta.print(ctx.writer, "unchecked optional unwrap in ", .{});
         }
         return error.UncheckedOptionalUnwrap;
     }
 
-    fn reportNullUnwrap(self: @This(), ctx: *Context, name: ?[]const u8) anyerror!void {
-        if (name) |n| {
-            try ctx.meta.print(ctx.writer, "optional unwrap of known null '{s}' in ", .{n});
+    fn reportNullUnwrap(self: @This(), ctx: *Context, name_id: ?u32) anyerror!void {
+        if (name_id) |id| {
+            const name = ctx.getName(id);
+            try ctx.meta.print(ctx.writer, "optional unwrap of known null '{s}' in ", .{name});
         } else {
             try ctx.meta.print(ctx.writer, "optional unwrap of known null in ", .{});
         }
@@ -152,10 +154,10 @@ pub const NullSafety = union(enum) {
         // optional_payload can apply to optionals or pointers (for error union unwrapping)
         if (ref.* != .optional) return;
 
-        const ns = ref.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name);
+        const ns = ref.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
         switch (ns) {
-            .unknown => return reportUncheckedUnwrap(ctx, results[src_idx].name),
-            .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name),
+            .unknown => return reportUncheckedUnwrap(ctx, results[src_idx].name_id),
+            .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name_id),
             .non_null => {}, // Safe
         }
     }

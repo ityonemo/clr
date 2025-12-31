@@ -17,6 +17,10 @@ setup() {
 }
 
 teardown() {
+    # On failure, copy .air.zig files to project root for inspection
+    if [ "$BATS_TEST_COMPLETED" != 1 ]; then
+        cp "$TEST_TEMP"/*.air.zig "$PROJECT_ROOT/" 2>/dev/null || true
+    fi
     rm -rf "$TEST_TEMP"
 }
 
@@ -29,6 +33,7 @@ compile_air() {
         -fair-out="$LIBCLR" \
         -ofmt=air \
         -femit-bin="$output" \
+        --global-cache-dir "$TEST_TEMP/.zig-cache" \
         -lc \
         "$input" 2>&1
 }
@@ -41,6 +46,7 @@ run_air() {
         --dep clr \
         -Mroot="$zig_file" \
         -Mclr="${LIB_DIR}/lib.zig" \
+        --global-cache-dir "$TEST_TEMP/.zig-cache" \
         2>&1
 }
 
@@ -52,5 +58,9 @@ compile_and_run() {
     local air_file="${TEST_TEMP}/${basename}.air.zig"
 
     compile_air "$input" "$air_file" >/dev/null
+    # Retry once if air file is empty (OOM or crash)
+    if [ ! -s "$air_file" ]; then
+        compile_air "$input" "$air_file" >/dev/null
+    fi
     run_air "$air_file"
 }

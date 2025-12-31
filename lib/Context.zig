@@ -1,4 +1,7 @@
 const std = @import("std");
+const tag = @import("tag.zig");
+const Refinements = @import("Refinements.zig");
+const Inst = @import("Inst.zig");
 
 allocator: std.mem.Allocator,
 stacktrace: std.ArrayListUnmanaged([]const u8),
@@ -14,6 +17,9 @@ getName: *const fn (u32) []const u8 = undefined,
 /// Converts (type_id, field_index) to a name_id for getName
 /// Returns null for tuple types or unknown fields
 getFieldId: *const fn (u32, u32) ?u32 = undefined,
+
+/// Arena for error path names - strings allocated here are freed all at once at end of run
+error_name_arena: std.heap.ArenaAllocator,
 
 const Context = @This();
 
@@ -40,11 +46,86 @@ pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
         .writer = writer,
         .getName = &testGetName,
         .getFieldId = &testGetFieldId,
+        .error_name_arena = std.heap.ArenaAllocator.init(allocator),
     };
 }
 
 pub fn deinit(self: *Context) void {
     self.stacktrace.deinit(self.allocator);
+    self.error_name_arena.deinit();
+}
+
+/// Build a full access path name for an instruction by walking the tag chain.
+/// Allocated from error_name_arena. Returns null if no name can be determined.
+pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refinements, index: usize) ?[]const u8 {
+    const inst = results[index];
+
+    // Check for root variable name (set by dbg_var_ptr/dbg_var_val)
+    if (inst.name_id) |name_id| {
+        return self.getName(name_id);
+    }
+
+    // Walk the tag chain to build compound paths
+    const t = inst.inst_tag orelse return null;
+    switch (t) {
+        .struct_field_ptr => |sfp| {
+            const base = sfp.base orelse return null;
+            const base_path = self.buildPathName(results, refinements, base);
+
+            // Get field name from container's type_id
+            const base_ref_idx = results[base].refinement orelse return base_path;
+            const type_id = switch (refinements.at(base_ref_idx).*) {
+                .pointer => |p| blk: {
+                    // struct_field_ptr's base is a pointer to struct/union
+                    const pointee = refinements.at(p.to);
+                    break :blk switch (pointee.*) {
+                        .@"struct" => |s| s.type_id,
+                        .@"union" => |u| u.type_id,
+                        else => return base_path,
+                    };
+                },
+                else => return base_path,
+            };
+            const field_name_id = self.getFieldId(type_id, @intCast(sfp.field_index)) orelse return base_path;
+            const field_name = self.getName(field_name_id);
+
+            if (base_path) |bp| {
+                const arena_alloc = self.error_name_arena.allocator();
+                return std.fmt.allocPrint(arena_alloc, "{s}.{s}", .{ bp, field_name }) catch return field_name;
+            }
+            return field_name;
+        },
+        .struct_field_val => |sfv| {
+            const operand = sfv.operand orelse return null;
+            const base_path = self.buildPathName(results, refinements, operand);
+
+            // Get field name from container's type_id
+            const base_ref_idx = results[operand].refinement orelse return base_path;
+            const type_id = switch (refinements.at(base_ref_idx).*) {
+                .@"struct" => |s| s.type_id,
+                .@"union" => |u| u.type_id,
+                else => return base_path,
+            };
+            const field_name_id = self.getFieldId(type_id, @intCast(sfv.field_index)) orelse return base_path;
+            const field_name = self.getName(field_name_id);
+
+            if (base_path) |bp| {
+                const arena_alloc = self.error_name_arena.allocator();
+                return std.fmt.allocPrint(arena_alloc, "{s}.{s}", .{ bp, field_name }) catch return field_name;
+            }
+            return field_name;
+        },
+        .load => |l| {
+            // Load inherits name from its pointer source
+            const ptr = l.ptr orelse return null;
+            return self.buildPathName(results, refinements, ptr);
+        },
+        .arg => |a| {
+            // Arg has its name in the tag
+            return self.getName(a.name_id);
+        },
+        else => return null,
+    }
 }
 
 /// Create a shallow copy of the context (for branch execution).

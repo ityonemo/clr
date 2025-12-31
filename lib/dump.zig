@@ -84,8 +84,10 @@ fn dumpInstructionResults(writer: *std.Io.Writer, results: []Inst, refinements: 
             }
             const ref = refinements.at(eidx);
             const desc = formatRefinementDeep(&desc_buf, eidx, ref.*, refinements, 0);
-            const name_str = inst.name orelse "(no name)";
-            const line = std.fmt.bufPrint(&line_buf, "{s}[{d}] name=\"{s}\" → {s}\n", .{ prefix, i, name_str, desc }) catch continue;
+            const line = if (inst.name_id) |id|
+                std.fmt.bufPrint(&line_buf, "{s}[{d}] name_id={d} → {s}\n", .{ prefix, i, id, desc }) catch continue
+            else
+                std.fmt.bufPrint(&line_buf, "{s}[{d}] → {s}\n", .{ prefix, i, desc }) catch continue;
             writer.writeAll(line) catch {};
         } else {
             // Start or continue uninitialized range

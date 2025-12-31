@@ -14,12 +14,12 @@ pub const Undefined = union(enum) {
     defined: void,
     undefined: struct {
         meta: Meta,
-        name_when_set: ?[]const u8 = null, // Access path when set to undefined
+        name_when_set: ?[]const u8 = null, // Full path name (arena-allocated at store time)
     },
     inconsistent: struct {
         undefined_meta: Meta, // where undefined was set
         branch_meta: Meta, // where the conditional branch occurred
-        name_when_set: ?[]const u8 = null, // Access path when set to undefined
+        name_when_set: ?[]const u8 = null, // Full path name (arena-allocated at store time)
     },
 
     pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror!void {
@@ -291,7 +291,7 @@ pub const Undefined = union(enum) {
     /// Recursively set name_when_set on undefined states that don't have a name yet.
     /// Called by DbgVarPtr to retroactively name undefined states that were created
     /// before the variable name was known (since dbg_var_ptr comes AFTER stores in AIR).
-    pub fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: []const u8) void {
+    pub fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: ?[]const u8) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| {
                 if (s.analyte.undefined) |*undef| {
@@ -327,7 +327,9 @@ pub const Undefined = union(enum) {
         const ptr_idx = state.results[inst].refinement orelse return;
         // Follow pointer to get pointee - panic on unexpected types
         const pointee_idx = state.refinements.at(ptr_idx).pointer.to;
-        setNameOnUndefined(state.refinements, pointee_idx, params.name);
+        // Build the full path name and set on undefined states
+        const name = state.ctx.buildPathName(state.results, state.refinements, inst);
+        setNameOnUndefined(state.refinements, pointee_idx, name);
     }
 
     pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
@@ -532,8 +534,8 @@ pub const Undefined = union(enum) {
 
         if (is_undef) {
             // Undefined stores: mark pointee and all children as undefined (recursive)
-            // Capture name from the destination pointer instruction
-            const undef_state: Undefined = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = results[ptr].name } };
+            // Build full path name for the destination pointer
+            const undef_state: Undefined = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = state.ctx.buildPathName(results, refinements, ptr) } };
             setUndefinedRecursive(refinements, pointee_idx, undef_state);
         } else {
             // Defined stores: update the pointee based on source type
@@ -1131,6 +1133,13 @@ test "load from inst without undefined tracking does not return error" {
     try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 
+fn testGetName(id: u32) []const u8 {
+    return switch (id) {
+        1 => "my_var",
+        else => "unknown",
+    };
+}
+
 test "reportUseBeforeAssign with name_when_set returns error" {
     const allocator = std.testing.allocator;
 
@@ -1138,6 +1147,7 @@ test "reportUseBeforeAssign with name_when_set returns error" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     ctx.meta.function = "test_func";
+    ctx.getName = &testGetName;
     defer ctx.deinit();
 
     const undef = Undefined{ .undefined = .{

@@ -17,22 +17,22 @@ pub const StackPtr = struct {
     name: Name = .{ .other = {} },
 
     pub const Name = union(enum) {
-        variable: []const u8,
-        parameter: []const u8,
+        variable: u32, // Name ID (resolved via ctx.getName at error time)
+        parameter: u32, // Name ID (resolved via ctx.getName at error time)
         other: void,
     };
 };
 
 pub const Free = struct {
     meta: Meta,
-    name_at_free: ?[]const u8 = null,
+    name_at_free: ?[]const u8 = null, // Full path name (arena-allocated at store time)
 };
 
 pub const Allocation = struct {
     allocated: Meta,
     freed: ?Free = null, // null = still allocated, has value = freed
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
-    name_at_alloc: ?[]const u8 = null, // Access path when allocated (e.g., "container.ptr")
+    name_at_alloc: ?[]const u8 = null, // Full path name when allocated (e.g., "container.ptr")
     returned: bool = false, // true if this allocation was returned to caller (not a local leak)
 };
 
@@ -65,26 +65,27 @@ pub const MemorySafety = union(enum) {
         const src_refinement_idx = results[src].refinement orelse return;
         const src_refinement = refinements.at(src_refinement_idx);
         if (src_refinement.* == .pointer) {
-            // Get the destination name (e.g., "container.ptr" from dbg_var_ptr)
-            const dest_name = results[ptr].name;
-            if (dest_name != null) {
-                // Get the pointee and check if it has allocation tracking
-                const pointee_idx = src_refinement.pointer.to;
-                const pointee = refinements.at(pointee_idx);
-                const pointee_analyte = getAnalytePtr(pointee);
-                if (pointee_analyte.memory_safety) |*ms| {
-                    if (ms.* == .allocation) {
-                        // Set name_at_alloc if not already set
-                        if (ms.allocation.name_at_alloc == null) {
-                            ms.allocation.name_at_alloc = dest_name;
-                        }
+            // Get the pointee and check if it has allocation tracking
+            const pointee_idx = src_refinement.pointer.to;
+            const pointee = refinements.at(pointee_idx);
+            const pointee_analyte = getAnalytePtr(pointee);
+            if (pointee_analyte.memory_safety) |*ms| {
+                if (ms.* == .allocation) {
+                    // Set name_at_alloc if not already set
+                    if (ms.allocation.name_at_alloc == null) {
+                        ms.allocation.name_at_alloc = ctx.buildPathName(results, refinements, ptr);
                     }
                 }
             }
         }
 
-        // If storing from a parameter, propagate the parameter name and location to the destination's stack_ptr
-        const param_name = results[src].name orelse return;
+        // If storing from a parameter, propagate the parameter name_id and location to the destination's stack_ptr
+        // Get name_id from the arg tag (name_id on Inst is only set by dbg_var_ptr)
+        const src_tag = results[src].inst_tag orelse return;
+        const param_name_id = switch (src_tag) {
+            .arg => |a| a.name_id,
+            else => return,
+        };
         // Get the target pointer refinement (created by arg for pointer parameters)
         const tgt_refinement_idx = results[ptr].refinement orelse return;
         if (refinements.at(tgt_refinement_idx).* != .pointer) return;
@@ -92,7 +93,7 @@ pub const MemorySafety = union(enum) {
 
         if (tgt_ptr.analyte.memory_safety) |*ms| {
             if (ms.* == .stack_ptr) {
-                ms.stack_ptr.name = .{ .parameter = param_name };
+                ms.stack_ptr.name = .{ .parameter = param_name_id };
                 ms.stack_ptr.meta = .{
                     .function = ctx.meta.function,
                     .file = ctx.meta.file,
@@ -104,7 +105,7 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Retroactively set variable name on stack_ptr for escape detection messages.
-    /// The name is already set on the instruction by DbgVarPtr.apply().
+    /// The name_id is already set on the instruction by DbgVarPtr.apply().
     pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtrParams) !void {
         _ = index;
         const inst = params.ptr orelse return;
@@ -114,7 +115,7 @@ pub const MemorySafety = union(enum) {
             if (outer_analyte.memory_safety) |*ms| {
                 if (ms.* == .stack_ptr) {
                     if (ms.stack_ptr.name == .other) {
-                        ms.stack_ptr.name = .{ .variable = params.name };
+                        ms.stack_ptr.name = .{ .variable = params.name_id };
                     }
                 }
             }
@@ -389,7 +390,7 @@ pub const MemorySafety = union(enum) {
         // Mark as freed
         ms.allocation.freed = .{
             .meta = ctx.meta,
-            .name_at_free = results[ptr].name,
+            .name_at_free = ctx.buildPathName(results, refinements, ptr),
         };
     }
 
@@ -434,10 +435,12 @@ pub const MemorySafety = union(enum) {
         const sp = ms.stack_ptr;
         try ctx.meta.print(ctx.writer, "stack pointer escape in ", .{});
         switch (sp.name) {
-            .variable => |name| {
+            .variable => |name_id| {
+                const name = ctx.getName(name_id);
                 try sp.meta.print(ctx.writer, "pointer was for local variable '{s}' in ", .{name});
             },
-            .parameter => |name| {
+            .parameter => |name_id| {
+                const name = ctx.getName(name_id);
                 if (name.len > 0) {
                     try sp.meta.print(ctx.writer, "pointer was for parameter '{s}' created in ", .{name});
                 } else {
@@ -529,10 +532,12 @@ pub const MemorySafety = union(enum) {
     fn reportFreeStackMemory(ctx: *Context, sp: StackPtr) anyerror {
         try ctx.meta.print(ctx.writer, "free of stack memory in ", .{});
         switch (sp.name) {
-            .variable => |name| {
+            .variable => |name_id| {
+                const name = ctx.getName(name_id);
                 try sp.meta.print(ctx.writer, "pointer is to local variable '{s}' in ", .{name});
             },
-            .parameter => |name| {
+            .parameter => |name_id| {
+                const name = ctx.getName(name_id);
                 try sp.meta.print(ctx.writer, "pointer is to parameter '{s}' in ", .{name});
             },
             .other => {
@@ -642,6 +647,9 @@ fn testGetName(id: u32) []const u8 {
         2 => "my_val",
         3 => "param",
         4 => "foo",
+        5 => "src_var",
+        6 => "local",
+        7 => "container",
         // Allocator type IDs
         10 => "PageAllocator",
         11 => "ArenaAllocator",
@@ -720,7 +728,7 @@ test "dbg_var_ptr sets variable name when name is other" {
 
     const ms2 = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.variable, std.meta.activeTag(ms2.stack_ptr.name));
-    try std.testing.expectEqualStrings("foo", ms2.stack_ptr.name.variable);
+    try std.testing.expectEqual(@as(u32, 4), ms2.stack_ptr.name.variable);
 }
 
 test "bitcast propagates stack_ptr metadata" {
@@ -747,7 +755,7 @@ test "bitcast propagates stack_ptr metadata" {
                 .line = 42,
                 .column = 7,
             },
-            .name = .{ .variable = "src_var" },
+            .name = .{ .variable = 5 }, // 5 -> "src_var"
         } } },
         .type_id = 0,
         .to = pointee_idx,
@@ -760,7 +768,7 @@ test "bitcast propagates stack_ptr metadata" {
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
     try std.testing.expectEqualStrings("source.zig", ms.stack_ptr.meta.file);
     try std.testing.expectEqual(@as(u32, 42), ms.stack_ptr.meta.line);
-    try std.testing.expectEqualStrings("src_var", ms.stack_ptr.name.variable);
+    try std.testing.expectEqual(@as(u32, 5), ms.stack_ptr.name.variable); // 5 -> "src_var"
 }
 
 test "ret_safe detects escape when returning stack pointer from same function" {
@@ -787,7 +795,7 @@ test "ret_safe detects escape when returning stack pointer from same function" {
                 .file = "test.zig",
                 .line = 5,
             },
-            .name = .{ .variable = "local" },
+            .name = .{ .variable = 6 }, // 6 -> "local"
         } } },
         .type_id = 0,
         .to = pointee_idx,
@@ -824,7 +832,7 @@ test "ret_safe allows returning arg (empty function name)" {
                 .file = "test.zig",
                 .line = 5,
             },
-            .name = .{ .parameter = "param" },
+            .name = .{ .parameter = 3 }, // 3 -> "param"
         } } },
         .type_id = 0,
         .to = pointee_idx,
@@ -1272,7 +1280,7 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     const local_ptr_idx = try caller_refinements.at(caller_ptr_idx).*.copyTo(&caller_refinements, &callee_refinements);
     callee_results[0].refinement = local_ptr_idx;
     callee_results[0].caller_eidx = caller_ptr_idx;
-    callee_results[0].name = "container";
+    callee_results[0].name_id = 7; // 7 -> "container"
 
     const callee_state = State{
         .ctx = &ctx,
