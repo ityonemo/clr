@@ -117,6 +117,20 @@ fn arenaFree(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize) void {}
 // Main arena instance
 var main_arena: Arena = undefined;
 
+// Simple spinlock protecting main_arena access (codegen runs in parallel threads)
+// Using raw atomic instead of std.Thread.Mutex to avoid DLL relocation issues
+var arena_lock: std.atomic.Value(u32) = std.atomic.Value(u32).init(0);
+
+fn spinLock() void {
+    while (arena_lock.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+        std.atomic.spinLoopHint();
+    }
+}
+
+fn spinUnlock() void {
+    arena_lock.store(0, .release);
+}
+
 /// Initialize the allocator with a vtable from the host process.
 /// Must be called before using allocator().
 pub fn init(avt: *const AllocatorVTable) void {
@@ -130,6 +144,14 @@ pub fn init(avt: *const AllocatorVTable) void {
         .free = arenaFree,
     };
 
+    // Initialize locking vtable for thread-safe main_arena access
+    locking_vtable = .{
+        .alloc = lockingAlloc,
+        .resize = lockingResize,
+        .remap = lockingRemap,
+        .free = lockingFree,
+    };
+
     main_arena = Arena.init();
 }
 
@@ -137,8 +159,39 @@ pub fn deinit() void {
     main_arena.deinit();
 }
 
+/// Thread-safe allocator wrapper for main_arena.
+/// Uses spinlock to protect concurrent access from parallel codegen threads.
+var locking_vtable: std.mem.Allocator.VTable = undefined;
+
+fn lockingAlloc(ptr: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    spinLock();
+    defer spinUnlock();
+    return arenaAlloc(ptr, len, ptr_align, ret_addr);
+}
+
+fn lockingResize(ptr: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+    spinLock();
+    defer spinUnlock();
+    return arenaResize(ptr, buf, buf_align, new_len, ret_addr);
+}
+
+fn lockingRemap(ptr: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+    spinLock();
+    defer spinUnlock();
+    return arenaRemap(ptr, buf, buf_align, new_len, ret_addr);
+}
+
+fn lockingFree(ptr: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
+    spinLock();
+    defer spinUnlock();
+    arenaFree(ptr, buf, buf_align, ret_addr);
+}
+
 pub fn allocator() std.mem.Allocator {
-    return main_arena.allocator();
+    return .{
+        .ptr = &main_arena,
+        .vtable = &locking_vtable,
+    };
 }
 
 /// Create a new arena for temporary allocations (e.g., per-function codegen)

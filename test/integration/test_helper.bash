@@ -58,9 +58,5 @@ compile_and_run() {
     local air_file="${TEST_TEMP}/${basename}.air.zig"
 
     compile_air "$input" "$air_file" >/dev/null
-    # Retry once if air file is empty (OOM or crash)
-    if [ ! -s "$air_file" ]; then
-        compile_air "$input" "$air_file" >/dev/null
-    fi
     run_air "$air_file"
 }
