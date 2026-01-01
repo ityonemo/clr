@@ -75,6 +75,36 @@ load test_helper
 }
 
 # =============================================================================
+# Switch Tests
+# =============================================================================
+
+@test "detects undefined when one switch case sets, others don't" {
+    run compile_and_run "$TEST_CASES/undefined/switch/one_case_sets.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of value that may be undefined in one_case_sets.main" ]]
+    [[ "$output" =~ "one_case_sets.zig:" ]]
+}
+
+@test "no error when all switch cases set value" {
+    run compile_and_run "$TEST_CASES/undefined/switch/all_cases_set.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined when all switch cases set to undefined" {
+    run compile_and_run "$TEST_CASES/undefined/switch/all_cases_unset.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in all_cases_unset.main" ]]
+    [[ "$output" =~ "all_cases_unset.zig:" ]]
+}
+
+@test "detects undefined value returned from switch case" {
+    run compile_and_run "$TEST_CASES/undefined/switch/return_from_cases.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in" ]]
+    [[ "$output" =~ "return_from_cases.zig:" ]]
+}
+
+# =============================================================================
 # Struct Tests
 # =============================================================================
 

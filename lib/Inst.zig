@@ -180,6 +180,120 @@ fn mergeCallerReturn(
     }
 }
 
+/// Handle switch statement with N case branches plus optional else.
+/// All branches are executed to get conservative analysis results.
+/// Uses comptime tuple of function pointers for the case functions.
+pub fn switch_br(
+    state: State,
+    comptime index: usize,
+    comptime case_fns: anytype,
+) !void {
+    const ctx = state.ctx;
+    const results = state.results;
+    const refinements = state.refinements;
+    const caller_refinements = state.caller_refinements;
+    const return_eidx = state.return_eidx;
+
+    const num_cases = case_fns.len;
+
+    // Create arrays for each branch's cloned state
+    var branch_results: [num_cases][]Inst = undefined;
+    var branch_refinements: [num_cases]Refinements = undefined;
+    var branch_contexts: [num_cases]*Context = undefined;
+    var branch_caller_refinements: [num_cases]?Refinements = undefined;
+
+    // Clone state for each branch
+    inline for (0..num_cases) |i| {
+        branch_results[i] = try clone_results_list(results, ctx.allocator);
+        branch_refinements[i] = try refinements.clone(ctx.allocator);
+        branch_contexts[i] = try ctx.copy();
+        branch_caller_refinements[i] = if (caller_refinements) |cp|
+            try cp.clone(ctx.allocator)
+        else
+            null;
+    }
+
+    // Deferred cleanup
+    defer {
+        inline for (0..num_cases) |i| {
+            clear_results_list(branch_results[i], ctx.allocator);
+            branch_refinements[i].deinit();
+            branch_contexts[i].delete();
+            if (branch_caller_refinements[i]) |*r| r.deinit();
+        }
+    }
+
+    // Build states and execute each branch
+    var branch_states: [num_cases]State = undefined;
+    inline for (0..num_cases) |i| {
+        branch_states[i] = State{
+            .ctx = branch_contexts[i],
+            .results = branch_results[i],
+            .refinements = &branch_refinements[i],
+            .caller_refinements = if (branch_caller_refinements[i]) |*r| r else null,
+            .return_eidx = return_eidx,
+        };
+        try case_fns[i](branch_states[i]);
+    }
+
+    // Mark the switch instruction as void
+    results[index].refinement = try refinements.appendEntity(.{ .void = {} });
+
+    // Merge all branches using splatMerge
+    try tag.splatMerge(.switch_br, results, ctx, refinements, &branch_states);
+
+    // Merge caller_refinements return slot if all branches wrote to it
+    if (caller_refinements) |cp| {
+        try mergeCallerReturnN(
+            ctx,
+            cp,
+            return_eidx,
+            &branch_caller_refinements,
+        );
+    }
+}
+
+/// Merge the return slot from N branch's caller_refinements back into the original.
+/// Called after all branches of a switch have executed.
+fn mergeCallerReturnN(
+    ctx: *Context,
+    caller_refinements: *Refinements,
+    return_eidx: EIdx,
+    branch_callers: []?Refinements,
+) !void {
+    _ = ctx;
+    const orig_return = caller_refinements.at(return_eidx);
+
+    // If original is still retval_future, check if any branch set it
+    if (orig_return.* == .retval_future) {
+        var all_set = true;
+        var first_set_idx: ?usize = null;
+
+        for (branch_callers, 0..) |*bc_opt, i| {
+            if (bc_opt.*) |*bc| {
+                const branch_return = bc.at(return_eidx);
+                if (branch_return.* == .retval_future) {
+                    all_set = false;
+                } else if (first_set_idx == null) {
+                    first_set_idx = i;
+                }
+            }
+        }
+
+        if (all_set and first_set_idx != null) {
+            // All branches returned - need to merge
+            // Copy first branch's value, then let analyses merge
+            const first_bc = &branch_callers[first_set_idx.?].?;
+            const first_return = first_bc.at(return_eidx);
+            const first_idx = try first_return.*.copyTo(first_bc, caller_refinements);
+            orig_return.* = caller_refinements.at(first_idx).*;
+
+            // TODO: Call each analysis's mergeReturn for N-way merge
+            // For now, we just copy the first branch's value
+        }
+    }
+}
+
 // =============================================================================
 // Results list management
 // =============================================================================

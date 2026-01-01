@@ -63,6 +63,11 @@ bats test/integration/allocator.bats
 bats test/integration/allocator.bats -f "double-free"
 ```
 
+**Performance Note**: Full integration tests take ~7 minutes to run. Only run `./run_integration.sh` before commits. During development, use targeted testing:
+- `./run_one.sh <test_file>` - Test a single case quickly
+- `bats test/integration/<file>.bats -f "pattern"` - Run specific tests by pattern
+- `bats test/integration/<file>.bats` - Run one test file
+
 **Note**: Integration tests are expected to fail during development (the CLR runtime is incomplete). However, if the tests fail due to **compilation errors in the emitted .air.zig analyzer**, that indicates a real problem in codegen that needs to be fixed.
 
 **Important**: Always run BATS from the project root directory. The test helper uses relative paths from its location to find the compiler, libclr.so, and test cases.
@@ -457,6 +462,10 @@ This allows `backPropagate` to find the caller's entity, follow it (if it's a po
 - Type flexibility is important.  If you are for example converting a pointer to an integer
   it is useful to continue to track that integer *as if it were a pointer*.  Though this
   is not supported at the moment.
+
+### Invalid union tag detection
+
+We won't prevent failures due to union tag field being set to an invalid value. In release safe modes this will cause a runtime crash, or will exhibit undefined behavior in optimized builds.
 
 ## Known Limitations
 

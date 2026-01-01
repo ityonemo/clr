@@ -936,6 +936,23 @@ pub const CondBr = struct {
     }
 };
 
+/// Tag injected at the start of each switch case body.
+/// Similar to CondBr but for switch cases - identifies which case this is.
+pub const SwitchBr = struct {
+    /// Which case this is (0-indexed). The else case is the last index.
+    case_index: usize,
+    /// Total number of cases including else (for analysis context).
+    num_cases: usize,
+    /// If switching on a union tag, this contains the union and variant info.
+    /// Used by variant_safety to know which variant is active in this case.
+    union_tag: ?UnionTagCheck = null,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = index;
+        try splat(.switch_br, state, 0, self);
+    }
+};
+
 /// Noop tag for unreferenced instructions with garbage data.
 /// These instructions exist in the AIR array but are not in any body.
 pub const Noop = struct {
@@ -1076,6 +1093,7 @@ pub const AnyTag = union(enum) {
     array_to_slice: Unimplemented(.{}),
     block: Block,
     cond_br: CondBr,
+    switch_br: SwitchBr,
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
     is_non_err: Simple(.is_non_err), // produces boolean scalar
@@ -1103,6 +1121,9 @@ pub const AnyTag = union(enum) {
     set_union_tag: SetUnionTag,
     get_union_tag: GetUnionTag,
     union_init: UnionInit,
+
+    // Enum safety check - produces a bool scalar for cond_br
+    is_named_enum_value: Simple(.is_named_enum_value),
 };
 
 pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {

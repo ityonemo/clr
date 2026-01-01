@@ -565,39 +565,73 @@ pub const MemorySafety = union(enum) {
         _ = merge_tag;
         const orig_ref = refinements.at(orig_eidx);
 
-        switch (orig_ref.*) {
-            .pointer => |*op| {
-                // Copy memory_safety from first branch that has it if original doesn't
-                if (op.analyte.memory_safety == null) {
+        // Only pointer and scalar refinements have analytes
+        const orig_analyte = switch (orig_ref.*) {
+            .pointer => |*p| &p.analyte,
+            .scalar => |*s| &s.analyte,
+            else => return, // No memory_safety on container types
+        };
+
+        // Handle allocation freed state merging
+        // If original has an unfreed allocation, check if all branches freed it
+        if (orig_analyte.memory_safety) |*orig_ms| {
+            if (orig_ms.* == .allocation) {
+                const orig_alloc = &orig_ms.allocation;
+                if (orig_alloc.freed == null) {
+                    // Original not freed - check if all branches freed it
+                    var all_freed = true;
+                    var first_freed: ?Free = null;
+
                     for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+                        // Null branch = unreachable path (e.g., unreach in cold branch)
                         const branch = branch_opt orelse continue;
+                        // Entity may not exist in all branches during recursive merge traversal
                         const branch_eidx = branch_eidx_opt orelse continue;
                         const branch_ref = branch.refinements.at(branch_eidx);
-                        if (branch_ref.* != .pointer) continue;
-                        if (branch_ref.pointer.analyte.memory_safety) |ms| {
-                            op.analyte.memory_safety = ms;
-                            break;
+                        // Original was pointer/scalar with allocation, branch copy must be same type
+                        const branch_analyte = switch (branch_ref.*) {
+                            .pointer => |*p| &p.analyte,
+                            .scalar => |*s| &s.analyte,
+                            else => unreachable,
+                        };
+                        // Original has memory_safety with allocation, branch copy must too
+                        const branch_ms = branch_analyte.memory_safety.?;
+                        if (branch_ms.allocation.freed) |freed| {
+                            if (first_freed == null) {
+                                first_freed = freed;
+                            }
+                        } else {
+                            all_freed = false;
                         }
                     }
-                }
-            },
-            .scalar => |*s| {
-                // Copy memory_safety from first branch that has it if original doesn't
-                if (s.analyte.memory_safety == null) {
-                    for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
-                        const branch = branch_opt orelse continue;
-                        const branch_eidx = branch_eidx_opt orelse continue;
-                        const branch_ref = branch.refinements.at(branch_eidx);
-                        if (branch_ref.* != .scalar) continue;
-                        if (branch_ref.scalar.analyte.memory_safety) |ms| {
-                            s.analyte.memory_safety = ms;
-                            break;
-                        }
+
+                    // If all branches freed, propagate freed state
+                    if (all_freed and first_freed != null) {
+                        orig_alloc.freed = first_freed;
                     }
+                    // Note: if only some branches freed, that's a leak in the
+                    // non-freeing branch - onFinish will detect this
                 }
-            },
-            // No memory_safety on container types - recursion handled by tag.zig
-            else => {},
+            }
+        } else {
+            // Original has no memory_safety - copy from first branch that has it
+            for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+                // Null branch = unreachable path
+                const branch = branch_opt orelse continue;
+                // Entity may not exist in all branches during recursive merge traversal
+                const branch_eidx = branch_eidx_opt orelse continue;
+                const branch_ref = branch.refinements.at(branch_eidx);
+                // Original was pointer/scalar, branch copy must be same type
+                const branch_analyte = switch (branch_ref.*) {
+                    .pointer => |*p| &p.analyte,
+                    .scalar => |*s| &s.analyte,
+                    else => unreachable,
+                };
+                if (branch_analyte.memory_safety) |ms| {
+                    orig_analyte.memory_safety = ms;
+                    break;
+                }
+            }
         }
     }
 

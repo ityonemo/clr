@@ -1421,7 +1421,16 @@ fn extractDestroyPtrInst(datum: Data, extra: []const u32, tags: []const Tag, dat
 // FunctionGen - Represents a function to generate (main or branch)
 // =============================================================================
 
-const SubTag = enum { cond_br_true, cond_br_false };
+const SubTag = union(enum) {
+    cond_br_true,
+    cond_br_false,
+    switch_case: struct {
+        case_index: u32,
+        num_cases: u32,
+        /// If switching on a union tag, this contains the union inst and field index
+        union_tag: ?UnionTagCheck = null,
+    },
+};
 
 const FunctionGen = union(enum) {
     /// Full function (entry point into the codegen)
@@ -1440,11 +1449,21 @@ const FunctionGen = union(enum) {
     fn name(self: FunctionGen, arena: std.mem.Allocator) []const u8 {
         return switch (self) {
             .full => |f| clr_allocator.allocPrint(arena, "fn_{d}", .{f.func_index}, null),
-            .sub => |s| clr_allocator.allocPrint(arena, "fn_{d}_{s}_{d}", .{
-                s.func_index,
-                @tagName(s.tag),
-                s.instr_index,
-            }, null),
+            .sub => |s| switch (s.tag) {
+                .cond_br_true => clr_allocator.allocPrint(arena, "fn_{d}_cond_br_true_{d}", .{
+                    s.func_index,
+                    s.instr_index,
+                }, null),
+                .cond_br_false => clr_allocator.allocPrint(arena, "fn_{d}_cond_br_false_{d}", .{
+                    s.func_index,
+                    s.instr_index,
+                }, null),
+                .switch_case => |sc| clr_allocator.allocPrint(arena, "fn_{d}_switch_case_{d}_{d}", .{
+                    s.func_index,
+                    sc.case_index,
+                    s.instr_index,
+                }, null),
+            },
         };
     }
 
@@ -1472,10 +1491,20 @@ const FunctionGen = union(enum) {
                 \\
                 \\
             , .{ f.func_index, params, file_path, base_line, fqn, num_insts }, null),
-            .sub => |s| clr_allocator.allocPrint(arena,
-                \\fn fn_{d}_{s}_{d}(state: State) anyerror!void {{
-                \\
-            , .{ s.func_index, @tagName(s.tag), s.instr_index }, null),
+            .sub => |s| switch (s.tag) {
+                .cond_br_true => clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_cond_br_true_{d}(state: State) anyerror!void {{
+                    \\
+                , .{ s.func_index, s.instr_index }, null),
+                .cond_br_false => clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_cond_br_false_{d}(state: State) anyerror!void {{
+                    \\
+                , .{ s.func_index, s.instr_index }, null),
+                .switch_case => |sc| clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_switch_case_{d}_{d}(state: State) anyerror!void {{
+                    \\
+                , .{ s.func_index, sc.case_index, s.instr_index }, null),
+            },
         };
     }
 
@@ -1541,6 +1570,116 @@ fn extractCondBrBodies(cond_br_idx: usize, data: []const Data, extra: []const u3
     return .{
         .then = extra[then_body_start..][0..then_body_len],
         .@"else" = extra[else_body_start..][0..else_body_len],
+    };
+}
+
+/// Switch case info for extraction
+const SwitchCaseInfo = struct {
+    body: []const u32,
+    /// Field index if this case matches an enum tag (for union switch)
+    field_index: ?u32 = null,
+};
+
+/// Result of extracting switch bodies
+const SwitchBodies = struct {
+    cases: []const SwitchCaseInfo,
+    else_body: []const u32,
+    /// If switching on a union tag, this is the union operand instruction
+    union_operand: ?u32 = null,
+};
+
+/// Extract case and else body indices from a switch_br instruction.
+/// Also detects if switching on union tag and extracts field indices.
+/// Returns null if extraction fails.
+fn extractSwitchBrBodies(arena: std.mem.Allocator, ip: *const InternPool, switch_idx: usize, tags: []const Tag, data: []const Data, extra: []const u32) ?SwitchBodies {
+    if (switch_idx >= data.len) return null;
+    const switch_datum = data[switch_idx];
+    const payload_index = switch_datum.pl_op.payload;
+    if (payload_index + 2 > extra.len) return null;
+
+    const cases_len = extra[payload_index];
+    const else_body_len = extra[payload_index + 1];
+
+    // Check if operand is get_union_tag - if so, this is a union switch
+    var union_operand: ?u32 = null;
+    const operand_ref = switch_datum.pl_op.operand;
+    if (operand_ref.toIndex()) |operand_idx| {
+        const operand_idx_u32: u32 = @intFromEnum(operand_idx);
+        if (operand_idx_u32 < tags.len and tags[operand_idx_u32] == .get_union_tag) {
+            // This is a switch on union tag - get the union operand
+            const get_tag_datum = data[operand_idx_u32];
+            if (get_tag_datum.ty_op.operand.toIndex()) |union_idx| {
+                union_operand = @intFromEnum(union_idx);
+            }
+        }
+    }
+
+    // Calculate branch hints size (packed 10 per u32)
+    const hint_bag_count = (cases_len + 1 + 9) / 10; // ceil((cases_len + 1) / 10)
+    var extra_index: u32 = payload_index + 2 + @as(u32, @intCast(hint_bag_count));
+
+    // Parse each case
+    var cases = arena.alloc(SwitchCaseInfo, cases_len) catch return null;
+    for (0..cases_len) |i| {
+        if (extra_index + 3 > extra.len) return null;
+        const items_len = extra[extra_index];
+        const ranges_len = extra[extra_index + 1];
+        const body_len = extra[extra_index + 2];
+        extra_index += 3;
+
+        // Extract field_index from first item if this is a union switch
+        var field_index: ?u32 = null;
+        if (union_operand != null and items_len > 0) {
+            // Items are Ref values stored as u32s
+            const item_ref: Ref = @enumFromInt(extra[extra_index]);
+            if (item_ref.toInterned()) |interned_idx| {
+                field_index = extractEnumTagFieldIndex(ip, interned_idx);
+            }
+        }
+
+        // Skip items and ranges
+        const items_start = extra_index;
+        _ = items_start;
+        extra_index += items_len;
+        extra_index += ranges_len * 2; // ranges are pairs
+
+        // Extract body
+        if (extra_index + body_len > extra.len) return null;
+        cases[i] = .{ .body = extra[extra_index..][0..body_len], .field_index = field_index };
+        extra_index += body_len;
+    }
+
+    // Extract else body
+    if (extra_index + else_body_len > extra.len) return null;
+    const else_body = extra[extra_index..][0..else_body_len];
+
+    // Note: We intentionally don't expand else into separate cases for union switches.
+    // While it would provide more precise variant tracking, the else body typically
+    // contains safety checks with nested cond_br, and sharing the same body across
+    // multiple expanded cases causes duplicate function name collisions.
+    // Explicit cases get full variant tracking; else cases do not.
+
+    return .{
+        .cases = cases,
+        .else_body = else_body,
+        .union_operand = union_operand,
+    };
+}
+
+/// Extract the field index from an interned enum tag value
+fn extractEnumTagFieldIndex(ip: *const InternPool, interned_idx: InternPool.Index) ?u32 {
+    const key = ip.indexToKey(interned_idx);
+    if (key != .enum_tag) return null;
+
+    const int_idx = key.enum_tag.int;
+    const int_key = ip.indexToKey(int_idx);
+    if (int_key != .int) return null;
+
+    return switch (int_key.int.storage) {
+        .u64 => |v| @intCast(v),
+        .i64 => |v| @intCast(v),
+        .big_int => |big| big.toInt(u32) catch null,
+        .lazy_align, .lazy_size => null,
     };
 }
 
@@ -1805,6 +1944,45 @@ fn generateOneFunction(
                     }
                 }
 
+                // Check for switch_br - add all cases to worklist
+                if (tag == .switch_br) {
+                    if (extractSwitchBrBodies(info.arena, info.ip, idx, info.tags, info.data, info.extra)) |bodies| {
+                        const has_else = bodies.else_body.len > 0;
+                        const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                        // Add each case
+                        for (bodies.cases, 0..) |case, case_idx| {
+                            // Build union_tag info if this is a union switch
+                            const union_tag: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
+                                .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                            else
+                                null;
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .switch_case = .{
+                                    .case_index = @intCast(case_idx),
+                                    .num_cases = num_cases,
+                                    .union_tag = union_tag,
+                                } },
+                                .body_indices = case.body,
+                            } }) catch @panic("out of memory");
+                        }
+                        // Add else case only if not expanded into specific cases
+                        if (has_else) {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .switch_case = .{
+                                    .case_index = @intCast(bodies.cases.len),
+                                    .num_cases = num_cases,
+                                    .union_tag = null,
+                                } },
+                                .body_indices = bodies.else_body,
+                            } }) catch @panic("out of memory");
+                        }
+                    }
+                }
+
                 stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
@@ -1846,6 +2024,42 @@ fn generateOneFunction(
                     }
                 }
 
+                // Check for nested switch_br
+                if (tag == .switch_br) {
+                    if (extractSwitchBrBodies(info.arena, info.ip, idx, info.tags, info.data, info.extra)) |bodies| {
+                        const has_else = bodies.else_body.len > 0;
+                        const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                        for (bodies.cases, 0..) |case, case_idx| {
+                            const union_tag: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
+                                .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                            else
+                                null;
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .switch_case = .{
+                                    .case_index = @intCast(case_idx),
+                                    .num_cases = num_cases,
+                                    .union_tag = union_tag,
+                                } },
+                                .body_indices = case.body,
+                            } }) catch @panic("out of memory");
+                        }
+                        if (has_else) {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .switch_case = .{
+                                    .case_index = @intCast(bodies.cases.len),
+                                    .num_cases = num_cases,
+                                    .union_tag = null,
+                                } },
+                                .body_indices = bodies.else_body,
+                            } }) catch @panic("out of memory");
+                        }
+                    }
+                }
+
                 stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
@@ -1856,24 +2070,32 @@ fn generateOneFunction(
     var total_len: usize = 0;
     var arg_counter: u32 = 0;
 
-    // For sub functions, inject CondBr line at the start to trigger null_safety refinement
+    // For sub functions, inject tag line at the start for refinement
     switch (item) {
-        .sub => |s| {
-            // Get the condition operand from the cond_br instruction
-            const cond_br_datum = info.data[s.instr_index];
-            const condition_ref = cond_br_datum.pl_op.operand;
-            const condition_idx: ?usize = if (condition_ref.toIndex()) |idx| @intFromEnum(idx) else null;
-            const is_true_branch = s.tag == .cond_br_true;
+        .sub => |s| switch (s.tag) {
+            .cond_br_true, .cond_br_false => {
+                // Get the condition operand from the cond_br instruction
+                const cond_br_datum = info.data[s.instr_index];
+                const condition_ref = cond_br_datum.pl_op.operand;
+                const condition_idx: ?usize = if (condition_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+                const is_true_branch = s.tag == .cond_br_true;
 
-            // Check if this is a union tag comparison pattern
-            const union_tag: ?UnionTagCheck = if (condition_idx) |cond_idx|
-                getUnionTagCheck(info.ip, cond_idx, info.tags, info.data)
-            else
-                null;
+                // Check if this is a union tag comparison pattern
+                const union_tag: ?UnionTagCheck = if (condition_idx) |cond_idx|
+                    getUnionTagCheck(info.ip, cond_idx, info.tags, info.data)
+                else
+                    null;
 
-            const cond_br_line = generateCondBrTagLine(info.arena, is_true_branch, condition_idx, union_tag);
-            lines.append(info.arena, cond_br_line) catch @panic("out of memory");
-            total_len += cond_br_line.len;
+                const cond_br_line = generateCondBrTagLine(info.arena, is_true_branch, condition_idx, union_tag);
+                lines.append(info.arena, cond_br_line) catch @panic("out of memory");
+                total_len += cond_br_line.len;
+            },
+            .switch_case => |sc| {
+                // Inject SwitchBr tag at the start of switch case
+                const switch_br_line = generateSwitchBrTagLine(info.arena, sc.case_index, sc.num_cases, sc.union_tag);
+                lines.append(info.arena, switch_br_line) catch @panic("out of memory");
+                total_len += switch_br_line.len;
+            },
         },
         .full => {},
     }
@@ -1888,6 +2110,16 @@ fn generateOneFunction(
         } else if (instr.tag == .cond_br) {
             // Generate Inst.cond_br call with function references
             line = generateCondBrLine(info.arena, instr.idx, func_index);
+        } else if (instr.tag == .switch_br) {
+            // Generate Inst.switch_br call with all case function references
+            if (extractSwitchBrBodies(info.arena, info.ip, instr.idx, info.tags, info.data, info.extra)) |bodies| {
+                const has_else = bodies.else_body.len > 0;
+                const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                line = generateSwitchBrLine(info.arena, instr.idx, func_index, num_cases);
+            } else {
+                // Fallback to noop if extraction fails
+                line = generateNoopLine(info.arena, instr.idx);
+            }
         } else {
             line = _instLine(info, instr.tag, instr.datum, instr.idx, &arg_counter);
         }
@@ -1960,6 +2192,51 @@ fn generateCondBrTagLine(arena: std.mem.Allocator, is_true_branch: bool, conditi
             \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d} }} }});
             \\
         , .{ is_true_branch, condition_idx }, null);
+    }
+}
+
+/// Generate Inst.switch_br call with all case function references.
+/// The function builds a tuple of function pointers for all cases.
+fn generateSwitchBrLine(arena: std.mem.Allocator, switch_idx: u32, func_index: u32, num_cases: u32) []const u8 {
+    // Build the tuple of function pointers: .{ fn_X_switch_case_0_Y, fn_X_switch_case_1_Y, ... }
+    var case_fns: []const u8 = ".{";
+    for (0..num_cases) |i| {
+        if (i > 0) {
+            case_fns = clr_allocator.allocPrint(arena, "{s}, fn_{d}_switch_case_{d}_{d}", .{
+                case_fns,
+                func_index,
+                i,
+                switch_idx,
+            }, null);
+        } else {
+            case_fns = clr_allocator.allocPrint(arena, "{s} fn_{d}_switch_case_{d}_{d}", .{
+                case_fns,
+                func_index,
+                i,
+                switch_idx,
+            }, null);
+        }
+    }
+    case_fns = clr_allocator.allocPrint(arena, "{s} }}", .{case_fns}, null);
+
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.switch_br(state, {d}, {s});
+        \\
+    , .{ switch_idx, case_fns }, null);
+}
+
+/// Generate SwitchBr tag line at the start of switch case functions
+fn generateSwitchBrTagLine(arena: std.mem.Allocator, case_index: u32, num_cases: u32, union_tag: ?UnionTagCheck) []const u8 {
+    if (union_tag) |ut| {
+        return clr_allocator.allocPrint(arena,
+            \\    try Inst.apply(state, 0, .{{ .switch_br = .{{ .case_index = {d}, .num_cases = {d}, .union_tag = .{{ .union_inst = {d}, .field_index = {d} }} }} }});
+            \\
+        , .{ case_index, num_cases, ut.union_inst, ut.field_index }, null);
+    } else {
+        return clr_allocator.allocPrint(arena,
+            \\    try Inst.apply(state, 0, .{{ .switch_br = .{{ .case_index = {d}, .num_cases = {d} }} }});
+            \\
+        , .{ case_index, num_cases }, null);
     }
 }
 

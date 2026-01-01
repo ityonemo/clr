@@ -120,6 +120,38 @@ pub const VariantSafety = struct {
         // The original set_union_tag establishes the active variant.
     }
 
+    /// Handle switch_br - when switching on a union tag, update the active variant.
+    /// In each switch case, we know which variant is active based on the case's items.
+    pub fn switch_br(state: State, index: usize, params: tag.SwitchBr) !void {
+        _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // If this switch case has union_tag info, update the active variant
+        const union_check = params.union_tag orelse return;
+
+        // Find the union's refinement via the operand instruction
+        const union_eidx = results[union_check.union_inst].refinement orelse return;
+        const union_ref = refinements.at(union_eidx);
+
+        // Only update for union refinements
+        if (union_ref.* != .@"union") return;
+        const u = &union_ref.@"union";
+
+        // Clear all active variants and set only this one
+        const vs = &(u.analyte.variant_safety orelse return);
+        for (vs.active_metas) |*meta| {
+            meta.* = null;
+        }
+
+        // Set this variant as active
+        const field_index = union_check.field_index;
+        if (field_index < vs.active_metas.len) {
+            vs.active_metas[field_index] = ctx.meta;
+        }
+    }
+
     /// Check struct_field_val access on unions - report error if accessing inactive variant
     pub fn struct_field_val(state: State, index: usize, params: tag.StructFieldVal) !void {
         _ = index;

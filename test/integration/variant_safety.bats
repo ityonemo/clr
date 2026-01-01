@@ -47,3 +47,43 @@ load test_helper
     [[ "$output" =~ "access of union with ambiguous active variant" ]]
     [[ "$output" =~ "branch_one_changes_variant.zig" ]]
 }
+
+# =============================================================================
+# Switch Tests
+# =============================================================================
+
+@test "detects ambiguous variant after switch cases set different variants" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/different_variants.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of union with ambiguous active variant" ]]
+    [[ "$output" =~ "different_variants.zig" ]]
+}
+
+@test "no error when all switch cases set same variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/same_variant.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects ambiguous variant when one switch case changes it" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/one_case_changes.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of union with ambiguous active variant" ]]
+    [[ "$output" =~ "one_case_changes.zig" ]]
+}
+
+@test "no error when switch on union tag accesses correct variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/switch_on_union.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when switch else branch doesn't access variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/switch_else_safe.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects ambiguous variant access in switch else branch" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/switch_else_unsafe.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of union with ambiguous active variant" ]]
+    [[ "$output" =~ "switch_else_unsafe.zig:23" ]]
+}
