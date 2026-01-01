@@ -22,6 +22,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
         .zig_lib_dir = b.path("zig/lib"),
+        // Must use LLVM backend - x86 backend breaks dlopen/dlsym relocations
         .use_llvm = true,
     });
 

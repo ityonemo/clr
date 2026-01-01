@@ -231,3 +231,10 @@ load test_helper
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "union_field_clobber" ]]
 }
+
+@test "detects leak when variable is clobbered in branch" {
+    run compile_and_run "$TEST_CASES/allocator/clobber/branch_clobber.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "branch_clobber" ]]
+}

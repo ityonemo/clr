@@ -600,6 +600,32 @@ pub const MemorySafety = union(enum) {
             else => {},
         }
     }
+
+    /// Handle orphaned entities detected during branch merge.
+    /// An orphaned entity was created in a branch but is no longer reachable after merge.
+    /// If the orphaned entity is a pointer to an unfreed allocation, report a leak.
+    pub fn orphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, eidx: EIdx) !void {
+        _ = refinements; // Main refinements not needed for immediate reporting
+        const ref = branch_refinements.at(eidx);
+
+        // Only check pointers - allocation state is on the pointee
+        if (ref.* != .pointer) return;
+
+        // Get the pointee entity via ptr.to
+        const pointee_idx = ref.pointer.to;
+        const pointee = branch_refinements.at(pointee_idx);
+        const pointee_analyte = getAnalytePtr(pointee);
+
+        // Check pointee's memory_safety for allocation state
+        const ms = pointee_analyte.memory_safety orelse return;
+        if (ms != .allocation) return;
+
+        const allocation = ms.allocation;
+        // If allocation is not freed and not returned, it's a leak
+        if (allocation.freed == null and !allocation.returned) {
+            return reportMemoryLeak(ctx, allocation);
+        }
+    }
 };
 
 // =========================================================================

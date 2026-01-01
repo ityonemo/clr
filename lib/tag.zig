@@ -1124,6 +1124,18 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !v
     }
 }
 
+/// Called for each orphaned entity detected during branch merge.
+/// An orphaned entity is one that was created during branch execution but
+/// is no longer reachable from any result slot after the branch completes.
+/// Analysis modules can implement `orphaned` to handle these (e.g., detect leaked allocations).
+fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, eidx: EIdx) !void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "orphaned")) {
+            try Analysis.orphaned(ctx, refinements, branch_refinements, eidx);
+        }
+    }
+}
+
 /// Check if a branch contains any .noreturn result, making it unreachable.
 fn branchIsUnreachable(branch_results: []const Inst, branch_refinements: *Refinements) bool {
     for (branch_results) |result| {
@@ -1149,6 +1161,9 @@ pub fn splatMerge(
     branches: []const State,
 ) !void {
     const allocator = ctx.allocator;
+
+    // Record base_len before merge - entities >= this index were created by branches
+    const base_len = refinements.list.items.len;
 
     // Build filtered branch array - null for unreachable
     const filtered = try allocator.alloc(?State, branches.len);
@@ -1189,6 +1204,24 @@ pub fn splatMerge(
             branch_eidxs,
             &merged,
         );
+    }
+
+    // Detect orphaned entities: created by branch but not reachable after merge
+    for (filtered) |branch_opt| {
+        const branch = branch_opt orelse continue;
+        const branch_len = branch.refinements.list.items.len;
+
+        // Check entities created by this branch (indices >= base_len)
+        // Skip if branch has no new entities (branch_len <= base_len)
+        if (branch_len <= base_len) continue;
+
+        for (base_len..branch_len) |eidx_usize| {
+            const eidx: EIdx = @intCast(eidx_usize);
+            // If not in merged set, it's orphaned (unreachable from results)
+            if (!merged.contains(eidx)) {
+                try splatOrphaned(ctx, refinements, branch.refinements, eidx);
+            }
+        }
     }
 }
 
