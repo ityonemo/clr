@@ -140,6 +140,11 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Get root module name to filter user code from stdlib.
     const root_name = zcu.root_mod.fully_qualified_name;
 
+    // Skip non-user functions (stdlib) - these crash navSrcLine/toAbsolute in Release
+    if (!std.mem.startsWith(u8, fqn, root_name)) {
+        return null;
+    }
+
     // Check if this is the main function (entrypoint)
     var expected_main: [256]u8 = undefined;
     const expected_main_slice = std.fmt.bufPrint(&expected_main, "{s}.main", .{root_name}) catch return null;
@@ -153,7 +158,8 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Get function's source location
     const base_line = zcu.navSrcLine(func.owner_nav);
     const file_scope = zcu.navFileScope(func.owner_nav);
-    const file_path = file_scope.path.toAbsolute(zcu.comp.dirs, clr_allocator.allocator()) catch return null;
+    // Use sub_path directly to avoid toAbsolute crash in Release mode
+    const file_path = file_scope.path.sub_path;
 
     // Extract parameter names from ZIR
     const param_names = extractParamNames(zcu, ip, func, file_scope);
