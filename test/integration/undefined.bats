@@ -166,6 +166,23 @@ load test_helper
     [[ "$output" =~ "full_undefined_with_default.zig:9:" ]]
 }
 
+@test "detects undefined value when dereferencing pointer to undefined field" {
+    run compile_and_run "$TEST_CASES/undefined/structs/field_ptr_to_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in field_ptr_to_undefined.main" ]]
+    [[ "$output" =~ "field_ptr_to_undefined.zig" ]]
+}
+
+@test "no error when dereferencing pointer to defined field" {
+    run compile_and_run "$TEST_CASES/undefined/structs/field_ptr_to_defined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when field is defined through field pointer" {
+    run compile_and_run "$TEST_CASES/undefined/structs/field_ptr_defines_field.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no error when accessing defined field from partial init const" {
     run compile_and_run "$TEST_CASES/undefined/structs/partial_init_const_defined_field.zig"
     [ "$status" -eq 0 ]

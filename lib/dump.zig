@@ -186,6 +186,10 @@ fn formatMemSafety(ms: ?@import("analysis/memory_safety.zig").MemorySafety) []co
         return switch (m) {
             .allocation => |a| if (a.freed != null) "freed" else "allocated",
             .stack_ptr => "stack_ptr",
+            .origin => |o| switch (o.type) {
+                .struct_field => "origin:struct_field",
+                .union_field => "origin:union_field",
+            },
         };
     }
     return "null";

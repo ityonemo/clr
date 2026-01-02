@@ -36,9 +36,22 @@ pub const Allocation = struct {
     returned: bool = false, // true if this allocation was returned to caller (not a local leak)
 };
 
+pub const Origin = struct {
+    meta: Meta,
+    type: Type,
+
+    pub const Type = enum {
+        struct_field, // Pointer to a struct field - cannot be freed
+        union_field, // Pointer to a union field - cannot be freed
+    };
+};
+
 pub const MemorySafety = union(enum) {
     stack_ptr: StackPtr,
     allocation: Allocation,
+    /// Origin tracking for pointers derived from other memory (e.g., field pointers).
+    /// Only set for special pointer types that cannot be freed directly.
+    origin: Origin,
 
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
@@ -131,6 +144,33 @@ pub const MemorySafety = union(enum) {
         _ = params;
         // Nothing to do - interned values have no memory safety state,
         // and eidx values already have their state copied from caller.
+    }
+
+    /// struct_field_ptr creates a pointer to a field of a struct/union.
+    /// Mark it with origin so we can detect invalid frees.
+    pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
+        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr = &state.refinements.at(ptr_idx).pointer;
+
+        // Determine if base is struct or union
+        const origin_type: Origin.Type = blk: {
+            const base = params.base orelse break :blk .struct_field; // Default to struct for interned
+            const base_ref_idx = state.results[base].refinement orelse break :blk .struct_field;
+            const base_ref = state.refinements.at(base_ref_idx);
+            if (base_ref.* != .pointer) break :blk .struct_field;
+            const container = state.refinements.at(base_ref.pointer.to);
+            break :blk switch (container.*) {
+                .@"struct" => .struct_field,
+                .@"union" => .union_field,
+                else => .struct_field,
+            };
+        };
+
+        // Mark this pointer as derived from a field - cannot be freed directly
+        ptr.analyte.memory_safety = .{ .origin = .{
+            .meta = state.ctx.meta,
+            .type = origin_type,
+        } };
     }
 
     pub fn ret_safe(state: State, index: usize, params: tag.RetSafe) !void {
@@ -240,7 +280,7 @@ pub const MemorySafety = union(enum) {
                             return reportStackEscape(ms, ctx);
                         }
                     },
-                    .allocation => {},
+                    .allocation, .origin => {},
                 }
             },
             .@"struct" => |s| {
@@ -357,11 +397,13 @@ pub const MemorySafety = union(enum) {
         const ptr_idx = results[ptr].refinement orelse @panic("alloc_destroy: inst has no refinement");
         const ptr_refinement = refinements.at(ptr_idx);
 
-        // Check if pointer itself is a stack pointer (freeing stack memory is an error)
+        // Check if pointer itself is a stack pointer or field pointer (freeing these is an error)
         if (ptr_refinement.* == .pointer) {
             if (ptr_refinement.pointer.analyte.memory_safety) |ms| {
-                if (ms == .stack_ptr) {
-                    return reportFreeStackMemory(ctx, ms.stack_ptr);
+                switch (ms) {
+                    .stack_ptr => |sp| return reportFreeStackMemory(ctx, sp),
+                    .origin => |origin| return reportFreeFieldPointer(ctx, origin),
+                    .allocation => {},
                 }
             }
         }
@@ -545,6 +587,16 @@ pub const MemorySafety = union(enum) {
             },
         }
         return error.FreeStackMemory;
+    }
+
+    fn reportFreeFieldPointer(ctx: *Context, origin: Origin) anyerror {
+        try ctx.meta.print(ctx.writer, "free of field pointer in ", .{});
+        const type_name = switch (origin.type) {
+            .struct_field => "struct",
+            .union_field => "union",
+        };
+        try origin.meta.print(ctx.writer, "pointer is to {s} field taken in ", .{type_name});
+        return error.FreeFieldPointer;
     }
 
     // =========================================================================

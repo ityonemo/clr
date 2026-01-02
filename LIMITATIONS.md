@@ -45,19 +45,16 @@ container.ptr = try allocator.create(u8);  // Leaks the first allocation!
 
 ### Struct Field Tracking
 
-Struct field tracking is partially implemented:
+Struct field tracking is implemented for most cases:
 
 **What works**:
 - `struct_field_val`: Extracting a field value from a struct by value is tracked
+- `struct_field_ptr`: Field pointers inherit undefined state from their parent field and propagate changes back
 - Field-level undefined detection when accessing struct fields
+- Origin tracking prevents freeing field pointers (only parent allocations can be freed)
 
 **What doesn't work**:
-- `struct_field_ptr`: The undefined analysis doesn't have a handler for struct_field_ptr, so stores through field pointers may not be properly tracked
-- Memory safety for individual fields is not tracked
-
-**Example not detected**: Setting `.x` but not `.y` through field pointers (as opposed to struct literals) may not be caught.
-
-**Planned fix**: Add undefined analysis handler for `struct_field_ptr` to track stores through field pointers.
+- Memory safety for individual fields beyond origin tracking is not implemented
 
 ### DbgVarVal Analysis Handlers
 
@@ -94,6 +91,26 @@ Loop analysis is not implemented. The analyzer doesn't perform fixed-point itera
 **Impact**: Variables modified in loops, allocations in loops, and loop-dependent control flow are not properly analyzed.
 
 **Planned**: Implement fixed-point iteration for loops with proper state merging.
+
+### Branch Merge with Heap-Allocated Structs
+
+When allocating struct types via `allocator.create(StructType)` combined with error handling (`catch return`), the branch merge logic can crash. The issue occurs in `mergeRefinementRecursive` when one branch has a struct refinement while another has a different refinement type (e.g., scalar).
+
+**Trigger conditions**:
+1. Allocate a struct type via `allocator.create(Container)` returning `?*Container`
+2. Use error handling (`catch return 1`) which creates a conditional branch
+3. During `cond_br` merge, branches have mismatched refinement types
+
+**Error**: `access of union field 'struct' while field 'scalar' is active`
+
+**Workaround**: Use stack-allocated containers with separately heap-allocated fields:
+```zig
+// Instead of: var container = allocator.create(Container) catch return 1;
+var container: Container = undefined;
+container.ptr = allocator.create(u8) catch return 1;
+```
+
+**Planned fix**: Improve `mergeRefinementRecursive` to handle cases where branch refinements have different types, possibly by finding a common refinement or using a fallback.
 
 ### Unimplemented AIR Tags
 

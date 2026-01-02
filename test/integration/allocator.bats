@@ -298,3 +298,19 @@ load test_helper
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "clobber_in_case" ]]
 }
+
+# =============================================================================
+# Field pointer free tests
+# =============================================================================
+
+@test "detects error when trying to free struct field pointer" {
+    run compile_and_run "$TEST_CASES/allocator/field_ptr/free_field_ptr.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of field pointer" ]]
+    [[ "$output" =~ "free_field_ptr" ]]
+}
+
+@test "no error when freeing parent allocation with field pointer in scope" {
+    run compile_and_run "$TEST_CASES/allocator/field_ptr/free_parent_ok.zig"
+    [ "$status" -eq 0 ]
+}
