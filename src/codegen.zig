@@ -1027,13 +1027,7 @@ fn getInstResultType(_: *const InternPool, tags: []const Tag, data: []const Data
         .struct_field_ptr_index_1,
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
-        => blk: {
-            // Read raw bytes to avoid DLL relocation issues with union field access
-            const raw_ptr: [*]const u32 = @ptrCast(&datum);
-            const ty_raw: u32 = raw_ptr[0];
-            const ty_ref: Ref = @enumFromInt(ty_raw);
-            break :blk ty_ref.toInterned();
-        },
+        => datum.ty_op.ty.toInterned(),
         else => null,
     };
 }
@@ -1538,10 +1532,7 @@ const FunctionGen = union(enum) {
 fn extractBlockBody(block_idx: u32, data: []const Data, extra: []const u32) ?[]const u32 {
     if (block_idx >= data.len) return null;
     const block_data = data[block_idx];
-    // Raw access: ty_pl has ty (u32) then payload (u32), so payload is at byte offset 4
-    const raw_ptr: [*]const u8 = @ptrCast(&block_data);
-    const payload_ptr: *const u32 = @ptrCast(@alignCast(raw_ptr + 4));
-    const payload_index = payload_ptr.*;
+    const payload_index = block_data.ty_pl.payload;
     if (payload_index >= extra.len) return null;
     const body_len = extra[payload_index];
     if (body_len == 0) return null;
