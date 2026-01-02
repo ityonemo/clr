@@ -54,11 +54,26 @@ Planned (see LIMITATIONS.md for details):
 
 ## Building
 
-```sh
-# Build the custom Zig compiler (first time only, or after submodule changes)
-cd zig && ./b && cd ..
+The vendored Zig compiler and libclr plugin must be built with matching optimization levels.
+Mismatched optimization levels will cause segfaults.
 
-# Build the CLR plugin
+```sh
+# Build the custom Zig compiler with ReleaseFast (first time only, or after submodule changes)
+cd zig && zig build --zig-lib-dir lib -Doptimize=ReleaseFast && cd ..
+
+# Build the CLR plugin with matching optimization
+zig build -Doptimize=ReleaseFast
+```
+
+For development/debugging, use ReleaseSafe or Debug for both:
+
+```sh
+# ReleaseSafe (with safety checks, slightly slower)
+cd zig && zig build --zig-lib-dir lib -Doptimize=ReleaseSafe && cd ..
+zig build -Doptimize=ReleaseSafe
+
+# Debug (full debug info, slowest)
+cd zig && zig build --zig-lib-dir lib && cd ..
 zig build
 ```
 
@@ -84,11 +99,15 @@ zig build test
 zig test lib/lib.zig
 
 # Integration tests (requires BATS)
+# Defaults to ReleaseFast; override with OPTIMIZE=ReleaseSafe or OPTIMIZE=Debug
 ./run_integration.sh
 
 # Manual test of a single file
 ./run_one.sh test/cases/undefined/use_before_assign.zig
 ```
+
+**Note:** Integration tests rebuild libclr with the specified optimization level (default: ReleaseFast).
+Make sure your vendored Zig compiler was built with a matching optimization level.
 
 ## Project Structure
 

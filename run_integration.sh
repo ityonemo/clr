@@ -3,8 +3,17 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Optimization level for libclr (must match vendored zig build)
+# Override with: OPTIMIZE=ReleaseSafe ./run_integration.sh
+# Use OPTIMIZE=Debug for debug builds (or leave empty)
+OPTIMIZE="${OPTIMIZE:-ReleaseFast}"
+
 # make sure we are running the most recent version
-zig build
+if [ "$OPTIMIZE" = "Debug" ] || [ -z "$OPTIMIZE" ]; then
+    zig build
+else
+    zig build -Doptimize="$OPTIMIZE"
+fi
 
 # Check if bats is available
 if command -v bats &> /dev/null; then
