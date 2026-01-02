@@ -12,28 +12,6 @@ Self-referential types like linked lists (`struct { next: ?*@This(), data: T }`)
 
 **Test plan**: Will be tested alongside ownership tracking for linked lists.
 
-### Large Return Value Tracking (ret_load, ret_ptr)
-
-Functions that return large values (structs, arrays) use `ret_load` or `ret_ptr` instructions instead of `ret_safe`. These instructions handle returns where the value is returned via a pointer to caller-provided storage.
-
-- `ret_load`: Returns by loading from a pointer (for values that don't fit in registers)
-- `ret_ptr`: Returns the pointer where the return value should be stored
-
-**Impact**: Analysis of functions returning large structs or arrays may be incomplete. Return value tracking only works for simple scalar returns via `ret_safe`.
-
-**Planned fix**: Implement handlers for `ret_load` and `ret_ptr` that properly track the data flow through the return pointer.
-
-### @fieldParentPtr Safety
-
-The `@fieldParentPtr` builtin allows converting a pointer to a struct field back to a pointer to the containing struct. This is commonly used in intrusive data structures but can be unsafe if misused.
-
-**Potential issues to detect**:
-- Using `@fieldParentPtr` on a field that isn't actually embedded in the expected struct type
-- Using `@fieldParentPtr` on stack-allocated fields passed to functions expecting heap-allocated containers
-- Lifetime issues where the parent struct is freed but the field pointer is still used
-
-**Investigation needed**: Determine what AIR instructions are generated for `@fieldParentPtr` and whether we can track the field-to-parent relationship to validate safety.
-
 ### GeneralPurposeAllocator Type Complexity
 
 Using `std.heap.GeneralPurposeAllocator` generates deeply nested struct types that hit the recursion depth limit. The codegen emits `.{ .unknown = {} }` for these types, but the runtime `Type` union doesn't yet support the `unknown` variant.
@@ -109,29 +87,6 @@ Region-based memory management (allocating from a region, freeing entire regions
 
 **Planned**: Support for region allocators and tracking region lifetimes.
 
-### Branching and Control Flow
-
-Switch statements are not fully supported:
-
-- In AIR, switch generates a series of `cond_br` instructions comparing against each case value
-- Multiple case branches can target the same block (for fallthrough or shared outcomes like `1, 2, 3 => doSomething()`)
-- Current merge logic only handles binary if/else merging from a single `cond_br`
-- N-way state merging is needed: after a switch, we must merge states from ALL case branches, not just two
-
-**Example of AIR pattern for switch**:
-```
-%10 = cmp_eq(value, 1)
-%11 = cond_br(%10, case1_block, {
-  %12 = cmp_eq(value, 2)
-  %13 = cond_br(%12, case2_block, {
-    %14 = cmp_eq(value, 3)
-    %15 = cond_br(%14, case3_block, else_block)
-  })
-})
-```
-
-**Planned fix**: Implement n-way merge that collects states from all branches targeting the same continuation block.
-
 ### Loops
 
 Loop analysis is not implemented. The analyzer doesn't perform fixed-point iteration to reach stable states for loop bodies.
@@ -139,6 +94,31 @@ Loop analysis is not implemented. The analyzer doesn't perform fixed-point itera
 **Impact**: Variables modified in loops, allocations in loops, and loop-dependent control flow are not properly analyzed.
 
 **Planned**: Implement fixed-point iteration for loops with proper state merging.
+
+### Unimplemented AIR Tags
+
+The following AIR instruction tags are not yet implemented and produce `.unimplemented` refinements:
+
+**Array/Slice operations**:
+- `aggregate_init` - Initialize aggregate (array/struct) from elements
+- `array_to_slice` - Convert array to slice
+- `slice` - Create slice from pointer and length
+- `slice_len` - Get length of slice
+
+**Type conversions**:
+- `intcast` - Integer type casting
+- `ptr_add` - Pointer arithmetic
+
+**Error unions**:
+- `wrap_errunion_err` - Wrap error into error union
+- `wrap_errunion_payload` - Wrap payload into error union
+
+**Debug/minor**:
+- `dbg_inline_block` - Inlined function debug info
+- `memset_safe` - Memory set (produces void)
+- `ret_addr` - Return address for stack traces
+- `stack_trace_frames` - Stack trace frame info
+- `noop_pruned_debug` - Pruned debug instruction (produces void)
 
 ## Desired But Unknown How to Implement
 
@@ -185,18 +165,6 @@ The analyzer specifically recognizes `std.mem.Allocator` operations. Custom allo
 
 Slice and array bounds checking is not performed. Out-of-bounds access is not detected.
 
-### Optional/Null Safety
-
-**IMPLEMENTED** - The analyzer now detects:
-- Unchecked `.?` unwraps (optional in unknown state)
-- Known-null `.?` unwraps (optional assigned `null` or initialized to `null`)
-- Ambiguous `.?` unwraps (optional could be null or non-null after branch merge)
-
-Safe patterns recognized:
-- Explicit `if (x != null)` or `if (x == null)` checks before unwrap
-- Assignment of non-null value before unwrap
-- Comptime-known non-null optionals
-
 ### Optional Pointers in AIR
 
 **Investigation needed**: AIR instructions `is_non_null`, `is_null`, and `optional_payload` can apply to BOTH optional types (`?T`) AND pointer types (`*T`). The current implementation handles both cases, but the semantics need further examination:
@@ -210,10 +178,6 @@ Safe patterns recognized:
 3. Are there cases where pointer null checks should trigger null_safety analysis?
 
 **Current behavior**: The handlers check if the refinement is `.optional` or `.pointer` and only perform null_safety tracking for optionals. Pointers are handled but don't update null_safety state. This may need revision after investigation.
-
-### Union Variant Safety
-
-Accessing the wrong variant of a tagged union is not detected. (This might become necessary in the future.)
 
 ### Pointer Arithmetic
 
