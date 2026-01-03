@@ -9,6 +9,10 @@ meta: @import("Meta.zig"),
 base_line: u32 = 0,
 writer: *std.Io.Writer = undefined,
 
+/// Global ID counter for refinement provenance tracking.
+/// Incremented each time a new refinement entity is created.
+next_gid: Refinements.Gid = 0,
+
 /// Name lookup function pointer - set by generated .air.zig main()
 /// Converts a Name ID (u32) to a string slice
 getName: *const fn (u32) []const u8 = undefined,
@@ -127,7 +131,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
         .optional_payload => |op| {
             // Optional unwrap: base.?
             const src_idx = switch (op.src) {
-                .eidx => |idx| idx,
+                .inst => |idx| idx,
                 .interned, .other => return null,
             };
             const base_path = self.buildPathName(results, refinements, src_idx) orelse return null;
@@ -320,7 +324,7 @@ test "buildPathName for optional_payload appends .?" {
     // Inst 1: optional_payload unwrap of inst 0
     var results = [_]Inst{
         .{ .name_id = 4 }, // opt
-        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 0 } } } },
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 0 } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 1);
@@ -342,8 +346,8 @@ test "buildPathName for nested optional unwrap shows chain" {
     // Inst 2: optional_payload unwrap of inst 1 -> opt.?.?
     var results = [_]Inst{
         .{ .name_id = 4 }, // opt
-        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 0 } } } },
-        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 1 } } } },
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 0 } } } },
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 1 } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 2);
@@ -363,13 +367,13 @@ test "buildPathName for struct_field_ptr builds field path" {
 
     // Create a pointer to struct refinement for inst 0
     // The struct has type_id = 100
-    const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = struct_eidx, .analyte = .{}, .type_id = 0 } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .analyte = .{}, .type_id = 0 } });
 
     // Inst 0: named variable "foo" pointing to struct
     // Inst 1: struct_field_ptr accessing field 0 (bar) of inst 0
     var results = [_]Inst{
-        .{ .name_id = 1, .refinement = ptr_eidx }, // foo
+        .{ .name_id = 1, .refinement = ptr_gid }, // foo
         .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
     };
 
@@ -390,15 +394,15 @@ test "buildPathName for compound path: foo.?.bar" {
 
     // Create refinements for the path: foo (optional containing ptr to struct)
     // When unwrapped, gives pointer to struct with type_id = 100
-    const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = struct_eidx, .analyte = .{}, .type_id = 0 } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .analyte = .{}, .type_id = 0 } });
 
     // Inst 0: named variable "foo" (the optional)
     // Inst 1: optional_payload of inst 0 -> foo.? (gives ptr to struct)
     // Inst 2: struct_field_ptr of inst 1, field 0 -> foo.?.bar
     var results = [_]Inst{
         .{ .name_id = 1 }, // foo
-        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .eidx = 0 } } }, .refinement = ptr_eidx },
+        .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 0 } } }, .refinement = ptr_gid },
         .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 1, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
     };
 

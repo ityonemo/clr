@@ -46,7 +46,7 @@ const std = @import("std");
 const Inst = @import("Inst.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
-const EIdx = Inst.EIdx;
+const Gid = Refinements.Gid;
 const Context = @import("Context.zig");
 const State = Inst.State;
 const Undefined = @import("analysis/undefined.zig").Undefined;
@@ -85,8 +85,8 @@ pub const Type = struct {
 /// Used by store, br, ret_safe, and other tags that reference source values,
 /// as well as by calls.
 pub const Src = union(enum) {
-    /// Runtime value from a result in the results table
-    eidx: usize,
+    /// Runtime value from a result in the results table (index into results[])
+    inst: usize,
     /// Compile-time known value (interned in InternPool)
     interned: Type,
     /// Other sources (globals, etc.) - currently unimplemented
@@ -130,7 +130,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
         .region => @panic("regions not implemented yet"),
         inline .@"struct", .@"union" => |type_fields, class_tag| blk: {
             const allocator = refinements.list.allocator;
-            const FieldType = if (class_tag == .@"union") ?Refinements.EIdx else Refinements.EIdx;
+            const FieldType = if (class_tag == .@"union") ?Gid else Gid;
             const fields = allocator.alloc(FieldType, type_fields.len) catch @panic("out of memory");
             for (type_fields, 0..) |field_type, i| {
                 // For structs, create entities for each field; for unions, all fields start inactive (null)
@@ -190,7 +190,7 @@ pub const AllocDestroy = struct {
 };
 
 /// Entity operation: SHARE (global refinements) or CREATE (interned)
-/// For runtime args: shares the caller's entity directly via global EIdx.
+/// For runtime args: shares the caller's entity directly via global GID.
 /// For compile-time args: creates entity in global refinements.
 ///
 /// AIR Semantics:
@@ -200,24 +200,24 @@ pub const AllocDestroy = struct {
 /// - Taking `&param` in source code generates explicit `alloc` + `store_safe` in AIR.
 ///
 /// Global Refinements Architecture:
-/// - With a single global refinements table, the caller's EIdx IS the callee's EIdx.
+/// - With a single global refinements table, the caller's GID IS the callee's GID.
 /// - No copying needed - callee directly references caller's entity.
 /// - No backpropagation needed - modifications are direct to the shared entity.
 ///
 /// Example for `fn set_value(ptr: *u8) { ptr.* = 5; }`:
-/// - Caller passes pointer entity P1 -> scalar S1 (undefined) at some EIdx
-/// - Arg stores that same EIdx in results[index].refinement
+/// - Caller passes pointer entity P1 -> scalar S1 (undefined) at some GID
+/// - Arg stores that same GID in results[index].refinement
 /// - store_safe(ptr=0) follows P1 to S1, marks S1 as defined (direct modification)
 pub const Arg = struct {
     name_id: u32, // Parameter name ID, resolved via ctx.getName()
-    /// Source of the argument value - either runtime (.eidx) or compile-time (.interned)
+    /// Source of the argument value - either runtime (.gid) or compile-time (.interned)
     value: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         switch (self.value) {
-            .eidx => |eidx| {
-                // Global refinements: caller's EIdx is the same table, use directly
-                state.results[index].refinement = @intCast(eidx);
+            .inst => |src_gid| {
+                // Global refinements: caller's GID is the same table, use directly
+                state.results[index].refinement = @intCast(src_gid);
                 // name_id is in inst_tag (stored by Inst.apply)
             },
             .interned => |ty| {
@@ -247,20 +247,20 @@ pub const Bitcast = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         switch (self.src) {
-            .eidx => |src| {
-                const src_eidx = state.results[src].refinement orelse return;
-                const src_ref = state.refinements.at(src_eidx);
+            .inst => |src| {
+                const src_gid = state.results[src].refinement orelse return;
+                const src_ref = state.refinements.at(src_gid);
 
                 // Check if we're converting pointer to optional (e.g., *T to ?*T)
                 if (self.ty.ty == .optional and src_ref.* == .pointer) {
                     // Create optional wrapper that points to the existing pointer entity
-                    const opt_idx = try state.refinements.appendEntity(.{
-                        .optional = .{ .analyte = .{}, .type_id = 0, .to = src_eidx },
+                    const opt_gid = try state.refinements.appendEntity(.{
+                        .optional = .{ .analyte = .{}, .type_id = 0, .to = src_gid },
                     });
-                    state.results[index].refinement = opt_idx;
+                    state.results[index].refinement = opt_gid;
                 } else {
                     // Default: share the source refinement directly
-                    state.results[index].refinement = src_eidx;
+                    state.results[index].refinement = src_gid;
                 }
             },
             .interned, .other => {},
@@ -284,7 +284,7 @@ pub const Block = struct {
 };
 
 /// Br (break) transfers control to a block, optionally carrying a value.
-/// - `break :blk value` → src is .eidx or .interned with the value
+/// - `break :blk value` → src is .gid or .interned with the value
 /// - `break :blk` (void) → src is .interned with .void type
 pub const Br = struct {
     block: usize,
@@ -292,13 +292,13 @@ pub const Br = struct {
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // For eidx sources, share the source's refinement with the block.
+        // For gid sources, share the source's refinement with the block.
         // This ensures operations on the block (like alloc_destroy) affect the same entity.
         // Clone preserves indices, so sharing propagates correctly through merge.
         switch (self.src) {
-            .eidx => |src| {
-                const src_idx = state.results[src].refinement orelse return;
-                state.results[self.block].refinement = src_idx;
+            .inst => |src| {
+                const src_gid = state.results[src].refinement orelse return;
+                state.results[self.block].refinement = src_gid;
             },
             // Interned values are handled by analysis modules (e.g., undefined.br marks as defined)
             .interned, .other => {},
@@ -308,9 +308,9 @@ pub const Br = struct {
 
     /// Copy analysis state (memory_safety, undefined) from source entity to destination.
     /// This preserves the destination's type structure while updating its analysis state.
-    fn copyAnalyteState(refns: *Refinements, dst_idx: EIdx, src_idx: EIdx) void {
-        const dst = refns.at(dst_idx);
-        const src = refns.at(src_idx);
+    fn copyAnalyteState(refns: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+        const dst = refns.at(dst_gid);
+        const src = refns.at(src_gid);
 
         switch (dst.*) {
             .pointer => |*dp| {
@@ -599,16 +599,16 @@ pub const OptionalPayload = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         switch (self.src) {
-            .eidx => |src| {
-                const src_ref_idx = state.results[src].refinement orelse return;
-                const src_ref = state.refinements.at(src_ref_idx);
+            .inst => |src| {
+                const src_ref_gid = state.results[src].refinement orelse return;
+                const src_ref = state.refinements.at(src_ref_gid);
 
                 if (src_ref.* == .optional) {
                     // Extract the payload from the optional (optional.to is the inner value)
                     state.results[index].refinement = src_ref.optional.to;
                 } else {
                     // Not an optional - might be error union or direct pass-through
-                    state.results[index].refinement = src_ref_idx;
+                    state.results[index].refinement = src_ref_gid;
                 }
             },
             .interned, .other => {
@@ -628,7 +628,7 @@ pub const OptionalPayload = struct {
 /// (as opposed to naked/inline assembly returns).
 ///
 /// Global Refinements Architecture:
-/// - return_eidx points to a slot in the refinements table
+/// - return_gid points to a slot in the refinements table
 /// - Callee writes directly to that slot
 /// - No copying between tables needed
 pub const RetSafe = struct {
@@ -645,18 +645,18 @@ pub const RetSafe = struct {
             br.* = true;
         }
 
-        const return_eidx = state.return_eidx;
+        const return_gid = state.return_gid;
         const refns = state.refinements;
 
         switch (self.src) {
-            .eidx => |src| {
-                const src_idx = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                if (refns.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
-                switch (refns.at(return_eidx).*) {
+            .inst => |src| {
+                const src_gid = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
+                if (refns.at(src_gid).* == .retval_future) @panic("cannot return an unset_retval");
+                switch (refns.at(return_gid).*) {
                     .retval_future, .noreturn => {
                         // .noreturn can be overwritten - it's from an error path return
                         // Deep copy to avoid double-free when struct/union fields are freed
-                        refns.at(return_eidx).* = try refns.deepCopyValue(refns.at(src_idx).*);
+                        refns.at(return_gid).* = try refns.deepCopyValue(refns.at(src_gid).*);
                     },
                     else => {
                         // Multiple returns within same branch - need to merge
@@ -669,16 +669,16 @@ pub const RetSafe = struct {
                 // Comptime return value
                 if (ty.ty == .void) {
                     // Void return
-                    switch (refns.at(return_eidx).*) {
-                        .retval_future => refns.at(return_eidx).* = .void,
+                    switch (refns.at(return_gid).*) {
+                        .retval_future => refns.at(return_gid).* = .void,
                         .void => {},
                         else => @panic("void function retval incorrectly set to some value"),
                     }
                 } else {
                     // Non-void comptime value - create structure from type info
-                    switch (refns.at(return_eidx).*) {
+                    switch (refns.at(return_gid).*) {
                         .retval_future, .void => {
-                            refns.at(return_eidx).* = try typeToRefinement(ty, refns);
+                            refns.at(return_gid).* = try typeToRefinement(ty, refns);
                         },
                         else => {
                             // Multiple returns within same branch - need to merge
@@ -703,9 +703,9 @@ pub const RetSafe = struct {
 /// Used for large return values (structs, unions) where caller provides storage.
 ///
 /// Global Refinements Architecture:
-/// - return_eidx points to a slot in the refinements table
+/// - return_gid points to a slot in the refinements table
 /// - ret_ptr creates a pointer to a local entity for building up the return value
-/// - ret_load will copy the built-up value to return_eidx
+/// - ret_load will copy the built-up value to return_gid
 pub const RetPtr = struct {
     /// The return value type (pointee type, not pointer type)
     ty: Type,
@@ -726,8 +726,8 @@ pub const RetPtr = struct {
 /// Copies the return value entity to the return slot.
 ///
 /// Global Refinements Architecture:
-/// - return_eidx points to a slot in the refinements table
-/// - Just copy the value from ret_ptr's target to return_eidx
+/// - return_gid points to a slot in the refinements table
+/// - Just copy the value from ret_ptr's target to return_gid
 pub const RetLoad = struct {
     /// The ret_ptr instruction index
     ptr: usize,
@@ -747,12 +747,12 @@ pub const RetLoad = struct {
         const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
 
         // Copy to return slot in global table
-        const return_eidx = state.return_eidx;
+        const return_gid = state.return_gid;
         const refns = state.refinements;
-        switch (refns.at(return_eidx).*) {
+        switch (refns.at(return_gid).*) {
             .retval_future, .noreturn => {
                 // Deep copy to avoid double-free when struct/union fields are freed
-                refns.at(return_eidx).* = try refns.deepCopyValue(refns.at(pointee_idx).*);
+                refns.at(return_gid).* = try refns.deepCopyValue(refns.at(pointee_idx).*);
             },
             else => {
                 @panic("ret_load: multiple returns in same branch - merge not yet implemented");
@@ -812,14 +812,14 @@ pub const UnwrapErrunionPayload = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         switch (self.src) {
-            .eidx => |src| {
+            .inst => |src| {
                 // Get the errorunion refinement and extract its payload
-                const src_eidx = state.results[src].refinement orelse
+                const src_gid = state.results[src].refinement orelse
                     std.debug.panic("unwrap_errunion_payload: source inst {d} has no refinement", .{src});
-                const src_ref = state.refinements.at(src_eidx).*;
+                const src_ref = state.refinements.at(src_gid).*;
                 // errorunion's .to points to the payload entity
-                const payload_idx = src_ref.errorunion.to;
-                state.results[index].refinement = payload_idx;
+                const payload_gid = src_ref.errorunion.to;
+                state.results[index].refinement = payload_gid;
             },
             .interned, .other => {
                 std.debug.panic("unwrap_errunion_payload: interned/other sources not supported", .{});
@@ -844,19 +844,20 @@ pub fn Simple(comptime instr: anytype) type {
 pub fn OverflowOp(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
+            _ = self;
             const allocator = state.refinements.list.allocator;
 
             // Create two scalar fields (result and overflow flag)
-            const field0_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-            const field1_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            const field0_gid = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            const field1_gid = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
             // clobberInst takes ownership of fields slice
-            const fields = allocator.alloc(EIdx, 2) catch @panic("out of memory");
-            fields[0] = field0_idx;
-            fields[1] = field1_idx;
+            const fields = allocator.alloc(Gid, 2) catch @panic("out of memory");
+            fields[0] = field0_gid;
+            fields[1] = field1_gid;
 
             _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .fields = fields, .type_id = 0 } });
-            try splat(instr, state, index, self);
+            try splat(instr, state, index, .{});
         }
     };
 }
@@ -1023,14 +1024,14 @@ pub const UnionInit = struct {
         const union_fields = self.ty.ty.@"union";
         const allocator = state.refinements.list.allocator;
 
-        // Union fields use ?EIdx - null means inactive, some means active
-        const fields = allocator.alloc(?Refinements.EIdx, union_fields.len) catch @panic("out of memory");
+        // Union fields use ?Gid - null means inactive, some means active
+        const fields = allocator.alloc(?Gid, union_fields.len) catch @panic("out of memory");
 
         for (union_fields, 0..) |_, i| {
             if (i == self.field_index) {
                 // Active field - create entity from init value
                 switch (self.init) {
-                    .eidx => |src| {
+                    .inst => |src| {
                         // Runtime value - share the source entity
                         fields[i] = state.results[src].refinement;
                     },
@@ -1146,10 +1147,10 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !v
 /// An orphaned entity is one that was created during branch execution but
 /// is no longer reachable from any result slot after the branch completes.
 /// Analysis modules can implement `orphaned` to handle these (e.g., detect leaked allocations).
-fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, eidx: EIdx) !void {
+fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, gid: Gid) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "orphaned")) {
-            try Analysis.orphaned(ctx, refinements, branch_refinements, eidx);
+            try Analysis.orphaned(ctx, refinements, branch_refinements, gid);
         }
     }
 }
@@ -1178,8 +1179,8 @@ fn branchIsUnreachable(branch: State) bool {
 /// Walks through all result slots and calls each analysis's merge function.
 /// Analysis modules can implement `merge` to handle their specific fields.
 ///
-/// Multiple result slots may reference the same EIdx internally. We track
-/// which EIdx values have been merged to avoid re-merging the same entity.
+/// Multiple result slots may reference the same GID internally. We track
+/// which GID values have been merged to avoid re-merging the same entity.
 pub fn splatMerge(
     comptime merge_tag: anytype,
     results: []Inst,
@@ -1203,45 +1204,45 @@ pub fn splatMerge(
             branch;
     }
 
-    // Track merged EIdx to avoid re-merging the same entity
-    var merged = std.AutoHashMap(EIdx, void).init(allocator);
+    // Track merged GIDs to avoid re-merging the same entity
+    var merged = std.AutoHashMap(Gid, void).init(allocator);
     defer merged.deinit();
 
-    // Reusable array for branch EIdx values
-    const branch_eidxs = try allocator.alloc(?EIdx, filtered.len);
-    defer allocator.free(branch_eidxs);
+    // Reusable array for branch GID values
+    const branch_gids = try allocator.alloc(?Gid, filtered.len);
+    defer allocator.free(branch_gids);
 
     // Walk through all result slots
     for (results, 0..) |*result, result_idx| {
-        const orig_eidx = result.refinement orelse continue;
+        const orig_gid = result.refinement orelse continue;
 
-        // Build branch EIdx array for this result slot
+        // Build branch GID array for this result slot
         for (filtered, 0..) |branch_opt, i| {
-            branch_eidxs[i] = if (branch_opt) |branch| branch.results[result_idx].refinement else null;
+            branch_gids[i] = if (branch_opt) |branch| branch.results[result_idx].refinement else null;
         }
 
-        // Check if branches changed the entity index for this result slot.
-        // If only reachable branches have a consistent entity index different from orig,
+        // Check if branches changed the entity GID for this result slot.
+        // If only reachable branches have a consistent entity GID different from orig,
         // update the parent's result to use that entity (e.g., br overwrites block result).
-        var consistent_branch_eidx: ?EIdx = null;
+        var consistent_branch_gid: ?Gid = null;
         var all_same = true;
-        for (branch_eidxs) |eidx_opt| {
-            const eidx = eidx_opt orelse continue; // Skip unreachable branches
-            if (consistent_branch_eidx) |prev| {
-                if (prev != eidx) {
+        for (branch_gids) |gid_opt| {
+            const gid = gid_opt orelse continue; // Skip unreachable branches
+            if (consistent_branch_gid) |prev| {
+                if (prev != gid) {
                     all_same = false;
                     break;
                 }
             } else {
-                consistent_branch_eidx = eidx;
+                consistent_branch_gid = gid;
             }
         }
         if (all_same) {
-            if (consistent_branch_eidx) |new_eidx| {
-                if (new_eidx != orig_eidx) {
+            if (consistent_branch_gid) |new_gid| {
+                if (new_gid != orig_gid) {
                     // All reachable branches have same entity, different from orig.
                     // Update parent's result slot to use the branch's entity.
-                    result.refinement = new_eidx;
+                    result.refinement = new_gid;
                 }
             }
         }
@@ -1255,7 +1256,7 @@ pub fn splatMerge(
             refinements,
             result.refinement.?,
             filtered,
-            branch_eidxs,
+            branch_gids,
             &merged,
         );
     }
@@ -1269,17 +1270,17 @@ pub fn splatMerge(
         // Skip if branch has no new entities (branch_len <= base_len)
         if (branch_len <= base_len) continue;
 
-        for (base_len..branch_len) |eidx_usize| {
-            const eidx: EIdx = @intCast(eidx_usize);
+        for (base_len..branch_len) |gid_usize| {
+            const gid: Gid = @intCast(gid_usize);
             // If not in merged set, it's orphaned (unreachable from results)
-            if (!merged.contains(eidx)) {
-                try splatOrphaned(ctx, refinements, branch.refinements, eidx);
+            if (!merged.contains(gid)) {
+                try splatOrphaned(ctx, refinements, branch.refinements, gid);
             }
         }
     }
 }
 
-/// Merge return values from returning branches into parent's return_eidx.
+/// Merge return values from returning branches into parent's return_gid.
 /// Called after splatMerge to handle return value hoisting.
 /// Only branches where branch_returns is true contribute to the merge.
 pub fn mergeReturnValue(
@@ -1287,7 +1288,7 @@ pub fn mergeReturnValue(
     allocator: std.mem.Allocator,
     ctx: *Context,
     refinements: *Refinements,
-    return_eidx: EIdx,
+    return_gid: Gid,
     branches: []const State,
 ) !void {
     // Count returning branches
@@ -1304,26 +1305,26 @@ pub fn mergeReturnValue(
     // Build arrays for merge: only returning branches contribute
     const filtered = try allocator.alloc(?State, branches.len);
     defer allocator.free(filtered);
-    const branch_eidxs = try allocator.alloc(?EIdx, branches.len);
-    defer allocator.free(branch_eidxs);
+    const branch_gids = try allocator.alloc(?Gid, branches.len);
+    defer allocator.free(branch_gids);
 
     for (branches, 0..) |branch, i| {
         if (branch.branch_returns) |br| {
             if (br.*) {
                 filtered[i] = branch;
-                branch_eidxs[i] = return_eidx;
+                branch_gids[i] = return_gid;
             } else {
                 filtered[i] = null;
-                branch_eidxs[i] = null;
+                branch_gids[i] = null;
             }
         } else {
             filtered[i] = null;
-            branch_eidxs[i] = null;
+            branch_gids[i] = null;
         }
     }
 
     // Track merged entities
-    var merged = std.AutoHashMap(EIdx, void).init(allocator);
+    var merged = std.AutoHashMap(Gid, void).init(allocator);
     defer merged.deinit();
 
     // Recursively merge return value and nested refinements
@@ -1332,22 +1333,22 @@ pub fn mergeReturnValue(
         allocator,
         ctx,
         refinements,
-        return_eidx,
+        return_gid,
         filtered,
-        branch_eidxs,
+        branch_gids,
         &merged,
     );
 }
 
-/// Follow .to field for each branch's eidx, updating branch_eidxs in place.
-fn followBranchEidxs(
+/// Follow .to field for each branch's gid, updating branch_gids in place.
+fn followBranchGids(
     comptime ref_tag: std.meta.Tag(Refinement),
     branches: []const ?State,
-    branch_eidxs: []?EIdx,
+    branch_gids: []?Gid,
 ) void {
-    for (branches, branch_eidxs) |branch_opt, *eidx| {
+    for (branches, branch_gids) |branch_opt, *gid| {
         const branch = branch_opt orelse continue;
-        eidx.* = @field(branch.refinements.at(eidx.*.?).*, @tagName(ref_tag)).to;
+        gid.* = @field(branch.refinements.at(gid.*.?).*, @tagName(ref_tag)).to;
     }
 }
 
@@ -1358,14 +1359,14 @@ fn mergeRefinementRecursive(
     allocator: std.mem.Allocator,
     ctx: *Context,
     refinements: *Refinements,
-    orig_eidx: EIdx,
+    orig_gid: Gid,
     branches: []const ?State,
-    branch_eidxs: []?EIdx,
-    merged: *std.AutoHashMap(EIdx, void),
+    branch_gids: []?Gid,
+    merged: *std.AutoHashMap(Gid, void),
 ) !void {
     // Skip if we've already merged this entity
-    if (merged.contains(orig_eidx)) return;
-    try merged.put(orig_eidx, {});
+    if (merged.contains(orig_gid)) return;
+    try merged.put(orig_gid, {});
 
     // Call each analyzer's merge for this node
     inline for (analyses) |Analysis| {
@@ -1374,60 +1375,60 @@ fn mergeRefinementRecursive(
                 ctx,
                 merge_tag,
                 refinements,
-                orig_eidx,
+                orig_gid,
                 branches,
-                branch_eidxs,
+                branch_gids,
             );
         }
     }
 
     // Recurse into children based on refinement type
-    const orig_ref = refinements.at(orig_eidx);
+    const orig_ref = refinements.at(orig_gid);
     switch (orig_ref.*) {
         // Pointer: check rejection logic before following and merging
         .pointer => |p| {
             // TODO: pointer rejection logic (all same original OR all new, not mixed)
-            followBranchEidxs(.pointer, branches, branch_eidxs);
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, p.to, branches, branch_eidxs, merged);
+            followBranchGids(.pointer, branches, branch_gids);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, p.to, branches, branch_gids, merged);
         },
         // For optional/errorunion: follow .to in all branches
         // Types always match when following the same structural path
-        // If branch exists, eidx exists (they're always in sync)
+        // If branch exists, gid exists (they're always in sync)
         inline .optional, .errorunion => |data, tag| {
-            followBranchEidxs(tag, branches, branch_eidxs);
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, data.to, branches, branch_eidxs, merged);
+            followBranchGids(tag, branches, branch_gids);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, data.to, branches, branch_gids, merged);
         },
         .@"struct" => |s| {
             // Need separate array for struct fields since we recurse multiple times
-            const field_eidxs = try allocator.alloc(?EIdx, branches.len);
-            defer allocator.free(field_eidxs);
+            const field_gids = try allocator.alloc(?Gid, branches.len);
+            defer allocator.free(field_gids);
             for (s.fields, 0..) |field_idx, field_i| {
-                for (branches, branch_eidxs, 0..) |branch_opt, branch_eidx_opt, i| {
+                for (branches, branch_gids, 0..) |branch_opt, branch_gid_opt, i| {
                     const branch = branch_opt orelse {
-                        field_eidxs[i] = null;
+                        field_gids[i] = null;
                         continue;
                     };
-                    // Types always match; if branch exists, eidx exists
-                    field_eidxs[i] = branch.refinements.at(branch_eidx_opt.?).@"struct".fields[field_i];
+                    // Types always match; if branch exists, gid exists
+                    field_gids[i] = branch.refinements.at(branch_gid_opt.?).@"struct".fields[field_i];
                 }
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_eidxs, merged);
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged);
             }
         },
         .@"union" => |u| {
             // Need separate array for union fields since we recurse multiple times
-            const field_eidxs = try allocator.alloc(?EIdx, branches.len);
-            defer allocator.free(field_eidxs);
+            const field_gids = try allocator.alloc(?Gid, branches.len);
+            defer allocator.free(field_gids);
             for (u.fields, 0..) |field_opt, field_i| {
                 const field_idx = field_opt orelse continue;
-                for (branches, branch_eidxs, 0..) |branch_opt, branch_eidx_opt, i| {
+                for (branches, branch_gids, 0..) |branch_opt, branch_gid_opt, i| {
                     const branch = branch_opt orelse {
-                        field_eidxs[i] = null;
+                        field_gids[i] = null;
                         continue;
                     };
-                    // Types always match; if branch exists, eidx exists
-                    field_eidxs[i] = branch.refinements.at(branch_eidx_opt.?).@"union".fields[field_i];
+                    // Types always match; if branch exists, gid exists
+                    field_gids[i] = branch.refinements.at(branch_gid_opt.?).@"union".fields[field_i];
                 }
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_eidxs, merged);
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged);
             }
         },
         else => {},
@@ -1443,7 +1444,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
-        .return_eidx = 0,
+        .return_gid = 0,
     };
 }
 
@@ -1540,16 +1541,16 @@ test "arg shares eidx from caller (global refinements)" {
     defer refinements.deinit();
 
     // With global refinements, the caller's entity is already in refinements
-    const arg_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const arg_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
     var results = [_]Inst{.{}} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
-    // arg should share the entity (same eidx), not copy
-    try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .eidx = arg_eidx }, .name_id = 3 } });
+    // arg should share the entity (same gid), not copy
+    try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .inst = arg_gid }, .name_id = 3 } });
 
-    // Should have the same eidx as the caller's entity
-    try std.testing.expectEqual(arg_eidx, results[0].refinement.?);
+    // Should have the same gid as the caller's entity
+    try std.testing.expectEqual(arg_gid, results[0].refinement.?);
     // name_id is in the inst_tag
     try std.testing.expectEqual(@as(u32, 3), results[0].inst_tag.?.arg.name_id);
 }
@@ -1573,13 +1574,13 @@ test "br shares source refinement with block" {
 
     // Create a value at index 1
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const src_eidx = results[1].refinement.?;
+    const src_gid = results[1].refinement.?;
 
     // br should share the source refinement with the block
-    try Inst.apply(state, 2, .{ .br = .{ .block = 0, .src = .{ .eidx = 1 } } });
+    try Inst.apply(state, 2, .{ .br = .{ .block = 0, .src = .{ .inst = 1 } } });
 
     // Block should now have the same refinement as source
-    try std.testing.expectEqual(src_eidx, results[0].refinement.?);
+    try std.testing.expectEqual(src_gid, results[0].refinement.?);
 }
 
 test "dbg_stmt does nothing" {
@@ -1618,23 +1619,23 @@ test "optional_payload extracts inner value from optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional with a scalar inside, marked as non-null (checked)
-    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .non_null = .{
             .function = "test",
             .file = "test.zig",
             .line = 1,
         } } },
         .type_id = 0,
-        .to = inner_eidx,
+        .to = inner_gid,
     } });
-    results[0].refinement = opt_eidx;
+    results[0].refinement = opt_gid;
 
     // optional_payload should extract the inner value
-    try Inst.apply(state, 1, .{ .optional_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .optional_payload = .{ .src = .{ .inst = 0 } } });
 
     // Result should point to the inner scalar
-    try std.testing.expectEqual(inner_eidx, results[1].refinement.?);
+    try std.testing.expectEqual(inner_gid, results[1].refinement.?);
 }
 
 test "unwrap_errunion_payload extracts payload from error union" {
@@ -1652,15 +1653,15 @@ test "unwrap_errunion_payload extracts payload from error union" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an error union with a scalar payload
-    const payload_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const eu_eidx = try refinements.appendEntity(.{ .errorunion = .{ .analyte = .{}, .type_id = 0, .to = payload_eidx } });
-    results[0].refinement = eu_eidx;
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const eu_gid = try refinements.appendEntity(.{ .errorunion = .{ .analyte = .{}, .type_id = 0, .to = payload_gid } });
+    results[0].refinement = eu_gid;
 
     // unwrap_errunion_payload should extract the payload
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // Result should point to the payload
-    try std.testing.expectEqual(payload_eidx, results[1].refinement.?);
+    try std.testing.expectEqual(payload_gid, results[1].refinement.?);
 }
 
 test "Simple tags produce scalar" {
@@ -1754,7 +1755,7 @@ test "struct_field_ptr gets pointer to struct field" {
     // Create a pointer to a struct with two scalar fields
     const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const fields = try allocator.alloc(EIdx, 2);
+    const fields = try allocator.alloc(Gid, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
     const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{
@@ -1792,7 +1793,7 @@ test "struct_field_val extracts field value from struct" {
     // Create a struct with two scalar fields (both defined)
     const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
     const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
-    const fields = try allocator.alloc(EIdx, 2);
+    const fields = try allocator.alloc(Gid, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
     const struct_eidx = try refinements.appendEntity(.{ .@"struct" = .{
@@ -1824,15 +1825,15 @@ test "is_non_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional
-    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = inner_eidx } });
-    results[0].refinement = opt_eidx;
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = inner_gid } });
+    results[0].refinement = opt_gid;
 
     // is_non_null should record the check
-    try Inst.apply(state, 1, .{ .is_non_null = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .is_non_null = .{ .src = .{ .inst = 0 } } });
 
     // The optional's null_safety should be set to unknown with check info
-    const opt_ref = refinements.at(opt_eidx);
+    const opt_ref = refinements.at(opt_gid);
     try std.testing.expect(opt_ref.optional.analyte.null_safety != null);
     try std.testing.expectEqual(.unknown, std.meta.activeTag(opt_ref.optional.analyte.null_safety.?));
 }
@@ -1852,15 +1853,15 @@ test "is_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional
-    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = inner_eidx } });
-    results[0].refinement = opt_eidx;
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = inner_gid } });
+    results[0].refinement = opt_gid;
 
     // is_null should record the check
-    try Inst.apply(state, 1, .{ .is_null = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .is_null = .{ .src = .{ .inst = 0 } } });
 
     // The optional's null_safety should be set to unknown with check info
-    const opt_ref = refinements.at(opt_eidx);
+    const opt_ref = refinements.at(opt_gid);
     try std.testing.expect(opt_ref.optional.analyte.null_safety != null);
     try std.testing.expectEqual(.unknown, std.meta.activeTag(opt_ref.optional.analyte.null_safety.?));
 }
@@ -1880,24 +1881,24 @@ test "set_union_tag updates union variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a union with two fields
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const fields = try allocator.alloc(?EIdx, 2);
-    fields[0] = field0_eidx;
-    fields[1] = field1_eidx;
-    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+    const field0_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const field1_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const fields = try allocator.alloc(?Gid, 2);
+    fields[0] = field0_gid;
+    fields[1] = field1_gid;
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{},
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = union_eidx } });
-    results[0].refinement = ptr_eidx;
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = union_gid } });
+    results[0].refinement = ptr_gid;
 
     // set_union_tag should update the active variant
     try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // The union's active field should be set (field 1), others null
-    const union_ref = refinements.at(union_eidx);
+    const union_ref = refinements.at(union_gid);
     try std.testing.expect(union_ref.@"union".fields[0] == null);
     try std.testing.expect(union_ref.@"union".fields[1] != null);
 }
@@ -1917,15 +1918,15 @@ test "get_union_tag produces scalar" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a union
-    const field_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const fields = try allocator.alloc(?EIdx, 1);
-    fields[0] = field_eidx;
-    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
+    const field_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const fields = try allocator.alloc(?Gid, 1);
+    fields[0] = field_gid;
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{},
         .fields = fields,
         .type_id = 0,
     } });
-    results[0].refinement = union_eidx;
+    results[0].refinement = union_gid;
 
     // get_union_tag should produce a scalar (the tag value)
     try Inst.apply(state, 1, .{ .get_union_tag = .{ .operand = 0 } });
@@ -1949,14 +1950,14 @@ test "union_init creates union with active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a value to use as the init value
-    const val_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    results[0].refinement = val_eidx;
+    const val_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    results[0].refinement = val_gid;
 
     // union_init should create a union with active variant set
     try Inst.apply(state, 1, .{ .union_init = .{
         .ty = .{ .id = null, .ty = .{ .@"union" = &.{ .{ .id = null, .ty = .{ .scalar = {} } }, .{ .id = null, .ty = .{ .scalar = {} } } } } },
         .field_index = 1,
-        .init = .{ .eidx = 0 },
+        .init = .{ .inst = 0 },
     } });
 
     try std.testing.expect(results[1].refinement != null);

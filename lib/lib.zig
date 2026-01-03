@@ -3,7 +3,7 @@ pub const Context = @import("Context.zig");
 pub const Inst = @import("Inst.zig");
 pub const Refinements = @import("Refinements.zig");
 pub const Arg = @import("tag.zig").Src;
-pub const EIdx = Inst.EIdx;
+pub const Gid = Refinements.Gid;
 const std = @import("std");
 
 // Debug utilities
@@ -16,11 +16,11 @@ pub const State = struct {
     ctx: *Context,
     results: []Inst,
     refinements: *Refinements,
-    return_eidx: EIdx,
+    return_gid: Gid,
     /// For branch tracking: GIDs of entities created during this branch (null outside branches)
-    created_gids: ?*std.ArrayListUnmanaged(Refinements.Gid) = null,
+    created_gids: ?*std.ArrayListUnmanaged(Gid) = null,
     /// For branch tracking: GIDs of entities modified during this branch (null outside branches)
-    modified_gids: ?*std.ArrayListUnmanaged(Refinements.Gid) = null,
+    modified_gids: ?*std.ArrayListUnmanaged(Gid) = null,
     /// Set to true by ret_safe/ret_load when this branch returns.
     /// Used to exclude returning branches from local variable merge.
     /// Null outside of branch contexts (top-level function execution).

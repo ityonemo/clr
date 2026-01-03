@@ -15,7 +15,7 @@ pub const Analyte = @import("Analyte.zig");
 
 /// Refinement tracks the type structure of a value along with analysis state.
 /// This is like a refinement type - the base type plus predicates/properties.
-/// EIdx is used for anything that needs indirection (pointers, optionals, etc).
+/// GID is used for anything that needs indirection (pointers, optionals, etc).
 pub const Refinement = union(enum) {
     pub const Scalar = struct {
         gid: Gid = 0,
@@ -27,16 +27,16 @@ pub const Refinement = union(enum) {
         gid: Gid = 0,
         analyte: Analyte,
         type_id: Tid,
-        to: EIdx,
+        to: Gid,
     };
 
     pub const Struct = struct {
         gid: Gid = 0,
         /// Analyte for tracking on the whole struct
         analyte: Analyte = .{},
-        /// Field refinement indices - each field has its own refinement
+        /// Field refinement GIDs - each field has its own refinement
         /// To obtain the fieldname use field_id = ctx.getFieldId(type_id, field_index) and ctx.getName(field_id)
-        fields: []const EIdx,
+        fields: []const Gid,
         type_id: Tid,
     };
 
@@ -44,11 +44,11 @@ pub const Refinement = union(enum) {
         gid: Gid = 0,
         /// Analyte for tracking on the whole union
         analyte: Analyte = .{},
-        /// Field refinement indices - each field has its own refinement.  Any field
+        /// Field refinement GIDs - each field has its own refinement.  Any field
         /// that is null, is NOT active in this variable. Mutable because set_union_tag
         /// needs to activate/deactivate fields.
         /// To obtain the field name use field_id = ctx.getFieldId(type_id, field_index) and ctx.getName(field_id)
-        fields: []?EIdx,
+        fields: []?Gid,
         type_id: Tid,
     };
 
@@ -88,10 +88,10 @@ pub const Refinement = union(enum) {
         }
     }
 
-    /// clobbers one refinement over another, using index for destination.
+    /// clobbers one refinement over another, using GID for destination.
     /// Use this when dst might be .retval_future (which requires reallocation-safe handling).
-    pub fn clobber_structured_idx(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
-        const dst = dst_list.at(dst_idx);
+    pub fn clobber_structured_idx(dst_gid: Gid, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
+        const dst = dst_list.at(dst_gid);
         switch (dst.*) {
             .scalar => {
                 if (src != .scalar) std.debug.panic("clobber mismatch: src is .{s} and dst is .scalar", .{@tagName(src)});
@@ -101,7 +101,7 @@ pub const Refinement = union(enum) {
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             // retval_future is a placeholder for return values, to be filled in by ret_safe
-            .retval_future => try clobber_retval_future(dst_idx, dst_list, src, src_list),
+            .retval_future => try clobber_retval_future(dst_gid, dst_list, src, src_list),
             .region => @panic("regions not implemented yet"),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
@@ -113,8 +113,8 @@ pub const Refinement = union(enum) {
     }
 
     /// Clobber a .retval_future slot with a src refinement, copying the structure without checks.
-    /// Takes dst_idx instead of pointer because copyTo may reallocate dst_list.
-    fn clobber_retval_future(dst_idx: EIdx, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
+    /// Takes dst_gid instead of pointer because copyTo may reallocate dst_list.
+    fn clobber_retval_future(dst_gid: Gid, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const same_list = src_list == dst_list;
         // Note: We must compute the new value BEFORE getting a pointer to dst,
         // because copyTo may reallocate dst_list's backing memory.
@@ -138,7 +138,7 @@ pub const Refinement = union(enum) {
             .region => @panic("regions not implemented yet"),
             .@"struct" => |s| blk: {
                 const allocator = dst_list.list.allocator;
-                const new_fields = try allocator.alloc(EIdx, s.fields.len);
+                const new_fields = try allocator.alloc(Gid, s.fields.len);
                 if (same_list) {
                     // Same list: just copy field indices, they already reference valid entities
                     @memcpy(new_fields, s.fields);
@@ -152,7 +152,7 @@ pub const Refinement = union(enum) {
             },
             .@"union" => |u| blk: {
                 const allocator = dst_list.list.allocator;
-                const new_fields = try allocator.alloc(?EIdx, u.fields.len);
+                const new_fields = try allocator.alloc(?Gid, u.fields.len);
                 if (same_list) {
                     @memcpy(new_fields, u.fields);
                 } else {
@@ -171,7 +171,7 @@ pub const Refinement = union(enum) {
             .retval_future => @panic("cannot copy from .retval_future"),
         };
         // Now safe to get pointer and assign
-        dst_list.at(dst_idx).* = new_value;
+        dst_list.at(dst_gid).* = new_value;
     }
 
     fn recurse_indirected(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!void {
@@ -245,7 +245,7 @@ pub const Refinement = union(enum) {
     /// Cross-table copy: copies refinement from src_list to dst_list.
     /// Uses noalias to assert tables are different.
     /// Follows semideep copy rules - pointers reference same pointee across tables.
-    pub fn copyTo(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !EIdx {
+    pub fn copyTo(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !Gid {
         return switch (src) {
             .scalar => try dst_list.appendEntity(src),
             .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
@@ -262,7 +262,7 @@ pub const Refinement = union(enum) {
         };
     }
 
-    fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
+    fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!Gid {
         const src_inner_idx = @field(src, @tagName(tag)).to;
         const dst_inner_idx = try copyTo(src_list.at(src_inner_idx).*, src_list, dst_list);
         const to_insert: Refinement = @unionInit(Refinement, @tagName(tag), .{
@@ -273,7 +273,15 @@ pub const Refinement = union(enum) {
         return dst_list.appendEntity(to_insert);
     }
 
-    fn copyToFields(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!EIdx {
+    /// Get the GID of this refinement. Unreachable for void/noreturn/retval_future/unimplemented.
+    pub fn getGid(self: Refinement) Gid {
+        return switch (self) {
+            .void, .noreturn, .retval_future, .unimplemented => unreachable,
+            inline else => |data| data.gid,
+        };
+    }
+
+    fn copyToFields(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!Gid {
         const allocator = dst_list.list.allocator;
         const src_data = @field(src, @tagName(tag));
         const src_fields = src_data.fields;
@@ -314,8 +322,8 @@ pub const Refinement = union(enum) {
 const Refinements = @This();
 
 /// Entity table that stores all Refinement values.
-/// Each entity is indexed by EIdx. Entities can reference other entities
-/// via EIdx (e.g., a pointer entity references its pointee entity).
+/// Each entity is indexed by GID. Entities can reference other entities
+/// via GID (e.g., a pointer entity references its pointee entity).
 list: std.array_list.AlignedManaged(Refinement, null),
 
 pub fn init(allocator: Allocator) Refinements {
@@ -342,43 +350,65 @@ pub fn deinit(self: *Refinements) void {
     self.list.deinit();
 }
 
-/// Get Refinement by entity index. Crashes if index is out of bounds.
-pub fn at(self: *Refinements, index: EIdx) *Refinement {
-    return &self.list.items[index];
+/// Get Refinement by GID. Crashes if GID is out of bounds.
+/// Since GID == EIdx at creation and entities don't move, this is O(1).
+pub fn at(self: *Refinements, gid: Gid) *Refinement {
+    return &self.list.items[gid];
 }
 
-/// Append a new entity with the given value and return its index.
-/// Uses default gid=0. For assigned GIDs, use appendEntityWithGid.
-pub fn appendEntity(self: *Refinements, value: Refinement) !EIdx {
-    const idx: EIdx = @intCast(self.list.items.len);
-    try self.list.append(value);
+/// Find entity by GID. Returns the GID if found, null otherwise.
+/// Note: After branch merging, an entity may not exist in this table
+/// even if it was created elsewhere with that GID.
+/// Since GID == EIdx at creation, this can often be O(1) with a direct lookup.
+pub fn findByGid(self: *Refinements, gid: Gid) ?Gid {
+    // Fast path: check if gid is a valid index and entity at that index has matching gid
+    if (gid < self.list.items.len) {
+        switch (self.list.items[gid]) {
+            .void, .noreturn, .retval_future, .unimplemented => {},
+            inline else => |data| if (data.gid == gid) return gid,
+        }
+    }
+    // Slow path: linear scan (needed after deduplication/merge)
+    for (self.list.items, 0..) |ref, idx| {
+        switch (ref) {
+            .void, .noreturn, .retval_future, .unimplemented => {},
+            inline else => |data| if (data.gid == gid) return @intCast(idx),
+        }
+    }
+    return null;
+}
+
+/// Append a new entity with the given value and return its GID.
+/// GID is automatically assigned as the entity's index (GID = EIdx at creation).
+pub fn appendEntity(self: *Refinements, value: Refinement) !Gid {
+    const idx: Gid = @intCast(self.list.items.len);
+    var entity = value;
+    // GID = EIdx at creation time (stable identity across clones/merges)
+    switch (entity) {
+        .void, .noreturn, .retval_future, .unimplemented => {},
+        inline else => |*data| data.gid = idx,
+    }
+    try self.list.append(entity);
     return idx;
 }
 
 /// Append a new entity with the given value, assigning a new global ID from the counter.
-pub fn appendEntityWithGid(self: *Refinements, value: Refinement, gid_counter: *Gid) !EIdx {
-    const idx: EIdx = @intCast(self.list.items.len);
+/// DEPRECATED: Use appendEntity instead, which auto-assigns GID = EIdx.
+pub fn appendEntityWithGid(self: *Refinements, value: Refinement, gid_counter: *Gid) !Gid {
+    const idx: Gid = @intCast(self.list.items.len);
     var entity = value;
     const gid = gid_counter.*;
     gid_counter.* += 1;
-    // Set gid on the appropriate variant
     switch (entity) {
-        .scalar => |*s| s.gid = gid,
-        .pointer => |*p| p.gid = gid,
-        .optional => |*o| o.gid = gid,
-        .errorunion => |*e| e.gid = gid,
-        .@"struct" => |*st| st.gid = gid,
-        .@"union" => |*u| u.gid = gid,
-        .region => |*r| r.gid = gid,
-        // These don't have gids
         .void, .noreturn, .retval_future, .unimplemented => {},
+        inline else => |*data| data.gid = gid,
     }
     try self.list.append(entity);
     return idx;
 }
 
 /// Deep clone the entire refinements table.
-/// EIdx references remain valid because indices are preserved.
+/// GID references remain valid because indices are preserved.
 /// Struct and union field slices are deep copied so each refinements list owns its own memory.
 pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     var new = Refinements.init(allocator);
@@ -441,12 +471,12 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
 /// Semideep copy within same table: creates new entity, copying values but sharing pointer targets.
 /// For struct/union, recursively copies value fields, but pointer fields reference same pointee.
 /// Always deep copies variant_safety.active_metas.
-pub fn semideepCopy(self: *Refinements, src_eidx: EIdx) error{OutOfMemory}!EIdx {
-    const src = self.at(src_eidx).*;
+pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
+    const src = self.at(src_gid).*;
     return self.semideepCopyRefinement(src);
 }
 
-fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory}!EIdx {
+fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory}!Gid {
     const allocator = self.list.allocator;
     return switch (src) {
         // Scalars: copy analyte state to new entity
@@ -481,7 +511,7 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
 
         // Structs: new struct with semideep copied fields
         .@"struct" => |s| blk: {
-            const new_fields = try allocator.alloc(EIdx, s.fields.len);
+            const new_fields = try allocator.alloc(Gid, s.fields.len);
             for (s.fields, 0..) |field_idx, i| {
                 new_fields[i] = try self.semideepCopy(field_idx);
             }
@@ -494,7 +524,7 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
 
         // Unions: new union with semideep copied active fields
         .@"union" => |u| blk: {
-            const new_fields = try allocator.alloc(?EIdx, u.fields.len);
+            const new_fields = try allocator.alloc(?Gid, u.fields.len);
             for (u.fields, 0..) |field_idx_opt, i| {
                 new_fields[i] = if (field_idx_opt) |field_idx|
                     try self.semideepCopy(field_idx)
@@ -526,10 +556,10 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
 }
 
 /// Create pointer entity referencing existing entity (for struct_field_ptr, bitcast on pointer, etc.)
-pub fn createPointerTo(self: *Refinements, pointee_eidx: EIdx, analyte: Analyte) !EIdx {
+pub fn createPointerTo(self: *Refinements, pointee_gid: Gid, analyte: Analyte) !Gid {
     return self.appendEntity(.{ .pointer = .{
         .analyte = analyte,
-        .to = pointee_eidx,
+        .to = pointee_gid,
     } });
 }
 

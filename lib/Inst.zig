@@ -4,13 +4,13 @@ const Context = @import("Context.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
 const Analyte = Refinements.Analyte;
-pub const EIdx = Refinements.EIdx;
+pub const Gid = Refinements.Gid;
 pub const State = @import("lib.zig").State;
 
 const Inst = @This();
 
-/// Index into the Refinements entity table, or null if not yet initialized.
-refinement: ?EIdx = null,
+/// GID into the Refinements entity table, or null if not yet initialized.
+refinement: ?Gid = null,
 
 /// The tag that created this instruction, stored for path building at error time.
 /// Used by Context.buildPathName to walk the instruction chain statelessly.
@@ -41,16 +41,16 @@ pub fn call(state: State, index: usize, called: anytype, args: anytype) !void {
     // Create return slot in global refinements table
     const return_slot = try state.refinements.appendEntity(.{ .retval_future = {} });
     // Call function with ctx, refinements, and return_slot
-    const return_eidx = try @call(.auto, called, .{ state.ctx, state.refinements, return_slot } ++ args);
+    const return_gid = try @call(.auto, called, .{ state.ctx, state.refinements, return_slot } ++ args);
     // Restore caller's base_line
     state.ctx.base_line = saved_base_line;
     // Clear "returned" flag on any allocations in the return value.
     // The callee marked them as "returned" (its responsibility ends),
     // but the caller now owns them and must either free or return them.
     const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
-    MemorySafety.clearAllocationsReturned(state.refinements, return_eidx);
-    // Deposit returned entity index into caller's instruction
-    state.results[index].refinement = return_eidx;
+    MemorySafety.clearAllocationsReturned(state.refinements, return_gid);
+    // Deposit returned entity GID into caller's instruction
+    state.results[index].refinement = return_gid;
 }
 
 /// Execute both branches of a conditional, then merge results.
@@ -63,7 +63,7 @@ pub fn cond_br(
 ) !void {
     const ctx = state.ctx;
     const results = state.results;
-    const return_eidx = state.return_eidx;
+    const return_gid = state.return_gid;
 
     // Clone results and refinements for each branch
     const true_results = try clone_results_list(results, ctx.allocator);
@@ -96,7 +96,7 @@ pub fn cond_br(
         .ctx = ctx,
         .results = true_results,
         .refinements = &true_refinements,
-        .return_eidx = return_eidx,
+        .return_gid = return_gid,
         .created_gids = &true_created,
         .modified_gids = &true_modified,
         .branch_returns = &true_returns,
@@ -105,7 +105,7 @@ pub fn cond_br(
         .ctx = ctx,
         .results = false_results,
         .refinements = &false_refinements,
-        .return_eidx = return_eidx,
+        .return_gid = return_gid,
         .created_gids = &false_created,
         .modified_gids = &false_modified,
         .branch_returns = &false_returns,
@@ -130,7 +130,7 @@ pub fn cond_br(
     try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches);
 
     // Merge return values from returning branches (hoisting to function level)
-    try tag.mergeReturnValue(.cond_br, ctx.allocator, ctx, state.refinements, return_eidx, &branches);
+    try tag.mergeReturnValue(.cond_br, ctx.allocator, ctx, state.refinements, return_gid, &branches);
 
     // Propagate created/modified GIDs to parent's lists if tracking
     if (state.created_gids) |parent_created| {
@@ -153,7 +153,7 @@ pub fn switch_br(
 ) !void {
     const ctx = state.ctx;
     const results = state.results;
-    const return_eidx = state.return_eidx;
+    const return_gid = state.return_gid;
 
     const num_cases = case_fns.len;
 
@@ -189,7 +189,7 @@ pub fn switch_br(
             .ctx = ctx,
             .results = branch_results[i],
             .refinements = &branch_refinements[i],
-            .return_eidx = return_eidx,
+            .return_gid = return_gid,
             .created_gids = &branch_created[i],
             .modified_gids = &branch_modified[i],
             .branch_returns = &branch_returns[i],
@@ -215,7 +215,7 @@ pub fn switch_br(
     try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states);
 
     // Merge return values from returning branches (hoisting to function level)
-    try tag.mergeReturnValue(.switch_br, ctx.allocator, ctx, state.refinements, return_eidx, &branch_states);
+    try tag.mergeReturnValue(.switch_br, ctx.allocator, ctx, state.refinements, return_gid, &branch_states);
 
     // Propagate created/modified GIDs to parent's lists if tracking
     if (state.created_gids) |parent_created| {
@@ -257,23 +257,21 @@ pub fn clone_results_list(list: []Inst, allocator: std.mem.Allocator) error{OutO
 // =============================================================================
 
 /// Initialize an instruction with a new scalar refinement. Crashes if already initialized.
-pub fn initInst(refinements: *Refinements, results: []Inst, index: usize) !EIdx {
+pub fn initInst(refinements: *Refinements, results: []Inst, index: usize) !Gid {
     if (results[index].refinement) |_| @panic("instruction already initialized");
-    const idx: EIdx = @intCast(refinements.list.items.len);
-    try refinements.list.append(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    results[index].refinement = idx;
-    return idx;
+    const gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    results[index].refinement = gid;
+    return gid;
 }
 
 /// Overwrite an instruction with a new refinement. Creates new entity regardless of prior state.
 /// Call this in tag handlers before splat() so analyses can set their respective fields.
 /// For conditional keep-of-previous-value semantics, use merge (not yet implemented).
 /// For structs, takes ownership of the fields slice (caller must allocate fresh fields).
-pub fn clobberInst(refinements: *Refinements, results: []Inst, index: usize, value: Refinement) !EIdx {
-    const idx: EIdx = @intCast(refinements.list.items.len);
-    try refinements.list.append(value);
-    results[index].refinement = idx;
-    return idx;
+pub fn clobberInst(refinements: *Refinements, results: []Inst, index: usize, value: Refinement) !Gid {
+    const gid = try refinements.appendEntity(value);
+    results[index].refinement = gid;
+    return gid;
 }
 
 // =============================================================================
@@ -304,7 +302,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
-        .return_eidx = 0,
+        .return_gid = 0,
     };
 }
 
@@ -473,20 +471,20 @@ test "ret_safe writes return value to return slot" {
     // Global refinements table - return slot pre-allocated
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
+    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
 
     const results = try make_results_list(allocator, 3);
     defer clear_results_list(results, allocator);
 
     // Verify return entity is initially unset
-    try std.testing.expectEqual(.retval_future, std.meta.activeTag(refinements.at(return_eidx).*));
+    try std.testing.expectEqual(.retval_future, std.meta.activeTag(refinements.at(return_gid).*));
 
-    // Create state with return_eidx pointing to return slot
+    // Create state with return_gid pointing to return slot
     const state = State{
         .ctx = &ctx,
         .results = results,
         .refinements = &refinements,
-        .return_eidx = return_eidx,
+        .return_gid = return_gid,
     };
 
     // Allocate and store a value
@@ -494,10 +492,10 @@ test "ret_safe writes return value to return slot" {
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
     // Return the value from instruction 0
-    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
 
     // Verify return entity is now a pointer
-    try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(return_eidx).*));
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(return_gid).*));
 }
 
 test "ret_safe with void src sets return to void" {
@@ -512,24 +510,24 @@ test "ret_safe with void src sets return to void" {
     // Global refinements table - return slot pre-allocated
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
+    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
 
     const results = try make_results_list(allocator, 1);
     defer clear_results_list(results, allocator);
 
-    // Create state with return_eidx
+    // Create state with return_gid
     const state = State{
         .ctx = &ctx,
         .results = results,
         .refinements = &refinements,
-        .return_eidx = return_eidx,
+        .return_gid = return_gid,
     };
 
     // Return void
     try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .interned = .{ .id = null, .ty = .{ .void = {} } } } } });
 
     // Verify return entity is now void
-    try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(return_eidx).*));
+    try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(return_gid).*));
 }
 
 test "ret_safe at entrypoint succeeds" {
@@ -545,7 +543,7 @@ test "ret_safe at entrypoint succeeds" {
     defer refinements.deinit();
 
     // Create return slot (like entrypoint would)
-    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
+    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
 
     const results = try make_results_list(allocator, 2);
     defer clear_results_list(results, allocator);
@@ -554,7 +552,7 @@ test "ret_safe at entrypoint succeeds" {
         .ctx = &ctx,
         .results = results,
         .refinements = &refinements,
-        .return_eidx = return_eidx,
+        .return_gid = return_gid,
     };
 
     // Allocate a value
@@ -562,5 +560,5 @@ test "ret_safe at entrypoint succeeds" {
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
     // Return - should just succeed without error
-    try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
 }

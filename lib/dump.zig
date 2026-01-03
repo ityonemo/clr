@@ -3,7 +3,7 @@ const Context = @import("Context.zig");
 const Inst = @import("Inst.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
-const EIdx = Inst.EIdx;
+const Gid = Inst.Gid;
 const State = @import("lib.zig").State;
 
 /// Debug function to dump analysis state at any point.
@@ -12,8 +12,7 @@ pub fn dump(state: State) void {
     const results = state.results;
     const ctx = state.ctx;
     const refinements = state.refinements;
-    const caller_refinements = state.caller_refinements;
-    const return_eidx = state.return_eidx;
+    const return_gid = state.return_gid;
 
     const writer = ctx.writer;
     var buf: [4096]u8 = undefined;
@@ -38,8 +37,8 @@ pub fn dump(state: State) void {
     }
     writer.writeAll("]\n") catch {};
 
-    // Return eidx
-    const ret_msg = std.fmt.bufPrint(&buf, "Return EIdx: {d}\n", .{return_eidx}) catch "Return EIdx: <format error>\n";
+    // Return gid (with global refinements, return slot is in the same table)
+    const ret_msg = std.fmt.bufPrint(&buf, "Return GID: {d}\n", .{return_gid}) catch "Return GID: <format error>\n";
     writer.writeAll(ret_msg) catch {};
 
     // Instruction results
@@ -47,16 +46,12 @@ pub fn dump(state: State) void {
     writer.writeAll(inst_msg) catch {};
     dumpInstructionResults(writer, results, refinements, "  ");
 
-    // Caller refinements
-    if (caller_refinements) |cp| {
-        writer.writeAll("Caller Return Slot:\n") catch {};
-        var desc_buf: [2048]u8 = undefined;
-        const desc = formatRefinementDeep(&desc_buf, return_eidx, cp.at(return_eidx).*, cp, 0);
-        const line = std.fmt.bufPrint(&buf, "  {s}\n", .{desc}) catch "  <format error>\n";
-        writer.writeAll(line) catch {};
-    } else {
-        writer.writeAll("Caller Refinements: null (entrypoint)\n") catch {};
-    }
+    // Return slot info (from global refinements table)
+    writer.writeAll("Return Slot:\n") catch {};
+    var desc_buf: [2048]u8 = undefined;
+    const desc = formatRefinementDeep(&desc_buf, return_gid, refinements.at(return_gid).*, refinements, 0);
+    const line = std.fmt.bufPrint(&buf, "  {s}\n", .{desc}) catch "  <format error>\n";
+    writer.writeAll(line) catch {};
 
     writer.writeAll("===== END DEBUG DUMP =====\n\n") catch {};
 }
@@ -69,7 +64,7 @@ fn dumpInstructionResults(writer: *std.Io.Writer, results: []Inst, refinements: 
     var i: usize = 0;
     while (i < results.len) : (i += 1) {
         const inst = results[i];
-        if (inst.refinement) |eidx| {
+        if (inst.refinement) |gid| {
             // Flush any pending uninitialized range
             if (uninit_start) |start| {
                 const end = i - 1;
@@ -82,8 +77,8 @@ fn dumpInstructionResults(writer: *std.Io.Writer, results: []Inst, refinements: 
                 }
                 uninit_start = null;
             }
-            const ref = refinements.at(eidx);
-            const desc = formatRefinementDeep(&desc_buf, eidx, ref.*, refinements, 0);
+            const ref = refinements.at(gid);
+            const desc = formatRefinementDeep(&desc_buf, gid, ref.*, refinements, 0);
             const line = if (inst.name_id) |id|
                 std.fmt.bufPrint(&line_buf, "{s}[{d}] name_id={d} → {s}\n", .{ prefix, i, id, desc }) catch continue
             else
@@ -109,12 +104,12 @@ fn dumpInstructionResults(writer: *std.Io.Writer, results: []Inst, refinements: 
     }
 }
 
-fn formatRefinementDeep(buf: []u8, eidx: EIdx, ref: Refinement, refinements: *Refinements, depth: usize) []const u8 {
+fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refinements, depth: usize) []const u8 {
     if (depth > 10) return "<max depth>";
 
     return switch (ref) {
         .scalar => |s| std.fmt.bufPrint(buf, "({d}) scalar(undef={s}, mem={s})", .{
-            eidx,
+            gid,
             formatUndefined(s.analyte.undefined),
             formatMemSafety(s.analyte.memory_safety),
         }) catch "scalar(?)",
@@ -123,7 +118,7 @@ fn formatRefinementDeep(buf: []u8, eidx: EIdx, ref: Refinement, refinements: *Re
             const pointee = refinements.at(p.to);
             const pointee_desc = formatRefinementDeep(&inner_buf, p.to, pointee.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) pointer(undef={s}, mem={s}) → {s}", .{
-                eidx,
+                gid,
                 formatUndefined(p.analyte.undefined),
                 formatMemSafety(p.analyte.memory_safety),
                 pointee_desc,
@@ -135,7 +130,7 @@ fn formatRefinementDeep(buf: []u8, eidx: EIdx, ref: Refinement, refinements: *Re
             const payload = refinements.at(o.to);
             const payload_desc = formatRefinementDeep(&inner_buf, o.to, payload.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) optional(undef={s}, mem={s}) → {s}", .{
-                eidx,
+                gid,
                 formatUndefined(o.analyte.undefined),
                 formatMemSafety(o.analyte.memory_safety),
                 payload_desc,
@@ -147,7 +142,7 @@ fn formatRefinementDeep(buf: []u8, eidx: EIdx, ref: Refinement, refinements: *Re
             const payload = refinements.at(e.to);
             const payload_desc = formatRefinementDeep(&inner_buf, e.to, payload.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) errorunion(undef={s}, mem={s}) → {s}", .{
-                eidx,
+                gid,
                 formatUndefined(e.analyte.undefined),
                 formatMemSafety(e.analyte.memory_safety),
                 payload_desc,
@@ -158,15 +153,15 @@ fn formatRefinementDeep(buf: []u8, eidx: EIdx, ref: Refinement, refinements: *Re
             var inner_buf: [1024]u8 = undefined;
             const inner = refinements.at(r.to);
             const inner_desc = formatRefinementDeep(&inner_buf, r.to, inner.*, refinements, depth + 1);
-            const result = std.fmt.bufPrint(buf, "({d}) region → {s}", .{ eidx, inner_desc }) catch "region(?)";
+            const result = std.fmt.bufPrint(buf, "({d}) region → {s}", .{ gid, inner_desc }) catch "region(?)";
             break :blk result;
         },
-        .@"struct" => std.fmt.bufPrint(buf, "({d}) struct", .{eidx}) catch "struct",
-        .@"union" => std.fmt.bufPrint(buf, "({d}) union", .{eidx}) catch "union",
-        .retval_future => std.fmt.bufPrint(buf, "({d}) retval_future", .{eidx}) catch "retval_future",
-        .unimplemented => std.fmt.bufPrint(buf, "({d}) unimplemented", .{eidx}) catch "unimplemented",
-        .void => std.fmt.bufPrint(buf, "({d}) void", .{eidx}) catch "void",
-        .noreturn => std.fmt.bufPrint(buf, "({d}) noreturn", .{eidx}) catch "noreturn",
+        .@"struct" => std.fmt.bufPrint(buf, "({d}) struct", .{gid}) catch "struct",
+        .@"union" => std.fmt.bufPrint(buf, "({d}) union", .{gid}) catch "union",
+        .retval_future => std.fmt.bufPrint(buf, "({d}) retval_future", .{gid}) catch "retval_future",
+        .unimplemented => std.fmt.bufPrint(buf, "({d}) unimplemented", .{gid}) catch "unimplemented",
+        .void => std.fmt.bufPrint(buf, "({d}) void", .{gid}) catch "void",
+        .noreturn => std.fmt.bufPrint(buf, "({d}) noreturn", .{gid}) catch "noreturn",
     };
 }
 

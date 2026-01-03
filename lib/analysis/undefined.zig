@@ -1,7 +1,7 @@
 const std = @import("std");
 const Inst = @import("../Inst.zig");
 const Refinements = @import("../Refinements.zig");
-const EIdx = Inst.EIdx;
+const Gid = Refinements.Gid;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
@@ -110,7 +110,7 @@ pub const Undefined = union(enum) {
 
     /// Ensure an entity and its children have undefined state set.
     /// Only sets state if currently null (newly created), does not overwrite existing state.
-    fn ensureUndefinedStateSet(refinements: *Refinements, idx: EIdx) void {
+    fn ensureUndefinedStateSet(refinements: *Refinements, idx: Gid) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| {
                 if (s.analyte.undefined == null) {
@@ -259,7 +259,7 @@ pub const Undefined = union(enum) {
     }
 
     /// Helper to recursively set all scalars/pointers in a refinement tree to defined.
-    fn setDefinedRecursive(refinements: *Refinements, idx: EIdx) void {
+    fn setDefinedRecursive(refinements: *Refinements, idx: Gid) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
             .pointer => |*p| {
@@ -291,7 +291,7 @@ pub const Undefined = union(enum) {
     /// Recursively set name_when_set on undefined states that don't have a name yet.
     /// Called by DbgVarPtr to retroactively name undefined states that were created
     /// before the variable name was known (since dbg_var_ptr comes AFTER stores in AIR).
-    pub fn setNameOnUndefined(refinements: *Refinements, idx: EIdx, name: ?[]const u8) void {
+    pub fn setNameOnUndefined(refinements: *Refinements, idx: Gid, name: ?[]const u8) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| {
                 if (s.analyte.undefined) |*undef| {
@@ -335,7 +335,7 @@ pub const Undefined = union(enum) {
     pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
         _ = state;
         _ = index;
-        // For .eidx: result shares source's entity, undefined state already correct
+        // For .inst: result shares source's entity, undefined state already correct
         if (params.src == .interned) {
             @panic("optional_payload: interned source unimplemented");
         }
@@ -350,7 +350,7 @@ pub const Undefined = union(enum) {
                 const idx = state.results[index].refinement.?;
                 setDefinedRecursive(state.refinements, idx);
             },
-            .eidx => {
+            .inst => {
                 // Runtime value - undefined state was already copied from caller
             },
             .other => {},
@@ -365,7 +365,7 @@ pub const Undefined = union(enum) {
         // When source is an eidx with existing refinement, undefined state is already set.
         // When br creates a new scalar (interned source), we need to set undefined.
         switch (params.src) {
-            .eidx => {}, // Source has existing refinement with undefined state
+            .inst => {}, // Source has existing refinement with undefined state
             .interned => {
                 const block_idx = state.results[params.block].refinement orelse return;
                 setDefinedRecursive(state.refinements, block_idx);
@@ -379,22 +379,22 @@ pub const Undefined = union(enum) {
     pub fn ret_safe(state: State, index: usize, params: tag.RetSafe) !void {
         _ = index;
         // Only handle interned non-void returns - those are the ones that create new entities
-        const caller_refinements = state.caller_refinements orelse return;
         switch (params.src) {
             .interned => |ty| {
                 if (ty.ty != .void) {
                     // Interned values are compile-time constants, so defined
-                    setDefinedRecursive(caller_refinements, state.return_eidx);
+                    // With global refinements, return_gid points to slot in state.refinements
+                    setDefinedRecursive(state.refinements, state.return_gid);
                 }
             },
-            .eidx => {}, // Already has undefined state from callee
+            .inst => {}, // Already has undefined state from callee
             .other => {},
         }
     }
 
     /// Recursively set undefined state on a refinement and its children.
     /// Only called when storing an undefined value (src type is .undefined).
-    fn setUndefinedRecursive(refinements: *Refinements, idx: EIdx, undef_state: Undefined) void {
+    fn setUndefinedRecursive(refinements: *Refinements, idx: Gid, undef_state: Undefined) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| s.analyte.undefined = undef_state,
             .pointer => |*p| {
@@ -432,7 +432,7 @@ pub const Undefined = union(enum) {
 
     /// Apply defined/undefined state from an interned type to a refinement.
     /// Handles field-level undefined for structs where some fields may be undefined.
-    fn applyInternedType(refinements: *Refinements, idx: EIdx, ty: tag.Type, ctx: *Context) void {
+    fn applyInternedType(refinements: *Refinements, idx: Gid, ty: tag.Type, ctx: *Context) void {
         switch (ty.ty) {
             .undefined => {
                 // Mark as undefined - don't recurse further, undefined is terminal
@@ -540,7 +540,7 @@ pub const Undefined = union(enum) {
         } else {
             // Defined stores: update the pointee based on source type
             switch (params.src) {
-                .eidx => |src_idx| {
+                .inst => |src_idx| {
                     // Runtime source - connect pointee to source's entity
                     const src_ref = results[src_idx].refinement orelse {
                         // Source has no refinement - just mark as defined
@@ -768,7 +768,7 @@ pub const Undefined = union(enum) {
         }
     }
 
-    fn checkFieldUndefined(refinements: *Refinements, field_idx: Refinements.EIdx, ctx: *Context) !void {
+    fn checkFieldUndefined(refinements: *Refinements, field_idx: Refinements.Gid, ctx: *Context) !void {
         switch (refinements.at(field_idx).*) {
             .scalar => |sc| {
                 const undef = sc.analyte.undefined orelse @panic("struct_field_val: field scalar has no undefined state");
@@ -801,21 +801,21 @@ pub const Undefined = union(enum) {
         ctx: *Context,
         comptime merge_tag: anytype,
         refinements: *Refinements,
-        orig_eidx: EIdx,
+        orig_gid: Gid,
         branches: []const ?State,
-        branch_eidxs: []const ?EIdx,
+        branch_gids: []const ?Gid,
     ) !void {
         _ = merge_tag;
-        const orig_ref = refinements.at(orig_eidx);
+        const orig_ref = refinements.at(orig_gid);
 
         switch (orig_ref.*) {
             .scalar => |*s| {
-                if (mergeUndefinedFromBranches(ctx, branches, branch_eidxs, getScalarUndefined)) |merged| {
+                if (mergeUndefinedFromBranches(ctx, branches, branch_gids, getScalarUndefined)) |merged| {
                     s.analyte.undefined = merged;
                 }
             },
             .pointer => |*p| {
-                if (mergeUndefinedFromBranches(ctx, branches, branch_eidxs, getPointerUndefined)) |merged| {
+                if (mergeUndefinedFromBranches(ctx, branches, branch_gids, getPointerUndefined)) |merged| {
                     p.analyte.undefined = merged;
                 }
             },
@@ -824,16 +824,16 @@ pub const Undefined = union(enum) {
         }
     }
 
-    /// Get undefined state from a scalar at given EIdx
-    fn getScalarUndefined(branch: State, branch_eidx: EIdx) ?Undefined {
-        const ref = branch.refinements.at(branch_eidx);
+    /// Get undefined state from a scalar at given GID
+    fn getScalarUndefined(branch: State, branch_gid: Gid) ?Undefined {
+        const ref = branch.refinements.at(branch_gid);
         if (ref.* != .scalar) return null;
         return ref.scalar.analyte.undefined;
     }
 
-    /// Get undefined state from a pointer at given EIdx
-    fn getPointerUndefined(branch: State, branch_eidx: EIdx) ?Undefined {
-        const ref = branch.refinements.at(branch_eidx);
+    /// Get undefined state from a pointer at given GID
+    fn getPointerUndefined(branch: State, branch_gid: Gid) ?Undefined {
+        const ref = branch.refinements.at(branch_gid);
         if (ref.* != .pointer) return null;
         return ref.pointer.analyte.undefined;
     }
@@ -842,15 +842,15 @@ pub const Undefined = union(enum) {
     fn mergeUndefinedFromBranches(
         ctx: *Context,
         branches: []const ?State,
-        branch_eidxs: []const ?EIdx,
-        comptime getUndefined: fn (State, EIdx) ?Undefined,
+        branch_gids: []const ?Gid,
+        comptime getUndefined: fn (State, Gid) ?Undefined,
     ) ?Undefined {
         var result: ?Undefined = null;
 
-        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+        for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
-            const branch_eidx = branch_eidx_opt orelse continue;
-            const branch_undef = getUndefined(branch, branch_eidx) orelse continue;
+            const branch_gid = branch_gid_opt orelse continue;
+            const branch_undef = getUndefined(branch, branch_gid) orelse continue;
 
             if (result) |current| {
                 result = mergeUndefinedStates(ctx, current, branch_undef);
@@ -923,8 +923,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
-        .return_eidx = 0,
-        .caller_refinements = null,
+        .return_gid = 0,
     };
 }
 
@@ -1081,7 +1080,7 @@ test "load from undefined inst returns error" {
     } });
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
-    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
+    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try std.testing.expectError(
         error.UseBeforeAssign,
         Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } }),
@@ -1108,7 +1107,7 @@ test "load from defined inst does not return error" {
     // Set up result for the load instruction (index 0)
     _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
-    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
+    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 
@@ -1129,7 +1128,7 @@ test "load from inst without undefined tracking does not return error" {
     const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = null }, .type_id = 0 } });
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
-    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_eidx = 0, .caller_refinements = null };
+    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 

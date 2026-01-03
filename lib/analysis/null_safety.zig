@@ -1,7 +1,7 @@
 const std = @import("std");
 const Inst = @import("../Inst.zig");
 const Refinements = @import("../Refinements.zig");
-const EIdx = Inst.EIdx;
+const Gid = Refinements.Gid;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
@@ -30,7 +30,7 @@ pub const NullSafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
         const src_idx = switch (params.src) {
-            .eidx => |s| results[s].refinement orelse return,
+            .inst => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
         };
 
@@ -58,7 +58,7 @@ pub const NullSafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
         const src_idx = switch (params.src) {
-            .eidx => |s| results[s].refinement orelse return,
+            .inst => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
         };
 
@@ -145,7 +145,7 @@ pub const NullSafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
         const src_idx = switch (params.src) {
-            .eidx => |s| s,
+            .inst => |s| s,
             else => return, // Comptime - always safe
         };
 
@@ -187,7 +187,7 @@ pub const NullSafety = union(enum) {
                     pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
                 }
             },
-            .eidx => {
+            .inst => {
                 // Runtime value - mark as non_null
                 pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
             },
@@ -201,13 +201,13 @@ pub const NullSafety = union(enum) {
         ctx: *Context,
         comptime merge_tag: anytype,
         refinements: *Refinements,
-        orig_eidx: EIdx,
+        orig_gid: Gid,
         branches: []const ?State,
-        branch_eidxs: []const ?EIdx,
+        branch_gids: []const ?Gid,
     ) !void {
         _ = ctx;
         _ = merge_tag;
-        const orig_ref = refinements.at(orig_eidx);
+        const orig_ref = refinements.at(orig_gid);
 
         // Only optionals have null_safety
         if (orig_ref.* != .optional) return;
@@ -215,10 +215,10 @@ pub const NullSafety = union(enum) {
 
         // Fold null_safety across all reachable branches
         var result: ?NullSafety = null;
-        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+        for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
-            const branch_eidx = branch_eidx_opt orelse continue;
-            const branch_ref = branch.refinements.at(branch_eidx);
+            const branch_gid = branch_gid_opt orelse continue;
+            const branch_ref = branch.refinements.at(branch_gid);
             if (branch_ref.* != .optional) continue;
 
             const branch_ns = branch_ref.optional.analyte.null_safety orelse continue;
@@ -271,8 +271,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
-        .return_eidx = 0,
-        .caller_refinements = null,
+        .return_gid = 0,
     };
 }
 
@@ -299,7 +298,7 @@ test "is_non_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // is_non_null should record the check
-    try NullSafety.is_non_null(state, 1, .{ .src = .{ .eidx = 0 } });
+    try NullSafety.is_non_null(state, 1, .{ .src = .{ .inst = 0 } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .unknown);
@@ -326,7 +325,7 @@ test "is_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // is_null should record the check
-    try NullSafety.is_null(state, 1, .{ .src = .{ .eidx = 0 } });
+    try NullSafety.is_null(state, 1, .{ .src = .{ .inst = 0 } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .unknown);
@@ -415,7 +414,7 @@ test "optional_payload errors on unchecked unwrap" {
     const state = testState(&ctx, &results, &refinements);
 
     // optional_payload should error on unchecked optional
-    const result = NullSafety.optional_payload(state, 1, .{ .src = .{ .eidx = 0 } });
+    const result = NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
     try std.testing.expectError(error.UncheckedOptionalUnwrap, result);
 }
 
@@ -440,7 +439,7 @@ test "optional_payload errors on known null unwrap" {
     const state = testState(&ctx, &results, &refinements);
 
     // optional_payload should error on null unwrap
-    const result = NullSafety.optional_payload(state, 1, .{ .src = .{ .eidx = 0 } });
+    const result = NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
     try std.testing.expectError(error.NullUnwrap, result);
 }
 
@@ -465,7 +464,7 @@ test "optional_payload succeeds on checked non_null" {
     const state = testState(&ctx, &results, &refinements);
 
     // optional_payload should succeed
-    try NullSafety.optional_payload(state, 1, .{ .src = .{ .eidx = 0 } });
+    try NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
 }
 
 test "store to optional with null sets null state" {
@@ -512,7 +511,7 @@ test "store to optional with value sets non_null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store a runtime value to the optional
-    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .eidx = 1 } });
+    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .inst = 1 } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .non_null);

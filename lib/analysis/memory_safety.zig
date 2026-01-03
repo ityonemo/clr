@@ -2,7 +2,7 @@ const std = @import("std");
 const Inst = @import("../Inst.zig");
 const Refinements = @import("../Refinements.zig");
 const Analyte = @import("../Analyte.zig");
-const EIdx = Inst.EIdx;
+const Gid = Refinements.Gid;
 const Meta = @import("../Meta.zig");
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
@@ -39,11 +39,7 @@ pub const Allocation = struct {
 pub const Origin = struct {
     meta: Meta,
     type: Type,
-    parent_container_eidx: EIdx, // Entity index of the container this field pointer came from
-    // NOTE: If we ever encounter an origin situation where parent_container_eidx
-    // doesn't make sense, we should make this optional (?EIdx).
-    // TODO: When GIDs are properly implemented across the codebase, change this to GID
-    // for stability across branch cloning/merging.
+    parent_container_gid: Gid, // GID of the container this field pointer came from
 
     pub const Type = enum {
         struct_field, // Pointer to a struct field - cannot be freed
@@ -73,7 +69,7 @@ pub const MemorySafety = union(enum) {
         // ptr is null for stores to interned/global locations - no memory safety tracking needed
         const ptr = params.ptr orelse return;
         const src = switch (params.src) {
-            .eidx => |idx| idx,
+            .inst => |idx| idx,
             // comptime/global values don't have memory safety tracking - skip
             .interned, .other => return,
         };
@@ -175,16 +171,16 @@ pub const MemorySafety = union(enum) {
         };
 
         // Mark this pointer as derived from a field - cannot be freed directly
-        // Store container_eidx for field_parent_ptr recovery
+        // Store container GID for field_parent_ptr recovery
         ptr.analyte.memory_safety = .{ .origin = .{
             .meta = state.ctx.meta,
             .type = origin_type,
-            .parent_container_eidx = container_eidx,
+            .parent_container_gid = container.getGid(),
         } };
     }
 
     /// field_parent_ptr recovers the parent container pointer from a field pointer.
-    /// We use the stored parent_container_eidx to reconnect to the original container entity.
+    /// We use the stored parent_container_gid to reconnect to the original container entity.
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
         const refinements = state.refinements;
 
@@ -193,13 +189,13 @@ pub const MemorySafety = union(enum) {
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
 
-        // Get parent EIdx from the field pointer's origin
+        // Get parent GID from the field pointer's origin
         const ms = ptr_ref.pointer.analyte.memory_safety orelse return;
         const origin = switch (ms) {
             .origin => |o| o,
             else => return, // Not a field pointer
         };
-        const parent_eidx = origin.parent_container_eidx;
+        const parent_eidx = refinements.findByGid(origin.parent_container_gid) orelse return;
 
         // Update result to point to original parent container
         const result_idx = state.results[index].refinement orelse return;
@@ -213,7 +209,7 @@ pub const MemorySafety = union(enum) {
         const ctx = state.ctx;
 
         const src = switch (params.src) {
-            .eidx => |idx| idx,
+            .inst => |idx| idx,
             // comptime/global values don't have memory safety tracking - skip
             .interned, .other => return,
         };
@@ -226,7 +222,7 @@ pub const MemorySafety = union(enum) {
 
     /// Recursively mark all allocations in a refinement tree as returned (not leaks).
     /// This handles pointers, optionals containing pointers, unions containing pointers, and structs.
-    fn markAllocationsAsReturned(refinements: *Refinements, idx: EIdx, ctx: *Context) !void {
+    fn markAllocationsAsReturned(refinements: *Refinements, idx: Gid, ctx: *Context) !void {
         const refinement = refinements.at(idx);
         switch (refinement.*) {
             .pointer => |*p| {
@@ -282,7 +278,7 @@ pub const MemorySafety = union(enum) {
     /// Called by the caller after receiving a value from a function call.
     /// This transfers ownership: the callee marked it as "returned" (its responsibility ends),
     /// but the caller now owns it and must either free it or return it.
-    pub fn clearAllocationsReturned(refinements: *Refinements, idx: EIdx) void {
+    pub fn clearAllocationsReturned(refinements: *Refinements, idx: Gid) void {
         const refinement = refinements.at(idx);
         switch (refinement.*) {
             .pointer => |*p| {
@@ -344,7 +340,7 @@ pub const MemorySafety = union(enum) {
 
     /// Recursively check refinement tree for escaping stack pointers.
     /// Only checks for stack_ptr escapes - does NOT modify allocation state.
-    fn checkStackEscapeRecursive(refinements: *Refinements, idx: EIdx, ctx: *Context, func_name: []const u8) !void {
+    fn checkStackEscapeRecursive(refinements: *Refinements, idx: Gid, ctx: *Context, func_name: []const u8) !void {
         switch (refinements.at(idx).*) {
             .pointer => |p| {
                 const ms = p.analyte.memory_safety orelse return;
@@ -683,13 +679,13 @@ pub const MemorySafety = union(enum) {
         ctx: *Context,
         comptime merge_tag: anytype,
         refinements: *Refinements,
-        orig_eidx: EIdx,
+        orig_gid: Gid,
         branches: []const ?State,
-        branch_eidxs: []const ?EIdx,
+        branch_gids: []const ?Gid,
     ) !void {
         _ = ctx;
         _ = merge_tag;
-        const orig_ref = refinements.at(orig_eidx);
+        const orig_ref = refinements.at(orig_gid);
 
         // Only pointer and scalar refinements have analytes
         const orig_analyte = switch (orig_ref.*) {
@@ -708,12 +704,12 @@ pub const MemorySafety = union(enum) {
                     var all_freed = true;
                     var first_freed: ?Free = null;
 
-                    for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+                    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
                         // Null branch = unreachable path (e.g., unreach in cold branch)
                         const branch = branch_opt orelse continue;
                         // Entity may not exist in all branches during recursive merge traversal
-                        const branch_eidx = branch_eidx_opt orelse continue;
-                        const branch_ref = branch.refinements.at(branch_eidx);
+                        const branch_gid = branch_gid_opt orelse continue;
+                        const branch_ref = branch.refinements.at(branch_gid);
                         // Original was pointer/scalar with allocation, branch copy must be same type
                         const branch_analyte = switch (branch_ref.*) {
                             .pointer => |*p| &p.analyte,
@@ -741,12 +737,12 @@ pub const MemorySafety = union(enum) {
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it
-            for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+            for (branches, branch_gids) |branch_opt, branch_gid_opt| {
                 // Null branch = unreachable path
                 const branch = branch_opt orelse continue;
                 // Entity may not exist in all branches during recursive merge traversal
-                const branch_eidx = branch_eidx_opt orelse continue;
-                const branch_ref = branch.refinements.at(branch_eidx);
+                const branch_gid = branch_gid_opt orelse continue;
+                const branch_ref = branch.refinements.at(branch_gid);
                 // Original was pointer/scalar, branch copy must be same type
                 const branch_analyte = switch (branch_ref.*) {
                     .pointer => |*p| &p.analyte,
@@ -764,9 +760,9 @@ pub const MemorySafety = union(enum) {
     /// Handle orphaned entities detected during branch merge.
     /// An orphaned entity was created in a branch but is no longer reachable after merge.
     /// If the orphaned entity is a pointer to an unfreed allocation, report a leak.
-    pub fn orphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, eidx: EIdx) !void {
+    pub fn orphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, gid: Gid) !void {
         _ = refinements; // Main refinements not needed for immediate reporting
-        const ref = branch_refinements.at(eidx);
+        const ref = branch_refinements.at(gid);
 
         // Only check pointers - allocation state is on the pointee
         if (ref.* != .pointer) return;
@@ -860,7 +856,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
-        .return_eidx = 0,
+        .return_gid = 0,
     };
 }
 
@@ -947,7 +943,7 @@ test "bitcast propagates stack_ptr metadata" {
     } });
 
     // Bitcast shares the refinement
-    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .eidx = 0 }, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .inst = 0 }, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     const ms = refinements.at(results[1].refinement.?).pointer.analyte.memory_safety.?;
     try std.testing.expectEqualStrings("source_func", ms.stack_ptr.meta.function);
@@ -989,7 +985,7 @@ test "ret_safe detects escape when returning stack pointer from same function" {
     const state = testState(&ctx, &results, &refinements);
     try std.testing.expectError(
         error.StackPointerEscape,
-        MemorySafety.ret_safe(state, 1, .{ .src = .{ .eidx = 0 } }),
+        MemorySafety.ret_safe(state, 1, .{ .src = .{ .inst = 0 } }),
     );
 }
 
@@ -1025,7 +1021,7 @@ test "ret_safe allows returning arg (empty function name)" {
 
     // Should NOT error - returning pointer from caller is fine
     const state = testState(&ctx, &results, &refinements);
-    try MemorySafety.ret_safe(state, 1, .{ .src = .{ .eidx = 0 } });
+    try MemorySafety.ret_safe(state, 1, .{ .src = .{ .inst = 0 } });
 }
 
 test "alloc_create sets allocation metadata on pointer analyte" {
@@ -1082,7 +1078,7 @@ test "alloc_destroy marks allocation as freed" {
     // Create allocation (errorunion -> ptr -> pointee)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     // Unwrap error union to get the pointer (simulating real AIR flow)
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // Update context for free location
     ctx.meta.line = 20;
@@ -1119,7 +1115,7 @@ test "alloc_destroy detects double free" {
     // Create allocation (errorunion -> ptr -> pointee)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     // Unwrap error union to get the pointer (simulating real AIR flow)
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // First free
     try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
@@ -1147,7 +1143,7 @@ test "alloc_destroy detects mismatched allocator" {
 
     // Create with PageAllocator and unwrap
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // Destroy with different allocator
     try std.testing.expectError(
@@ -1196,7 +1192,7 @@ test "load detects use after free" {
 
     // Create, unwrap, store (to make it defined), and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
     try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
 
@@ -1223,7 +1219,7 @@ test "load from live allocation does not error" {
 
     // Create, unwrap, and store to allocation (not freed)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
     // Load from live allocation should succeed
@@ -1247,7 +1243,7 @@ test "onFinish detects memory leak" {
 
     // Create allocation and unwrap but don't free
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // onFinish should detect the leak (via the unwrapped pointer at inst 1)
     try std.testing.expectError(
@@ -1273,7 +1269,7 @@ test "onFinish allows freed allocation" {
 
     // Create, unwrap, and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
 
     // onFinish should not error
@@ -1292,24 +1288,24 @@ test "onFinish allows passed allocation" {
     // Global refinements table - return slot pre-allocated
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
+    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
 
     var results = [_]Inst{.{}} ** 5;
     const state = State{
         .ctx = &ctx,
         .results = &results,
         .refinements = &refinements,
-        .return_eidx = return_eidx,
+        .return_gid = return_gid,
     };
 
     // Create allocation and unwrap
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // Store to make the pointee defined
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
     // Return the pointer (marks as passed)
-    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .eidx = 1 } } });
+    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 1 } } });
 
     // onFinish should not error - allocation was passed to caller
     try MemorySafety.onFinish(&results, &ctx, &refinements);
@@ -1355,7 +1351,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     // inst 0: alloc_create - create heap allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     // inst 1: unwrap_errunion_payload - get the pointer
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // inst 2: store_safe - make pointee defined
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
@@ -1372,7 +1368,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
         .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } },
     } });
     // inst 6: store_safe - store the allocation pointer into struct field
-    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = 5, .src = .{ .eidx = 1 } } });
+    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = 5, .src = .{ .inst = 1 } } });
 
     // === LOAD POINTER FROM STRUCT FIELD ===
     // inst 7: load - load struct from stack alloc
@@ -1429,7 +1425,7 @@ test "global refinements: freeing struct pointer field is visible immediately" {
 
     // inst 0 = alloc_create, inst 1 = unwrap to get pointer
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // inst 1 now has the allocation pointer
 
     // inst 2 = alloc struct with pointer field
@@ -1440,7 +1436,7 @@ test "global refinements: freeing struct pointer field is visible immediately" {
     // inst 4 = struct_field_ptr to field 0
     try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } } });
     // inst 5 = store allocation pointer into struct field
-    try Inst.apply(state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 } } });
+    try Inst.apply(state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .inst = 1 } } });
 
     // Get the allocation's POINTEE entity for later verification
     const alloc_ptr_ref = results[1].refinement.?;

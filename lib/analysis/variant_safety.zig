@@ -1,7 +1,7 @@
 const std = @import("std");
 const Inst = @import("../Inst.zig");
 const Refinements = @import("../Refinements.zig");
-const EIdx = Inst.EIdx;
+const Gid = Refinements.Gid;
 const Context = @import("../Context.zig");
 const tag = @import("../tag.zig");
 const Meta = @import("../Meta.zig");
@@ -257,13 +257,13 @@ pub const VariantSafety = struct {
         ctx: *Context,
         comptime merge_tag: anytype,
         refinements: *Refinements,
-        orig_eidx: EIdx,
+        orig_gid: Gid,
         branches: []const ?State,
-        branch_eidxs: []const ?EIdx,
+        branch_gids: []const ?Gid,
     ) !void {
         _ = ctx;
         _ = merge_tag;
-        const orig_ref = refinements.at(orig_eidx);
+        const orig_ref = refinements.at(orig_gid);
 
         // Only unions have variant_safety
         if (orig_ref.* != .@"union") return;
@@ -272,10 +272,10 @@ pub const VariantSafety = struct {
         // Gather variant_safety from all reachable branches
         var first_vs: ?VariantSafety = null;
 
-        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+        for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
-            const branch_eidx = branch_eidx_opt orelse continue;
-            const branch_ref = branch.refinements.at(branch_eidx);
+            const branch_gid = branch_gid_opt orelse continue;
+            const branch_ref = branch.refinements.at(branch_gid);
             if (branch_ref.* != .@"union") continue;
 
             const branch_vs = branch_ref.@"union".analyte.variant_safety orelse continue;
@@ -297,10 +297,10 @@ pub const VariantSafety = struct {
         const orig_vs = &u.analyte.variant_safety.?;
 
         // Merge: mark as active any variant that was active in ANY branch
-        for (branches, branch_eidxs) |branch_opt, branch_eidx_opt| {
+        for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
-            const branch_eidx = branch_eidx_opt orelse continue;
-            const branch_ref = branch.refinements.at(branch_eidx);
+            const branch_gid = branch_gid_opt orelse continue;
+            const branch_ref = branch.refinements.at(branch_gid);
             if (branch_ref.* != .@"union") continue;
 
             const branch_vs = branch_ref.@"union".analyte.variant_safety orelse continue;
@@ -328,8 +328,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
-        .return_eidx = 0,
-        .caller_refinements = null,
+        .return_gid = 0,
     };
 }
 
@@ -346,7 +345,7 @@ test "set_union_tag sets active variant" {
 
     // Create a union with 3 fields (null entities initially)
     // Note: fields array is owned by refinements, freed on deinit
-    const fields = try allocator.alloc(?EIdx, 3);
+    const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{ .analyte = .{}, .fields = fields, .type_id = 0 } });
@@ -384,7 +383,7 @@ test "struct_field_ptr allows access to active variant" {
     active_metas[1] = .{ .function = "test", .file = "test.zig", .line = 1, .column = null };
 
     // Create fields array - only field 1 needs an entity
-    const fields = try allocator.alloc(?EIdx, 3);
+    const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
     fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
@@ -420,7 +419,7 @@ test "struct_field_ptr errors on inactive variant" {
     active_metas[1] = .{ .function = "test", .file = "test.zig", .line = 1, .column = null };
 
     // Create fields array
-    const fields = try allocator.alloc(?EIdx, 3);
+    const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
     fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
@@ -457,7 +456,7 @@ test "struct_field_val errors on inactive variant" {
     active_metas[2] = .{ .function = "test", .file = "test.zig", .line = 1, .column = null };
 
     // Create fields array
-    const fields = try allocator.alloc(?EIdx, 3);
+    const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
     fields[2] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
@@ -494,7 +493,7 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
     active_metas[1] = .{ .function = "branch2", .file = "test.zig", .line = 2, .column = null };
 
     // Create fields array
-    const fields = try allocator.alloc(?EIdx, 3);
+    const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
     fields[0] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
     fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });

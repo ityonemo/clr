@@ -138,7 +138,7 @@ fn payloadUnOp(info: *const FnInfo, datum: Data) []const u8 {
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 
-/// Payload for ret_safe - just the src, caller_refinements and return_eidx come from State.
+/// Payload for ret_safe - just the src, caller_refinements and return_gid come from State.
 fn payloadRetSafe(info: *const FnInfo, datum: Data) []const u8 {
     const src_str = srcString(info.arena, info.ip, datum.un_op);
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
@@ -368,7 +368,7 @@ fn payloadDbgStmt(info: *const FnInfo, datum: Data) []const u8 {
 }
 
 /// Convert an AIR Ref to a Src union string.
-/// Handles .eidx (runtime instruction), .interned (comptime), and .other (globals).
+/// Handles .inst (runtime instruction), .interned (comptime), and .other (globals).
 fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const u8 {
     // Check for .none first (void/no value)
     if (ref == .none) {
@@ -376,7 +376,7 @@ fn srcString(arena: std.mem.Allocator, ip: *const InternPool, ref: Ref) []const 
     }
     if (ref.toIndex()) |idx| {
         // Runtime value from instruction
-        return clr_allocator.allocPrint(arena, ".{{ .eidx = {d} }}", .{@intFromEnum(idx)}, null);
+        return clr_allocator.allocPrint(arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null);
     }
     if (ref.toInterned()) |interned_idx| {
         // Check for null value first (untyped null)
@@ -924,7 +924,7 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     } else "null";
 
     // Build args tuple string: .{ Arg, Arg, ... }
-    // Args are tagged unions: .{ .eidx = N } or .{ .interned = Type }
+    // Args are tagged unions: .{ .inst = N } or .{ .interned = Type }
     var args_str: []const u8 = ".{";
     var first = true;
 
@@ -935,10 +935,10 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
             // Runtime value from local instruction - look up entity index from results
             const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(info.arena, "{s} Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Arg{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(info.arena, "{s}, Arg{{ .eidx = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Arg{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
@@ -1467,21 +1467,17 @@ const FunctionGen = union(enum) {
         _ = discard_caller_params;
         return switch (self) {
             .full => |f| clr_allocator.allocPrint(arena,
-                \\fn fn_{d}(ctx: *Context, caller_refinements: ?*Refinements{s}) anyerror!EIdx {{
+                \\fn fn_{d}(ctx: *Context, refinements: *Refinements, return_gid: Gid{s}) anyerror!Gid {{
                 \\    ctx.meta.file = "{s}";
                 \\    ctx.base_line = {d};
                 \\    try ctx.push_fn("{s}");
                 \\    defer ctx.pop_fn();
-                \\
-                \\    var refinements = Refinements.init(ctx.allocator);
-                \\    defer refinements.deinit();
                 \\    defer refinements.testValid();
                 \\
                 \\    const results = try Inst.make_results_list(ctx.allocator, {d});
                 \\    defer Inst.clear_results_list(results, ctx.allocator);
-                \\    const return_eidx: EIdx = if (caller_refinements) |cp| try cp.appendEntity(.{{ .retval_future = {{}} }}) else 0;
                 \\
-                \\    const state = State{{ .ctx = ctx, .results = results, .refinements = &refinements, .return_eidx = return_eidx, .caller_refinements = caller_refinements }};
+                \\    const state = State{{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid }};
                 \\
                 \\
             , .{ f.func_index, params, file_path, base_line, fqn, num_insts }, null),
@@ -1507,8 +1503,7 @@ const FunctionGen = union(enum) {
         return switch (self) {
             .full => clr_allocator.allocPrint(arena,
                 \\    try Inst.onFinish(state);
-                \\    Inst.backPropagate(state);
-                \\    return return_eidx;
+                \\    return return_gid;
                 \\}}
                 \\
             , .{}, null),
@@ -2351,7 +2346,7 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\const Context = clr.Context;
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
-        \\const EIdx = clr.EIdx;
+        \\const Gid = clr.Gid;
         \\const Arg = clr.Arg;
         \\const State = clr.State;
         \\
@@ -2368,7 +2363,12 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\    defer ctx.deinit();
         \\    ctx.getName = &getName;
         \\    ctx.getFieldId = &getFieldId;
-        \\    _ = fn_{d}(&ctx, null) catch {{
+        \\
+        \\    var refinements = Refinements.init(allocator);
+        \\    defer refinements.deinit();
+        \\    const return_gid = refinements.appendEntity(.{{ .retval_future = {{}} }}) catch 0;
+        \\
+        \\    _ = fn_{d}(&ctx, &refinements, return_gid) catch {{
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);
         \\    }};
@@ -2382,18 +2382,20 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + caller_refinements + arity Arg args
-    var params: []const u8 = "ctx: *Context, caller_refinements: ?*Refinements";
+    // Build parameter list: ctx + refinements + return_gid + arity Arg args
+    var params: []const u8 = "ctx: *Context, refinements: *Refinements, return_gid: Gid";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
         params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: Arg", .{params}, null);
     }
 
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}({s}) anyerror!EIdx {{
+        \\fn fn_{d}({s}) anyerror!Gid {{
+        \\    _ = refinements;
+        \\    _ = return_gid;
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    return if (caller_refinements) |cp| try cp.appendEntity(.{{ .retval_future = {{}} }}) else 0;
+        \\    return 0;
         \\}}
         \\
     , .{ func_index, params, func_index }, null);
