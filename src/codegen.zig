@@ -171,19 +171,19 @@ fn payloadAlloc(info: *const FnInfo, datum: Data) []const u8 {
 /// NOTE: Returns ".{ .unknown = {} }" when type cannot be determined, which will cause
 /// a compile error in the generated .air.zig - this is intentional to surface extraction failures.
 /// TODO: Audit other places in codegen that fall back to scalar and consider using .unknown instead.
-fn extractAllocCreateType(arena: std.mem.Allocator, ip: *const InternPool, datum: Data) []const u8 {
+fn extractAllocCreateType(info: *const FnInfo, datum: Data) []const u8 {
     const callee_ref = datum.pl_op.operand;
     const ip_idx = callee_ref.toInterned() orelse return ".{ .unknown = {} }";
 
     // Get function and its type
-    const func_key = ip.indexToKey(ip_idx);
+    const func_key = info.ip.indexToKey(ip_idx);
     const func_ty = switch (func_key) {
         .func => |f| f.ty,
         else => return ".{ .unknown = {} }",
     };
 
     // Get function type to access return_type
-    const func_type_key = ip.indexToKey(func_ty);
+    const func_type_key = info.ip.indexToKey(func_ty);
     const return_type = switch (func_type_key) {
         .func_type => |ft| ft.return_type,
         else => return ".{ .unknown = {} }",
@@ -191,7 +191,7 @@ fn extractAllocCreateType(arena: std.mem.Allocator, ip: *const InternPool, datum
 
     // Return type is Allocator.Error!*T - unwrap error union to get *T
     const ptr_type: InternPool.Index = blk: {
-        const return_key = ip.indexToKey(return_type);
+        const return_key = info.ip.indexToKey(return_type);
         break :blk switch (return_key) {
             .error_union_type => |eu| eu.payload_type,
             .ptr_type => return_type, // Already unwrapped
@@ -201,14 +201,14 @@ fn extractAllocCreateType(arena: std.mem.Allocator, ip: *const InternPool, datum
 
     // Now unwrap *T to get T
     const pointee_type: InternPool.Index = blk: {
-        const ptr_key = ip.indexToKey(ptr_type);
+        const ptr_key = info.ip.indexToKey(ptr_type);
         break :blk switch (ptr_key) {
             .ptr_type => |p| p.child,
             else => return ".{ .unknown = {} }",
         };
     };
 
-    return typeToString(null, null, arena, ip, pointee_type);
+    return typeToString(info.name_map, info.field_map, info.arena, info.ip, pointee_type);
 }
 
 /// Payload for struct_field_ptr_index_N - gets pointer to a struct field.
@@ -311,7 +311,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 // Prune allocator.create() - emit special tag for tracking
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const created_type = extractAllocCreateType(info.arena, info.ip, datum);
+                const created_type = extractAllocCreateType(info, datum);
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, created_type }, null);
             }
             if (isAllocatorDestroy(info.ip, datum)) {

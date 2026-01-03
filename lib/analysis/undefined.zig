@@ -556,12 +556,13 @@ pub const Undefined = union(enum) {
                     switch (refinements.at(pointee_idx).*) {
                         .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
                         .pointer => |*p| {
-                            // If source is also a pointer, copy its structure
+                            // If source is also a pointer, update .to to share the target
                             if (refinements.at(src_ref).* == .pointer) {
                                 const src_ptr = refinements.at(src_ref).pointer;
                                 p.to = src_ptr.to;
-                                // Copy analyte but override undefined to defined
-                                p.analyte = src_ptr.analyte;
+                                // Only update undefined state, NOT memory_safety
+                                // The field's location (stack/allocated) doesn't change
+                                // just because we stored a different pointer value into it
                                 p.analyte.undefined = .{ .defined = {} };
                             } else {
                                 p.analyte.undefined = .{ .defined = {} };

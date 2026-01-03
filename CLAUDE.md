@@ -8,7 +8,7 @@
 
 - `zig/b` - Builds the custom Zig compiler (uses `zig build --zig-lib-dir lib`)
 - `zig/z` - Runs the custom Zig compiler from `zig-out/bin/zig`
-- `zig build` - Builds libclr.so (the AIR plugin)
+- `zig build -Doptimize=ReleaseFast` - Builds libclr.so (the AIR plugin) **IMPORTANT: Always use ReleaseFast unless you need to do advanced debugging and you have recompiled Zig to be in a different mode**
 - `zig build test` - Runs unit tests for libclr
 - `./run_integration.sh` - Runs BATS integration tests
 - `./run_one.sh <test_file>` - Run a single test case (generates `.air.zig` file in project root)

@@ -339,3 +339,14 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator/field_ptr/free_via_fieldparentptr_tagged_union.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "use-after-free when accessing field pointer after parent freed" {
+    run compile_and_run "$TEST_CASES/allocator/field_ptr/use_after_free_field_ptr.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free in use_after_free_field_ptr.main" ]]
+    [[ "$output" =~ "use_after_free_field_ptr.zig:13:4)" ]]
+    [[ "$output" =~ "'container' freed in use_after_free_field_ptr.main" ]]
+    [[ "$output" =~ "use_after_free_field_ptr.zig:12:21)" ]]
+    [[ "$output" =~ "allocated in use_after_free_field_ptr.main" ]]
+    [[ "$output" =~ "use_after_free_field_ptr.zig:9:38)" ]]
+}

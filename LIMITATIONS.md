@@ -1,5 +1,26 @@
 # CLR Limitations
 
+## Immediate Refactor Targets
+
+### Return Slot Type Structure
+
+Currently, the return slot is initialized as `.retval_future` which is a placeholder with no type structure:
+
+```zig
+const return_gid = refinements.appendEntity(.{ .retval_future = {} }) catch 0;
+```
+
+This should be refactored to extract the function's return type from the AIR and create a proper refinement structure:
+
+```zig
+const return_type = extractReturnType(func_index, ip);  // TODO: implement
+const return_gid = refinements.appendEntity(typeToRefinement(return_type, refinements)) catch 0;
+```
+
+**Why this matters**: If a function returns a pointer, we need the return slot to have pointer structure so we can properly track returned allocations and detect issues like returning freed pointers.
+
+**Implementation**: In `src/codegen.zig`, we have access to `func_index` which gives us the function info. The return type can be extracted from the function signature and emitted as a `Type` literal in the generated code.
+
 ## Currently Not Implemented, But Planned
 
 ### Recursive Type Tracking
@@ -136,6 +157,39 @@ The following AIR instruction tags are not yet implemented and produce `.unimple
 - `ret_addr` - Return address for stack traces
 - `stack_trace_frames` - Stack trace frame info
 - `noop_pruned_debug` - Pruned debug instruction (produces void)
+
+## Needs Investigation
+
+### Move Semantics (Stack to Allocated)
+
+What happens when we move a value from stack to allocated memory? For example:
+```zig
+var stack_val: u8 = 42;  // .stack memory_safety
+container.field = stack_val;  // storing into .allocated field
+```
+
+The store should preserve the destination's `.allocated` memory_safety, but this needs verification and testing.
+
+### Free Checking at Program End vs Function End
+
+Currently, leak detection happens at function close (`onFinish`). Should we instead only perform free-checking at the end of the whole program? This would allow for patterns where allocations are returned to callers and freed elsewhere.
+
+**Questions**:
+1. How do we track allocations that are intentionally returned to the caller?
+2. Should `returned` allocations be exempt from local leak detection?
+3. Is there a use case for "program-level" leak detection vs "function-level"?
+
+### Tombstone for Out-of-Scope Functions
+
+When a function returns, do we need a `.tombstone` state for refinements that are no longer valid? This could prevent issues where:
+1. A pointer to a local variable escapes (stack escape)
+2. After the function returns, the pointer's target is no longer valid
+3. Accessing through that pointer should be detected as use-after-free
+
+**Questions**:
+1. Should we mark all stack allocations as "tombstoned" when a function returns?
+2. How does this interact with the existing stack escape detection?
+3. Would this overlap with or replace the current stack pointer tracking?
 
 ## Desired But Unknown How to Implement
 

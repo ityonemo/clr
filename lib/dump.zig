@@ -179,12 +179,9 @@ fn formatUndefined(undef: ?@import("analysis/undefined.zig").Undefined) []const 
 fn formatMemSafety(ms: ?@import("analysis/memory_safety.zig").MemorySafety) []const u8 {
     if (ms) |m| {
         return switch (m) {
-            .allocation => |a| if (a.freed != null) "freed" else "allocated",
-            .stack_ptr => "stack_ptr",
-            .origin => |o| switch (o.type) {
-                .struct_field => "origin:struct_field",
-                .union_field => "origin:union_field",
-            },
+            .allocated => |a| if (a.freed != null) "freed" else "allocated",
+            .stack => "stack",
+            .unset => "unset",
         };
     }
     return "null";
