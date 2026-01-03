@@ -1,26 +1,5 @@
 # CLR Limitations
 
-## Immediate Refactor Targets
-
-### Return Slot Type Structure
-
-Currently, the return slot is initialized as `.retval_future` which is a placeholder with no type structure:
-
-```zig
-const return_gid = refinements.appendEntity(.{ .retval_future = {} }) catch 0;
-```
-
-This should be refactored to extract the function's return type from the AIR and create a proper refinement structure:
-
-```zig
-const return_type = extractReturnType(func_index, ip);  // TODO: implement
-const return_gid = refinements.appendEntity(typeToRefinement(return_type, refinements)) catch 0;
-```
-
-**Why this matters**: If a function returns a pointer, we need the return slot to have pointer structure so we can properly track returned allocations and detect issues like returning freed pointers.
-
-**Implementation**: In `src/codegen.zig`, we have access to `func_index` which gives us the function info. The return type can be extracted from the function signature and emitted as a `Type` literal in the generated code.
-
 ## Currently Not Implemented, But Planned
 
 ### Recursive Type Tracking

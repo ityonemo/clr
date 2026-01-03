@@ -77,6 +77,9 @@ pub const FuncMir = struct {
     entrypoint: bool = false,
     name_mappings: []const NameMap,
     field_mappings: []const FieldMap,
+    /// Return type string for entrypoints (e.g., ".{ .id = null, .ty = .{ .scalar = {} } }")
+    /// Used to initialize the return slot with proper type structure
+    return_type: ?[]const u8 = null,
 };
 
 // Collection of MIR structs
@@ -196,6 +199,13 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Extract call targets from AIR (skips debug.* calls)
     const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), ip, tags, data, extra);
 
+    // Extract return type for entrypoints (to initialize return slot with proper type)
+    const return_type: ?[]const u8 = if (is_entrypoint) blk: {
+        const ret_type_str = clr_codegen.extractFunctionReturnType(&name_map, &field_map, arena.allocator(), ip, @enumFromInt(func_index));
+        // Dupe to persistent allocator since arena will be freed
+        break :blk clr_allocator.allocator().dupe(u8, ret_type_str) catch null;
+    } else null;
+
     const mir = clr_allocator.allocator().create(FuncMir) catch return null;
     mir.* = .{
         .func_index = func_index,
@@ -205,6 +215,7 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         .entrypoint = is_entrypoint,
         .name_mappings = name_mappings,
         .field_mappings = field_mappings,
+        .return_type = return_type,
     };
     return @ptrCast(mir);
 }
@@ -256,9 +267,11 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
 
     // Find entrypoint first
     var entrypoint_index: ?u32 = null;
+    var entrypoint_return_type: ?[]const u8 = null;
     for (mir_list.items) |mir| {
         if (mir.entrypoint) {
             entrypoint_index = mir.func_index;
+            entrypoint_return_type = mir.return_type;
             break;
         }
     }
@@ -313,7 +326,7 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
 
     // Write epilogue (imports and main function)
     if (entrypoint_index) |idx| {
-        const entry_text = clr_codegen.epilogue(idx);
+        const entry_text = clr_codegen.epilogue(idx, entrypoint_return_type);
         file.writeAll(entry_text) catch return;
     }
 

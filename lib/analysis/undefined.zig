@@ -38,6 +38,17 @@ pub const Undefined = union(enum) {
         return error.UseBeforeAssign;
     }
 
+    /// Check if a refinement represents an unfilled return slot (has undefined state).
+    /// Used by ret_safe to determine if a typed return slot can be overwritten.
+    pub fn isUnfilledReturnSlot(refinements: *Refinements, gid: Gid) bool {
+        const ref = refinements.at(gid);
+        return switch (ref.*) {
+            .scalar => |s| if (s.analyte.undefined) |u| u == .undefined else false,
+            .pointer => |p| if (p.analyte.undefined) |u| u == .undefined else false,
+            else => false,
+        };
+    }
+
     pub fn reportInconsistentBranches(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of value that may be undefined in ", .{});
         switch (self) {
@@ -137,7 +148,7 @@ pub const Undefined = union(enum) {
                     }
                 }
             },
-            .void, .unimplemented, .noreturn, .retval_future => {},
+            .void, .unimplemented, .noreturn => {},
             .region => @panic("ensureUndefinedStateSet: region not yet implemented"),
         }
     }
@@ -283,7 +294,7 @@ pub const Undefined = union(enum) {
                     }
                 }
             },
-            .void, .unimplemented, .noreturn, .retval_future => {},
+            .void, .unimplemented, .noreturn => {},
             .region => @panic("setDefinedRecursive: region not yet implemented"),
         }
     }
@@ -425,7 +436,7 @@ pub const Undefined = union(enum) {
                     }
                 }
             },
-            .void, .unimplemented, .noreturn, .retval_future => {},
+            .void, .unimplemented, .noreturn => {},
             .region => @panic("setUndefinedRecursive: region not yet implemented"),
         }
     }
@@ -598,7 +609,7 @@ pub const Undefined = union(enum) {
                                 }
                             }
                         },
-                        .void, .unimplemented, .noreturn, .retval_future => {},
+                        .void, .unimplemented, .noreturn => {},
                         .region => @panic("store: region not yet implemented"),
                     }
                 },
@@ -879,6 +890,37 @@ pub const Undefined = union(enum) {
             .branch_meta = ctx.meta,
             .name_when_set = undef_state.name_when_set,
         } };
+    }
+
+    /// Initialize the undefined state on a return slot refinement.
+    /// Return slots start as undefined - they become defined when ret_safe fills them.
+    pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => {
+                ref.scalar.analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+            },
+            .pointer => |p| {
+                ref.pointer.analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+                retval_init(refinements, p.to, ctx);
+            },
+            .optional => |o| retval_init(refinements, o.to, ctx),
+            .errorunion => |e| retval_init(refinements, e.to, ctx),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    retval_init(refinements, field_gid, ctx);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        retval_init(refinements, field_gid, ctx);
+                    }
+                }
+            },
+            .void => {}, // void return type is valid
+            .noreturn, .unimplemented, .region => unreachable,
+        }
     }
 };
 

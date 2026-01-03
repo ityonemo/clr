@@ -33,13 +33,15 @@ pub fn apply(state: State, index: usize, any_tag: tag.AnyTag) !void {
     }
 }
 
-pub fn call(state: State, index: usize, called: anytype, args: anytype) !void {
+pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: anytype) !void {
     // Skip if called is null (indirect call through function pointer - TODO: handle these)
     if (@TypeOf(called) == @TypeOf(null)) return;
     // Save caller's base_line - callee will set its own
     const saved_base_line = state.ctx.base_line;
-    // Create return slot in global refinements table
-    const return_slot = try state.refinements.appendEntity(.{ .retval_future = {} });
+    // Create typed return slot in global refinements table
+    const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+    const return_slot = try state.refinements.appendEntity(return_ref);
+    tag.splatInit(state.refinements, return_slot, state.ctx);
     // Call function with ctx, refinements, and return_slot
     const return_gid = try @call(.auto, called, .{ state.ctx, state.refinements, return_slot } ++ args);
     // Restore caller's base_line
@@ -468,16 +470,19 @@ test "ret_safe writes return value to return slot" {
     defer ctx.deinit();
     try ctx.stacktrace.append(allocator, "test_func"); // ret_safe needs a function name on stacktrace
 
-    // Global refinements table - return slot pre-allocated
+    // Global refinements table - return slot pre-allocated with typed slot
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
+    const return_type: tag.Type = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } };
+    const return_ref = try tag.typeToRefinement(return_type, &refinements);
+    const return_gid = try refinements.appendEntity(return_ref);
+    tag.splatInit(&refinements, return_gid, &ctx);
 
     const results = try make_results_list(allocator, 3);
     defer clear_results_list(results, allocator);
 
-    // Verify return entity is initially unset
-    try std.testing.expectEqual(.retval_future, std.meta.activeTag(refinements.at(return_gid).*));
+    // Verify return entity is initially a pointer (typed slot)
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(return_gid).*));
 
     // Create state with return_gid pointing to return slot
     const state = State{
@@ -494,7 +499,7 @@ test "ret_safe writes return value to return slot" {
     // Return the value from instruction 0
     try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
 
-    // Verify return entity is now a pointer
+    // Verify return entity is still a pointer (overwritten with return value)
     try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(return_gid).*));
 }
 
@@ -507,10 +512,10 @@ test "ret_safe with void src sets return to void" {
     defer ctx.deinit();
     try ctx.stacktrace.append(allocator, "test_func");
 
-    // Global refinements table - return slot pre-allocated
+    // Global refinements table - return slot pre-allocated with void type
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
 
     const results = try make_results_list(allocator, 1);
     defer clear_results_list(results, allocator);
@@ -526,7 +531,7 @@ test "ret_safe with void src sets return to void" {
     // Return void
     try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .interned = .{ .id = null, .ty = .{ .void = {} } } } } });
 
-    // Verify return entity is now void
+    // Verify return entity is still void
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(return_gid).*));
 }
 
@@ -542,8 +547,11 @@ test "ret_safe at entrypoint succeeds" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create return slot (like entrypoint would)
-    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
+    // Create typed return slot (like entrypoint would)
+    const return_type: tag.Type = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } };
+    const return_ref = try tag.typeToRefinement(return_type, &refinements);
+    const return_gid = try refinements.appendEntity(return_ref);
+    tag.splatInit(&refinements, return_gid, &ctx);
 
     const results = try make_results_list(allocator, 2);
     defer clear_results_list(results, allocator);

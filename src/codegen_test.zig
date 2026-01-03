@@ -329,11 +329,11 @@ test "generateFunction produces complete function" {
     try std.testing.expectEqualStrings(expected, result);
 }
 
-test "epilogue generates correct output" {
+test "epilogue generates correct output with typed return slot" {
     initTestAllocator();
     defer deinitTestAllocator();
 
-    const result = codegen.epilogue(123);
+    const result = codegen.epilogue(123, ".{ .id = null, .ty = .{ .scalar = {} } }");
 
     const expected =
         \\const std = @import("std");
@@ -361,7 +361,10 @@ test "epilogue generates correct output" {
         \\
         \\    var refinements = Refinements.init(allocator);
         \\    defer refinements.deinit();
-        \\    const return_gid = refinements.appendEntity(.{ .retval_future = {} }) catch 0;
+        \\    const return_type: clr.Type = .{ .id = null, .ty = .{ .scalar = {} } };
+        \\    const return_ref = clr.typeToRefinement(return_type, &refinements) catch Refinements.Refinement{ .scalar = .{ .analyte = .{}, .type_id = 0 } };
+        \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
+        \\    clr.splatInit(&refinements, return_gid, &ctx);
         \\
         \\    _ = fn_123(&ctx, &refinements, return_gid) catch {
         \\        file_writer.interface.flush() catch {};

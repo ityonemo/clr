@@ -648,44 +648,21 @@ pub const RetSafe = struct {
         const return_gid = state.return_gid;
         const refns = state.refinements;
 
+        // Overwrite return slot with the return value
+        // Phase 2 will change this to append to early_returns instead
         switch (self.src) {
             .inst => |src| {
                 const src_gid = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                if (refns.at(src_gid).* == .retval_future) @panic("cannot return an unset_retval");
-                switch (refns.at(return_gid).*) {
-                    .retval_future, .noreturn => {
-                        // .noreturn can be overwritten - it's from an error path return
-                        // Deep copy to avoid double-free when struct/union fields are freed
-                        refns.at(return_gid).* = try refns.deepCopyValue(refns.at(src_gid).*);
-                    },
-                    else => {
-                        // Multiple returns within same branch - need to merge
-                        // TODO: implement proper merge of return value analysis states
-                        @panic("ret_safe: multiple returns in same branch - merge not yet implemented");
-                    },
-                }
+                // Deep copy to avoid double-free when struct/union fields are freed
+                refns.at(return_gid).* = try refns.deepCopyValue(refns.at(src_gid).*);
             },
             .interned => |ty| {
                 // Comptime return value
                 if (ty.ty == .void) {
-                    // Void return
-                    switch (refns.at(return_gid).*) {
-                        .retval_future => refns.at(return_gid).* = .void,
-                        .void => {},
-                        else => @panic("void function retval incorrectly set to some value"),
-                    }
+                    refns.at(return_gid).* = .void;
                 } else {
                     // Non-void comptime value - create structure from type info
-                    switch (refns.at(return_gid).*) {
-                        .retval_future, .void => {
-                            refns.at(return_gid).* = try typeToRefinement(ty, refns);
-                        },
-                        else => {
-                            // Multiple returns within same branch - need to merge
-                            // TODO: implement proper merge of return value analysis states
-                            @panic("ret_safe: multiple interned returns in same branch - merge not yet implemented");
-                        },
-                    }
+                    refns.at(return_gid).* = try typeToRefinement(ty, refns);
                 }
             },
             .other => {
@@ -746,18 +723,11 @@ pub const RetLoad = struct {
         const ptr_ref = state.results[self.ptr].refinement orelse @panic("ret_load: ret_ptr has no refinement");
         const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
 
-        // Copy to return slot in global table
+        // Overwrite return slot with deep copy of pointee
+        // Phase 2 will change this to append to early_returns instead
         const return_gid = state.return_gid;
         const refns = state.refinements;
-        switch (refns.at(return_gid).*) {
-            .retval_future, .noreturn => {
-                // Deep copy to avoid double-free when struct/union fields are freed
-                refns.at(return_gid).* = try refns.deepCopyValue(refns.at(pointee_idx).*);
-            },
-            else => {
-                @panic("ret_load: multiple returns in same branch - merge not yet implemented");
-            },
-        }
+        refns.at(return_gid).* = try refns.deepCopyValue(refns.at(pointee_idx).*);
 
         try splat(.ret_load, state, index, self);
     }
@@ -1139,6 +1109,17 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !v
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "onFinish")) {
             try Analysis.onFinish(results, ctx, refinements);
+        }
+    }
+}
+
+/// Initialize a return slot refinement. Called after creating the return slot
+/// to set up initial analysis state (e.g., marking values as defined).
+/// Each analysis can implement `retval_init` to initialize its state.
+pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "retval_init")) {
+            Analysis.retval_init(refinements, gid, ctx);
         }
     }
 }

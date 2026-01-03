@@ -21,6 +21,7 @@ const std = @import("std");
 /// Re-export types from clr namespace for external use
 pub const NameMap = clr.NameMap;
 pub const FnInfo = clr.FnInfo;
+pub const FieldHashMap = clr.FieldHashMap;
 
 /// Register a name with a specific ID (typically an InternPool index).
 /// Use this when you have an InternPool NullTerminatedString to ensure globally unique IDs.
@@ -164,6 +165,34 @@ fn payloadAlloc(info: *const FnInfo, datum: Data) []const u8 {
     };
     const pointee_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, pointee_type);
     return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
+}
+
+/// Extract the return type string for a function given its InternPool index.
+/// Returns the type as a refinement initializer string (e.g., ".{ .id = null, .ty = .{ .scalar = {} } }").
+/// Used to initialize return slots with proper type structure.
+pub fn extractFunctionReturnType(
+    name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
+    field_map: *FieldHashMap,
+    arena: std.mem.Allocator,
+    ip: *const InternPool,
+    func_ip_idx: InternPool.Index,
+) []const u8 {
+    // Get function and its type
+    const func_key = ip.indexToKey(func_ip_idx);
+    const func_ty = switch (func_key) {
+        .func => |f| f.ty,
+        else => return ".{ .scalar = {} }", // fallback
+    };
+
+    // Get function type to access return_type
+    const func_type_key = ip.indexToKey(func_ty);
+    const return_type_idx = switch (func_type_key) {
+        .func_type => |ft| ft.return_type,
+        else => return ".{ .scalar = {} }", // fallback
+    };
+
+    // Convert return type to string
+    return typeToString(name_map, field_map, arena, ip, return_type_idx);
 }
 
 /// Extract type info for AllocCreate payload.
@@ -319,14 +348,14 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const ptr_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
                     // Can't determine ptr instruction, fall through to regular call
                     const call_parts = payloadCallParts(info, datum);
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d} }} }});\n", .{ inst_index, ptr_inst, allocator_info.id }, null);
             }
             const call_parts = payloadCallParts(info, datum);
-            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.args }, null);
+            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
         },
         else => blk: {
             const tag_payload = payload(info, tag, datum, arg_counter);
@@ -902,6 +931,7 @@ fn extractString(extra: []const u32, start: u32) []const u8 {
 const CallParts = struct {
     called: []const u8,
     args: []const u8,
+    return_type: []const u8,
 };
 
 fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
@@ -911,17 +941,19 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     const payload_index = datum.pl_op.payload;
     const args_len = info.extra[payload_index];
 
-    // Get called function - look up the instruction that produces the callee
-    const called_str = if (callee_ref.toIndex()) |idx| blk: {
+    // Get called function and return type
+    const called_str, const return_type_str = if (callee_ref.toIndex()) |idx| blk: {
         // Indirect call through function pointer (load, slice_elem_val, etc.)
         const callee_idx = @intFromEnum(idx);
         const callee_tag = info.tags[callee_idx];
         _ = callee_tag;
-        break :blk "null"; // TODO: handle indirect calls
+        break :blk .{ "null", ".{ .id = null, .ty = .{ .scalar = {} } }" }; // TODO: handle indirect calls
     } else if (callee_ref.toInterned()) |ip_idx| blk: {
         // Direct call to known function - use InternPool index as func_index
-        break :blk clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
-    } else "null";
+        const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
+        const ret_type = extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, ip_idx);
+        break :blk .{ called, ret_type };
+    } else .{ "null", ".{ .id = null, .ty = .{ .scalar = {} } }" };
 
     // Build args tuple string: .{ Arg, Arg, ... }
     // Args are tagged unions: .{ .inst = N } or .{ .interned = Type }
@@ -956,7 +988,7 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     }
     args_str = clr_allocator.allocPrint(info.arena, "{s} }}", .{args_str}, null);
 
-    return .{ .called = called_str, .args = args_str };
+    return .{ .called = called_str, .args = args_str, .return_type = return_type_str };
 }
 
 /// Detect if a Ref is an undefined value (typed or untyped).
@@ -2339,7 +2371,18 @@ pub fn emitGetFieldId(field_map: *clr.FieldHashMap) []const u8 {
 }
 
 /// Generate epilogue with imports and main function
-pub fn epilogue(entrypoint_index: u32) []u8 {
+pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
+    // Generate the return slot initialization
+    const return_slot_init = if (return_type) |rt|
+        clr_allocator.allocPrint(clr_allocator.allocator(),
+            \\    const return_type: clr.Type = {s};
+            \\    const return_ref = clr.typeToRefinement(return_type, &refinements) catch Refinements.Refinement{{ .scalar = .{{ .analyte = .{{}}, .type_id = 0 }} }};
+            \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
+            \\    clr.splatInit(&refinements, return_gid, &ctx);
+        , .{rt}, null)
+    else
+        @panic("entrypoint must have return type");
+
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\const std = @import("std");
         \\const clr = @import("clr");
@@ -2366,7 +2409,7 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\
         \\    var refinements = Refinements.init(allocator);
         \\    defer refinements.deinit();
-        \\    const return_gid = refinements.appendEntity(.{{ .retval_future = {{}} }}) catch 0;
+        \\{s}
         \\
         \\    _ = fn_{d}(&ctx, &refinements, return_gid) catch {{
         \\        file_writer.interface.flush() catch {{}};
@@ -2374,7 +2417,7 @@ pub fn epilogue(entrypoint_index: u32) []u8 {
         \\    }};
         \\}}
         \\
-    , .{entrypoint_index}, null);
+    , .{ return_slot_init, entrypoint_index }, null);
 }
 
 /// Generate a stub function for a missing call target

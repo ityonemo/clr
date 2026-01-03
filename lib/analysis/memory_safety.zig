@@ -339,7 +339,7 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .scalar, .void, .noreturn, .unimplemented, .retval_future, .region => {},
+            .scalar, .void, .noreturn, .unimplemented, .region => {},
         }
     }
 
@@ -380,7 +380,7 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .scalar, .void, .noreturn, .unimplemented, .retval_future, .region => {},
+            .scalar, .void, .noreturn, .unimplemented, .region => {},
         }
     }
 
@@ -436,7 +436,7 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
-            .scalar, .void, .noreturn, .unimplemented, .retval_future, .region => {},
+            .scalar, .void, .noreturn, .unimplemented, .region => {},
         }
     }
 
@@ -1019,6 +1019,37 @@ pub const MemorySafety = union(enum) {
             return reportMemoryLeak(ctx, allocation);
         }
     }
+
+    /// Initialize memory_safety state on a return slot refinement.
+    /// Pointees start as `.unset` - they get proper tracking when ret_safe fills the slot.
+    pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => {
+                ref.scalar.analyte.memory_safety = .{ .unset = {} };
+            },
+            .pointer => |p| {
+                ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                retval_init(refinements, p.to, ctx);
+            },
+            .optional => |o| retval_init(refinements, o.to, ctx),
+            .errorunion => |e| retval_init(refinements, e.to, ctx),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    retval_init(refinements, field_gid, ctx);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        retval_init(refinements, field_gid, ctx);
+                    }
+                }
+            },
+            .void => {},
+            .noreturn, .unimplemented, .region => unreachable,
+        }
+    }
 };
 
 // =========================================================================
@@ -1031,7 +1062,7 @@ const debug = @import("builtin").mode == .Debug;
 /// TODO: Re-enable strict checking once all handlers set memory_safety.
 /// With the new architecture:
 /// - Non-trivial types (scalar, struct, union, optional, errorunion) SHOULD have memory_safety set
-/// - Trivial types (void, unimplemented, noreturn, retval_future, region): no memory_safety
+/// - Trivial types (void, unimplemented, noreturn, region): no memory_safety
 pub fn testValid(refinement: Refinements.Refinement) void {
     // Temporarily disabled - not all handlers set memory_safety yet
     _ = refinement;
@@ -1534,10 +1565,12 @@ test "onFinish allows passed allocation" {
     try ctx.stacktrace.append(allocator, "test_func");
     defer ctx.deinit();
 
-    // Global refinements table - return slot pre-allocated
+    // Global refinements table - return slot pre-allocated with typed pointer
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_gid = try refinements.appendEntity(.{ .retval_future = {} });
+    // Create typed return slot: pointer to scalar (matches what ret_safe will return)
+    const pointee_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const return_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_gid } });
 
     var results = [_]Inst{.{}} ** 5;
     const state = State{

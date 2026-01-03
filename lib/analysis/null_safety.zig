@@ -258,7 +258,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("null_safety should only exist on optionals, got {s}", .{@tagName(t)});
             }
         },
-        .void, .noreturn, .retval_future, .unimplemented, .region => {},
+        .void, .noreturn, .unimplemented, .region => {},
     }
 }
 

@@ -60,14 +60,11 @@ pub const Refinement = union(enum) {
     @"struct": Struct,
     @"union": Union,
     noreturn: void, // specific return value for error paths.
-    retval_future: void, // special-case for retvals before a return has been called.
     unimplemented: void, // this is the result of an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
 
     /// clobbers one refinement over another.  The dst structure must be identical.
     /// TODO: In some cases, "deeper specification" may be added.
-    /// NOTE: For .retval_future destinations, use clobber_structured_idx instead because
-    /// clobber_retval_future may reallocate dst_list, invalidating the dst pointer.
     pub fn clobber_structured(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         switch (dst.*) {
             .scalar => {
@@ -77,7 +74,6 @@ pub const Refinement = union(enum) {
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
-            .retval_future => @panic("clobber_structured: use clobber_structured_idx for .retval_future destinations"),
             .region => @panic("regions not implemented yet"),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
@@ -89,7 +85,6 @@ pub const Refinement = union(enum) {
     }
 
     /// clobbers one refinement over another, using GID for destination.
-    /// Use this when dst might be .retval_future (which requires reallocation-safe handling).
     pub fn clobber_structured_idx(dst_gid: Gid, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const dst = dst_list.at(dst_gid);
         switch (dst.*) {
@@ -100,8 +95,6 @@ pub const Refinement = union(enum) {
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
-            // retval_future is a placeholder for return values, to be filled in by ret_safe
-            .retval_future => try clobber_retval_future(dst_gid, dst_list, src, src_list),
             .region => @panic("regions not implemented yet"),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
@@ -110,68 +103,6 @@ pub const Refinement = union(enum) {
             .void => if (src != .void) std.debug.panic("clobber mismatch: src is .{s} and dst is .void", .{@tagName(src)}),
             .noreturn => if (src != .noreturn) std.debug.panic("clobber mismatch: src is .{s} and dst is .noreturn", .{@tagName(src)}),
         }
-    }
-
-    /// Clobber a .retval_future slot with a src refinement, copying the structure without checks.
-    /// Takes dst_gid instead of pointer because copyTo may reallocate dst_list.
-    fn clobber_retval_future(dst_gid: Gid, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
-        const same_list = src_list == dst_list;
-        // Note: We must compute the new value BEFORE getting a pointer to dst,
-        // because copyTo may reallocate dst_list's backing memory.
-        const new_value: Refinement = switch (src) {
-            .scalar => src,
-            .pointer => |p| .{ .pointer = .{
-                .analyte = p.analyte,
-                .type_id = p.type_id,
-                .to = if (same_list) p.to else try copyTo(src_list.at(p.to).*, src_list, dst_list),
-            } },
-            .optional => |o| .{ .optional = .{
-                .analyte = o.analyte,
-                .type_id = o.type_id,
-                .to = if (same_list) o.to else try copyTo(src_list.at(o.to).*, src_list, dst_list),
-            } },
-            .errorunion => |e| .{ .errorunion = .{
-                .analyte = e.analyte,
-                .type_id = e.type_id,
-                .to = if (same_list) e.to else try copyTo(src_list.at(e.to).*, src_list, dst_list),
-            } },
-            .region => @panic("regions not implemented yet"),
-            .@"struct" => |s| blk: {
-                const allocator = dst_list.list.allocator;
-                const new_fields = try allocator.alloc(Gid, s.fields.len);
-                if (same_list) {
-                    // Same list: just copy field indices, they already reference valid entities
-                    @memcpy(new_fields, s.fields);
-                } else {
-                    // Different lists: need to copy field entities too
-                    for (s.fields, 0..) |field_idx, i| {
-                        new_fields[i] = try copyTo(src_list.at(field_idx).*, src_list, dst_list);
-                    }
-                }
-                break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .type_id = s.type_id } };
-            },
-            .@"union" => |u| blk: {
-                const allocator = dst_list.list.allocator;
-                const new_fields = try allocator.alloc(?Gid, u.fields.len);
-                if (same_list) {
-                    @memcpy(new_fields, u.fields);
-                } else {
-                    for (u.fields, 0..) |field_idx_opt, i| {
-                        new_fields[i] = if (field_idx_opt) |field_idx|
-                            try copyTo(src_list.at(field_idx).*, src_list, dst_list)
-                        else
-                            null;
-                    }
-                }
-                break :blk .{ .@"union" = .{ .analyte = u.analyte, .fields = new_fields, .type_id = u.type_id } };
-            },
-            .unimplemented => .{ .unimplemented = {} },
-            .void => .{ .void = {} },
-            .noreturn => .{ .noreturn = {} },
-            .retval_future => @panic("cannot copy from .retval_future"),
-        };
-        // Now safe to get pointer and assign
-        dst_list.at(dst_gid).* = new_value;
     }
 
     fn recurse_indirected(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime tag: anytype) error{OutOfMemory}!void {
@@ -251,7 +182,6 @@ pub const Refinement = union(enum) {
             .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
             .optional => try src.copyToIndirected(src_list, dst_list, .optional),
             .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
-            .retval_future => @panic("cannot copy from .retval_future"),
             .region => @panic("regions not implemented yet"),
             .@"struct" => try src.copyToFields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copyToFields(src_list, dst_list, .@"union"),
@@ -273,10 +203,10 @@ pub const Refinement = union(enum) {
         return dst_list.appendEntity(to_insert);
     }
 
-    /// Get the GID of this refinement. Unreachable for void/noreturn/retval_future/unimplemented.
+    /// Get the GID of this refinement. Unreachable for void/noreturn/unimplemented.
     pub fn getGid(self: Refinement) Gid {
         return switch (self) {
-            .void, .noreturn, .retval_future, .unimplemented => unreachable,
+            .void, .noreturn, .unimplemented => unreachable,
             inline else => |data| data.gid,
         };
     }
@@ -364,14 +294,14 @@ pub fn findByGid(self: *Refinements, gid: Gid) ?Gid {
     // Fast path: check if gid is a valid index and entity at that index has matching gid
     if (gid < self.list.items.len) {
         switch (self.list.items[gid]) {
-            .void, .noreturn, .retval_future, .unimplemented => {},
+            .void, .noreturn, .unimplemented => {},
             inline else => |data| if (data.gid == gid) return gid,
         }
     }
     // Slow path: linear scan (needed after deduplication/merge)
     for (self.list.items, 0..) |ref, idx| {
         switch (ref) {
-            .void, .noreturn, .retval_future, .unimplemented => {},
+            .void, .noreturn, .unimplemented => {},
             inline else => |data| if (data.gid == gid) return @intCast(idx),
         }
     }
@@ -385,7 +315,7 @@ pub fn appendEntity(self: *Refinements, value: Refinement) !Gid {
     var entity = value;
     // GID = EIdx at creation time (stable identity across clones/merges)
     switch (entity) {
-        .void, .noreturn, .retval_future, .unimplemented => {},
+        .void, .noreturn, .unimplemented => {},
         inline else => |*data| data.gid = idx,
     }
     try self.list.append(entity);
@@ -400,7 +330,7 @@ pub fn appendEntityWithGid(self: *Refinements, value: Refinement, gid_counter: *
     const gid = gid_counter.*;
     gid_counter.* += 1;
     switch (entity) {
-        .void, .noreturn, .retval_future, .unimplemented => {},
+        .void, .noreturn, .unimplemented => {},
         inline else => |*data| data.gid = gid,
     }
     try self.list.append(entity);
@@ -546,7 +476,6 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
         },
 
         .region => @panic("regions not implemented yet"),
-        .retval_future => @panic("cannot semideep copy .retval_future"),
 
         // Simple types: just copy
         .unimplemented => try self.appendEntity(.{ .unimplemented = {} }),

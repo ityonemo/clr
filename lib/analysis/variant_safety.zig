@@ -28,7 +28,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
             }
         },
         // No analyte on void, noreturn, etc.
-        .void, .noreturn, .retval_future, .unimplemented, .region => {},
+        .void, .noreturn, .unimplemented, .region => {},
     }
 }
 
