@@ -34,6 +34,13 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "detects stack pointer escape via pointer argument" {
+    run compile_and_run "$TEST_CASES/stack_pointer/basic/escape_via_ptr_arg.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "escape_via_ptr_arg.zig" ]]
+}
+
 # =============================================================================
 # Union stack pointer tests
 # =============================================================================
@@ -64,6 +71,13 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "detects stack pointer escape via union argument" {
+    run compile_and_run "$TEST_CASES/stack_pointer/union/escape_via_union_arg.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "escape_via_union_arg.zig" ]]
+}
+
 # =============================================================================
 # Struct stack pointer tests
 # =============================================================================
@@ -92,4 +106,11 @@ load test_helper
 @test "no false positive for passed-in pointer in struct return" {
     run compile_and_run "$TEST_CASES/stack_pointer/struct/no_escape.zig"
     [ "$status" -eq 0 ]
+}
+
+@test "detects stack pointer escape via struct argument" {
+    run compile_and_run "$TEST_CASES/stack_pointer/struct/escape_via_struct_arg.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "escape_via_struct_arg.zig" ]]
 }
