@@ -12,11 +12,6 @@ const Inst = @This();
 /// Index into the Refinements entity table, or null if not yet initialized.
 refinement: ?EIdx = null,
 
-/// For args: caller's entity index for backward propagation.
-/// Null for interned args (compile-time constants have nothing to propagate back to).
-/// Used by backPropagate() along with the caller_refinements parameter.
-caller_eidx: ?EIdx = null,
-
 /// The tag that created this instruction, stored for path building at error time.
 /// Used by Context.buildPathName to walk the instruction chain statelessly.
 inst_tag: ?tag.AnyTag = null,
@@ -43,10 +38,17 @@ pub fn call(state: State, index: usize, called: anytype, args: anytype) !void {
     if (@TypeOf(called) == @TypeOf(null)) return;
     // Save caller's base_line - callee will set its own
     const saved_base_line = state.ctx.base_line;
-    // Pass caller's refinements so callee can write return value into it
-    const return_eidx = try @call(.auto, called, .{ state.ctx, state.refinements } ++ args);
+    // Create return slot in global refinements table
+    const return_slot = try state.refinements.appendEntity(.{ .retval_future = {} });
+    // Call function with ctx, refinements, and return_slot
+    const return_eidx = try @call(.auto, called, .{ state.ctx, state.refinements, return_slot } ++ args);
     // Restore caller's base_line
     state.ctx.base_line = saved_base_line;
+    // Clear "returned" flag on any allocations in the return value.
+    // The callee marked them as "returned" (its responsibility ends),
+    // but the caller now owns them and must either free or return them.
+    const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
+    MemorySafety.clearAllocationsReturned(state.refinements, return_eidx);
     // Deposit returned entity index into caller's instruction
     state.results[index].refinement = return_eidx;
 }
@@ -61,122 +63,83 @@ pub fn cond_br(
 ) !void {
     const ctx = state.ctx;
     const results = state.results;
-    const refinements = state.refinements;
-    const caller_refinements = state.caller_refinements;
     const return_eidx = state.return_eidx;
 
-    // Clone results and refinements, and context for each branch
+    // Clone results and refinements for each branch
     const true_results = try clone_results_list(results, ctx.allocator);
     defer clear_results_list(true_results, ctx.allocator);
-    var true_refinements = try refinements.clone(ctx.allocator);
+    var true_refinements = try state.refinements.clone(ctx.allocator);
     defer true_refinements.deinit();
-    const true_ctx = try ctx.copy();
-    defer true_ctx.delete();
 
     const false_results = try clone_results_list(results, ctx.allocator);
     defer clear_results_list(false_results, ctx.allocator);
-    var false_refinements = try refinements.clone(ctx.allocator);
+    var false_refinements = try state.refinements.clone(ctx.allocator);
     defer false_refinements.deinit();
-    const false_ctx = try ctx.copy();
-    defer false_ctx.delete();
 
-    // Clone caller_refinements for each branch so ret_safe writes don't conflict
-    var true_caller_refinements: ?Refinements = if (caller_refinements) |cp|
-        try cp.clone(ctx.allocator)
-    else
-        null;
-    defer if (true_caller_refinements) |*r| r.deinit();
+    // Create GID tracking lists for each branch
+    var true_created = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer true_created.deinit(ctx.allocator);
+    var true_modified = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer true_modified.deinit(ctx.allocator);
 
-    var false_caller_refinements: ?Refinements = if (caller_refinements) |cp|
-        try cp.clone(ctx.allocator)
-    else
-        null;
-    defer if (false_caller_refinements) |*r| r.deinit();
+    var false_created = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer false_created.deinit(ctx.allocator);
+    var false_modified = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer false_modified.deinit(ctx.allocator);
 
-    // Build state for each branch
+    // Track if each branch returns (for merge exclusion)
+    var true_returns: bool = false;
+    var false_returns: bool = false;
+
+    // Build state for each branch - same ctx, cloned refinements
     const true_state = State{
-        .ctx = true_ctx,
+        .ctx = ctx,
         .results = true_results,
         .refinements = &true_refinements,
-        .caller_refinements = if (true_caller_refinements) |*r| r else null,
         .return_eidx = return_eidx,
+        .created_gids = &true_created,
+        .modified_gids = &true_modified,
+        .branch_returns = &true_returns,
     };
     const false_state = State{
-        .ctx = false_ctx,
+        .ctx = ctx,
         .results = false_results,
         .refinements = &false_refinements,
-        .caller_refinements = if (false_caller_refinements) |*r| r else null,
         .return_eidx = return_eidx,
+        .created_gids = &false_created,
+        .modified_gids = &false_modified,
+        .branch_returns = &false_returns,
     };
+
+    // Save ctx.meta before branches execute (they modify it via dbg_stmt)
+    // The merge should use the meta at the cond_br, not inside a branch
+    const saved_meta = ctx.meta;
 
     // Execute both branches (they modify their cloned state)
     try true_fn(true_state);
     try false_fn(false_state);
 
+    // Restore ctx.meta for the merge - errors should point to the cond_br location
+    ctx.meta = saved_meta;
+
     // Mark the block instruction as void
-    results[index].refinement = try refinements.appendEntity(.{ .void = {} });
+    results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 
     // Merge: walk results and call analysis merge for each slot that has refinements
     const branches = [_]State{ true_state, false_state };
-    try tag.splatMerge(.cond_br, results, ctx, refinements, &branches);
+    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches);
 
-    // Merge caller_refinements return slot if both branches wrote to it
-    if (caller_refinements) |cp| {
-        try mergeCallerReturn(
-            ctx,
-            cp,
-            return_eidx,
-            if (true_caller_refinements) |*r| r else null,
-            if (false_caller_refinements) |*r| r else null,
-        );
+    // Merge return values from returning branches (hoisting to function level)
+    try tag.mergeReturnValue(.cond_br, ctx.allocator, ctx, state.refinements, return_eidx, &branches);
+
+    // Propagate created/modified GIDs to parent's lists if tracking
+    if (state.created_gids) |parent_created| {
+        try parent_created.appendSlice(ctx.allocator, true_created.items);
+        try parent_created.appendSlice(ctx.allocator, false_created.items);
     }
-}
-
-/// Merge the return slot from both branch's caller_refinements back into the original.
-/// Called after both branches of a conditional have executed.
-fn mergeCallerReturn(
-    ctx: *Context,
-    caller_refinements: *Refinements,
-    return_eidx: EIdx,
-    true_caller: ?*Refinements,
-    false_caller: ?*Refinements,
-) !void {
-    // Caller refinements are null when cond_br is at entrypoint (no caller to propagate to).
-    // This is legitimate - entrypoint functions have no caller return slot to merge.
-    const true_cp = true_caller orelse return;
-    const false_cp = false_caller orelse return;
-
-    const orig_return = caller_refinements.at(return_eidx);
-    const true_return = true_cp.at(return_eidx);
-    const false_return = false_cp.at(return_eidx);
-
-    // If original is still retval_future, check if either branch set it
-    if (orig_return.* == .retval_future) {
-        const true_set = true_return.* != .retval_future;
-        const false_set = false_return.* != .retval_future;
-
-        if (true_set and false_set) {
-            // Both branches returned - need to merge
-            // For now, copy true branch's value, then let analyses merge
-            const true_idx = try true_return.*.copyTo(true_cp, caller_refinements);
-            orig_return.* = caller_refinements.at(true_idx).*;
-
-            // Call each analysis's merge function for the return value
-            inline for (tag.analyses) |Analysis| {
-                if (@hasDecl(Analysis, "mergeReturn")) {
-                    try Analysis.mergeReturn(
-                        ctx,
-                        caller_refinements,
-                        return_eidx,
-                        true_cp,
-                        false_cp,
-                    );
-                }
-            }
-        }
-        // If only one branch returned (early return), don't copy it.
-        // The other branch continues to code after cond_br, which will set its own return.
-        // If neither branch returned, leave as retval_future.
+    if (state.modified_gids) |parent_modified| {
+        try parent_modified.appendSlice(ctx.allocator, true_modified.items);
+        try parent_modified.appendSlice(ctx.allocator, false_modified.items);
     }
 }
 
@@ -190,8 +153,6 @@ pub fn switch_br(
 ) !void {
     const ctx = state.ctx;
     const results = state.results;
-    const refinements = state.refinements;
-    const caller_refinements = state.caller_refinements;
     const return_eidx = state.return_eidx;
 
     const num_cases = case_fns.len;
@@ -199,18 +160,16 @@ pub fn switch_br(
     // Create arrays for each branch's cloned state
     var branch_results: [num_cases][]Inst = undefined;
     var branch_refinements: [num_cases]Refinements = undefined;
-    var branch_contexts: [num_cases]*Context = undefined;
-    var branch_caller_refinements: [num_cases]?Refinements = undefined;
+    var branch_created: [num_cases]std.ArrayListUnmanaged(Refinements.Gid) = undefined;
+    var branch_modified: [num_cases]std.ArrayListUnmanaged(Refinements.Gid) = undefined;
+    var branch_returns: [num_cases]bool = [_]bool{false} ** num_cases;
 
-    // Clone state for each branch
+    // Clone state for each branch - same ctx, cloned refinements
     inline for (0..num_cases) |i| {
         branch_results[i] = try clone_results_list(results, ctx.allocator);
-        branch_refinements[i] = try refinements.clone(ctx.allocator);
-        branch_contexts[i] = try ctx.copy();
-        branch_caller_refinements[i] = if (caller_refinements) |cp|
-            try cp.clone(ctx.allocator)
-        else
-            null;
+        branch_refinements[i] = try state.refinements.clone(ctx.allocator);
+        branch_created[i] = .{};
+        branch_modified[i] = .{};
     }
 
     // Deferred cleanup
@@ -218,8 +177,8 @@ pub fn switch_br(
         inline for (0..num_cases) |i| {
             clear_results_list(branch_results[i], ctx.allocator);
             branch_refinements[i].deinit();
-            branch_contexts[i].delete();
-            if (branch_caller_refinements[i]) |*r| r.deinit();
+            branch_created[i].deinit(ctx.allocator);
+            branch_modified[i].deinit(ctx.allocator);
         }
     }
 
@@ -227,69 +186,46 @@ pub fn switch_br(
     var branch_states: [num_cases]State = undefined;
     inline for (0..num_cases) |i| {
         branch_states[i] = State{
-            .ctx = branch_contexts[i],
+            .ctx = ctx,
             .results = branch_results[i],
             .refinements = &branch_refinements[i],
-            .caller_refinements = if (branch_caller_refinements[i]) |*r| r else null,
             .return_eidx = return_eidx,
+            .created_gids = &branch_created[i],
+            .modified_gids = &branch_modified[i],
+            .branch_returns = &branch_returns[i],
         };
+    }
+
+    // Save ctx.meta before branches execute (they modify it via dbg_stmt)
+    // The merge should use the meta at the switch_br, not inside a branch
+    const saved_meta = ctx.meta;
+
+    // Execute all branches
+    inline for (0..num_cases) |i| {
         try case_fns[i](branch_states[i]);
     }
 
+    // Restore ctx.meta for the merge - errors should point to the switch_br location
+    ctx.meta = saved_meta;
+
     // Mark the switch instruction as void
-    results[index].refinement = try refinements.appendEntity(.{ .void = {} });
+    results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 
     // Merge all branches using splatMerge
-    try tag.splatMerge(.switch_br, results, ctx, refinements, &branch_states);
+    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states);
 
-    // Merge caller_refinements return slot if all branches wrote to it
-    if (caller_refinements) |cp| {
-        try mergeCallerReturnN(
-            ctx,
-            cp,
-            return_eidx,
-            &branch_caller_refinements,
-        );
-    }
-}
+    // Merge return values from returning branches (hoisting to function level)
+    try tag.mergeReturnValue(.switch_br, ctx.allocator, ctx, state.refinements, return_eidx, &branch_states);
 
-/// Merge the return slot from N branch's caller_refinements back into the original.
-/// Called after all branches of a switch have executed.
-fn mergeCallerReturnN(
-    ctx: *Context,
-    caller_refinements: *Refinements,
-    return_eidx: EIdx,
-    branch_callers: []?Refinements,
-) !void {
-    _ = ctx;
-    const orig_return = caller_refinements.at(return_eidx);
-
-    // If original is still retval_future, check if any branch set it
-    if (orig_return.* == .retval_future) {
-        var all_set = true;
-        var first_set_idx: ?usize = null;
-
-        for (branch_callers, 0..) |*bc_opt, i| {
-            if (bc_opt.*) |*bc| {
-                const branch_return = bc.at(return_eidx);
-                if (branch_return.* == .retval_future) {
-                    all_set = false;
-                } else if (first_set_idx == null) {
-                    first_set_idx = i;
-                }
-            }
+    // Propagate created/modified GIDs to parent's lists if tracking
+    if (state.created_gids) |parent_created| {
+        inline for (0..num_cases) |i| {
+            try parent_created.appendSlice(ctx.allocator, branch_created[i].items);
         }
-
-        if (all_set and first_set_idx != null) {
-            // All branches returned - need to merge
-            // Copy first branch's value, then let analyses merge
-            const first_bc = &branch_callers[first_set_idx.?].?;
-            const first_return = first_bc.at(return_eidx);
-            const first_idx = try first_return.*.copyTo(first_bc, caller_refinements);
-            orig_return.* = caller_refinements.at(first_idx).*;
-
-            // TODO: Call each analysis's mergeReturn for N-way merge
-            // For now, we just copy the first branch's value
+    }
+    if (state.modified_gids) |parent_modified| {
+        inline for (0..num_cases) |i| {
+            try parent_modified.appendSlice(ctx.allocator, branch_modified[i].items);
         }
     }
 }
@@ -348,181 +284,6 @@ pub fn onFinish(state: State) !void {
     try tag.splatFinish(state.results, state.ctx, state.refinements);
 }
 
-/// Recursively propagate pointee state from local to caller.
-/// Note: Uses indices and re-fetches pointers after any operation that could reallocate.
-fn propagatePointee(local_refs: *Refinements, local_idx: EIdx, caller_refs: *Refinements, caller_idx: EIdx) void {
-    const local = local_refs.at(local_idx);
-
-    switch (local.*) {
-        .scalar => |src| {
-            // caller should already be scalar from type info
-            caller_refs.at(caller_idx).scalar = src;
-        },
-        .pointer => |src| {
-            const caller_to = caller_refs.at(caller_idx).pointer.to;
-            caller_refs.at(caller_idx).pointer.analyte = src.analyte;
-            propagatePointee(local_refs, src.to, caller_refs, caller_to);
-        },
-        .@"struct" => |src| {
-            caller_refs.at(caller_idx).@"struct".analyte = src.analyte;
-            for (src.fields, 0..) |local_field_idx, i| {
-                const caller_field_idx = caller_refs.at(caller_idx).@"struct".fields[i];
-                propagatePointee(local_refs, local_field_idx, caller_refs, caller_field_idx);
-            }
-        },
-        .@"union" => |src| {
-            // Propagate active fields - if local has active field that caller doesn't, activate it in caller
-            // Note: fields slice is stable (allocated separately), but we must re-fetch after append operations
-            const mutable_caller_fields = @constCast(caller_refs.at(caller_idx).@"union".fields);
-
-            // If local has variant_safety with active_metas[i] != null, ensure caller has field entity
-            // This must happen BEFORE copying analyte to maintain testValid invariant
-            if (src.analyte.variant_safety) |vs| {
-                for (vs.active_metas, 0..) |meta_opt, i| {
-                    if (meta_opt != null and mutable_caller_fields[i] == null) {
-                        // Active variant in local but no field entity in caller - create one
-                        if (src.fields[i]) |local_field_idx| {
-                            // Copy from local - may reallocate caller_refs
-                            const new_idx = local_refs.at(local_field_idx).*.copyTo(local_refs, caller_refs) catch @panic("out of memory");
-                            // Re-fetch fields pointer after potential reallocation
-                            @constCast(caller_refs.at(caller_idx).@"union".fields)[i] = new_idx;
-                        } else {
-                            // No local field either - create a defined scalar placeholder
-                            const new_idx = caller_refs.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
-                            // Re-fetch fields pointer after potential reallocation
-                            @constCast(caller_refs.at(caller_idx).@"union".fields)[i] = new_idx;
-                        }
-                    }
-                }
-            }
-
-            // Copy analyte, but deep copy variant_safety.active_metas to caller's allocator
-            // First free the old active_metas if it exists
-            const allocator = caller_refs.list.allocator;
-            if (caller_refs.at(caller_idx).@"union".analyte.variant_safety) |old_vs| {
-                allocator.free(old_vs.active_metas);
-            }
-
-            var new_analyte = src.analyte;
-            if (src.analyte.variant_safety) |vs| {
-                const new_active_metas = allocator.alloc(?@import("Meta.zig"), vs.active_metas.len) catch @panic("out of memory");
-                @memcpy(new_active_metas, vs.active_metas);
-                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-            }
-            caller_refs.at(caller_idx).@"union".analyte = new_analyte;
-
-            // Propagate field values for fields that are active in both
-            for (src.fields, 0..) |local_field_opt, i| {
-                if (local_field_opt) |local_field_idx| {
-                    // Re-fetch caller fields after any potential reallocation above
-                    const caller_field_opt = caller_refs.at(caller_idx).@"union".fields[i];
-                    if (caller_field_opt) |caller_field_idx| {
-                        // Both have field active - propagate
-                        propagatePointee(local_refs, local_field_idx, caller_refs, caller_field_idx);
-                    } else {
-                        // Local has field that caller doesn't - copy to caller
-                        const new_idx = local_refs.at(local_field_idx).*.copyTo(local_refs, caller_refs) catch @panic("out of memory");
-                        @constCast(caller_refs.at(caller_idx).@"union".fields)[i] = new_idx;
-                    }
-                }
-            }
-        },
-        .optional => |src| {
-            const caller_to = caller_refs.at(caller_idx).optional.to;
-            caller_refs.at(caller_idx).optional.analyte = src.analyte;
-            propagatePointee(local_refs, src.to, caller_refs, caller_to);
-        },
-        else => |t| std.debug.panic("backPropagate: local pointee is {s} - propagation not yet implemented", .{@tagName(t)}),
-    }
-}
-
-/// Propagate analysis state back to callers via caller_ref.
-/// Called after onFinish to copy state back to the caller's entity.
-/// Propagates both:
-/// - Pointer's analyte (memory_safety for allocation tracking)
-/// - Pointee's analyte (undefined tracking for scalar values)
-pub fn backPropagate(state: State) void {
-    // Caller refinements are null at entrypoint - no caller to propagate analysis state to.
-    // This is legitimate - entrypoint functions don't need backward propagation.
-    const cp = state.caller_refinements orelse return;
-    for (state.results) |inst| {
-        // Skip non-arg instructions and interned args (compile-time constants)
-        const caller_entity_idx = inst.caller_eidx orelse continue;
-        const local_idx = inst.refinement orelse continue;
-
-        const local_refinement = state.refinements.at(local_idx);
-        const caller_entity = cp.at(caller_entity_idx);
-
-        // Local and caller refinements have matching types - Arg copies structure from caller
-        switch (local_refinement.*) {
-            .scalar => |src| {
-                caller_entity.scalar = src;
-            },
-            .pointer => |local_ptr| {
-                caller_entity.pointer.analyte = local_ptr.analyte;
-                propagatePointee(state.refinements, local_ptr.to, cp, caller_entity.pointer.to);
-            },
-            .optional => |local_opt| {
-                caller_entity.optional.analyte = local_opt.analyte;
-                propagatePointee(state.refinements, local_opt.to, cp, caller_entity.optional.to);
-            },
-            .@"struct" => |local_struct| {
-                caller_entity.@"struct".analyte = local_struct.analyte;
-                for (local_struct.fields, 0..) |local_field_idx, i| {
-                    propagatePointee(state.refinements, local_field_idx, cp, caller_entity.@"struct".fields[i]);
-                }
-            },
-            .@"union" => |local_union| {
-                // Copy analyte (including variant_safety) from local to caller
-                // But we need to ensure any active variants have field entities in caller
-                const mutable_caller_fields = @constCast(caller_entity.@"union".fields);
-                const allocator = cp.list.allocator;
-
-                // If local has variant_safety with active fields, ensure caller has those field entities
-                if (local_union.analyte.variant_safety) |vs| {
-                    for (vs.active_metas, 0..) |meta_opt, i| {
-                        if (meta_opt != null and mutable_caller_fields[i] == null) {
-                            // Active variant in local but no field entity in caller - create one
-                            if (local_union.fields[i]) |local_field_idx| {
-                                // Copy from local
-                                const new_idx = state.refinements.at(local_field_idx).*.copyTo(state.refinements, cp) catch @panic("out of memory");
-                                mutable_caller_fields[i] = new_idx;
-                            } else {
-                                // No local field either - create a defined scalar placeholder
-                                mutable_caller_fields[i] = cp.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
-                            }
-                        }
-                    }
-                }
-
-                // Free old active_metas before overwriting
-                if (caller_entity.@"union".analyte.variant_safety) |old_vs| {
-                    allocator.free(old_vs.active_metas);
-                }
-
-                // Deep copy analyte with variant_safety.active_metas to caller's allocator
-                var new_analyte = local_union.analyte;
-                if (local_union.analyte.variant_safety) |vs| {
-                    const new_active_metas = allocator.alloc(?@import("Meta.zig"), vs.active_metas.len) catch @panic("out of memory");
-                    @memcpy(new_active_metas, vs.active_metas);
-                    new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-                }
-                caller_entity.@"union".analyte = new_analyte;
-
-                // Propagate active fields (non-null in both local and caller)
-                for (local_union.fields, 0..) |local_field_opt, i| {
-                    if (local_field_opt) |local_field_idx| {
-                        if (mutable_caller_fields[i]) |caller_field_idx| {
-                            propagatePointee(state.refinements, local_field_idx, cp, caller_field_idx);
-                        }
-                    }
-                }
-            },
-            else => |t| std.debug.panic("backPropagate: local refinement is {s} - propagation not yet implemented", .{@tagName(t)}),
-        }
-    }
-}
-
 /// Assert all refinements are valid (non-null for all results that have one).
 /// Accesses each refinement to trigger Zig's bounds checking if invalid.
 pub fn assertAllValid(refinements: *Refinements, results: []const Inst) void {
@@ -544,7 +305,6 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .results = results,
         .refinements = refinements,
         .return_eidx = 0,
-        .caller_refinements = null,
     };
 }
 
@@ -701,7 +461,7 @@ test "all instructions get valid refinements after operations" {
     assertAllValid(&refinements, results);
 }
 
-test "ret_safe copies scalar return value to caller_refinements" {
+test "ret_safe writes return value to return slot" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -710,41 +470,37 @@ test "ret_safe copies scalar return value to caller_refinements" {
     defer ctx.deinit();
     try ctx.stacktrace.append(allocator, "test_func"); // ret_safe needs a function name on stacktrace
 
-    // Callee's refinements and results
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_results = try make_results_list(allocator, 3);
-    defer clear_results_list(callee_results, allocator);
+    // Global refinements table - return slot pre-allocated
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
 
-    // Caller's refinements - pre-allocate return entity
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
+    const results = try make_results_list(allocator, 3);
+    defer clear_results_list(results, allocator);
 
     // Verify return entity is initially unset
-    try std.testing.expectEqual(.retval_future, std.meta.activeTag(caller_refinements.at(return_eidx).*));
+    try std.testing.expectEqual(.retval_future, std.meta.activeTag(refinements.at(return_eidx).*));
 
-    // Create state with caller_refinements set
+    // Create state with return_eidx pointing to return slot
     const state = State{
         .ctx = &ctx,
-        .results = callee_results,
-        .refinements = &callee_refinements,
+        .results = results,
+        .refinements = &refinements,
         .return_eidx = return_eidx,
-        .caller_refinements = &caller_refinements,
     };
 
-    // In callee: allocate and store a value
+    // Allocate and store a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
     // Return the value from instruction 0
     try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
 
-    // Verify return entity in caller's refinements is now a pointer
-    try std.testing.expectEqual(.pointer, std.meta.activeTag(caller_refinements.at(return_eidx).*));
+    // Verify return entity is now a pointer
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(return_eidx).*));
 }
 
-test "ret_safe with null src sets caller return to void" {
+test "ret_safe with void src sets return to void" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -753,34 +509,30 @@ test "ret_safe with null src sets caller return to void" {
     defer ctx.deinit();
     try ctx.stacktrace.append(allocator, "test_func");
 
-    // Callee's refinements and results
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_results = try make_results_list(allocator, 1);
-    defer clear_results_list(callee_results, allocator);
+    // Global refinements table - return slot pre-allocated
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
 
-    // Caller's refinements - pre-allocate return entity
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
+    const results = try make_results_list(allocator, 1);
+    defer clear_results_list(results, allocator);
 
-    // Create state with caller_refinements set
+    // Create state with return_eidx
     const state = State{
         .ctx = &ctx,
-        .results = callee_results,
-        .refinements = &callee_refinements,
+        .results = results,
+        .refinements = &refinements,
         .return_eidx = return_eidx,
-        .caller_refinements = &caller_refinements,
     };
 
     // Return void
     try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .interned = .{ .id = null, .ty = .{ .void = {} } } } } });
 
-    // Verify return entity in caller's refinements is now void
-    try std.testing.expectEqual(.void, std.meta.activeTag(caller_refinements.at(return_eidx).*));
+    // Verify return entity is now void
+    try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(return_eidx).*));
 }
 
-test "ret_safe with null caller_refinements (entrypoint) succeeds" {
+test "ret_safe at entrypoint succeeds" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -791,369 +543,24 @@ test "ret_safe with null caller_refinements (entrypoint) succeeds" {
 
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
+
+    // Create return slot (like entrypoint would)
+    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
+
     const results = try make_results_list(allocator, 2);
     defer clear_results_list(results, allocator);
 
-    // State with null caller_refinements (entrypoint)
-    const state = testState(&ctx, results, &refinements);
+    const state = State{
+        .ctx = &ctx,
+        .results = results,
+        .refinements = &refinements,
+        .return_eidx = return_eidx,
+    };
 
     // Allocate a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
-    // Return with null caller_refinements (entrypoint case) - should just succeed without error
+    // Return - should just succeed without error
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .eidx = 0 } } });
-}
-
-// =============================================================================
-// backPropagate Tests
-// =============================================================================
-
-test "backPropagate with null caller_refinements does nothing" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    const results = try make_results_list(allocator, 1);
-    defer clear_results_list(results, allocator);
-
-    // State with null caller_refinements
-    const state = testState(&ctx, results, &refinements);
-
-    // Should just return without error
-    backPropagate(state);
-}
-
-test "backPropagate propagates scalar analyte to caller" {
-    const allocator = std.testing.allocator;
-    const undefined_analysis = @import("analysis/undefined.zig");
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    // Set up caller's refinements with a scalar
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const caller_scalar_idx = try caller_refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-
-    // Set up callee's refinements with a modified scalar
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_scalar_idx = try callee_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .defined = {} } },
-        .type_id = 0,
-    } });
-
-    // Set up results with argument info pointing to caller
-    const results = try make_results_list(allocator, 1);
-    defer clear_results_list(results, allocator);
-    results[0].refinement = callee_scalar_idx;
-    results[0].caller_eidx = caller_scalar_idx;
-    results[0].name_id = 1; // Arbitrary test name ID
-
-    // Verify caller scalar is initially undefined tracking = null
-    try std.testing.expectEqual(@as(?undefined_analysis.Undefined, null), caller_refinements.at(caller_scalar_idx).scalar.analyte.undefined);
-
-    // Create state with caller_refinements
-    const state = State{
-        .ctx = &ctx,
-        .results = results,
-        .refinements = &callee_refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
-
-    // Propagate
-    backPropagate(state);
-
-    // Verify caller scalar now has defined state
-    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_scalar_idx).scalar.analyte.undefined.?));
-}
-
-test "backPropagate propagates pointer analyte to caller" {
-    const allocator = std.testing.allocator;
-    const memory_safety = @import("analysis/memory_safety.zig");
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    // Set up caller's refinements with a pointer (no memory_safety)
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const caller_pointee_idx = try caller_refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const caller_ptr_idx = try caller_refinements.appendEntity(.{ .pointer = .{
-        .analyte = .{},
-        .type_id = 0,
-        .to = caller_pointee_idx,
-    } });
-
-    // Set up callee's refinements with a pointer that has memory_safety set
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_pointee_idx = try callee_refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
-        .analyte = .{ .memory_safety = .{ .allocation = .{
-            .allocated = .{ .function = "test", .file = "test.zig", .line = 1 },
-            .type_id = 1, // TestAllocator type ID
-        } } },
-        .type_id = 0,
-        .to = callee_pointee_idx,
-    } });
-
-    // Set up results with argument info
-    const results = try make_results_list(allocator, 1);
-    defer clear_results_list(results, allocator);
-    results[0].refinement = callee_ptr_idx;
-    results[0].caller_eidx = caller_ptr_idx;
-    results[0].name_id = 1; // Arbitrary test name ID
-
-    // Verify caller pointer has no memory_safety initially
-    try std.testing.expectEqual(@as(?memory_safety.MemorySafety, null), caller_refinements.at(caller_ptr_idx).pointer.analyte.memory_safety);
-
-    // Create state with caller_refinements
-    const state = State{
-        .ctx = &ctx,
-        .results = results,
-        .refinements = &callee_refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
-
-    // Propagate
-    backPropagate(state);
-
-    // Verify caller pointer now has memory_safety
-    const ms = caller_refinements.at(caller_ptr_idx).pointer.analyte.memory_safety.?;
-    try std.testing.expectEqual(.allocation, std.meta.activeTag(ms));
-    try std.testing.expectEqual(@as(u32, 1), ms.allocation.type_id);
-}
-
-test "backPropagate propagates pointee undefined state to caller" {
-    const allocator = std.testing.allocator;
-
-    // Set up caller's refinements with a pointer to undefined scalar
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const caller_pointee_idx = try caller_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .undefined = .{
-            .meta = .{ .function = "", .file = "", .line = 0 },
-        } } },
-        .type_id = 0,
-    } });
-    const caller_ptr_idx = try caller_refinements.appendEntity(.{ .pointer = .{
-        .analyte = .{},
-        .type_id = 0,
-        .to = caller_pointee_idx,
-    } });
-
-    // Set up callee's refinements with pointer to defined scalar
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_pointee_idx = try callee_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .defined = {} } },
-        .type_id = 0,
-    } });
-    const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
-        .analyte = .{},
-        .type_id = 0,
-        .to = callee_pointee_idx,
-    } });
-
-    // Set up results with argument info
-    const results = try make_results_list(allocator, 1);
-    defer clear_results_list(results, allocator);
-    results[0].refinement = callee_ptr_idx;
-    results[0].caller_eidx = caller_ptr_idx;
-    results[0].name_id = 1; // Arbitrary test name ID
-
-    // Verify caller's pointee is undefined initially
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_pointee_idx).scalar.analyte.undefined.?));
-
-    // Propagate
-    const state = State{
-        .ctx = undefined,
-        .results = results,
-        .refinements = &callee_refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
-    backPropagate(state);
-
-    // Verify caller's pointee is now defined
-    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_pointee_idx).scalar.analyte.undefined.?));
-}
-
-test "backPropagate propagates struct field undefined state to caller" {
-    const allocator = std.testing.allocator;
-
-    // Set up caller's refinements: pointer → struct { field0: undefined, field1: undefined }
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const caller_field0_idx = try caller_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .undefined = .{
-            .meta = .{ .function = "", .file = "", .line = 0 },
-        } } },
-        .type_id = 0,
-    } });
-    const caller_field1_idx = try caller_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .undefined = .{
-            .meta = .{ .function = "", .file = "", .line = 0 },
-        } } },
-        .type_id = 0,
-    } });
-    const caller_fields = try allocator.alloc(EIdx, 2);
-    caller_fields[0] = caller_field0_idx;
-    caller_fields[1] = caller_field1_idx;
-    const caller_struct_idx = try caller_refinements.appendEntity(.{ .@"struct" = .{
-        .fields = caller_fields,
-        .type_id = 0,
-    } });
-    const caller_ptr_idx = try caller_refinements.appendEntity(.{ .pointer = .{
-        .analyte = .{},
-        .type_id = 0,
-        .to = caller_struct_idx,
-    } });
-
-    // Set up callee's refinements: pointer → struct { field0: defined, field1: undefined }
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_field0_idx = try callee_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .defined = {} } },
-        .type_id = 0,
-    } });
-    const callee_field1_idx = try callee_refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined = .{ .undefined = .{
-            .meta = .{ .function = "", .file = "", .line = 0 },
-        } } },
-        .type_id = 0,
-    } });
-    const callee_fields = try allocator.alloc(EIdx, 2);
-    callee_fields[0] = callee_field0_idx;
-    callee_fields[1] = callee_field1_idx;
-    const callee_struct_idx = try callee_refinements.appendEntity(.{ .@"struct" = .{
-        .fields = callee_fields,
-        .type_id = 0,
-    } });
-    const callee_ptr_idx = try callee_refinements.appendEntity(.{ .pointer = .{
-        .analyte = .{},
-        .type_id = 0,
-        .to = callee_struct_idx,
-    } });
-
-    // Set up results with argument info
-    const results = try make_results_list(allocator, 1);
-    defer clear_results_list(results, allocator);
-    results[0].refinement = callee_ptr_idx;
-    results[0].caller_eidx = caller_ptr_idx;
-    results[0].name_id = 1; // Arbitrary test name ID
-
-    // Verify caller's fields are undefined initially
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field0_idx).scalar.analyte.undefined.?));
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field1_idx).scalar.analyte.undefined.?));
-
-    // Propagate
-    const state = State{
-        .ctx = undefined,
-        .results = results,
-        .refinements = &callee_refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
-    backPropagate(state);
-
-    // Verify caller's field0 is now defined, field1 is still undefined
-    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_field0_idx).scalar.analyte.undefined.?));
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_field1_idx).scalar.analyte.undefined.?));
-}
-
-test "full flow: callee modifies struct field via pointer-to-pointer chain" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    // === CALLER SETUP ===
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const caller_results = try make_results_list(allocator, 3);
-    defer clear_results_list(caller_results, allocator);
-
-    // Caller: inst 1 = alloc (struct with 2 fields); inst 2 = store_safe with undefined struct
-    const struct_ty: tag.Type = .{ .id = null, .ty = .{ .@"struct" = &.{ .{ .id = null, .ty = .{ .scalar = {} } }, .{ .id = null, .ty = .{ .scalar = {} } } } } };
-    const caller_state = testState(&ctx, caller_results, &caller_refinements);
-    try Inst.apply(caller_state, 1, .{ .alloc = .{ .ty = struct_ty } });
-    try Inst.apply(caller_state, 2, .{ .store_safe = .{
-        .ptr = 1,
-        .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &struct_ty } } },
-    } });
-
-    // Verify caller's struct has undefined fields
-    const caller_ptr_idx = caller_results[1].refinement.?;
-    const caller_struct_idx = caller_refinements.at(caller_ptr_idx).pointer.to;
-    const caller_fields = caller_refinements.at(caller_struct_idx).@"struct".fields;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_fields[0]).scalar.analyte.undefined.?));
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_fields[1]).scalar.analyte.undefined.?));
-
-    // === CALLEE SETUP ===
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
-    const callee_results = try make_results_list(allocator, 8);
-    defer clear_results_list(callee_results, allocator);
-
-    const callee_state = State{
-        .ctx = &ctx,
-        .results = callee_results,
-        .refinements = &callee_refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
-
-    // Callee: inst 0 = arg (pointer to struct)
-    try Inst.apply(callee_state, 0, .{ .arg = .{ .value = .{ .eidx = caller_ptr_idx }, .name_id = 1 } });
-
-    // Callee: inst 1 = alloc (pointer to struct), inst 2 = store inst 0's pointer to inst 1
-    try Inst.apply(callee_state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .pointer = &struct_ty } } } });
-    try Inst.apply(callee_state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .eidx = 0 } } });
-
-    // Callee: inst 3 = bitcast inst 1 (shares refinement)
-    try Inst.apply(callee_state, 3, .{ .bitcast = .{ .src = .{ .eidx = 1 }, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-
-    // Callee: inst 5 = load from inst 3 (gets the pointer stored in inst 1)
-    try Inst.apply(callee_state, 5, .{ .load = .{ .ptr = 3, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .@"struct" = &.{ .{ .id = null, .ty = .{ .scalar = {} } }, .{ .id = null, .ty = .{ .scalar = {} } } } } } } } } });
-
-    // Callee: inst 6 = struct_field_ptr of field 0
-    try Inst.apply(callee_state, 6, .{ .struct_field_ptr = .{
-        .base = 5,
-        .field_index = 0,
-        .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } },
-    } });
-
-    // Callee: inst 7 = store_safe to inst 6 (sets field0 to defined)
-    try Inst.apply(callee_state, 7, .{ .store_safe = .{ .ptr = 6, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
-
-    // Check that callee's local field0 is now defined
-    const local_ptr_idx = callee_results[0].refinement.?;
-    const local_struct_idx = callee_refinements.at(local_ptr_idx).pointer.to;
-    const local_fields = callee_refinements.at(local_struct_idx).@"struct".fields;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(callee_refinements.at(local_fields[0]).scalar.analyte.undefined.?));
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(callee_refinements.at(local_fields[1]).scalar.analyte.undefined.?));
-
-    // === BACKPROPAGATE ===
-    backPropagate(callee_state);
-
-    // After backPropagate, caller's field0 should be defined, field1 should be undefined
-    try std.testing.expectEqual(.defined, std.meta.activeTag(caller_refinements.at(caller_fields[0]).scalar.analyte.undefined.?));
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(caller_refinements.at(caller_fields[1]).scalar.analyte.undefined.?));
 }

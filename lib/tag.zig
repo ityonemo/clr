@@ -189,10 +189,9 @@ pub const AllocDestroy = struct {
     }
 };
 
-/// Entity operation: CREATE
-/// Creates new entity for the argument value (via cross-table copyTo).
-///
-/// Arg copies caller's entity into local refinements directly - NO pointer wrapper.
+/// Entity operation: SHARE (global refinements) or CREATE (interned)
+/// For runtime args: shares the caller's entity directly via global EIdx.
+/// For compile-time args: creates entity in global refinements.
 ///
 /// AIR Semantics:
 /// - AIR arg instructions contain VALUES directly, not pointers to stack locations.
@@ -200,17 +199,15 @@ pub const AllocDestroy = struct {
 /// - If the parameter type is `u8`, the instruction contains the scalar value.
 /// - Taking `&param` in source code generates explicit `alloc` + `store_safe` in AIR.
 ///
-/// Interprocedural Analysis:
-/// - We deep-copy the caller's entity into local refinements to avoid cross-function aliasing.
-/// - caller_ref enables backward propagation on function close (backPropagate):
-///   for pointer args, updates through the pointer in the callee are propagated
-///   back to the caller's pointee entity.
+/// Global Refinements Architecture:
+/// - With a single global refinements table, the caller's EIdx IS the callee's EIdx.
+/// - No copying needed - callee directly references caller's entity.
+/// - No backpropagation needed - modifications are direct to the shared entity.
 ///
 /// Example for `fn set_value(ptr: *u8) { ptr.* = 5; }`:
-/// - Caller passes pointer entity P1 -> scalar S1 (undefined)
-/// - Arg copies to P1' -> S1' in local refinements
-/// - store_safe(ptr=0) follows P1' to S1', marks S1' as defined
-/// - backPropagate: propagates S1'.undefined back to S1.undefined
+/// - Caller passes pointer entity P1 -> scalar S1 (undefined) at some EIdx
+/// - Arg stores that same EIdx in results[index].refinement
+/// - store_safe(ptr=0) follows P1 to S1, marks S1 as defined (direct modification)
 pub const Arg = struct {
     name_id: u32, // Parameter name ID, resolved via ctx.getName()
     /// Source of the argument value - either runtime (.eidx) or compile-time (.interned)
@@ -219,21 +216,15 @@ pub const Arg = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         switch (self.value) {
             .eidx => |eidx| {
-                const caller_eidx: EIdx = @intCast(eidx);
-                const cp = state.caller_refinements orelse unreachable; // Entrypoint shouldn't have args
-                // Copy caller's entity directly (no pointer wrapping - AIR args contain values)
-                const local_copy_idx = try cp.at(caller_eidx).*.copyTo(cp, state.refinements);
-                state.results[index].refinement = local_copy_idx;
-                // Set caller_eidx for backward propagation on function close
-                state.results[index].caller_eidx = caller_eidx;
+                // Global refinements: caller's EIdx is the same table, use directly
+                state.results[index].refinement = @intCast(eidx);
                 // name_id is in inst_tag (stored by Inst.apply)
             },
             .interned => |ty| {
-                // Compile-time constant - create entity from type info
+                // Compile-time constant - create entity from type info in global table
                 const ref = try typeToRefinement(ty, state.refinements);
                 const local_idx = try state.refinements.appendEntity(ref);
                 state.results[index].refinement = local_idx;
-                // No backward propagation needed for constants (caller_eidx stays null)
                 // name_id is in inst_tag (stored by Inst.apply)
             },
             .other => @panic("Arg: .other source not yet implemented"),
@@ -317,9 +308,9 @@ pub const Br = struct {
 
     /// Copy analysis state (memory_safety, undefined) from source entity to destination.
     /// This preserves the destination's type structure while updating its analysis state.
-    fn copyAnalyteState(refinements: *Refinements, dst_idx: EIdx, src_idx: EIdx) void {
-        const dst = refinements.at(dst_idx);
-        const src = refinements.at(src_idx);
+    fn copyAnalyteState(refns: *Refinements, dst_idx: EIdx, src_idx: EIdx) void {
+        const dst = refns.at(dst_idx);
+        const src = refns.at(src_idx);
 
         switch (dst.*) {
             .pointer => |*dp| {
@@ -328,7 +319,7 @@ pub const Br = struct {
                     // Copy analyte (memory_safety, undefined)
                     dp.analyte = sp.analyte;
                     // Recursively copy pointee's analysis state
-                    copyAnalyteState(refinements, dp.to, sp.to);
+                    copyAnalyteState(refns, dp.to, sp.to);
                 }
             },
             .scalar => |*ds| {
@@ -338,14 +329,14 @@ pub const Br = struct {
             },
             .optional => |*d_opt| {
                 if (src.* == .optional) {
-                    copyAnalyteState(refinements, d_opt.to, src.optional.to);
+                    copyAnalyteState(refns, d_opt.to, src.optional.to);
                 }
             },
             .@"struct" => |*d_struct| {
                 if (src.* == .@"struct") {
                     const s_struct = src.@"struct";
                     for (d_struct.fields, s_struct.fields) |df, sf| {
-                        copyAnalyteState(refinements, df, sf);
+                        copyAnalyteState(refns, df, sf);
                     }
                 }
             },
@@ -494,11 +485,11 @@ pub const StructFieldPtr = struct {
         const container = state.refinements.at(container_idx).*;
 
         switch (container) {
-            inline .@"struct", .@"union" => |data, tag| {
+            inline .@"struct", .@"union" => |data, container_tag| {
                 // Get field index - for unions, create entity for inactive fields
                 // (variant_safety analysis will report error via splat)
                 const field_idx = idx: {
-                    if (tag == .@"union") {
+                    if (container_tag == .@"union") {
                         if (data.fields[self.field_index]) |idx| break :idx idx;
                         // Inactive field - create a fresh entity for structure
                         const new_field_ref = try typeToRefinement(self.ty.ty.pointer.*, state.refinements);
@@ -546,11 +537,11 @@ pub const StructFieldVal = struct {
 
         // Get the struct or union and find the field
         switch (state.refinements.at(container_ref).*) {
-            inline .@"struct", .@"union" => |data, tag| {
+            inline .@"struct", .@"union" => |data, container_tag| {
                 // Get field index - for unions, create entity for inactive fields
                 // (variant_safety analysis will report error via splat)
                 const field_idx = idx: {
-                    if (tag == .@"union") {
+                    if (container_tag == .@"union") {
                         if (data.fields[self.field_index]) |idx| break :idx idx;
                         // Inactive field - create a fresh entity for structure
                         const new_field_ref = try typeToRefinement(self.ty, state.refinements);
@@ -632,74 +623,71 @@ pub const OptionalPayload = struct {
 /// RetSafe returns a value from a function. "Safe" refers to safety-checked returns
 /// (as opposed to naked/inline assembly returns).
 ///
-/// This handles copying the return value's entity back to the caller's refinements,
-/// enabling interprocedural tracking of returned values.
+/// Global Refinements Architecture:
+/// - return_eidx points to a slot in the refinements table
+/// - Callee writes directly to that slot
+/// - No copying between tables needed
 pub const RetSafe = struct {
     /// Value being returned. Use .interned with .void for void returns.
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Return instruction produces void (not a usable value)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
 
-        // Copy return value to caller's refinements
-        if (state.caller_refinements) |caller_refinements| {
-            const return_eidx = state.return_eidx;
-            switch (self.src) {
-                .eidx => |src| {
-                    const src_idx = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                    if (state.refinements.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
-                    switch (caller_refinements.at(return_eidx).*) {
-                        .retval_future, .noreturn => {
-                            // .noreturn can be overwritten - it's from an error path return
-                            // Copy return value from callee to caller's return slot
-                            const new_idx = try state.refinements.at(src_idx).*.copyTo(state.refinements, caller_refinements);
-                            // Deep copy for structs to avoid double-free on deinit
-                            const new_val = caller_refinements.at(new_idx).*;
-                            caller_refinements.at(return_eidx).* = switch (new_val) {
-                                .@"struct" => |s| blk: {
-                                    const allocator = caller_refinements.list.allocator;
-                                    const new_fields = allocator.alloc(Refinements.EIdx, s.fields.len) catch @panic("out of memory");
-                                    @memcpy(new_fields, s.fields);
-                                    break :blk .{ .@"struct" = .{ .analyte = s.analyte, .fields = new_fields, .type_id = s.type_id } };
-                                },
-                                else => new_val,
-                            };
+        // Mark branch as returning (for merge exclusion)
+        if (state.branch_returns) |br| {
+            if (br.*) @panic("ret_safe: multiple returns in same branch");
+            br.* = true;
+        }
+
+        const return_eidx = state.return_eidx;
+        const refns = state.refinements;
+
+        switch (self.src) {
+            .eidx => |src| {
+                const src_idx = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
+                if (refns.at(src_idx).* == .retval_future) @panic("cannot return an unset_retval");
+                switch (refns.at(return_eidx).*) {
+                    .retval_future, .noreturn => {
+                        // .noreturn can be overwritten - it's from an error path return
+                        // Deep copy to avoid double-free when struct/union fields are freed
+                        refns.at(return_eidx).* = try refns.deepCopyValue(refns.at(src_idx).*);
+                    },
+                    else => {
+                        // Multiple returns within same branch - need to merge
+                        // TODO: implement proper merge of return value analysis states
+                        @panic("ret_safe: multiple returns in same branch - merge not yet implemented");
+                    },
+                }
+            },
+            .interned => |ty| {
+                // Comptime return value
+                if (ty.ty == .void) {
+                    // Void return
+                    switch (refns.at(return_eidx).*) {
+                        .retval_future => refns.at(return_eidx).* = .void,
+                        .void => {},
+                        else => @panic("void function retval incorrectly set to some value"),
+                    }
+                } else {
+                    // Non-void comptime value - create structure from type info
+                    switch (refns.at(return_eidx).*) {
+                        .retval_future, .void => {
+                            refns.at(return_eidx).* = try typeToRefinement(ty, refns);
                         },
                         else => {
                             // Multiple returns within same branch - need to merge
                             // TODO: implement proper merge of return value analysis states
-                            @panic("ret_safe: multiple returns in same branch - merge not yet implemented");
+                            @panic("ret_safe: multiple interned returns in same branch - merge not yet implemented");
                         },
                     }
-                },
-                .interned => |ty| {
-                    // Comptime return value
-                    if (ty.ty == .void) {
-                        // Void return
-                        switch (caller_refinements.at(return_eidx).*) {
-                            .retval_future => caller_refinements.at(return_eidx).* = .void,
-                            .void => {},
-                            else => @panic("void function retval incorrectly set to some value"),
-                        }
-                    } else {
-                        // Non-void comptime value - create structure from type info
-                        switch (caller_refinements.at(return_eidx).*) {
-                            .retval_future, .void => {
-                                caller_refinements.at(return_eidx).* = try typeToRefinement(ty, caller_refinements);
-                            },
-                            else => {
-                                // Multiple returns within same branch - need to merge
-                                // TODO: implement proper merge of return value analysis states
-                                @panic("ret_safe: multiple interned returns in same branch - merge not yet implemented");
-                            },
-                        }
-                    }
-                },
-                .other => {
-                    // Global/other source - not yet supported
-                    @panic("ret_safe: .other source not yet implemented");
-                },
-            }
+                }
+            },
+            .other => {
+                // Global/other source - not yet supported
+                @panic("ret_safe: .other source not yet implemented");
+            },
         }
 
         // Splat runs last - analyses see state after copy is complete
@@ -710,10 +698,10 @@ pub const RetSafe = struct {
 /// RetPtr returns a pointer to the return value storage.
 /// Used for large return values (structs, unions) where caller provides storage.
 ///
-/// Flow:
-/// 1. ret_ptr creates a local entity (the return value) and a pointer to it
-/// 2. Operations (store_safe, struct_field_ptr, etc.) modify through the pointer
-/// 3. ret_load copies the entity to caller's return slot
+/// Global Refinements Architecture:
+/// - return_eidx points to a slot in the refinements table
+/// - ret_ptr creates a pointer to a local entity for building up the return value
+/// - ret_load will copy the built-up value to return_eidx
 pub const RetPtr = struct {
     /// The return value type (pointee type, not pointer type)
     ty: Type,
@@ -731,35 +719,40 @@ pub const RetPtr = struct {
 };
 
 /// RetLoad loads from ret_ptr to complete the return.
-/// Copies the return value entity to caller's return slot.
+/// Copies the return value entity to the return slot.
+///
+/// Global Refinements Architecture:
+/// - return_eidx points to a slot in the refinements table
+/// - Just copy the value from ret_ptr's target to return_eidx
 pub const RetLoad = struct {
     /// The ret_ptr instruction index
     ptr: usize,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Return instruction produces void (not a usable value)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+
+        // Mark branch as returning (for merge exclusion)
+        if (state.branch_returns) |br| {
+            if (br.*) @panic("ret_load: multiple returns in same branch");
+            br.* = true;
+        }
 
         // Get the entity from ret_ptr's pointer
         const ptr_ref = state.results[self.ptr].refinement orelse @panic("ret_load: ret_ptr has no refinement");
         const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
 
-        // Copy to caller's return slot
-        if (state.caller_refinements) |caller_refinements| {
-            const return_eidx = state.return_eidx;
-            switch (caller_refinements.at(return_eidx).*) {
-                .retval_future, .noreturn => {
-                    // Copy return value from callee to caller's return slot
-                    // copy_to creates a new entity with properly allocated memory
-                    const new_idx = try state.refinements.at(pointee_idx).*.copyTo(state.refinements, caller_refinements);
-                    // Move the value to return_eidx and clear the intermediate entity
-                    // This avoids double-free since only return_eidx owns the allocations
-                    caller_refinements.at(return_eidx).* = caller_refinements.at(new_idx).*;
-                    caller_refinements.at(new_idx).* = .{ .void = {} };
-                },
-                else => {
-                    @panic("ret_load: multiple returns in same branch - merge not yet implemented");
-                },
-            }
+        // Copy to return slot in global table
+        const return_eidx = state.return_eidx;
+        const refns = state.refinements;
+        switch (refns.at(return_eidx).*) {
+            .retval_future, .noreturn => {
+                // Deep copy to avoid double-free when struct/union fields are freed
+                refns.at(return_eidx).* = try refns.deepCopyValue(refns.at(pointee_idx).*);
+            },
+            else => {
+                @panic("ret_load: multiple returns in same branch - merge not yet implemented");
+            },
         }
 
         try splat(.ret_load, state, index, self);
@@ -1157,11 +1150,20 @@ fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *
     }
 }
 
-/// Check if a branch contains any .noreturn result, making it unreachable.
-fn branchIsUnreachable(branch_results: []const Inst, branch_refinements: *Refinements) bool {
-    for (branch_results) |result| {
+/// Check if a branch is "unreachable" for post-branch code merge purposes.
+/// A branch is unreachable if:
+/// - It returned (branch_returns is true)
+/// - It contains a .noreturn result (panic, unreachable, etc.)
+fn branchIsUnreachable(branch: State) bool {
+    // Check if branch returned
+    if (branch.branch_returns) |br| {
+        if (br.*) return true;
+    }
+
+    // Check for noreturn refinement (panic, unreachable, etc.)
+    for (branch.results) |result| {
         const eidx = result.refinement orelse continue;
-        if (branch_refinements.at(eidx).* == .noreturn) {
+        if (branch.refinements.at(eidx).* == .noreturn) {
             return true;
         }
     }
@@ -1191,7 +1193,7 @@ pub fn splatMerge(
     defer allocator.free(filtered);
 
     for (branches, 0..) |branch, i| {
-        filtered[i] = if (branchIsUnreachable(branch.results, branch.refinements))
+        filtered[i] = if (branchIsUnreachable(branch))
             null
         else
             branch;
@@ -1214,13 +1216,40 @@ pub fn splatMerge(
             branch_eidxs[i] = if (branch_opt) |branch| branch.results[result_idx].refinement else null;
         }
 
+        // Check if branches changed the entity index for this result slot.
+        // If only reachable branches have a consistent entity index different from orig,
+        // update the parent's result to use that entity (e.g., br overwrites block result).
+        var consistent_branch_eidx: ?EIdx = null;
+        var all_same = true;
+        for (branch_eidxs) |eidx_opt| {
+            const eidx = eidx_opt orelse continue; // Skip unreachable branches
+            if (consistent_branch_eidx) |prev| {
+                if (prev != eidx) {
+                    all_same = false;
+                    break;
+                }
+            } else {
+                consistent_branch_eidx = eidx;
+            }
+        }
+        if (all_same) {
+            if (consistent_branch_eidx) |new_eidx| {
+                if (new_eidx != orig_eidx) {
+                    // All reachable branches have same entity, different from orig.
+                    // Update parent's result slot to use the branch's entity.
+                    result.refinement = new_eidx;
+                }
+            }
+        }
+
         // Recursively merge this refinement and all nested refinements
+        // Use the (possibly updated) result.refinement as the merge target
         try mergeRefinementRecursive(
             merge_tag,
             allocator,
             ctx,
             refinements,
-            orig_eidx,
+            result.refinement.?,
             filtered,
             branch_eidxs,
             &merged,
@@ -1246,15 +1275,75 @@ pub fn splatMerge(
     }
 }
 
+/// Merge return values from returning branches into parent's return_eidx.
+/// Called after splatMerge to handle return value hoisting.
+/// Only branches where branch_returns is true contribute to the merge.
+pub fn mergeReturnValue(
+    comptime merge_tag: anytype,
+    allocator: std.mem.Allocator,
+    ctx: *Context,
+    refinements: *Refinements,
+    return_eidx: EIdx,
+    branches: []const State,
+) !void {
+    // Count returning branches
+    var num_returning: usize = 0;
+    for (branches) |branch| {
+        if (branch.branch_returns) |br| {
+            if (br.*) num_returning += 1;
+        }
+    }
+
+    // No returning branches - nothing to merge
+    if (num_returning == 0) return;
+
+    // Build arrays for merge: only returning branches contribute
+    const filtered = try allocator.alloc(?State, branches.len);
+    defer allocator.free(filtered);
+    const branch_eidxs = try allocator.alloc(?EIdx, branches.len);
+    defer allocator.free(branch_eidxs);
+
+    for (branches, 0..) |branch, i| {
+        if (branch.branch_returns) |br| {
+            if (br.*) {
+                filtered[i] = branch;
+                branch_eidxs[i] = return_eidx;
+            } else {
+                filtered[i] = null;
+                branch_eidxs[i] = null;
+            }
+        } else {
+            filtered[i] = null;
+            branch_eidxs[i] = null;
+        }
+    }
+
+    // Track merged entities
+    var merged = std.AutoHashMap(EIdx, void).init(allocator);
+    defer merged.deinit();
+
+    // Recursively merge return value and nested refinements
+    try mergeRefinementRecursive(
+        merge_tag,
+        allocator,
+        ctx,
+        refinements,
+        return_eidx,
+        filtered,
+        branch_eidxs,
+        &merged,
+    );
+}
+
 /// Follow .to field for each branch's eidx, updating branch_eidxs in place.
 fn followBranchEidxs(
-    comptime tag: std.meta.Tag(Refinement),
+    comptime ref_tag: std.meta.Tag(Refinement),
     branches: []const ?State,
     branch_eidxs: []?EIdx,
 ) void {
     for (branches, branch_eidxs) |branch_opt, *eidx| {
         const branch = branch_opt orelse continue;
-        eidx.* = @field(branch.refinements.at(eidx.*.?).*, @tagName(tag)).to;
+        eidx.* = @field(branch.refinements.at(eidx.*.?).*, @tagName(ref_tag)).to;
     }
 }
 
@@ -1343,13 +1432,14 @@ fn mergeRefinementRecursive(
 
 // Tests
 
+/// Test helper to create a State for testing.
+/// Context owns nothing - refinements are passed separately.
 fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     return .{
         .ctx = ctx,
         .results = results,
         .refinements = refinements,
         .return_eidx = 0,
-        .caller_refinements = null,
     };
 }
 
@@ -1433,7 +1523,7 @@ test "dbg_var_val sets name on target instruction" {
     try std.testing.expectEqual(@as(u32, 2), results[1].name_id.?);
 }
 
-test "arg copies value and sets name" {
+test "arg shares eidx from caller (global refinements)" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -1442,29 +1532,21 @@ test "arg copies value and sets name" {
     defer ctx.deinit();
     ctx.getName = &testGetName;
 
-    // Caller refinements (simulating the caller)
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const arg_eidx = try caller_refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-
-    // Callee refinements
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 2;
-    const state = State{
-        .ctx = &ctx,
-        .results = &results,
-        .refinements = &refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
+    // With global refinements, the caller's entity is already in refinements
+    const arg_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
-    // arg should copy the entity from caller and store its tag
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // arg should share the entity (same eidx), not copy
     try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .eidx = arg_eidx }, .name_id = 3 } });
 
-    try std.testing.expect(results[0].refinement != null);
-    // name_id is now in the inst_tag, not a separate field
+    // Should have the same eidx as the caller's entity
+    try std.testing.expectEqual(arg_eidx, results[0].refinement.?);
+    // name_id is in the inst_tag
     try std.testing.expectEqual(@as(u32, 3), results[0].inst_tag.?.arg.name_id);
 }
 
