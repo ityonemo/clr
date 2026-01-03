@@ -73,10 +73,11 @@ pub const MemorySafety = union(enum) {
             .interned, .other => return,
         };
 
-        // When storing a pointer with allocation tracking, set name_at_alloc on the pointee
-        // This captures the access path (e.g., "container.ptr") for error messages
         const src_refinement_idx = results[src].refinement orelse return;
         const src_refinement = refinements.at(src_refinement_idx);
+
+        // When storing a pointer with allocation tracking, set name_at_alloc on the pointee
+        // This captures the access path (e.g., "container.ptr") for error messages
         if (src_refinement.* == .pointer) {
             // Get the pointee and check if it has allocation tracking
             const pointee_idx = src_refinement.pointer.to;
@@ -87,6 +88,25 @@ pub const MemorySafety = union(enum) {
                     // Set name_at_alloc if not already set
                     if (ms.allocated.name_at_alloc == null) {
                         ms.allocated.name_at_alloc = ctx.buildPathName(results, refinements, ptr);
+                    }
+                }
+            }
+
+            // Propagate stack memory_safety when storing a pointer into a struct/union field.
+            // This handles: union.ptr = &stack_var or struct.ptr = &stack_var
+            if (src_refinement.pointer.analyte.memory_safety) |src_ms| {
+                if (src_ms == .stack) {
+                    // Get destination pointer and its pointee
+                    const ptr_refinement_idx = results[ptr].refinement orelse return;
+                    const ptr_refinement = refinements.at(ptr_refinement_idx);
+                    if (ptr_refinement.* == .pointer) {
+                        // Destination pointee should be a pointer (we're storing into ptr-to-ptr)
+                        const dest_pointee_idx = ptr_refinement.pointer.to;
+                        const dest_pointee = refinements.at(dest_pointee_idx);
+                        if (dest_pointee.* == .pointer) {
+                            // Propagate the stack memory_safety to the destination pointer
+                            dest_pointee.pointer.analyte.memory_safety = src_ms;
+                        }
                     }
                 }
             }
@@ -119,7 +139,8 @@ pub const MemorySafety = union(enum) {
 
     /// Retroactively set variable name on stack for escape detection messages.
     /// The name_id is already set on the instruction by DbgVarPtr.apply().
-    /// With new architecture, memory_safety is on the POINTEE, so we follow the pointer.
+    /// Set name on BOTH the pointer and pointee's memory_safety - reportStackEscape
+    /// checks the pointer's memory_safety.
     pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtrParams) !void {
         _ = index;
         const inst = params.ptr orelse return;
@@ -127,7 +148,16 @@ pub const MemorySafety = union(enum) {
         const ptr_ref = state.refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
 
-        // Follow the pointer to the pointee where memory_safety is stored
+        // Set name on the POINTER's memory_safety (used by reportStackEscape)
+        if (ptr_ref.pointer.analyte.memory_safety) |*ms| {
+            if (ms.* == .stack) {
+                if (ms.stack.name == .other) {
+                    ms.stack.name = .{ .variable = params.name_id };
+                }
+            }
+        }
+
+        // Also set on the pointee's memory_safety
         const pointee_idx = ptr_ref.pointer.to;
         const pointee = state.refinements.at(pointee_idx);
         const pointee_analyte = getAnalytePtr(pointee);
