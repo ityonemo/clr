@@ -39,6 +39,11 @@ pub const Allocation = struct {
 pub const Origin = struct {
     meta: Meta,
     type: Type,
+    parent_container_eidx: EIdx, // Entity index of the container this field pointer came from
+    // NOTE: If we ever encounter an origin situation where parent_container_eidx
+    // doesn't make sense, we should make this optional (?EIdx).
+    // TODO: When GIDs are properly implemented across the codebase, change this to GID
+    // for stability across branch cloning/merging.
 
     pub const Type = enum {
         struct_field, // Pointer to a struct field - cannot be freed
@@ -149,28 +154,56 @@ pub const MemorySafety = union(enum) {
     /// struct_field_ptr creates a pointer to a field of a struct/union.
     /// Mark it with origin so we can detect invalid frees.
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
+        const refinements = state.refinements;
         const ptr_idx = state.results[index].refinement orelse return;
-        const ptr = &state.refinements.at(ptr_idx).pointer;
+        const ptr = &refinements.at(ptr_idx).pointer;
+
+        // Get container info from base pointer
+        const base = params.base orelse return; // Can't track interned base
+        const base_ref_idx = state.results[base].refinement orelse return;
+        const base_ref = refinements.at(base_ref_idx);
+        if (base_ref.* != .pointer) return;
+
+        const container_eidx = base_ref.pointer.to;
+        const container = refinements.at(container_eidx);
 
         // Determine if base is struct or union
-        const origin_type: Origin.Type = blk: {
-            const base = params.base orelse break :blk .struct_field; // Default to struct for interned
-            const base_ref_idx = state.results[base].refinement orelse break :blk .struct_field;
-            const base_ref = state.refinements.at(base_ref_idx);
-            if (base_ref.* != .pointer) break :blk .struct_field;
-            const container = state.refinements.at(base_ref.pointer.to);
-            break :blk switch (container.*) {
-                .@"struct" => .struct_field,
-                .@"union" => .union_field,
-                else => .struct_field,
-            };
+        const origin_type: Origin.Type = switch (container.*) {
+            .@"struct" => .struct_field,
+            .@"union" => .union_field,
+            else => return, // Not a struct/union, can't track
         };
 
         // Mark this pointer as derived from a field - cannot be freed directly
+        // Store container_eidx for field_parent_ptr recovery
         ptr.analyte.memory_safety = .{ .origin = .{
             .meta = state.ctx.meta,
             .type = origin_type,
+            .parent_container_eidx = container_eidx,
         } };
+    }
+
+    /// field_parent_ptr recovers the parent container pointer from a field pointer.
+    /// We use the stored parent_container_eidx to reconnect to the original container entity.
+    pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
+        const refinements = state.refinements;
+
+        const field_ptr = params.field_ptr orelse return; // Can't track interned
+        const ptr_idx = state.results[field_ptr].refinement orelse return;
+        const ptr_ref = refinements.at(ptr_idx);
+        if (ptr_ref.* != .pointer) return;
+
+        // Get parent EIdx from the field pointer's origin
+        const ms = ptr_ref.pointer.analyte.memory_safety orelse return;
+        const origin = switch (ms) {
+            .origin => |o| o,
+            else => return, // Not a field pointer
+        };
+        const parent_eidx = origin.parent_container_eidx;
+
+        // Update result to point to original parent container
+        const result_idx = state.results[index].refinement orelse return;
+        refinements.at(result_idx).pointer.to = parent_eidx;
     }
 
     pub fn ret_safe(state: State, index: usize, params: tag.RetSafe) !void {

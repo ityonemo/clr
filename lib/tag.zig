@@ -485,22 +485,26 @@ pub const StructFieldPtr = struct {
         const container = state.refinements.at(container_idx).*;
 
         switch (container) {
-            inline .@"struct", .@"union" => |data, container_tag| {
-                // Get field index - for unions, create entity for inactive fields
-                // (variant_safety analysis will report error via splat)
+            .@"struct" => |data| {
+                const field_idx = data.fields[self.field_index];
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = field_idx } });
+            },
+            .@"union" => |data| {
                 const field_idx = idx: {
-                    if (container_tag == .@"union") {
-                        if (data.fields[self.field_index]) |idx| break :idx idx;
-                        // Inactive field - create a fresh entity for structure
-                        const new_field_ref = try typeToRefinement(self.ty.ty.pointer.*, state.refinements);
-                        const new_idx = try state.refinements.appendEntity(new_field_ref);
-                        break :idx new_idx;
-                    } else {
-                        break :idx data.fields[self.field_index];
+                    if (data.fields[self.field_index]) |idx| break :idx idx;
+                    // Field is inactive - check if this is a tagged union
+                    if (data.analyte.variant_safety != null) {
+                        // Tagged union: accessing inactive field is an error
+                        try state.ctx.meta.print(state.ctx.writer, "access of inactive union variant in ", .{});
+                        return error.InactiveVariantAccess;
                     }
+                    // Untagged union: create entity on first access and persist it
+                    const new_field_ref = try typeToRefinement(self.ty.ty.pointer.*, state.refinements);
+                    const new_idx = try state.refinements.appendEntity(new_field_ref);
+                    state.refinements.at(container_idx).@"union".fields[self.field_index] = new_idx;
+                    break :idx new_idx;
                 };
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = field_idx } });
-                // Path derived from inst_tag (has base and field_index) at error time
             },
             else => |t| std.debug.panic("struct_field_ptr: expected struct or union, got {s}", .{@tagName(t)}),
         }

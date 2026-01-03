@@ -45,6 +45,7 @@ pub const FieldParentPtrSafety = struct {
     /// Validate @fieldParentPtr usage.
     /// Checks that the field pointer actually came from a struct_field_ptr with matching type and field.
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
+        _ = index;
         const results = state.results;
         const refinements = state.refinements;
 
@@ -60,18 +61,15 @@ pub const FieldParentPtrSafety = struct {
             return reportNotFieldPointer(state.ctx, params);
         };
 
-        // Get expected type_id from the result type (pointer to parent container)
+        // Get expected type_id from params.ty (the claimed container type)
+        // Note: We use params.ty instead of the result entity because memory_safety
+        // may have already updated the result to point to the original container.
         const expected_type_id: Tid = blk: {
-            const result_ref_idx = results[index].refinement orelse return;
-            const result_ref = refinements.at(result_ref_idx);
-            if (result_ref.* != .pointer) return;
-            const container_idx = result_ref.pointer.to;
-            const container = refinements.at(container_idx);
-            break :blk switch (container.*) {
-                .@"struct" => |s| s.type_id,
-                .@"union" => |u| u.type_id,
+            // params.ty is pointer -> struct/union, extract the struct/union type_id
+            switch (params.ty.ty) {
+                .pointer => |container_ty| break :blk container_ty.id orelse return,
                 else => return,
-            };
+            }
         };
 
         // Check 2: Container type must match (compare type_ids)
@@ -136,7 +134,6 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .results = results,
         .refinements = refinements,
         .return_eidx = 0,
-        .caller_refinements = null,
     };
 }
 
@@ -289,7 +286,8 @@ test "field_parent_ptr errors on wrong container type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should error - type mismatch (100 != 200)
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    // params.ty is pointer -> struct with type_id 200 (the claimed type)
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = 200, .ty = .{ .scalar = {} } } } } });
     try std.testing.expectError(error.FieldParentPtrTypeMismatch, result);
 }
 
@@ -328,6 +326,7 @@ test "field_parent_ptr errors on wrong field index" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should error - field mismatch (claims field 1, but pointer is from field 0)
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    // params.ty is pointer -> struct with type_id 100 (matching type, wrong field)
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = 100, .ty = .{ .scalar = {} } } } } });
     try std.testing.expectError(error.FieldParentPtrFieldMismatch, result);
 }

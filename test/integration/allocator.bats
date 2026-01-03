@@ -324,3 +324,18 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator/field_ptr/free_parent_ok.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no error when freeing struct via fieldParentPtr" {
+    run compile_and_run "$TEST_CASES/allocator/field_ptr/free_via_fieldparentptr_struct.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when freeing union via fieldParentPtr" {
+    run compile_and_run "$TEST_CASES/allocator/field_ptr/free_via_fieldparentptr_union.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when freeing tagged union via fieldParentPtr" {
+    run compile_and_run "$TEST_CASES/allocator/field_ptr/free_via_fieldparentptr_tagged_union.zig"
+    [ "$status" -eq 0 ]
+}

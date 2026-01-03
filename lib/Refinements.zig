@@ -8,6 +8,9 @@ pub const EIdx = u32;
 /// Type ID - InternPool index identifying a type for type safety checks.
 pub const Tid = u32;
 
+/// Global ID - unique identifier for provenance tracking across function boundaries.
+pub const Gid = u32;
+
 pub const Analyte = @import("Analyte.zig");
 
 /// Refinement tracks the type structure of a value along with analysis state.
@@ -15,17 +18,20 @@ pub const Analyte = @import("Analyte.zig");
 /// EIdx is used for anything that needs indirection (pointers, optionals, etc).
 pub const Refinement = union(enum) {
     pub const Scalar = struct {
+        gid: Gid = 0,
         analyte: Analyte,
         type_id: Tid,
     };
 
     pub const Indirected = struct {
+        gid: Gid = 0,
         analyte: Analyte,
         type_id: Tid,
         to: EIdx,
     };
 
     pub const Struct = struct {
+        gid: Gid = 0,
         /// Analyte for tracking on the whole struct
         analyte: Analyte = .{},
         /// Field refinement indices - each field has its own refinement
@@ -35,6 +41,7 @@ pub const Refinement = union(enum) {
     };
 
     pub const Union = struct {
+        gid: Gid = 0,
         /// Analyte for tracking on the whole union
         analyte: Analyte = .{},
         /// Field refinement indices - each field has its own refinement.  Any field
@@ -341,9 +348,32 @@ pub fn at(self: *Refinements, index: EIdx) *Refinement {
 }
 
 /// Append a new entity with the given value and return its index.
+/// Uses default gid=0. For assigned GIDs, use appendEntityWithGid.
 pub fn appendEntity(self: *Refinements, value: Refinement) !EIdx {
     const idx: EIdx = @intCast(self.list.items.len);
     try self.list.append(value);
+    return idx;
+}
+
+/// Append a new entity with the given value, assigning a new global ID from the counter.
+pub fn appendEntityWithGid(self: *Refinements, value: Refinement, gid_counter: *Gid) !EIdx {
+    const idx: EIdx = @intCast(self.list.items.len);
+    var entity = value;
+    const gid = gid_counter.*;
+    gid_counter.* += 1;
+    // Set gid on the appropriate variant
+    switch (entity) {
+        .scalar => |*s| s.gid = gid,
+        .pointer => |*p| p.gid = gid,
+        .optional => |*o| o.gid = gid,
+        .errorunion => |*e| e.gid = gid,
+        .@"struct" => |*st| st.gid = gid,
+        .@"union" => |*u| u.gid = gid,
+        .region => |*r| r.gid = gid,
+        // These don't have gids
+        .void, .noreturn, .retval_future, .unimplemented => {},
+    }
+    try self.list.append(entity);
     return idx;
 }
 
@@ -378,6 +408,34 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
         }
     }
     return new;
+}
+
+/// Deep copy a Refinement value, allocating new memory for struct/union fields.
+/// Use this when copying a refinement to another slot to avoid double-free.
+pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
+    const allocator = self.list.allocator;
+    return switch (src) {
+        inline .@"struct", .@"union" => |data, tag| blk: {
+            // Deep copy fields
+            const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
+            @memcpy(new_fields, data.fields);
+            // Deep copy analyte, including variant_safety.active_metas if present
+            var new_analyte = data.analyte;
+            if (tag == .@"union") {
+                if (data.analyte.variant_safety) |vs| {
+                    const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
+                    @memcpy(new_active_metas, vs.active_metas);
+                    new_analyte.variant_safety = .{ .active_metas = new_active_metas };
+                }
+            }
+            break :blk @unionInit(Refinement, @tagName(tag), .{
+                .analyte = new_analyte,
+                .fields = new_fields,
+                .type_id = data.type_id,
+            });
+        },
+        else => src, // Non-container types can be shallow copied
+    };
 }
 
 /// Semideep copy within same table: creates new entity, copying values but sharing pointer targets.

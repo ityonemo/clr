@@ -9,6 +9,13 @@ load test_helper
     [[ "$output" =~ "inactive_access.zig" ]]
 }
 
+@test "detects pointer access to inactive union variant" {
+    run compile_and_run "$TEST_CASES/variant_safety/inactive_ptr_access.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of inactive union variant" ]]
+    [[ "$output" =~ "inactive_ptr_access.zig" ]]
+}
+
 @test "no error when accessing active union variant" {
     run compile_and_run "$TEST_CASES/variant_safety/active_access.zig"
     [ "$status" -eq 0 ]
