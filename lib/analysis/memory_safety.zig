@@ -245,6 +245,47 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Clear the `returned` flag on allocations in a received return value.
+    /// Called by the caller after receiving a value from a function call.
+    /// This transfers ownership: the callee marked it as "returned" (its responsibility ends),
+    /// but the caller now owns it and must either free it or return it.
+    pub fn clearAllocationsReturned(refinements: *Refinements, idx: EIdx) void {
+        const refinement = refinements.at(idx);
+        switch (refinement.*) {
+            .pointer => |*p| {
+                // Check pointee's memory_safety for allocation state
+                const pointee_idx = p.to;
+                const pointee = refinements.at(pointee_idx);
+                const pointee_analyte = getAnalytePtr(pointee);
+                if (pointee_analyte.memory_safety) |*ms| {
+                    if (ms.* == .allocation) {
+                        // Clear returned flag - caller now owns this allocation
+                        ms.allocation.returned = false;
+                    }
+                }
+            },
+            .optional => |o| {
+                clearAllocationsReturned(refinements, o.to);
+            },
+            .errorunion => |e| {
+                clearAllocationsReturned(refinements, e.to);
+            },
+            .@"struct" => |s| {
+                for (s.fields) |field_idx| {
+                    clearAllocationsReturned(refinements, field_idx);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |field_idx_opt| {
+                    if (field_idx_opt) |field_idx| {
+                        clearAllocationsReturned(refinements, field_idx);
+                    }
+                }
+            },
+            .scalar, .void, .noreturn, .unimplemented, .retval_future, .region => {},
+        }
+    }
+
     /// Check ret_load for stack pointer escapes and mark allocations as returned.
     /// ret_load returns a value through ret_ptr storage - used for large returns (structs, unions).
     pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
@@ -302,25 +343,25 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Called on function close to check for memory leaks and stack pointer escapes.
-    /// Backward propagation is handled centrally by Inst.backPropagate().
+    /// With global refinements, args share entities directly with caller.
+    /// Stack pointer escapes through args are detected by checking arg pointees.
     pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
         // Check for stack pointer escapes via pointer arguments
         // If a pointer arg's pointee contains a stack pointer from this function,
-        // backPropagate would escape it to the caller
-        if (ctx.stacktrace.items.len > 0) {
-            const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-            for (results) |inst| {
-                // Only check args that have caller entity (will be back-propagated)
-                if (inst.caller_eidx == null) continue;
-                const idx = inst.refinement orelse continue;
-                const refinement = refinements.at(idx);
+        // it escapes to the caller via the shared global refinements table
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        for (results) |inst| {
+            // Only check args (instructions with .arg tag)
+            const any_tag = inst.inst_tag orelse continue;
+            if (any_tag != .arg) continue;
+            const idx = inst.refinement orelse continue;
+            const refinement = refinements.at(idx);
 
-                // Only check pointer args - scalar args are copied by value
-                if (refinement.* != .pointer) continue;
+            // Only check pointer args - scalar args are copied by value
+            if (refinement.* != .pointer) continue;
 
-                // Check the pointee for stack pointers
-                try checkStackEscapeRecursive(refinements, refinement.pointer.to, ctx, func_name);
-            }
+            // Check the pointee for stack pointers
+            try checkStackEscapeRecursive(refinements, refinement.pointer.to, ctx, func_name);
         }
 
         // Check for memory leaks - allocation state is on the POINTEE
@@ -787,7 +828,6 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .results = results,
         .refinements = refinements,
         .return_eidx = 0,
-        .caller_refinements = null,
     };
 }
 
@@ -1163,6 +1203,7 @@ test "onFinish detects memory leak" {
     var buf: [4096]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
+    try ctx.stacktrace.append(allocator, "test_func");
     defer ctx.deinit();
 
     var refinements = Refinements.init(allocator);
@@ -1188,6 +1229,7 @@ test "onFinish allows freed allocation" {
     var buf: [4096]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
+    try ctx.stacktrace.append(allocator, "test_func");
     defer ctx.deinit();
 
     var refinements = Refinements.init(allocator);
@@ -1214,12 +1256,10 @@ test "onFinish allows passed allocation" {
     try ctx.stacktrace.append(allocator, "test_func");
     defer ctx.deinit();
 
+    // Global refinements table - return slot pre-allocated
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
-    const return_eidx = try caller_refinements.appendEntity(.{ .retval_future = {} });
+    const return_eidx = try refinements.appendEntity(.{ .retval_future = {} });
 
     var results = [_]Inst{.{}} ** 5;
     const state = State{
@@ -1227,7 +1267,6 @@ test "onFinish allows passed allocation" {
         .results = &results,
         .refinements = &refinements,
         .return_eidx = return_eidx,
-        .caller_refinements = &caller_refinements,
     };
 
     // Create allocation and unwrap
@@ -1249,6 +1288,7 @@ test "onFinish ignores stack allocations" {
     var buf: [4096]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
+    try ctx.stacktrace.append(allocator, "test_func");
     defer ctx.deinit();
 
     var refinements = Refinements.init(allocator);
@@ -1339,7 +1379,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     try std.testing.expect(ms.allocation.freed != null);
 }
 
-test "interprocedural: callee freeing struct pointer field propagates back to caller" {
+test "global refinements: freeing struct pointer field is visible immediately" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -1347,88 +1387,51 @@ test "interprocedural: callee freeing struct pointer field propagates back to ca
     var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5, 0);
     defer ctx.deinit();
 
-    // === CALLER SETUP ===
-    var caller_refinements = Refinements.init(allocator);
-    defer caller_refinements.deinit();
+    // Global refinements table shared by all code
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
 
-    var caller_results = [_]Inst{.{}} ** 6;
-    const caller_state = testState(&ctx, &caller_results, &caller_refinements);
+    var results = [_]Inst{.{}} ** 8;
+    const state = testState(&ctx, &results, &refinements);
 
-    // Caller: inst 0 = alloc_create, inst 1 = unwrap to get pointer
-    try Inst.apply(caller_state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(caller_state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
+    // inst 0 = alloc_create, inst 1 = unwrap to get pointer
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .eidx = 0 } } });
     // inst 1 now has the allocation pointer
 
-    // Caller: inst 2 = alloc struct with pointer field
+    // inst 2 = alloc struct with pointer field
     const struct_ty: tag.Type = .{ .id = null, .ty = .{ .@"struct" = &.{.{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } }} } };
-    try Inst.apply(caller_state, 2, .{ .alloc = .{ .ty = struct_ty } });
+    try Inst.apply(state, 2, .{ .alloc = .{ .ty = struct_ty } });
     // inst 3 = store undefined struct
-    try Inst.apply(caller_state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &struct_ty } } } } });
+    try Inst.apply(state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &struct_ty } } } } });
     // inst 4 = struct_field_ptr to field 0
-    try Inst.apply(caller_state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } } });
+    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } } });
     // inst 5 = store allocation pointer into struct field
-    try Inst.apply(caller_state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 } } });
+    try Inst.apply(state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .eidx = 1 } } });
 
     // Get the allocation's POINTEE entity for later verification
-    const alloc_ptr_ref = caller_results[1].refinement.?;
-    const alloc_ptr = caller_refinements.at(alloc_ptr_ref);
+    const alloc_ptr_ref = results[1].refinement.?;
+    const alloc_ptr = refinements.at(alloc_ptr_ref);
     const alloc_pointee_idx = alloc_ptr.pointer.to;
 
-    // Verify allocation is not freed yet (check POINTEE's memory_safety)
-    const pointee_before = caller_refinements.at(alloc_pointee_idx);
+    // Verify allocation is not freed yet
+    const pointee_before = refinements.at(alloc_pointee_idx);
     const pointee_analyte_before = MemorySafety.getAnalytePtr(pointee_before);
     const pointee_ms_before = pointee_analyte_before.memory_safety.?;
     try std.testing.expect(pointee_ms_before == .allocation);
-    try std.testing.expect(pointee_ms_before.allocation.freed == null); // Not freed yet
+    try std.testing.expect(pointee_ms_before.allocation.freed == null);
 
-    // === CALLEE SETUP ===
-    var callee_refinements = Refinements.init(allocator);
-    defer callee_refinements.deinit();
+    // inst 6 = load from struct field to get the pointer
+    try Inst.apply(state, 6, .{ .load = .{ .ptr = 4, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } });
+    // inst 7 = alloc_destroy to free the pointer
+    try Inst.apply(state, 7, .{ .alloc_destroy = .{ .ptr = 6, .type_id = 10 } });
 
-    var callee_results = [_]Inst{.{}} ** 5;
-
-    // Copy caller's struct pointer using copyTo (simulating arg)
-    const caller_ptr_idx = caller_results[2].refinement.?;
-    const local_ptr_idx = try caller_refinements.at(caller_ptr_idx).*.copyTo(&caller_refinements, &callee_refinements);
-    callee_results[0].refinement = local_ptr_idx;
-    callee_results[0].caller_eidx = caller_ptr_idx;
-    callee_results[0].name_id = 7; // 7 -> "container"
-
-    const callee_state = State{
-        .ctx = &ctx,
-        .results = &callee_results,
-        .refinements = &callee_refinements,
-        .return_eidx = 0,
-        .caller_refinements = &caller_refinements,
-    };
-
-    // Callee: inst 1 = struct_field_ptr to get pointer to field 0
-    try Inst.apply(callee_state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } } });
-    // Callee: inst 2 = load to get the pointer value from field
-    try Inst.apply(callee_state, 2, .{ .load = .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } });
-    // Callee: inst 3 = alloc_destroy to free the pointer
-    try Inst.apply(callee_state, 3, .{ .alloc_destroy = .{ .ptr = 2, .type_id = 10 } });
-
-    // Callee's local pointer's POINTEE should be freed
-    const local_loaded_ptr_ref = callee_results[2].refinement.?;
-    const local_loaded_ptr = callee_refinements.at(local_loaded_ptr_ref);
-    try std.testing.expect(local_loaded_ptr.* == .pointer);
-    const local_pointee_idx = local_loaded_ptr.pointer.to;
-    const local_pointee = callee_refinements.at(local_pointee_idx);
-    const local_pointee_analyte = MemorySafety.getAnalytePtr(local_pointee);
-    const local_pointee_ms = local_pointee_analyte.memory_safety.?;
-    try std.testing.expect(local_pointee_ms == .allocation);
-    try std.testing.expect(local_pointee_ms.allocation.freed != null);
-
-    // === BACKPROPAGATE ===
-    Inst.backPropagate(callee_state);
-
-    // === VERIFY CALLER'S STATE IS UPDATED ===
-    // The caller's allocation pointee should now be marked as freed
-    const pointee_after = caller_refinements.at(alloc_pointee_idx);
+    // With global refinements, the allocation should be marked as freed immediately
+    // No backpropagation needed - modifications are direct
+    const pointee_after = refinements.at(alloc_pointee_idx);
     const pointee_analyte_after = MemorySafety.getAnalytePtr(pointee_after);
     const pointee_ms_after = pointee_analyte_after.memory_safety.?;
     try std.testing.expect(pointee_ms_after == .allocation);
-    // This is the key assertion: the caller's allocation should be marked as freed
+    // This is the key assertion: the allocation should be marked as freed
     try std.testing.expect(pointee_ms_after.allocation.freed != null);
 }

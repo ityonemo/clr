@@ -4,18 +4,27 @@ pub const Inst = @import("Inst.zig");
 pub const Refinements = @import("Refinements.zig");
 pub const Arg = @import("tag.zig").Src;
 pub const EIdx = Inst.EIdx;
+const std = @import("std");
 
 // Debug utilities
 /// Dump analysis state. Call as: clr.dump(state);
 pub const dump = @import("dump.zig").dump;
 
 /// wraps all state into a single object that is easily passed between units.
+/// With global refinements table, State is simpler - no per-function refinements.
 pub const State = struct {
     ctx: *Context,
     results: []Inst,
     refinements: *Refinements,
     return_eidx: EIdx,
-    caller_refinements: ?*Refinements,
+    /// For branch tracking: GIDs of entities created during this branch (null outside branches)
+    created_gids: ?*std.ArrayListUnmanaged(Refinements.Gid) = null,
+    /// For branch tracking: GIDs of entities modified during this branch (null outside branches)
+    modified_gids: ?*std.ArrayListUnmanaged(Refinements.Gid) = null,
+    /// Set to true by ret_safe/ret_load when this branch returns.
+    /// Used to exclude returning branches from local variable merge.
+    /// Null outside of branch contexts (top-level function execution).
+    branch_returns: ?*bool = null,
 };
 
 test {
