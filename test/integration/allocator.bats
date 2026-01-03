@@ -269,6 +269,11 @@ load test_helper
     [[ "$output" =~ "clobber_in_branch" ]]
 }
 
+@test "no false positive when if branch frees and returns" {
+    run compile_and_run "$TEST_CASES/allocator/if/free_and_return.zig"
+    [ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # Switch memory safety tests
 # =============================================================================
@@ -297,6 +302,11 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "clobber_in_case" ]]
+}
+
+@test "no false positive when switch case frees and returns" {
+    run compile_and_run "$TEST_CASES/allocator/switch/free_and_return.zig"
+    [ "$status" -eq 0 ]
 }
 
 # =============================================================================
