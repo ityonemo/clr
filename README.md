@@ -51,6 +51,9 @@ Planned (see LIMITATIONS.md for details):
 - Recursive functions
 - async/await
 
+Maybe:
+- Lazy Arena Allocator frees
+
 ## Prerequisites
 
 - Zig 0.15.2 (system installation with LLVM support)
