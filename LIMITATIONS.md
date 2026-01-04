@@ -92,26 +92,6 @@ Loop analysis is not implemented. The analyzer doesn't perform fixed-point itera
 
 **Planned**: Implement fixed-point iteration for loops with proper state merging.
 
-### Branch Merge with Heap-Allocated Structs
-
-When allocating struct types via `allocator.create(StructType)` combined with error handling (`catch return`), the branch merge logic can crash. The issue occurs in `mergeRefinementRecursive` when one branch has a struct refinement while another has a different refinement type (e.g., scalar).
-
-**Trigger conditions**:
-1. Allocate a struct type via `allocator.create(Container)` returning `?*Container`
-2. Use error handling (`catch return 1`) which creates a conditional branch
-3. During `cond_br` merge, branches have mismatched refinement types
-
-**Error**: `access of union field 'struct' while field 'scalar' is active`
-
-**Workaround**: Use stack-allocated containers with separately heap-allocated fields:
-```zig
-// Instead of: var container = allocator.create(Container) catch return 1;
-var container: Container = undefined;
-container.ptr = allocator.create(u8) catch return 1;
-```
-
-**Planned fix**: Improve `mergeRefinementRecursive` to handle cases where branch refinements have different types, possibly by finding a common refinement or using a fallback.
-
 ### Unimplemented AIR Tags
 
 The following AIR instruction tags are not yet implemented and produce `.unimplemented` refinements:
@@ -128,7 +108,6 @@ The following AIR instruction tags are not yet implemented and produce `.unimple
 
 **Error unions**:
 - `wrap_errunion_err` - Wrap error into error union
-- `wrap_errunion_payload` - Wrap payload into error union
 
 **Debug/minor**:
 - `dbg_inline_block` - Inlined function debug info

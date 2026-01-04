@@ -351,7 +351,7 @@ pub const AnyTag = union(enum) {
 If the tag affects an analysis (e.g., undefined tracking), add a handler:
 
 ```zig
-// In lib/analysis/undefined.zig (or other analysis module)
+// In lib/analysis/undefined_safety.zig (or other analysis module)
 pub fn my_new_tag(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, payload: anytype) !void {
     // Analysis logic - update results, report errors, etc.
 }
@@ -380,7 +380,7 @@ The tests from step 1 should now pass.
 | `src/codegen.zig` | Generates .air.zig source from AIR instructions |
 | `src/codegen_test.zig` | Unit tests for codegen |
 | `lib/tag.zig` | AnyTag union, tag structs, and splat dispatch |
-| `lib/analysis/*.zig` | Analysis modules (undefined, memory_safety) |
+| `lib/analysis/*.zig` | Analysis modules (undefined_safety, memory_safety, null_safety, variant_safety, fieldparentptr_safety) |
 | `lib/Inst.zig` | Inst struct, results list management, and entity helpers |
 | `lib/Refinements.zig` | Refinements table and Refinement union |
 | `test/cases/` | Integration test input files |

@@ -19,8 +19,7 @@ live demo video: https://www.youtube.com/watch?v=ZY_Z-aGbYm8
 
 ## Overview
 
-This project creates a Zig transpiler for the Zig compiler, which transforms AIR (Abstract Intermediate Representation) into Zig source code that performs static analysis at compile time. The generated analyzer will be able to catche memory safety issues like use-before-assignment, use-after-free, stack pointer escapes,
-as well as zig-specific UB, such as non-nullness assertions, (un)tagged union violations, or fieldParentPtr misuse.
+This project creates a Zig transpiler for the Zig compiler, which transforms AIR (Abstract Intermediate Representation) into Zig source code that performs static analysis at compile time. The generated analyzer catches memory safety issues like use-before-assignment, use-after-free, stack pointer escapes, as well as Zig-specific UB such as non-nullness assertions, tagged union violations, or fieldParentPtr misuse.
 
 The goal is to bring Rust-level memory safety guarantees to Zig through static analysis of AIR, without changing the language itself.
 
@@ -35,16 +34,22 @@ Currently implemented:
 - Memory safety analysis (use-after-free, double-free, memory leaks)
 - Allocator mismatch detection (freeing with wrong allocator)
 - Null safety (unchecked optional unwrap detection)
+- Variant safety (accessing inactive union fields, ambiguous variant after branches)
 - Interprocedural analysis (tracking values across function calls via pointer arguments)
-- Struct field tracking (pointer fields, nested structs)
+- Struct and union field tracking (pointer fields, nested types)
+- Error union support (try expressions, wrap/unwrap payload)
+- Switch statement support (n-way merging with variant tracking)
 - Source location and variable name tracking for error messages
 - Branching/control flow with state merging
 
 Planned (see LIMITATIONS.md for details):
-- Union tracking
 - Loop analysis (fixed-point iteration)
-- Switch statement support (n-way merging)
-- Large return value tracking (ret_load, ret_ptr)
+- Globals
+- Regions
+- Moving provenance
+- Recursive datatypes
+- Recursive functions
+- async/await
 
 ## Prerequisites
 
@@ -125,9 +130,10 @@ clr/
 │   ├── Analyte.zig          # Analysis state container
 │   ├── Context.zig          # Execution context (metadata, error reporting)
 │   └── analysis/            # Analysis modules
-│       ├── undefined.zig    # Use-before-assign tracking
-│       ├── memory_safety.zig # Allocation/free tracking
-│       └── null_safety.zig  # Optional unwrap checking
+│       ├── undefined_safety.zig  # Use-before-assign tracking
+│       ├── memory_safety.zig     # Allocation/free tracking
+│       ├── null_safety.zig       # Optional unwrap checking
+│       └── variant_safety.zig    # Tagged union field access
 ├── test/
 │   ├── integration/         # BATS integration tests
 │   │   ├── test_helper.bash
