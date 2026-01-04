@@ -367,7 +367,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 const created_type = extractAllocCreateType(info, datum);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, created_type }, null);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, created_type }, null);
             }
             if (isAllocatorDestroy(info.ip, datum)) {
                 // Prune allocator.destroy() - emit special tag with pointer inst
@@ -378,7 +379,13 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d} }} }});\n", .{ inst_index, ptr_inst, allocator_info.id }, null);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, ptr_inst, allocator_info.id, allocator_inst }, null);
+            }
+            // Check if call returns std.mem.Allocator - emit mkallocator tag
+            if (getCallAllocatorReturnInfo(info.ip, datum)) |allocator_info| {
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .mkallocator = .{{ .type_id = {d} }} }});\n", .{ inst_index, allocator_info.id }, null);
             }
             const call_parts = payloadCallParts(info, datum);
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
@@ -809,6 +816,17 @@ fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
     // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(info.ip, datum.bin_op.rhs);
     const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
+
+    // Check if storing an interned Allocator value - emit special allocator source
+    if (datum.bin_op.rhs.toInterned()) |interned_idx| {
+        const ty = info.ip.typeOf(interned_idx);
+        if (isAllocatorType(info.ip, ty)) {
+            // Extract the allocator type ID from the vtable
+            const alloc_info = extractAllocatorTypeFromInterned(info.ip, interned_idx);
+            return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .src = .{{ .interned = .{{ .allocator = {d} }} }} }}", .{ ptr, alloc_info.id }, null);
+        }
+    }
+
     const src_str = if (is_undef)
         // Wrap the type in .undefined when storing undefined
         srcStringUndef(info.arena, info.ip, datum.bin_op.rhs)
@@ -1304,6 +1322,29 @@ fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, 
     return .{ .id = 0, .name = "unknown" };
 }
 
+/// Extract the allocator instruction index from the first argument to create/destroy.
+/// Returns null if the allocator is interned (comptime) - in that case, type_id is reliable.
+/// Returns the instruction index if the allocator comes from an instruction (runtime) -
+/// in that case, the runtime handler should check the refinement for the actual type_id.
+fn extractAllocatorInst(datum: Data, extra: []const u32) ?usize {
+    const payload_index = datum.pl_op.payload;
+    const args_len = extra[payload_index];
+    if (args_len == 0) return null;
+
+    // First argument is the allocator (self)
+    const arg_ref: Ref = @enumFromInt(extra[payload_index + 1]);
+
+    // If it's an interned value (comptime allocator), we don't need the inst
+    if (arg_ref.toInterned() != null) return null;
+
+    // It's an inst_ref - return the instruction index
+    if (arg_ref.toIndex()) |inst_idx| {
+        return @intFromEnum(inst_idx);
+    }
+
+    return null;
+}
+
 /// Extract allocator name from vtable FQN (e.g., "heap.PageAllocator.vtable" -> "PageAllocator")
 fn extractAllocatorName(fqn: []const u8) []const u8 {
     // Find "heap." prefix and ".vtable" suffix
@@ -1449,6 +1490,117 @@ pub fn isAllocatorCreateFqn(fqn: []const u8) bool {
 /// Matches patterns like "mem.Allocator.destroy__anon_*" or "std.mem.Allocator.destroy__anon_*"
 pub fn isAllocatorDestroyFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.Allocator.destroy") != null;
+}
+
+/// Check if a type (by InternPool index) is std.mem.Allocator.
+/// Returns true if the type is a struct named "mem.Allocator".
+pub fn isAllocatorType(ip: *const InternPool, type_idx: InternPool.Index) bool {
+    if (type_idx == .none) return false;
+    // Skip built-in types/values (they can't be std.mem.Allocator)
+    // Built-in indices go from 0 to empty_tuple (last predefined value)
+    if (@intFromEnum(type_idx) <= @intFromEnum(InternPool.Index.empty_tuple)) return false;
+    const type_key = ip.indexToKey(type_idx);
+    switch (type_key) {
+        .struct_type => {
+            const loaded = ip.loadStructType(type_idx);
+            const name = loaded.name.toSlice(ip);
+            return std.mem.eql(u8, name, "mem.Allocator");
+        },
+        else => return false,
+    }
+}
+
+/// Check if a call returns std.mem.Allocator and return the allocator type info.
+/// Returns null if the call doesn't return Allocator.
+fn getCallAllocatorReturnInfo(ip: *const InternPool, datum: Data) ?AllocatorTypeInfo {
+    const callee_ref = datum.pl_op.operand;
+    const ip_idx = callee_ref.toInterned() orelse return null;
+
+    // Get function return type
+    const func_key = ip.indexToKey(ip_idx);
+    const func_ty = switch (func_key) {
+        .func => |f| f.ty,
+        else => return null,
+    };
+
+    const func_type_key = ip.indexToKey(func_ty);
+    const return_type_idx = switch (func_type_key) {
+        .func_type => |ft| ft.return_type,
+        else => return null,
+    };
+
+    // Check if return type is std.mem.Allocator
+    if (!isAllocatorType(ip, return_type_idx)) return null;
+
+    // Get the callee's FQN to extract the allocator type
+    const nav = switch (func_key) {
+        .func => |f| ip.getNav(f.owner_nav),
+        else => return null,
+    };
+    const fqn = nav.fqn.toSlice(ip);
+
+    // FQN is like "heap.GeneralPurposeAllocator(...).allocator" or similar
+    // Extract the allocator type name and use the FQN as unique ID
+    const fqn_id = @intFromEnum(nav.fqn);
+    const type_name = extractTypeFromAllocatorMethod(fqn);
+
+    return .{ .id = fqn_id, .name = type_name };
+}
+
+/// Extract allocator type info from an interned Allocator aggregate value.
+/// Returns the type ID (from vtable nav FQN) and display name.
+fn extractAllocatorTypeFromInterned(ip: *const InternPool, interned_idx: InternPool.Index) AllocatorTypeInfo {
+    const val_key = ip.indexToKey(interned_idx);
+    switch (val_key) {
+        .aggregate => |agg| {
+            // Allocator struct: [ptr, vtable]
+            switch (agg.storage) {
+                .elems => |elems| {
+                    if (elems.len >= 2) {
+                        const vtable_elem = elems[1];
+                        if (vtable_elem != .none) {
+                            const vtable_key = ip.indexToKey(vtable_elem);
+                            switch (vtable_key) {
+                                .ptr => |ptr| {
+                                    switch (ptr.base_addr) {
+                                        .nav => |nav_idx| {
+                                            const nav = ip.getNav(nav_idx);
+                                            // Use InternPool index of fqn as globally unique ID
+                                            const fqn_id = @intFromEnum(nav.fqn);
+                                            const fqn = nav.fqn.toSlice(ip);
+                                            // FQN is like "heap.PageAllocator.vtable"
+                                            // Extract "PageAllocator" for display
+                                            return .{ .id = fqn_id, .name = extractAllocatorName(fqn) };
+                                        },
+                                        else => {},
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        },
+        else => {},
+    }
+    return .{ .id = 0, .name = "comptime_unknown" };
+}
+
+/// Check if a Ref points to a value of type std.mem.Allocator.
+/// Works for both interned values and instruction references.
+pub fn isAllocatorRef(ip: *const InternPool, ref: Ref, tags: []const Tag, data: []const Data) bool {
+    if (ref.toInterned()) |interned_idx| {
+        const ty = ip.typeOf(interned_idx);
+        return isAllocatorType(ip, ty);
+    }
+    if (ref.toIndex()) |inst_idx| {
+        // Get the result type of the instruction
+        const ty = getInstResultType(ip, tags, data, @intFromEnum(inst_idx)) orelse return false;
+        return isAllocatorType(ip, ty);
+    }
+    return false;
 }
 
 /// Extract the pointer slot being destroyed from a destroy call.

@@ -253,6 +253,11 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("null_safety should only exist on optionals, got scalar", .{});
             }
         },
+        .allocator => |a| {
+            if (a.analyte.null_safety != null) {
+                std.debug.panic("null_safety should only exist on optionals, got allocator", .{});
+            }
+        },
         inline .pointer, .errorunion, .@"struct", .@"union" => |data, t| {
             if (data.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got {s}", .{@tagName(t)});

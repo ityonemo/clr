@@ -158,6 +158,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
         },
         .@"struct" => std.fmt.bufPrint(buf, "({d}) struct", .{gid}) catch "struct",
         .@"union" => std.fmt.bufPrint(buf, "({d}) union", .{gid}) catch "union",
+        .allocator => |a| std.fmt.bufPrint(buf, "({d}) allocator(type_id={d})", .{ gid, a.type_id }) catch "allocator(?)",
         .unimplemented => std.fmt.bufPrint(buf, "({d}) unimplemented", .{gid}) catch "unimplemented",
         .void => std.fmt.bufPrint(buf, "({d}) void", .{gid}) catch "void",
         .noreturn => std.fmt.bufPrint(buf, "({d}) noreturn", .{gid}) catch "noreturn",

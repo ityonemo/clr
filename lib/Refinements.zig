@@ -52,6 +52,14 @@ pub const Refinement = union(enum) {
         type_id: Tid,
     };
 
+    /// AllocatorRef refinement tracks allocator identity for mismatch detection.
+    /// The type_id uniquely identifies the allocator type (e.g., PageAllocator vs GPA).
+    pub const AllocatorRef = struct {
+        gid: Gid = 0,
+        analyte: Analyte = .{},
+        type_id: Tid,
+    };
+
     scalar: Scalar,
     pointer: Indirected,
     optional: Indirected,
@@ -59,6 +67,7 @@ pub const Refinement = union(enum) {
     region: Indirected, // unused, for now, will represent slices (maybe)
     @"struct": Struct,
     @"union": Union,
+    allocator: AllocatorRef, // tracks allocator identity for mismatch detection
     noreturn: void, // specific return value for error paths.
     unimplemented: void, // this is the result of an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
@@ -70,6 +79,10 @@ pub const Refinement = union(enum) {
             .scalar => {
                 if (src != .scalar) std.debug.panic("clobber mismatch: src is .{s} and dst is .scalar", .{@tagName(src)});
                 dst.scalar = src.scalar;
+            },
+            .allocator => {
+                if (src != .allocator) std.debug.panic("clobber mismatch: src is .{s} and dst is .allocator", .{@tagName(src)});
+                dst.allocator = src.allocator;
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
@@ -91,6 +104,10 @@ pub const Refinement = union(enum) {
             .scalar => {
                 if (src != .scalar) std.debug.panic("clobber mismatch: src is .{s} and dst is .scalar", .{@tagName(src)});
                 dst.scalar = src.scalar;
+            },
+            .allocator => {
+                if (src != .allocator) std.debug.panic("clobber mismatch: src is .{s} and dst is .allocator", .{@tagName(src)});
+                dst.allocator = src.allocator;
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
@@ -179,6 +196,7 @@ pub const Refinement = union(enum) {
     pub fn copyTo(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !Gid {
         return switch (src) {
             .scalar => try dst_list.appendEntity(src),
+            .allocator => try dst_list.appendEntity(src),
             .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
             .optional => try src.copyToIndirected(src_list, dst_list, .optional),
             .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
@@ -409,8 +427,9 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
 fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory}!Gid {
     const allocator = self.list.allocator;
     return switch (src) {
-        // Scalars: copy analyte state to new entity
+        // Scalars and allocators: copy to new entity
         .scalar => try self.appendEntity(src),
+        .allocator => try self.appendEntity(src),
 
         // Pointers: new pointer entity, same .to (reference existing pointee)
         .pointer => |p| try self.appendEntity(.{

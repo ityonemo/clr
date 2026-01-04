@@ -20,17 +20,6 @@ Using `std.heap.GeneralPurposeAllocator` generates deeply nested struct types th
 
 **Planned fix**: Add `unknown` variant to `lib/tag.zig` Type union to handle complex types that exceed the depth limit.
 
-### Runtime Allocator Type Identification
-
-For runtime allocators (e.g., `var gpa = GeneralPurposeAllocator(.{}){}` or `const alloc = fba.allocator()`), we currently return a generic "Allocator" marker instead of the specific type.
-
-**Impact**: Mismatched allocator detection only works when at least one allocator is a comptime constant (like `std.heap.page_allocator`). Two different runtime allocators will both show as "Allocator" and won't be detected as mismatched.
-
-**Planned improvements**:
-1. **Global/const allocator tracking**: If an allocator is stored in a global or const variable, trace through the store to find the vtable source
-2. **Allocator type through typing system**: Track allocator types through the slot typing system - when a variable is declared as a specific allocator type, propagate that type label to any `Allocator` derived from it via `.allocator()`
-3. **Vtable field tracing**: Search for `struct_field_ptr_index_1` (vtable field) stores to find the vtable global for runtime-constructed Allocator structs
-
 ### Struct/Union Field Clobber Memory Leaks
 
 When a struct or union field containing an allocated pointer is overwritten (clobbered) without first freeing the old value, this might create a memory leak. This case is not currently tested.

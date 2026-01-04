@@ -22,6 +22,11 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("variant_safety should only exist on unions, got scalar", .{});
             }
         },
+        .allocator => |a| {
+            if (a.analyte.variant_safety != null) {
+                std.debug.panic("variant_safety should only exist on unions, got allocator", .{});
+            }
+        },
         inline .pointer, .optional, .errorunion, .@"struct" => |data, t| {
             if (data.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got {s}", .{@tagName(t)});

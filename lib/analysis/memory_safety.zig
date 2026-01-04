@@ -339,7 +339,7 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .scalar, .void, .noreturn, .unimplemented, .region => {},
+            .scalar, .allocator, .void, .noreturn, .unimplemented, .region => {},
         }
     }
 
@@ -380,7 +380,7 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .scalar, .void, .noreturn, .unimplemented, .region => {},
+            .scalar, .void, .noreturn, .unimplemented, .region, .allocator => {},
         }
     }
 
@@ -436,7 +436,7 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
-            .scalar, .void, .noreturn, .unimplemented, .region => {},
+            .scalar, .allocator, .void, .noreturn, .unimplemented, .region => {},
         }
     }
 
@@ -501,9 +501,23 @@ pub const MemorySafety = union(enum) {
         const ptr = &state.refinements.at(ptr_ref).pointer;
         const pointee_ref = ptr.to;
 
+        // Determine type_id: prefer refinement-based if available (runtime allocators)
+        const type_id = blk: {
+            if (params.allocator_inst) |alloc_inst| {
+                if (state.results[alloc_inst].refinement) |alloc_gid| {
+                    const alloc_ref = state.refinements.at(alloc_gid);
+                    if (alloc_ref.* == .allocator) {
+                        break :blk alloc_ref.allocator.type_id;
+                    }
+                }
+            }
+            // Fall back to codegen-extracted type_id (comptime allocators)
+            break :blk params.type_id;
+        };
+
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
-            .type_id = params.type_id,
+            .type_id = type_id,
             .root_gid = null, // This is the root allocation
         };
 
@@ -718,8 +732,23 @@ pub const MemorySafety = union(enum) {
         if (a.freed) |previous_free| {
             return reportDoubleFree(ctx, a, previous_free);
         }
-        if (a.type_id != params.type_id) {
-            return reportMismatchedAllocator(ctx, a, params.type_id);
+
+        // Determine type_id: prefer refinement-based if available (runtime allocators)
+        const destroy_type_id = blk: {
+            if (params.allocator_inst) |alloc_inst| {
+                if (results[alloc_inst].refinement) |alloc_gid| {
+                    const alloc_ref = refinements.at(alloc_gid);
+                    if (alloc_ref.* == .allocator) {
+                        break :blk alloc_ref.allocator.type_id;
+                    }
+                }
+            }
+            // Fall back to codegen-extracted type_id (comptime allocators)
+            break :blk params.type_id;
+        };
+
+        if (a.type_id != destroy_type_id) {
+            return reportMismatchedAllocator(ctx, a, destroy_type_id);
         }
 
         // Mark as freed using setFreedRecursive to propagate to all fields
@@ -1067,6 +1096,9 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
+            .allocator => {
+                ref.allocator.analyte.memory_safety = .{ .unset = {} };
+            },
             .void => {},
             .noreturn, .unimplemented, .region => unreachable,
         }
@@ -1333,7 +1365,7 @@ test "alloc_create sets allocation metadata on pointer analyte" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // alloc_create creates errorunion -> ptr -> pointee, all with .allocated
     const eu_idx = results[1].refinement.?;
@@ -1377,7 +1409,7 @@ test "alloc_destroy marks allocation as freed" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create allocation (errorunion -> ptr -> pointee)
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     // Unwrap error union to get the pointer (simulating real AIR flow)
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
@@ -1385,7 +1417,7 @@ test "alloc_destroy marks allocation as freed" {
     ctx.meta.line = 20;
 
     // Destroy allocation (ptr points to unwrapped pointer at inst 1)
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
 
     // With new architecture, allocation state is on the POINTEE (accessed via ptr.to)
     const ptr_idx = results[1].refinement.?;
@@ -1414,17 +1446,17 @@ test "alloc_destroy detects double free" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create allocation (errorunion -> ptr -> pointee)
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     // Unwrap error union to get the pointer (simulating real AIR flow)
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // First free
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
 
     // Second free should error
     try std.testing.expectError(
         error.DoubleFree,
-        Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } }),
+        Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } }),
     );
 }
 
@@ -1443,13 +1475,13 @@ test "alloc_destroy detects mismatched allocator" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create with PageAllocator and unwrap
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // Destroy with different allocator
     try std.testing.expectError(
         error.MismatchedAllocator,
-        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 11 } }),
+        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 11, .allocator_inst = null } }),
     );
 }
 
@@ -1473,7 +1505,7 @@ test "alloc_destroy detects freeing stack memory" {
     // Trying to free stack memory should error
     try std.testing.expectError(
         error.FreeStackMemory,
-        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .type_id = 10 } }),
+        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .type_id = 10, .allocator_inst = null } }),
     );
 }
 
@@ -1492,10 +1524,10 @@ test "load detects use after free" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create, unwrap, store (to make it defined), and free allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
-    try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
+    try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
 
     // Load after free should error
     try std.testing.expectError(
@@ -1519,7 +1551,7 @@ test "load from live allocation does not error" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create, unwrap, and store to allocation (not freed)
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
 
@@ -1543,7 +1575,7 @@ test "onFinish detects memory leak" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create allocation and unwrap but don't free
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // onFinish should detect the leak (via the unwrapped pointer at inst 1)
@@ -1569,9 +1601,9 @@ test "onFinish allows freed allocation" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create, unwrap, and free allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10 } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
 
     // onFinish should not error
     try MemorySafety.onFinish(&results, &ctx, &refinements);
@@ -1602,7 +1634,7 @@ test "onFinish allows passed allocation" {
     };
 
     // Create allocation and unwrap
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // Store to make the pointee defined
     try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
@@ -1652,7 +1684,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
 
     // === SETUP: struct with pointer field pointing to allocation ===
     // inst 0: alloc_create - create heap allocation
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     // inst 1: unwrap_errunion_payload - get the pointer
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // inst 2: store_safe - make pointee defined
@@ -1681,7 +1713,7 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
 
     // === FREE THE LOADED POINTER ===
     // inst 9: alloc_destroy - free via the loaded pointer
-    try Inst.apply(state, 9, .{ .alloc_destroy = .{ .ptr = 8, .type_id = 10 } });
+    try Inst.apply(state, 9, .{ .alloc_destroy = .{ .ptr = 8, .type_id = 10, .allocator_inst = null } });
 
     // === VERIFICATION ===
     // The original struct field pointer (stored via inst 6) should also be marked as freed.
@@ -1727,7 +1759,7 @@ test "global refinements: freeing struct pointer field is visible immediately" {
     const state = testState(&ctx, &results, &refinements);
 
     // inst 0 = alloc_create, inst 1 = unwrap to get pointer
-    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // inst 1 now has the allocation pointer
 
@@ -1756,7 +1788,7 @@ test "global refinements: freeing struct pointer field is visible immediately" {
     // inst 6 = load from struct field to get the pointer
     try Inst.apply(state, 6, .{ .load = .{ .ptr = 4, .ty = .{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } } } });
     // inst 7 = alloc_destroy to free the pointer
-    try Inst.apply(state, 7, .{ .alloc_destroy = .{ .ptr = 6, .type_id = 10 } });
+    try Inst.apply(state, 7, .{ .alloc_destroy = .{ .ptr = 6, .type_id = 10, .allocator_inst = null } });
 
     // With global refinements, the allocation should be marked as freed immediately
     // No backpropagation needed - modifications are direct

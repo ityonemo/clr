@@ -68,6 +68,12 @@ bats test/integration/allocator.bats -f "double-free"
 - `bats test/integration/<file>.bats -f "pattern"` - Run specific tests by pattern
 - `bats test/integration/<file>.bats` - Run one test file
 
+**Avoid Redundant Test Runs**: When verifying a feature works:
+1. Use `./run_one.sh <test_file>` ONCE to check the output
+2. If it works, you're done - don't re-run with BATS or other methods
+3. Don't run the same test multiple ways (run_one.sh, then bats, then run_one.sh again)
+4. Trust the first result unless you changed code between runs
+
 **Note**: Integration tests are expected to fail during development (the CLR runtime is incomplete). However, if the tests fail due to **compilation errors in the emitted .air.zig analyzer**, that indicates a real problem in codegen that needs to be fixed.
 
 **Important**: Always run BATS from the project root directory. The test helper uses relative paths from its location to find the compiler, libclr.so, and test cases.
@@ -632,11 +638,8 @@ To identify runtime allocator types, trace the inst_ref back through the AIR:
 2. For `gpa.allocator()`, trace to the call to `.allocator()` method
 3. The receiver type of that call (e.g., `GeneralPurposeAllocator`) identifies the allocator type
 
-**Current Status**:
-- Comptime allocators (e.g., `std.heap.page_allocator`) work - we extract "PageAllocator" from the vtable FQN
-- Runtime allocators currently return "Allocator" (generic marker)
+**Implementation**:
+- **Comptime allocators** (e.g., `std.heap.page_allocator`): Extract allocator type from vtable FQN in InternPool
+- **Runtime allocators** (e.g., `gpa.allocator()`): Track via `.allocator` refinement type with `type_id` from the callee function
 
-**Future Improvements**:
-1. **Global/const allocator tracking**: If an allocator is stored in a global or const variable, trace through the store to find the vtable source
-2. **Allocator type tracking**: Track allocator types through the inst typing system - when a variable is declared as a specific allocator type (e.g., `var gpa = GeneralPurposeAllocator(.{}){}`), propagate that type label to any `Allocator` derived from it via `.allocator()`
-3. **Vtable field tracing**: Search for `struct_field_ptr_index_1` (vtable field) stores to find the vtable global for runtime-constructed Allocator structs
+The `.allocator` refinement is created by `MkAllocator` tag when codegen detects a call returning `std.mem.Allocator`. The `type_id` is the InternPool index of the callee function (e.g., the `.allocator()` method). At `alloc_create`/`alloc_destroy` time, the handler reads `type_id` from the allocator argument's refinement and compares them to detect mismatches.

@@ -148,6 +148,11 @@ pub const UndefinedSafety = union(enum) {
                     }
                 }
             },
+            .allocator => |*a| {
+                if (a.analyte.undefined == null) {
+                    a.analyte.undefined = .{ .defined = {} };
+                }
+            },
             .void, .unimplemented, .noreturn => {},
             .region => @panic("ensureUndefinedStateSet: region not yet implemented"),
         }
@@ -294,6 +299,7 @@ pub const UndefinedSafety = union(enum) {
                     }
                 }
             },
+            .allocator => |*a| a.analyte.undefined = .{ .defined = {} },
             .void, .unimplemented, .noreturn => {},
             .region => @panic("setDefinedRecursive: region not yet implemented"),
         }
@@ -436,6 +442,7 @@ pub const UndefinedSafety = union(enum) {
                     }
                 }
             },
+            .allocator => |*a| a.analyte.undefined = undef_state,
             .void, .unimplemented, .noreturn => {},
             .region => @panic("setUndefinedRecursive: region not yet implemented"),
         }
@@ -519,6 +526,13 @@ pub const UndefinedSafety = union(enum) {
                         // Non-union refinement - just mark as defined
                         setDefinedRecursive(refinements, idx);
                     },
+                }
+            },
+            .allocator => {
+                // Allocator value - mark as defined
+                switch (refinements.at(idx).*) {
+                    .allocator => |*a| a.analyte.undefined = .{ .defined = {} },
+                    else => setDefinedRecursive(refinements, idx),
                 }
             },
             .void => {},
@@ -609,6 +623,7 @@ pub const UndefinedSafety = union(enum) {
                                 }
                             }
                         },
+                        .allocator => |*a| a.analyte.undefined = .{ .defined = {} },
                         .void, .unimplemented, .noreturn => {},
                         .region => @panic("store: region not yet implemented"),
                     }
@@ -918,6 +933,9 @@ pub const UndefinedSafety = union(enum) {
                     }
                 }
             },
+            .allocator => {
+                ref.allocator.analyte.undefined = .{ .undefined = .{ .meta = ctx.meta } };
+            },
             .void => {}, // void return type is valid
             .noreturn, .unimplemented, .region => unreachable,
         }
@@ -948,6 +966,9 @@ pub const UndefinedSafety = union(enum) {
                         retval_init_defined(refinements, field_gid);
                     }
                 }
+            },
+            .allocator => {
+                ref.allocator.analyte.undefined = .{ .defined = {} };
             },
             .void => {}, // void return type is valid
             .noreturn, .unimplemented, .region => unreachable,
@@ -1039,7 +1060,7 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
 
     // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
     const eu_idx = results[1].refinement.?;

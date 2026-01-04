@@ -77,6 +77,7 @@ pub const Type = struct {
         region: *const Type, // unused, for now, will represent slices (maybe)
         @"struct": []const Type, // field types for struct
         @"union": []const Type, // field types for union
+        allocator: Name, // allocator type identified by type_id (vtable FQN hash)
         void: void,
     }
 };
@@ -127,6 +128,10 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // The undefined.store handler checks for .undefined wrapper and marks as undefined.
             return typeToRefinement(child.*, refinements);
         },
+        .allocator => |alloc_type_id| {
+            // Allocator refinement - type_id uniquely identifies allocator type
+            return .{ .allocator = .{ .type_id = alloc_type_id } };
+        },
         .region => @panic("regions not implemented yet"),
         inline .@"struct", .@"union" => |type_fields, class_tag| blk: {
             const allocator = refinements.list.allocator;
@@ -163,6 +168,7 @@ pub const Alloc = struct {
 
 pub const AllocCreate = struct {
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
+    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
     ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
@@ -182,10 +188,26 @@ pub const AllocDestroy = struct {
     /// Index into results[] array for the pointer being freed
     ptr: usize,
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
+    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
         try splat(.alloc_destroy, state, index, self);
+    }
+};
+
+/// Entity operation: CREATE
+/// Creates an .allocator refinement from a call to .allocator() method.
+/// The type_id uniquely identifies the allocator type (e.g., GPA vs PageAllocator).
+pub const MkAllocator = struct {
+    type_id: u32, // Allocator type ID (FQN hash of .allocator() method)
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create an allocator refinement with the type_id
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{
+            .allocator = .{ .type_id = self.type_id },
+        });
+        try splat(.mkallocator, state, index, self);
     }
 };
 
@@ -1168,6 +1190,7 @@ pub const AnyTag = union(enum) {
     alloc: Alloc,
     alloc_create: AllocCreate,
     alloc_destroy: AllocDestroy,
+    mkallocator: MkAllocator,
     arg: Arg,
     bitcast: Bitcast,
     br: Br,
