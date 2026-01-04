@@ -93,6 +93,10 @@ pub fn cond_br(
     var true_returns: bool = false;
     var false_returns: bool = false;
 
+    // Create branch-local early_returns lists (will be propagated to parent)
+    var true_early_returns = std.ArrayListUnmanaged(State){};
+    var false_early_returns = std.ArrayListUnmanaged(State){};
+
     // Build state for each branch - same ctx, cloned refinements
     const true_state = State{
         .ctx = ctx,
@@ -102,6 +106,7 @@ pub fn cond_br(
         .created_gids = &true_created,
         .modified_gids = &true_modified,
         .branch_returns = &true_returns,
+        .early_returns = &true_early_returns,
     };
     const false_state = State{
         .ctx = ctx,
@@ -111,6 +116,7 @@ pub fn cond_br(
         .created_gids = &false_created,
         .modified_gids = &false_modified,
         .branch_returns = &false_returns,
+        .early_returns = &false_early_returns,
     };
 
     // Save ctx.meta before branches execute (they modify it via dbg_stmt)
@@ -128,11 +134,28 @@ pub fn cond_br(
     results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 
     // Merge: walk results and call analysis merge for each slot that has refinements
+    // Pass null for merge_base_gid - regular branch merges should merge all entities
     const branches = [_]State{ true_state, false_state };
-    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches);
+    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches, null);
 
-    // Merge return values from returning branches (hoisting to function level)
-    try tag.mergeReturnValue(.cond_br, ctx.allocator, ctx, state.refinements, return_gid, &branches);
+    // Propagate early_returns to parent if tracking (ownership transfer)
+    if (state.early_returns) |parent_early| {
+        try parent_early.appendSlice(ctx.allocator, true_early_returns.items);
+        try parent_early.appendSlice(ctx.allocator, false_early_returns.items);
+    } else {
+        // No parent tracking - free the Refinements
+        for (true_early_returns.items) |s| {
+            s.refinements.deinit();
+            ctx.allocator.destroy(s.refinements);
+        }
+        for (false_early_returns.items) |s| {
+            s.refinements.deinit();
+            ctx.allocator.destroy(s.refinements);
+        }
+    }
+    // Free the branch ArrayLists (the States are either transferred or freed above)
+    true_early_returns.deinit(ctx.allocator);
+    false_early_returns.deinit(ctx.allocator);
 
     // Propagate created/modified GIDs to parent's lists if tracking
     if (state.created_gids) |parent_created| {
@@ -165,6 +188,7 @@ pub fn switch_br(
     var branch_created: [num_cases]std.ArrayListUnmanaged(Refinements.Gid) = undefined;
     var branch_modified: [num_cases]std.ArrayListUnmanaged(Refinements.Gid) = undefined;
     var branch_returns: [num_cases]bool = [_]bool{false} ** num_cases;
+    var branch_early_returns: [num_cases]std.ArrayListUnmanaged(State) = undefined;
 
     // Clone state for each branch - same ctx, cloned refinements
     inline for (0..num_cases) |i| {
@@ -172,6 +196,7 @@ pub fn switch_br(
         branch_refinements[i] = try state.refinements.clone(ctx.allocator);
         branch_created[i] = .{};
         branch_modified[i] = .{};
+        branch_early_returns[i] = .{};
     }
 
     // Deferred cleanup
@@ -181,6 +206,8 @@ pub fn switch_br(
             branch_refinements[i].deinit();
             branch_created[i].deinit(ctx.allocator);
             branch_modified[i].deinit(ctx.allocator);
+            // Don't deinit the Refinements in early_returns - they've been transferred to parent
+            branch_early_returns[i].deinit(ctx.allocator);
         }
     }
 
@@ -195,6 +222,7 @@ pub fn switch_br(
             .created_gids = &branch_created[i],
             .modified_gids = &branch_modified[i],
             .branch_returns = &branch_returns[i],
+            .early_returns = &branch_early_returns[i],
         };
     }
 
@@ -214,10 +242,23 @@ pub fn switch_br(
     results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 
     // Merge all branches using splatMerge
-    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states);
+    // Pass null for merge_base_gid - regular branch merges should merge all entities
+    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states, null);
 
-    // Merge return values from returning branches (hoisting to function level)
-    try tag.mergeReturnValue(.switch_br, ctx.allocator, ctx, state.refinements, return_gid, &branch_states);
+    // Propagate early_returns to parent if tracking (ownership transfer)
+    if (state.early_returns) |parent_early| {
+        inline for (0..num_cases) |i| {
+            try parent_early.appendSlice(ctx.allocator, branch_early_returns[i].items);
+        }
+    } else {
+        // No parent tracking - free the Refinements
+        inline for (0..num_cases) |i| {
+            for (branch_early_returns[i].items) |s| {
+                s.refinements.deinit();
+                ctx.allocator.destroy(s.refinements);
+            }
+        }
+    }
 
     // Propagate created/modified GIDs to parent's lists if tracking
     if (state.created_gids) |parent_created| {
@@ -248,6 +289,16 @@ pub fn clear_results_list(list: []Inst, allocator: std.mem.Allocator) void {
     allocator.free(list);
 }
 
+/// Free all Refinements in the early_returns list and the list itself.
+/// Called at function end after merging.
+pub fn freeEarlyReturns(early_returns: *std.ArrayListUnmanaged(State), allocator: std.mem.Allocator) void {
+    for (early_returns.items) |s| {
+        s.refinements.deinit();
+        allocator.destroy(s.refinements);
+    }
+    early_returns.deinit(allocator);
+}
+
 pub fn clone_results_list(list: []Inst, allocator: std.mem.Allocator) error{OutOfMemory}![]Inst {
     const new_list = try allocator.alloc(Inst, list.len);
     @memcpy(new_list, list);
@@ -257,14 +308,6 @@ pub fn clone_results_list(list: []Inst, allocator: std.mem.Allocator) error{OutO
 // =============================================================================
 // Refinement helpers
 // =============================================================================
-
-/// Initialize an instruction with a new scalar refinement. Crashes if already initialized.
-pub fn initInst(refinements: *Refinements, results: []Inst, index: usize) !Gid {
-    if (results[index].refinement) |_| @panic("instruction already initialized");
-    const gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    results[index].refinement = gid;
-    return gid;
-}
 
 /// Overwrite an instruction with a new refinement. Creates new entity regardless of prior state.
 /// Call this in tag handlers before splat() so analyses can set their respective fields.
@@ -279,6 +322,26 @@ pub fn clobberInst(refinements: *Refinements, results: []Inst, index: usize, val
 // =============================================================================
 // Function lifecycle
 // =============================================================================
+
+/// Merge all early returns into the return slot before function finalization.
+/// Each early_return is a full state snapshot at a return point.
+/// Merging produces "conflicting" state when different return paths have
+/// different defined/undefined states.
+/// Only merges entities with GID < base_gid (caller-owned entities like arguments).
+/// Callee-owned entities (return values, locals) are skipped since different
+/// return paths naturally have different values for them.
+pub fn mergeEarlyReturns(state: State) !void {
+    const early_returns = state.early_returns orelse return;
+    if (early_returns.items.len == 0) return;
+
+    try tag.splatMergeEarlyReturns(
+        state.results,
+        state.ctx,
+        state.refinements,
+        early_returns.items,
+        state.base_gid,
+    );
+}
 
 pub fn onFinish(state: State) !void {
     try tag.splatFinish(state.results, state.ctx, state.refinements);

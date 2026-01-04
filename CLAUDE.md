@@ -132,6 +132,29 @@ Output goes to stderr.
 
 2. **Optional pointers are special** - In Zig, `?*T` (optional pointer) is the ONLY optional type with the same bit width as its non-optional form (null = address 0). This is why `bitcast` can convert `*T` to `?*T`. Other optionals have a separate null flag.
 
+3. **Never default to scalar creation** - When encountering an unexpected or unhandled case, NEVER create a scalar refinement as a fallback. This hides bugs and corrupts type tracking. Instead:
+   - If the operation should produce a specific type, properly copy/create that type
+   - If the situation is truly unexpected, crash with a descriptive panic
+   - If a feature is unimplemented, use `.unimplemented` (which will crash if accessed)
+
+   Example of what NOT to do:
+   ```zig
+   // BAD: Silently creates wrong type, hides bugs
+   if (u.fields[i] == null) {
+       u.fields[i] = refinements.appendEntity(.{ .scalar = ... });
+   }
+   ```
+
+   Example of correct handling:
+   ```zig
+   // GOOD: Properly copy the field from the source
+   if (u.fields[i] == null) {
+       if (branch_u.fields[i]) |branch_field_gid| {
+           u.fields[i] = Refinement.copyTo(branch_field_ref, ...);
+       }
+   }
+   ```
+
 ## Architecture: Tag Handlers vs Analysis Modules
 
 **IMPORTANT**: Tag handlers in `lib/tag.zig` must NOT reach into analyte fields directly (e.g., `.analyte.undefined`, `.analyte.memory_safety`). Analyte manipulation is the responsibility of analysis modules in `lib/analysis/`.

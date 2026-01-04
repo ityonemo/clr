@@ -170,6 +170,16 @@ When a function returns, do we need a `.tombstone` state for refinements that ar
 2. How does this interact with the existing stack escape detection?
 3. Would this overlap with or replace the current stack pointer tracking?
 
+### Review Function Branching Architecture
+
+The current early_returns implementation stores full State objects (with cloned refinements) at each return point, then merges them at function end. This allows detecting "conflicting" states when different return paths have different defined/undefined states for in-out parameters.
+
+**Questions to review**:
+1. Is storing full State objects the right approach, or should we only store what's needed (refinements)?
+2. The `splatMergeEarlyReturns` function rebuilds clean States because stored States may have stale pointers (results, branch_returns point to freed memory). Is there a cleaner architecture?
+3. Should `branchIsUnreachable` be split into variants for cond_br/switch_br vs early_returns contexts?
+4. The current approach iterates over all results and recursively merges. For large functions, this could be expensive. Is there a more targeted approach?
+
 ## Desired But Unknown How to Implement
 
 ### Ownership Transfer to Objects or Collections

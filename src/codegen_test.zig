@@ -315,12 +315,17 @@ test "generateFunction produces complete function" {
         \\    const results = try Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
         \\
-        \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid };
+        \\    var early_returns = @import("std").ArrayListUnmanaged(State){};
+        \\    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+        \\
+        \\    const base_gid: Gid = @intCast(refinements.list.items.len);
+        \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
         \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
+        \\    try Inst.mergeEarlyReturns(state);
         \\    try Inst.onFinish(state);
         \\    return return_gid;
         \\}
@@ -1126,7 +1131,11 @@ test "generateFunction with simple cond_br block" {
         \\    const results = try Inst.make_results_list(ctx.allocator, 10);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
         \\
-        \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid };
+        \\    var early_returns = @import("std").ArrayListUnmanaged(State){};
+        \\    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+        \\
+        \\    const base_gid: Gid = @intCast(refinements.list.items.len);
+        \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } });
@@ -1138,6 +1147,7 @@ test "generateFunction with simple cond_br block" {
         \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
         \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .inst = 8 } } });
+        \\    try Inst.mergeEarlyReturns(state);
         \\    try Inst.onFinish(state);
         \\    return return_gid;
         \\}

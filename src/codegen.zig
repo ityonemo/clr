@@ -86,6 +86,8 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(info, datum),
         .bitcast => payloadBitcast(info, datum),
         .unwrap_errunion_payload, .optional_payload => payloadTransferOp(info, datum),
+        .errunion_payload_ptr_set => payloadErrunionPayloadPtrSet(info, datum),
+        .wrap_errunion_payload => payloadWrapErrunionPayload(info, datum),
         .is_non_null, .is_null => payloadUnOp(info, datum),
         .br => payloadBr(info, datum),
         .block => payloadBlock(info, datum),
@@ -112,6 +114,30 @@ fn payloadTransferOp(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(info.arena, info.ip, operand);
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for wrap_errunion_payload - wraps a value in an error union (success case).
+/// Takes a payload value and creates an error union containing that value.
+fn payloadWrapErrunionPayload(info: *const FnInfo, datum: Data) []const u8 {
+    const operand = datum.ty_op.operand;
+    const src_str = srcString(info.arena, info.ip, operand);
+    const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
+        typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
+    else
+        ".{ .id = null, .ty = .{ .errorunion = &.{ .id = null, .ty = .{ .scalar = {} } } } }";
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
+}
+
+/// Payload for errunion_payload_ptr_set - gets pointer to error union payload.
+/// Takes pointer to error union *(E!T) and returns pointer to payload *T.
+fn payloadErrunionPayloadPtrSet(info: *const FnInfo, datum: Data) []const u8 {
+    const operand = datum.ty_op.operand;
+    // operand is the pointer to the error union
+    if (operand.toIndex()) |idx| {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {d} }}", .{@intFromEnum(idx)}, null);
+    }
+    // Interned/other case - shouldn't happen for pointer operations
+    return ".{ .ptr = null }";
 }
 
 /// Payload for .try/.try_cold - extracts success payload from error union.
@@ -1509,7 +1535,11 @@ const FunctionGen = union(enum) {
                 \\    const results = try Inst.make_results_list(ctx.allocator, {d});
                 \\    defer Inst.clear_results_list(results, ctx.allocator);
                 \\
-                \\    const state = State{{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid }};
+                \\    var early_returns = @import("std").ArrayListUnmanaged(State){{}};
+                \\    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+                \\
+                \\    const base_gid: Gid = @intCast(refinements.list.items.len);
+                \\    const state = State{{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns }};
                 \\
                 \\
             , .{ f.func_index, params, file_path, base_line, fqn, num_insts }, null),
@@ -1534,6 +1564,7 @@ const FunctionGen = union(enum) {
     fn footer(self: FunctionGen, arena: std.mem.Allocator) []const u8 {
         return switch (self) {
             .full => clr_allocator.allocPrint(arena,
+                \\    try Inst.mergeEarlyReturns(state);
                 \\    try Inst.onFinish(state);
                 \\    return return_gid;
                 \\}}

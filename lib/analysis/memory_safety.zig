@@ -934,43 +934,64 @@ pub const MemorySafety = union(enum) {
         // Handle allocation freed state merging
         // If original has an unfreed allocation, check if all branches freed it
         if (orig_analyte.memory_safety) |*orig_ms| {
-            if (orig_ms.* == .allocated) {
-                const orig_alloc = &orig_ms.allocated;
-                if (orig_alloc.freed == null) {
-                    // Original not freed - check if all branches freed it
-                    var all_freed = true;
-                    var first_freed: ?Free = null;
+            switch (orig_ms.*) {
+                .allocated => |*orig_alloc| {
+                    if (orig_alloc.freed == null) {
+                        // Original not freed - check if all branches freed it
+                        var all_freed = true;
+                        var first_freed: ?Free = null;
 
+                        for (branches, branch_gids) |branch_opt, branch_gid_opt| {
+                            // Null branch = unreachable path (e.g., unreach in cold branch)
+                            const branch = branch_opt orelse continue;
+                            // Entity may not exist in all branches during recursive merge traversal
+                            const branch_gid = branch_gid_opt orelse continue;
+                            const branch_ref = branch.refinements.at(branch_gid);
+                            // Original was pointer/scalar with allocation, branch copy must be same type
+                            const branch_analyte = switch (branch_ref.*) {
+                                .pointer => |*p| &p.analyte,
+                                .scalar => |*s| &s.analyte,
+                                else => unreachable,
+                            };
+                            // Original has memory_safety with allocation, branch copy must too
+                            const branch_ms = branch_analyte.memory_safety.?;
+                            if (branch_ms.allocated.freed) |freed| {
+                                if (first_freed == null) {
+                                    first_freed = freed;
+                                }
+                            } else {
+                                all_freed = false;
+                            }
+                        }
+
+                        // If all branches freed, propagate freed state
+                        if (all_freed and first_freed != null) {
+                            orig_alloc.freed = first_freed;
+                        }
+                        // Note: if only some branches freed, that's a leak in the
+                        // non-freeing branch - onFinish will detect this
+                    }
+                },
+                .unset => {
+                    // Original has .unset - copy from first branch that has allocation tracking
                     for (branches, branch_gids) |branch_opt, branch_gid_opt| {
-                        // Null branch = unreachable path (e.g., unreach in cold branch)
                         const branch = branch_opt orelse continue;
-                        // Entity may not exist in all branches during recursive merge traversal
                         const branch_gid = branch_gid_opt orelse continue;
                         const branch_ref = branch.refinements.at(branch_gid);
-                        // Original was pointer/scalar with allocation, branch copy must be same type
                         const branch_analyte = switch (branch_ref.*) {
                             .pointer => |*p| &p.analyte,
                             .scalar => |*s| &s.analyte,
                             else => unreachable,
                         };
-                        // Original has memory_safety with allocation, branch copy must too
-                        const branch_ms = branch_analyte.memory_safety.?;
-                        if (branch_ms.allocated.freed) |freed| {
-                            if (first_freed == null) {
-                                first_freed = freed;
+                        if (branch_analyte.memory_safety) |ms| {
+                            if (ms == .allocated) {
+                                orig_analyte.memory_safety = ms;
+                                break;
                             }
-                        } else {
-                            all_freed = false;
                         }
                     }
-
-                    // If all branches freed, propagate freed state
-                    if (all_freed and first_freed != null) {
-                        orig_alloc.freed = first_freed;
-                    }
-                    // Note: if only some branches freed, that's a leak in the
-                    // non-freeing branch - onFinish will detect this
-                }
+                },
+                .stack => {}, // Stack pointers don't need merge handling
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it

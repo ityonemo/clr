@@ -164,7 +164,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
     };
 }
 
-fn formatUndefined(undef: ?@import("analysis/undefined.zig").Undefined) []const u8 {
+fn formatUndefined(undef: ?@import("analysis/undefined_safety.zig").UndefinedSafety) []const u8 {
     if (undef) |u| {
         return switch (u) {
             .undefined => "UNDEF",

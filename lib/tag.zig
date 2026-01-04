@@ -49,12 +49,12 @@ const Refinement = Refinements.Refinement;
 const Gid = Refinements.Gid;
 const Context = @import("Context.zig");
 const State = Inst.State;
-const Undefined = @import("analysis/undefined.zig").Undefined;
+const UndefinedSafety = @import("analysis/undefined_safety.zig").UndefinedSafety;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 const NullSafety = @import("analysis/null_safety.zig").NullSafety;
 const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
 const FieldParentPtrSafety = @import("analysis/fieldparentptr_safety.zig").FieldParentPtrSafety;
-pub const analyses = .{ Undefined, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety };
+pub const analyses = .{ UndefinedSafety, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety };
 
 // Type
 
@@ -546,7 +546,9 @@ pub const StructFieldVal = struct {
                 // (variant_safety analysis will report error via splat)
                 const field_idx = idx: {
                     if (container_tag == .@"union") {
-                        if (data.fields[self.field_index]) |idx| break :idx idx;
+                        if (data.fields[self.field_index]) |idx| {
+                            break :idx idx;
+                        }
                         // Inactive field - create a fresh entity for structure
                         const new_field_ref = try typeToRefinement(self.ty, state.refinements);
                         const new_idx = try state.refinements.appendEntity(new_field_ref);
@@ -611,10 +613,13 @@ pub const OptionalPayload = struct {
                     state.results[index].refinement = src_ref_gid;
                 }
             },
-            .interned, .other => {
-                // Comptime/global source - create fresh scalar
-                // TODO: use type info from .interned to determine structure
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            .interned => {
+                // optional_payload shouldn't receive interned values
+                @panic("optional_payload: unexpected interned source");
+            },
+            .other => {
+                // Global/external source - mark as unimplemented
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
             },
         }
         try splat(.optional_payload, state, index, self);
@@ -636,6 +641,8 @@ pub const RetSafe = struct {
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
+        const allocator = state.ctx.allocator;
+
         // Return instruction produces void (not a usable value)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
 
@@ -645,30 +652,51 @@ pub const RetSafe = struct {
             br.* = true;
         }
 
-        const return_gid = state.return_gid;
-        const refns = state.refinements;
+        // Clone the current refinements table for early_returns
+        const cloned = try allocator.create(Refinements);
+        cloned.* = try state.refinements.clone(allocator);
 
-        // Overwrite return slot with the return value
-        // Phase 2 will change this to append to early_returns instead
+        // Set the return value in the CLONED table (not the original)
+        const return_gid = state.return_gid;
         switch (self.src) {
             .inst => |src| {
                 const src_gid = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
                 // Deep copy to avoid double-free when struct/union fields are freed
-                refns.at(return_gid).* = try refns.deepCopyValue(refns.at(src_gid).*);
+                cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(src_gid).*);
             },
             .interned => |ty| {
                 // Comptime return value
                 if (ty.ty == .void) {
-                    refns.at(return_gid).* = .void;
+                    cloned.at(return_gid).* = .void;
+                } else if (ty.ty == .undefined) {
+                    // Explicitly undefined value - mark as undefined
+                    cloned.at(return_gid).* = try typeToRefinement(ty, cloned);
+                    splatInit(cloned, return_gid, state.ctx);
                 } else {
-                    // Non-void comptime value - create structure from type info
-                    refns.at(return_gid).* = try typeToRefinement(ty, refns);
+                    // Non-void, non-undefined comptime value (constants, null) - mark as defined
+                    cloned.at(return_gid).* = try typeToRefinement(ty, cloned);
+                    splatInitDefined(cloned, return_gid, state.ctx);
                 }
             },
             .other => {
                 // Global/other source - not yet supported
                 @panic("ret_safe: .other source not yet implemented");
             },
+        }
+
+        // Append cloned state to early_returns (merging happens at function end)
+        if (state.early_returns) |early_returns| {
+            try early_returns.append(allocator, State{
+                .ctx = state.ctx,
+                .results = state.results,
+                .refinements = cloned,
+                .return_gid = state.return_gid,
+            });
+        } else {
+            // No early_returns tracking - fall back to writing directly to return slot
+            state.refinements.at(return_gid).* = cloned.at(return_gid).*;
+            cloned.deinit();
+            allocator.destroy(cloned);
         }
 
         // Splat runs last - analyses see state after copy is complete
@@ -710,6 +738,8 @@ pub const RetLoad = struct {
     ptr: usize,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
+        const allocator = state.ctx.allocator;
+
         // Return instruction produces void (not a usable value)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
 
@@ -723,11 +753,28 @@ pub const RetLoad = struct {
         const ptr_ref = state.results[self.ptr].refinement orelse @panic("ret_load: ret_ptr has no refinement");
         const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
 
-        // Overwrite return slot with deep copy of pointee
-        // Phase 2 will change this to append to early_returns instead
+        // Clone the current refinements table for early_returns
+        const cloned = try allocator.create(Refinements);
+        cloned.* = try state.refinements.clone(allocator);
+
+        // Set return value in the CLONED table (deep copy of pointee)
         const return_gid = state.return_gid;
-        const refns = state.refinements;
-        refns.at(return_gid).* = try refns.deepCopyValue(refns.at(pointee_idx).*);
+        cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(pointee_idx).*);
+
+        // Append cloned state to early_returns (merging happens at function end)
+        if (state.early_returns) |early_returns| {
+            try early_returns.append(allocator, State{
+                .ctx = state.ctx,
+                .results = state.results,
+                .refinements = cloned,
+                .return_gid = state.return_gid,
+            });
+        } else {
+            // No early_returns tracking - fall back to writing directly to return slot
+            state.refinements.at(return_gid).* = cloned.at(return_gid).*;
+            cloned.deinit();
+            allocator.destroy(cloned);
+        }
 
         try splat(.ret_load, state, index, self);
     }
@@ -796,6 +843,96 @@ pub const UnwrapErrunionPayload = struct {
             },
         }
         try splat(.unwrap_errunion_payload, state, index, self);
+    }
+};
+
+/// Entity operation: CREATE
+/// Creates an error union containing a payload value (success case).
+///
+/// WrapErrunionPayload takes a payload value and wraps it in an error union.
+/// This is the inverse of UnwrapErrunionPayload.
+pub const WrapErrunionPayload = struct {
+    /// Source value to wrap as the payload.
+    src: Src,
+    /// Result type (the error union type).
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create errorunion structure based on the result type
+        // payload_gid is the GID of the payload entity
+        const payload_gid: Gid = switch (self.src) {
+            .inst => |src| blk: {
+                // Get payload refinement from source instruction
+                const src_gid = state.results[src].refinement orelse {
+                    // Source has no refinement - create based on type
+                    const ref = try typeToRefinement(self.ty.ty.errorunion.*, state.refinements);
+                    break :blk try state.refinements.appendEntity(ref);
+                };
+                // Deep copy the payload so we have our own entity
+                const src_ref = state.refinements.at(src_gid).*;
+                break :blk try Refinement.copyTo(src_ref, state.refinements, state.refinements);
+            },
+            .interned => |i| blk: {
+                // Create from type - wrap in Type struct
+                const ref = try typeToRefinement(.{ .id = i.id, .ty = i.ty }, state.refinements);
+                break :blk try state.refinements.appendEntity(ref);
+            },
+            .other => blk: {
+                const ref = try typeToRefinement(self.ty.ty.errorunion.*, state.refinements);
+                break :blk try state.refinements.appendEntity(ref);
+            },
+        };
+
+        // Create the errorunion that points to the payload
+        const errunion_gid = try state.refinements.appendEntity(.{ .errorunion = .{
+            .analyte = .{},
+            .type_id = self.ty.id orelse 0,
+            .to = payload_gid,
+        } });
+
+        state.results[index].refinement = errunion_gid;
+        try splat(.wrap_errunion_payload, state, index, self);
+    }
+};
+
+/// Entity operation: CREATE-PTR
+/// Creates pointer to error union payload.
+///
+/// ErrunionPayloadPtrSet takes a pointer to an error union *(E!T) and returns
+/// a pointer to the payload *T. This is used when initializing error unions.
+pub const ErrunionPayloadPtrSet = struct {
+    /// Index into results[] for the pointer to error union.
+    ptr: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const ptr_inst = self.ptr orelse {
+            // No pointer - create unimplemented
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
+            return;
+        };
+
+        // Get the pointer to error union
+        const ptr_gid = state.results[ptr_inst].refinement orelse
+            std.debug.panic("errunion_payload_ptr_set: ptr inst {d} has no refinement", .{ptr_inst});
+
+        // Follow pointer to get error union
+        const ptr_ref = state.refinements.at(ptr_gid).*;
+        const errunion_gid = ptr_ref.pointer.to;
+        const errunion_ref = state.refinements.at(errunion_gid).*;
+
+        // Get payload GID from error union
+        const payload_gid = errunion_ref.errorunion.to;
+
+        // Create a new pointer that points to the payload
+        // Pointer is defined (we have a valid address to the payload)
+        const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{
+            .analyte = .{ .undefined = .{ .defined = {} } },
+            .type_id = 0,
+            .to = payload_gid,
+        } });
+
+        state.results[index].refinement = new_ptr_gid;
+        try splat(.errunion_payload_ptr_set, state, index, self);
     }
 };
 
@@ -1082,8 +1219,9 @@ pub const AnyTag = union(enum) {
     @"try": UnwrapErrunionPayload, // try extracts payload from error union, same as unwrap_errunion_payload
     unreach: Unreach,
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
+    errunion_payload_ptr_set: ErrunionPayloadPtrSet, // *(E!T) -> *T
     wrap_errunion_err: Unimplemented(.{}),
-    wrap_errunion_payload: Unimplemented(.{}),
+    wrap_errunion_payload: WrapErrunionPayload,
 
     // Union tags - variant safety not implemented yet
     set_union_tag: SetUnionTag,
@@ -1124,6 +1262,134 @@ pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: *Context) void {
     }
 }
 
+/// Initialize a return slot refinement as DEFINED. Used for interned comptime values
+/// (constants, null) that are not the .undefined type wrapper.
+/// Calls retval_init_defined if available (marks as defined), otherwise retval_init.
+pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "retval_init_defined")) {
+            Analysis.retval_init_defined(refinements, gid);
+        } else if (@hasDecl(Analysis, "retval_init")) {
+            Analysis.retval_init(refinements, gid, ctx);
+        }
+    }
+}
+
+/// Merge early returns into the current refinements.
+/// Each early_return is a state snapshot at a return point.
+/// Called at function end to produce the final merged state for all entities.
+/// This is essential for in-out parameters: if one return path sets a value
+/// and another doesn't, the merged result should be "conflicting".
+/// Only merges entities with GID < base_gid (caller-owned entities).
+pub fn splatMergeEarlyReturns(
+    results: []Inst,
+    ctx: *Context,
+    refinements: *Refinements,
+    early_returns: []const State,
+    base_gid: Gid,
+) !void {
+    const allocator = ctx.allocator;
+
+    // Build clean States with current results and no dangling pointers
+    // The early_returns may have stale results/branch_returns pointers
+    const branches = try allocator.alloc(State, early_returns.len);
+    defer allocator.free(branches);
+
+    for (early_returns, 0..) |er, i| {
+        branches[i] = State{
+            .ctx = ctx,
+            .results = results, // Use current results, not stale pointer
+            .refinements = er.refinements, // Use the cloned refinements
+            .return_gid = er.return_gid,
+            // Don't copy branch_returns - it may point to freed stack memory
+            // branchIsUnreachable will skip the check when null
+        };
+    }
+
+    try splatMerge(.early_return, results, ctx, refinements, branches, base_gid);
+
+    // Also merge the return value from all early_returns.
+    // The return_gid is not in the results table (ret_safe sets result to void),
+    // so splatMerge won't find it. We need to handle it separately.
+    if (early_returns.len > 0) {
+        const return_gid = early_returns[0].return_gid;
+
+        // Build branch_gids array - all branches use the same return_gid
+        const branch_gids = try allocator.alloc(?Gid, branches.len);
+        defer allocator.free(branch_gids);
+        for (branches, 0..) |_, i| {
+            branch_gids[i] = return_gid;
+        }
+
+        // Build filtered branches (null for unreachable)
+        const filtered = try allocator.alloc(?State, branches.len);
+        defer allocator.free(filtered);
+        for (branches, 0..) |branch, i| {
+            filtered[i] = if (branchIsUnreachable(branch)) null else branch;
+        }
+
+        // Use a separate merged set for return value
+        var merged = std.AutoHashMap(Gid, void).init(allocator);
+        defer merged.deinit();
+
+        try mergeRefinementRecursive(
+            .early_return,
+            allocator,
+            ctx,
+            refinements,
+            return_gid,
+            filtered,
+            branch_gids,
+            &merged,
+        );
+    }
+}
+
+/// Recursively copy analytes from src to dst refinements, following both structures in parallel.
+/// dst_gid and src_gid are corresponding entities in the two tables (same position in type structure).
+fn copyAnalytesRecursive(dst_refinements: *Refinements, src_refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+    const src_ref = src_refinements.at(src_gid);
+    const dst_ref = dst_refinements.at(dst_gid);
+
+    switch (src_ref.*) {
+        .scalar => |s| {
+            dst_ref.scalar.analyte = s.analyte;
+        },
+        .pointer => |p| {
+            dst_ref.pointer.analyte = p.analyte;
+            // Recurse to pointee
+            copyAnalytesRecursive(dst_refinements, src_refinements, dst_ref.pointer.to, p.to);
+        },
+        .optional => |o| {
+            dst_ref.optional.analyte = o.analyte;
+            // Recurse to inner value
+            copyAnalytesRecursive(dst_refinements, src_refinements, dst_ref.optional.to, o.to);
+        },
+        .errorunion => |e| {
+            dst_ref.errorunion.analyte = e.analyte;
+            // Recurse to payload
+            copyAnalytesRecursive(dst_refinements, src_refinements, dst_ref.errorunion.to, e.to);
+        },
+        .@"struct" => |s| {
+            dst_ref.@"struct".analyte = s.analyte;
+            // Recurse to each field
+            for (dst_ref.@"struct".fields, s.fields) |dst_field, src_field| {
+                copyAnalytesRecursive(dst_refinements, src_refinements, dst_field, src_field);
+            }
+        },
+        .@"union" => |u| {
+            dst_ref.@"union".analyte = u.analyte;
+            // Recurse to each field (if initialized)
+            for (dst_ref.@"union".fields, u.fields) |dst_field_opt, src_field_opt| {
+                const dst_field = dst_field_opt orelse continue;
+                const src_field = src_field_opt orelse continue;
+                copyAnalytesRecursive(dst_refinements, src_refinements, dst_field, src_field);
+            }
+        },
+        .void, .unimplemented, .noreturn, .region => {},
+    }
+}
+
 /// Called for each orphaned entity detected during branch merge.
 /// An orphaned entity is one that was created during branch execution but
 /// is no longer reachable from any result slot after the branch completes.
@@ -1140,10 +1406,18 @@ fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *
 /// A branch is unreachable if:
 /// - It returned (branch_returns is true)
 /// - It contains a .noreturn result (panic, unreachable, etc.)
+///
+/// Note: When branch_returns is null (e.g., for early_returns merging),
+/// we skip the noreturn check since the results may not correspond to
+/// the branch's refinements table.
 fn branchIsUnreachable(branch: State) bool {
     // Check if branch returned
     if (branch.branch_returns) |br| {
         if (br.*) return true;
+    } else {
+        // No branch_returns tracking - this is likely an early_returns context
+        // where results and refinements may not match. Skip noreturn check.
+        return false;
     }
 
     // Check for noreturn refinement (panic, unreachable, etc.)
@@ -1162,12 +1436,15 @@ fn branchIsUnreachable(branch: State) bool {
 ///
 /// Multiple result slots may reference the same GID internally. We track
 /// which GID values have been merged to avoid re-merging the same entity.
+/// If merge_base_gid is non-null, only merge entities with GID < merge_base_gid.
+/// This is used by early_returns merging to skip callee-owned entities.
 pub fn splatMerge(
     comptime merge_tag: anytype,
     results: []Inst,
     ctx: *Context,
     refinements: *Refinements,
     branches: []const State,
+    merge_base_gid: ?Gid,
 ) !void {
     const allocator = ctx.allocator;
 
@@ -1197,9 +1474,30 @@ pub fn splatMerge(
     for (results, 0..) |*result, result_idx| {
         const orig_gid = result.refinement orelse continue;
 
+        // For early_returns merging, skip callee-owned entities (GID >= base_gid).
+        // Different return paths naturally have different values for return values
+        // and local variables - that's not an error.
+        if (merge_base_gid) |base_gid| {
+            if (orig_gid >= base_gid) continue;
+        }
+
         // Build branch GID array for this result slot
+        // Check bounds: early_returns may have fewer entities than current refinements
         for (filtered, 0..) |branch_opt, i| {
-            branch_gids[i] = if (branch_opt) |branch| branch.results[result_idx].refinement else null;
+            if (branch_opt) |branch| {
+                if (branch.results[result_idx].refinement) |gid| {
+                    // Only include if GID exists in this branch's refinements
+                    if (gid < branch.refinements.list.items.len) {
+                        branch_gids[i] = gid;
+                    } else {
+                        branch_gids[i] = null; // Entity created after this return
+                    }
+                } else {
+                    branch_gids[i] = null;
+                }
+            } else {
+                branch_gids[i] = null;
+            }
         }
 
         // Check if branches changed the entity GID for this result slot.
@@ -1261,66 +1559,6 @@ pub fn splatMerge(
     }
 }
 
-/// Merge return values from returning branches into parent's return_gid.
-/// Called after splatMerge to handle return value hoisting.
-/// Only branches where branch_returns is true contribute to the merge.
-pub fn mergeReturnValue(
-    comptime merge_tag: anytype,
-    allocator: std.mem.Allocator,
-    ctx: *Context,
-    refinements: *Refinements,
-    return_gid: Gid,
-    branches: []const State,
-) !void {
-    // Count returning branches
-    var num_returning: usize = 0;
-    for (branches) |branch| {
-        if (branch.branch_returns) |br| {
-            if (br.*) num_returning += 1;
-        }
-    }
-
-    // No returning branches - nothing to merge
-    if (num_returning == 0) return;
-
-    // Build arrays for merge: only returning branches contribute
-    const filtered = try allocator.alloc(?State, branches.len);
-    defer allocator.free(filtered);
-    const branch_gids = try allocator.alloc(?Gid, branches.len);
-    defer allocator.free(branch_gids);
-
-    for (branches, 0..) |branch, i| {
-        if (branch.branch_returns) |br| {
-            if (br.*) {
-                filtered[i] = branch;
-                branch_gids[i] = return_gid;
-            } else {
-                filtered[i] = null;
-                branch_gids[i] = null;
-            }
-        } else {
-            filtered[i] = null;
-            branch_gids[i] = null;
-        }
-    }
-
-    // Track merged entities
-    var merged = std.AutoHashMap(Gid, void).init(allocator);
-    defer merged.deinit();
-
-    // Recursively merge return value and nested refinements
-    try mergeRefinementRecursive(
-        merge_tag,
-        allocator,
-        ctx,
-        refinements,
-        return_gid,
-        filtered,
-        branch_gids,
-        &merged,
-    );
-}
-
 /// Follow .to field for each branch's gid, updating branch_gids in place.
 fn followBranchGids(
     comptime ref_tag: std.meta.Tag(Refinement),
@@ -1329,7 +1567,8 @@ fn followBranchGids(
 ) void {
     for (branches, branch_gids) |branch_opt, *gid| {
         const branch = branch_opt orelse continue;
-        gid.* = @field(branch.refinements.at(gid.*.?).*, @tagName(ref_tag)).to;
+        const current_gid = gid.* orelse continue;
+        gid.* = @field(branch.refinements.at(current_gid).*, @tagName(ref_tag)).to;
     }
 }
 
@@ -1389,8 +1628,11 @@ fn mergeRefinementRecursive(
                         field_gids[i] = null;
                         continue;
                     };
-                    // Types always match; if branch exists, gid exists
-                    field_gids[i] = branch.refinements.at(branch_gid_opt.?).@"struct".fields[field_i];
+                    const branch_gid = branch_gid_opt orelse {
+                        field_gids[i] = null;
+                        continue;
+                    };
+                    field_gids[i] = branch.refinements.at(branch_gid).@"struct".fields[field_i];
                 }
                 try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged);
             }
@@ -1400,15 +1642,39 @@ fn mergeRefinementRecursive(
             const field_gids = try allocator.alloc(?Gid, branches.len);
             defer allocator.free(field_gids);
             for (u.fields, 0..) |field_opt, field_i| {
-                const field_idx = field_opt orelse continue;
+                // Build branch GIDs for this field
                 for (branches, branch_gids, 0..) |branch_opt, branch_gid_opt, i| {
                     const branch = branch_opt orelse {
                         field_gids[i] = null;
                         continue;
                     };
-                    // Types always match; if branch exists, gid exists
-                    field_gids[i] = branch.refinements.at(branch_gid_opt.?).@"union".fields[field_i];
+                    const branch_gid = branch_gid_opt orelse {
+                        field_gids[i] = null;
+                        continue;
+                    };
+                    field_gids[i] = branch.refinements.at(branch_gid).@"union".fields[field_i];
                 }
+
+                // Get or create field entity in original
+                const field_idx = if (field_opt) |idx|
+                    idx
+                else blk: {
+                    // Original field is null - find first branch with populated field and copy structure
+                    for (branches, field_gids) |branch_opt, branch_field_gid_opt| {
+                        const branch = branch_opt orelse continue;
+                        const branch_field_gid = branch_field_gid_opt orelse continue;
+                        // Cross-table copy: use Refinement.copyTo which properly handles
+                        // pointer .to fields by recursively copying pointees
+                        const branch_field_ref = branch.refinements.at(branch_field_gid).*;
+                        const new_idx = try Refinement.copyTo(branch_field_ref, branch.refinements, refinements);
+                        // NOTE: copyTo may reallocate, so re-fetch the union's fields pointer
+                        refinements.at(orig_gid).@"union".fields[field_i] = new_idx;
+                        break :blk new_idx;
+                    }
+                    // No branch has this field populated - skip
+                    continue;
+                };
+
                 try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged);
             }
         },

@@ -492,7 +492,7 @@ pub fn createPointerTo(self: *Refinements, pointee_gid: Gid, analyte: Analyte) !
     } });
 }
 
-const undefined_analysis = @import("analysis/undefined.zig");
+const undefined_analysis = @import("analysis/undefined_safety.zig");
 const memory_safety_analysis = @import("analysis/memory_safety.zig");
 const null_safety_analysis = @import("analysis/null_safety.zig");
 const variant_safety_analysis = @import("analysis/variant_safety.zig");

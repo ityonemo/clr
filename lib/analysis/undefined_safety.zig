@@ -10,7 +10,7 @@ const State = @import("../lib.zig").State;
 // NOTE: For .optional, .errorunion and .struct refinements, the top-level analyte.undefined should always be null.
 // We don't track undefined state on the container itself - only on the payload/fields.
 
-pub const Undefined = union(enum) {
+pub const UndefinedSafety = union(enum) {
     defined: void,
     undefined: struct {
         meta: Meta,
@@ -405,7 +405,7 @@ pub const Undefined = union(enum) {
 
     /// Recursively set undefined state on a refinement and its children.
     /// Only called when storing an undefined value (src type is .undefined).
-    fn setUndefinedRecursive(refinements: *Refinements, idx: Gid, undef_state: Undefined) void {
+    fn setUndefinedRecursive(refinements: *Refinements, idx: Gid, undef_state: UndefinedSafety) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| s.analyte.undefined = undef_state,
             .pointer => |*p| {
@@ -447,7 +447,7 @@ pub const Undefined = union(enum) {
         switch (ty.ty) {
             .undefined => {
                 // Mark as undefined - don't recurse further, undefined is terminal
-                const undef_state: Undefined = .{ .undefined = .{ .meta = ctx.meta } };
+                const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = ctx.meta } };
                 setUndefinedRecursive(refinements, idx, undef_state);
             },
             .@"struct" => |field_types| {
@@ -546,7 +546,7 @@ pub const Undefined = union(enum) {
         if (is_undef) {
             // Undefined stores: mark pointee and all children as undefined (recursive)
             // Build full path name for the destination pointer
-            const undef_state: Undefined = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = state.ctx.buildPathName(results, refinements, ptr) } };
+            const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = state.ctx.buildPathName(results, refinements, ptr) } };
             setUndefinedRecursive(refinements, pointee_idx, undef_state);
         } else {
             // Defined stores: update the pointee based on source type
@@ -837,14 +837,14 @@ pub const Undefined = union(enum) {
     }
 
     /// Get undefined state from a scalar at given GID
-    fn getScalarUndefined(branch: State, branch_gid: Gid) ?Undefined {
+    fn getScalarUndefined(branch: State, branch_gid: Gid) ?UndefinedSafety {
         const ref = branch.refinements.at(branch_gid);
         if (ref.* != .scalar) return null;
         return ref.scalar.analyte.undefined;
     }
 
     /// Get undefined state from a pointer at given GID
-    fn getPointerUndefined(branch: State, branch_gid: Gid) ?Undefined {
+    fn getPointerUndefined(branch: State, branch_gid: Gid) ?UndefinedSafety {
         const ref = branch.refinements.at(branch_gid);
         if (ref.* != .pointer) return null;
         return ref.pointer.analyte.undefined;
@@ -855,9 +855,9 @@ pub const Undefined = union(enum) {
         ctx: *Context,
         branches: []const ?State,
         branch_gids: []const ?Gid,
-        comptime getUndefined: fn (State, Gid) ?Undefined,
-    ) ?Undefined {
-        var result: ?Undefined = null;
+        comptime getUndefined: fn (State, Gid) ?UndefinedSafety,
+    ) ?UndefinedSafety {
+        var result: ?UndefinedSafety = null;
 
         for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
@@ -874,7 +874,7 @@ pub const Undefined = union(enum) {
         return result;
     }
 
-    fn mergeUndefinedStates(ctx: *Context, a: Undefined, b: Undefined) Undefined {
+    fn mergeUndefinedStates(ctx: *Context, a: UndefinedSafety, b: UndefinedSafety) UndefinedSafety {
         if (a == .inconsistent) return a;
         if (b == .inconsistent) return b;
 
@@ -915,6 +915,37 @@ pub const Undefined = union(enum) {
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
                         retval_init(refinements, field_gid, ctx);
+                    }
+                }
+            },
+            .void => {}, // void return type is valid
+            .noreturn, .unimplemented, .region => unreachable,
+        }
+    }
+
+    /// Initialize the undefined state on a return slot refinement as DEFINED.
+    /// Used for interned comptime values (constants, null) that are not the .undefined type.
+    pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => {
+                ref.scalar.analyte.undefined = .{ .defined = {} };
+            },
+            .pointer => |p| {
+                ref.pointer.analyte.undefined = .{ .defined = {} };
+                retval_init_defined(refinements, p.to);
+            },
+            .optional => |o| retval_init_defined(refinements, o.to),
+            .errorunion => |e| retval_init_defined(refinements, e.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    retval_init_defined(refinements, field_gid);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        retval_init_defined(refinements, field_gid);
                     }
                 }
             },
@@ -1126,7 +1157,7 @@ test "load from undefined inst returns error" {
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try std.testing.expectError(
         error.UseBeforeAssign,
-        Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } }),
+        UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } }),
     );
 }
 
@@ -1151,7 +1182,7 @@ test "load from defined inst does not return error" {
     _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 
 test "load from inst without undefined tracking does not return error" {
@@ -1172,7 +1203,7 @@ test "load from inst without undefined tracking does not return error" {
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try Undefined.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
 }
 
 fn testGetName(id: u32) []const u8 {
@@ -1192,7 +1223,7 @@ test "reportUseBeforeAssign with name_when_set returns error" {
     ctx.getName = &testGetName;
     defer ctx.deinit();
 
-    const undef = Undefined{ .undefined = .{
+    const undef = UndefinedSafety{ .undefined = .{
         .meta = .{
             .function = "test_func",
             .file = "file.zig",
@@ -1214,7 +1245,7 @@ test "reportUseBeforeAssign without name_when_set returns error" {
     ctx.meta.function = "test_func";
     defer ctx.deinit();
 
-    const undef = Undefined{ .undefined = .{
+    const undef = UndefinedSafety{ .undefined = .{
         .meta = .{
             .function = "test_func",
             .file = "file.zig",

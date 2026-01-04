@@ -309,9 +309,14 @@ pub const VariantSafety = struct {
             for (orig_vs.active_metas, branch_vs.active_metas, 0..) |*orig_m, branch_m, i| {
                 if (branch_m != null) {
                     orig_m.* = branch_m;
-                    // Ensure field entity exists
+                    // Ensure field entity exists - copy from branch if original is null
                     if (u.fields[i] == null) {
-                        u.fields[i] = refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } }) catch @panic("out of memory");
+                        const branch_u = branch_ref.@"union";
+                        if (branch_u.fields[i]) |branch_field_gid| {
+                            // Cross-table copy: properly copies pointer .to fields
+                            const branch_field_ref = branch.refinements.at(branch_field_gid).*;
+                            u.fields[i] = Refinements.Refinement.copyTo(branch_field_ref, branch.refinements, refinements) catch @panic("out of memory");
+                        }
                     }
                 }
             }
