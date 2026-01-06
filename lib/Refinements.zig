@@ -11,6 +11,10 @@ pub const Tid = u32;
 /// Global ID - unique identifier for provenance tracking across function boundaries.
 pub const Gid = u32;
 
+/// Sentinel value for uninitialized GIDs. Any access to a refinement with this GID
+/// indicates a bug where the refinement wasn't properly added via appendEntity.
+pub const INVALID_GID: Gid = std.math.maxInt(Gid);
+
 pub const Analyte = @import("Analyte.zig");
 
 /// Refinement tracks the type structure of a value along with analysis state.
@@ -18,20 +22,20 @@ pub const Analyte = @import("Analyte.zig");
 /// GID is used for anything that needs indirection (pointers, optionals, etc).
 pub const Refinement = union(enum) {
     pub const Scalar = struct {
-        gid: Gid = 0,
+        gid: Gid = INVALID_GID,
         analyte: Analyte = .{},
         type_id: Tid,
     };
 
     pub const Indirected = struct {
-        gid: Gid = 0,
+        gid: Gid = INVALID_GID,
         analyte: Analyte = .{},
         type_id: Tid,
         to: Gid,
     };
 
     pub const Struct = struct {
-        gid: Gid = 0,
+        gid: Gid = INVALID_GID,
         /// Analyte for tracking on the whole struct
         analyte: Analyte = .{},
         /// Field refinement GIDs - each field has its own refinement
@@ -41,7 +45,7 @@ pub const Refinement = union(enum) {
     };
 
     pub const Union = struct {
-        gid: Gid = 0,
+        gid: Gid = INVALID_GID,
         /// Analyte for tracking on the whole union
         analyte: Analyte = .{},
         /// Field refinement GIDs - each field has its own refinement.  Any field
@@ -55,7 +59,7 @@ pub const Refinement = union(enum) {
     /// AllocatorRef refinement tracks allocator identity for mismatch detection.
     /// The type_id uniquely identifies the allocator type (e.g., PageAllocator vs GPA).
     pub const AllocatorRef = struct {
-        gid: Gid = 0,
+        gid: Gid = INVALID_GID,
         analyte: Analyte = .{},
         type_id: Tid,
     };
