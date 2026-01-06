@@ -107,6 +107,18 @@ pub const UndefinedSafety = union(enum) {
         ensureUndefinedStateSet(refinements, ptr.to);
     }
 
+    pub fn ptr_elem_ptr(state: State, index: usize, params: tag.PtrElemPtr) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        // The pointer itself is defined (it exists and points to a valid element)
+        const ptr_idx = results[index].refinement.?;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined = .{ .defined = {} };
+        // The element's undefined state is already set (it's the shared region element)
+        // Don't call ensureUndefinedStateSet - the element already has its state from alloc
+    }
+
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
         _ = params;
         const results = state.results;
@@ -154,7 +166,10 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .void, .unimplemented, .noreturn => {},
-            .region => @panic("ensureUndefinedStateSet: region not yet implemented"),
+            .region => |r| {
+                // Don't set analyte.undefined on region container - only the uniform element carries undefined state
+                ensureUndefinedStateSet(refinements, r.to);
+            },
         }
     }
 
@@ -301,7 +316,7 @@ pub const UndefinedSafety = union(enum) {
             },
             .allocator => |*a| a.analyte.undefined = .{ .defined = {} },
             .void, .unimplemented, .noreturn => {},
-            .region => @panic("setDefinedRecursive: region not yet implemented"),
+            .region => |r| setDefinedRecursive(refinements, r.to),
         }
     }
 
@@ -444,7 +459,10 @@ pub const UndefinedSafety = union(enum) {
             },
             .allocator => |*a| a.analyte.undefined = undef_state,
             .void, .unimplemented, .noreturn => {},
-            .region => @panic("setUndefinedRecursive: region not yet implemented"),
+            .region => |r| {
+                // Don't set analyte.undefined on region - only the uniform element carries undefined state
+                setUndefinedRecursive(refinements, r.to, undef_state);
+            },
         }
     }
 
@@ -536,7 +554,12 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .void => {},
-            .region => @panic("applyInternedType: region not yet implemented"),
+            .region => |inner| {
+                switch (refinements.at(idx).*) {
+                    .region => |r| applyInternedType(refinements, r.to, inner.*, ctx),
+                    else => setDefinedRecursive(refinements, idx),
+                }
+            },
         }
     }
 
@@ -625,7 +648,10 @@ pub const UndefinedSafety = union(enum) {
                         },
                         .allocator => |*a| a.analyte.undefined = .{ .defined = {} },
                         .void, .unimplemented, .noreturn => {},
-                        .region => @panic("store: region not yet implemented"),
+                        .region => |r| {
+                            // When storing to a region, mark the uniform element as defined
+                            setDefinedRecursive(refinements, r.to);
+                        },
                     }
                 },
                 .interned => |ty| {
@@ -736,7 +762,20 @@ pub const UndefinedSafety = union(enum) {
                 // Loading a union doesn't error - individual field access will check
                 // The loaded union value will carry the field refinements
             },
-            .region => @panic("load: region - undefined tracking not yet implemented"),
+            .region => |r| {
+                // Region container doesn't track undefined - check the uniform element
+                switch (refinements.at(r.to).*) {
+                    .scalar => |s| {
+                        const undef = s.analyte.undefined orelse return;
+                        switch (undef) {
+                            .undefined => return undef.reportUseBeforeAssign(ctx),
+                            .inconsistent => return undef.reportInconsistentBranches(ctx),
+                            .defined => {},
+                        }
+                    },
+                    else => {}, // Other element types - recurse or skip
+                }
+            },
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
             else => |t| std.debug.panic("load: unexpected pointee type {s}", .{@tagName(t)}),
         }
@@ -994,7 +1033,9 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
                 std.debug.panic("undefined state must be set on pointers", .{});
             }
         },
-        inline .optional, .errorunion, .@"struct" => |data, t| {
+        inline .optional, .errorunion, .@"struct", .region => |data, t| {
+            // Note: .@"union" is intentionally not included here - unions use analyte.undefined
+            // for tracking state when activating inactive fields
             if (data.analyte.undefined != null) {
                 std.debug.panic("undefined state should not exist on container types, got {s}", .{@tagName(t)});
             }

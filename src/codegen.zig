@@ -103,6 +103,8 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .set_union_tag => payloadSetUnionTag(info, datum),
         .get_union_tag => payloadGetUnionTag(info, datum),
         .@"try", .try_cold => payloadTry(info, datum),
+        .array_elem_val => payloadArrayElemVal(info, datum),
+        .ptr_elem_ptr => payloadPtrElemPtr(info, datum),
         else => ".{}",
     };
 }
@@ -163,6 +165,25 @@ fn payloadBitcast(info: *const FnInfo, datum: Data) []const u8 {
 fn payloadUnOp(info: *const FnInfo, datum: Data) []const u8 {
     const src_str = srcString(info.arena, info.ip, datum.un_op);
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for array_elem_val - gets a value from an array/region at an index.
+/// bin_op: lhs = array/region, rhs = index (ignored for uniform region model)
+fn payloadArrayElemVal(info: *const FnInfo, datum: Data) []const u8 {
+    // lhs is the array/region source
+    const base: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d} }}", .{base}, null);
+}
+
+/// Payload for ptr_elem_ptr - gets a pointer to an array/region element.
+/// ty_pl with Bin payload: lhs = pointer to array/region, rhs = index (ignored for uniform region model)
+fn payloadPtrElemPtr(info: *const FnInfo, datum: Data) []const u8 {
+    const payload_index = datum.ty_pl.payload;
+    // Bin: lhs (Ref as u32), rhs (Ref as u32)
+    const lhs_raw = info.extra[payload_index];
+    const lhs_ref: Ref = @enumFromInt(lhs_raw);
+    const base: ?usize = if (lhs_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d} }}", .{base}, null);
 }
 
 /// Payload for ret_safe - just the src, caller_refinements and return_gid come from State.
@@ -563,6 +584,10 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             const payload_str = typeToStringInner(null, null, arena, ip, eu.payload_type, visited);
             break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .errorunion = &{s} }} }}", .{payload_str}, null);
         },
+        .array_type => |arr| blk: {
+            const child_str = typeToStringInner(null, null, arena, ip, arr.child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .region = &{s} }} }}", .{child_str}, null);
+        },
         // Skip struct/union field names when no name_map
         .struct_type, .union_type => ".{ .id = null, .ty = .{ .scalar = {} } }",
         else => ".{ .id = null, .ty = .{ .scalar = {} } }",
@@ -599,9 +624,13 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             const payload_str = typeToStringInner(name_map, field_map, arena, ip, eu.payload_type, visited);
             break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .errorunion = &{s} }} }}", .{payload_str}, null);
         },
+        .array_type => |arr| blk: {
+            const child_str = typeToStringInner(name_map, field_map, arena, ip, arr.child, visited);
+            break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .region = &{s} }} }}", .{child_str}, null);
+        },
         .struct_type => structTypeToString(name_map, field_map, arena, ip, ty, visited),
         .union_type => unionTypeToString(name_map, field_map, arena, ip, ty, visited),
-        // All other types treated as scalar (int, float, array, enum, etc.)
+        // All other types treated as scalar (int, float, enum, etc.)
         else => ".{ .id = null, .ty = .{ .scalar = {} } }",
     };
 }

@@ -223,6 +223,23 @@ Potential integer overflow in arithmetic operations is not detected.
 
 @constCast may break assumptions that CLR is able to make about code/data propagation through dataflow.
 
+### Per-Element Region Tracking
+
+Arrays and slices use a "uniform region" model where all elements share the same refinement state. This is a deliberate design choice, not a limitation to be improved:
+
+- Setting ANY element marks ALL elements as defined
+- If ANY element is undefined, accessing ANY element reports undefined
+- Calling a setter function on one element assumes all elements are set
+
+Example:
+```zig
+var arr: [3]u8 = undefined;
+arr[0] = 42;  // System assumes ALL elements are now defined
+return arr[2];  // No error (conservative: assumes defined)
+```
+
+This trade-off allows analysis to scale to any array size. Per-element tracking would require tracking N refinements per array, which doesn't scale and adds complexity without significant benefit.
+
 ## Not Necessary (Handled by Zig)
 
 ### Const-correctness

@@ -87,7 +87,7 @@ pub const Refinement = union(enum) {
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
-            .region => @panic("regions not implemented yet"),
+            .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -112,7 +112,7 @@ pub const Refinement = union(enum) {
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
-            .region => @panic("regions not implemented yet"),
+            .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -200,7 +200,7 @@ pub const Refinement = union(enum) {
             .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
             .optional => try src.copyToIndirected(src_list, dst_list, .optional),
             .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
-            .region => @panic("regions not implemented yet"),
+            .region => try src.copyToIndirected(src_list, dst_list, .region),
             .@"struct" => try src.copyToFields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copyToFields(src_list, dst_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -494,7 +494,14 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
             } });
         },
 
-        .region => @panic("regions not implemented yet"),
+        .region => |r| blk: {
+            const new_inner = try self.semideepCopy(r.to);
+            break :blk try self.appendEntity(.{ .region = .{
+                .analyte = r.analyte,
+                .type_id = r.type_id,
+                .to = new_inner,
+            } });
+        },
 
         // Simple types: just copy
         .unimplemented => try self.appendEntity(.{ .unimplemented = {} }),

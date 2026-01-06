@@ -132,7 +132,14 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // Allocator refinement - type_id uniquely identifies allocator type
             return .{ .allocator = .{ .type_id = alloc_type_id } };
         },
-        .region => @panic("regions not implemented yet"),
+        .region => |child| {
+            // Region (array/slice) - create uniform element entity
+            // All elements share this single refinement (uniform region model)
+            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_idx = try refinements.appendEntity(child_ref);
+            // Region container has null undefined (only child has undefined state)
+            return .{ .region = .{ .analyte = .{}, .type_id = type_id, .to = child_idx } };
+        },
         inline .@"struct", .@"union" => |type_fields, class_tag| blk: {
             const allocator = refinements.list.allocator;
             const FieldType = if (class_tag == .@"union") ?Gid else Gid;
@@ -1182,6 +1189,97 @@ pub const UnionInit = struct {
     }
 };
 
+/// Entity operation: TRANSFER (from region's uniform element)
+/// ArrayElemVal extracts a value from an array/region at a given index.
+/// With uniform regions, all indices share the same element entity.
+pub const ArrayElemVal = struct {
+    /// Base instruction containing the array/region
+    base: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const base = self.base orelse {
+            // Interned/global array - create a scalar result
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            try splat(.array_elem_val, state, index, self);
+            return;
+        };
+
+        const base_ref = state.results[base].refinement orelse {
+            // No refinement on base - create scalar fallback
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            try splat(.array_elem_val, state, index, self);
+            return;
+        };
+
+        const base_refinement = state.refinements.at(base_ref).*;
+        switch (base_refinement) {
+            .region => |r| {
+                // Uniform region: result shares the region's element entity
+                // Copy the element's refinement to this instruction's result
+                const elem_ref = state.refinements.at(r.to).*;
+                _ = try Inst.clobberInst(state.refinements, state.results, index, elem_ref);
+            },
+            else => {
+                // Not a region - fallback to scalar
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            },
+        }
+        try splat(.array_elem_val, state, index, self);
+    }
+};
+
+/// Get a pointer to an array/region element.
+/// For uniform regions, returns a pointer to the shared element entity.
+pub const PtrElemPtr = struct {
+    /// Base instruction containing the pointer to array/region
+    base: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const base = self.base orelse {
+            // Interned/global pointer - create a pointer to scalar result
+            const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+            try splat(.ptr_elem_ptr, state, index, self);
+            return;
+        };
+
+        const base_ref = state.results[base].refinement orelse {
+            // No refinement on base - create pointer to scalar fallback
+            const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+            try splat(.ptr_elem_ptr, state, index, self);
+            return;
+        };
+
+        // base should be a pointer to a region
+        const base_refinement = state.refinements.at(base_ref).*;
+        switch (base_refinement) {
+            .pointer => |p| {
+                // Follow pointer to get the region
+                const pointee = state.refinements.at(p.to).*;
+                switch (pointee) {
+                    .region => |r| {
+                        // Uniform region: create pointer to the shared element
+                        // The pointer points to the SAME element entity (r.to)
+                        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = r.to } });
+                    },
+                    else => {
+                        // Not a region - fallback to pointer to scalar
+                        const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+                        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+                    },
+                }
+            },
+            else => {
+                // Not a pointer - fallback to pointer to scalar
+                const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+            },
+        }
+        try splat(.ptr_elem_ptr, state, index, self);
+    }
+};
+
 pub const AnyTag = union(enum) {
     // Noop for unreferenced instructions
     noop: Noop,
@@ -1238,6 +1336,8 @@ pub const AnyTag = union(enum) {
     stack_trace_frames: Unimplemented(.{}),
     struct_field_ptr: StructFieldPtr,
     struct_field_val: StructFieldVal,
+    array_elem_val: ArrayElemVal,
+    ptr_elem_ptr: PtrElemPtr,
     sub_with_overflow: OverflowOp(.sub_with_overflow),
     @"try": UnwrapErrunionPayload, // try extracts payload from error union, same as unwrap_errunion_payload
     unreach: Unreach,

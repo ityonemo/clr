@@ -267,3 +267,35 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/unions/untagged_set_via_pointer.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Region Tests (Arrays)
+# =============================================================================
+
+@test "detects undefined array element access" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_undefined_element.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_undefined_element.main" ]]
+    [[ "$output" =~ "array_undefined_element.zig:4:" ]]
+    [[ "$output" =~ "undefined value assigned in array_undefined_element.main" ]]
+    [[ "$output" =~ "array_undefined_element.zig:2:" ]]
+}
+
+@test "no error when array element is defined (uniform region model)" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_uniform_defined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when array is initialized with values" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_initialized.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined when array element is set to undefined (uniform region model)" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_set_to_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_set_to_undefined.main" ]]
+    [[ "$output" =~ "array_set_to_undefined.zig:5:" ]]
+    [[ "$output" =~ "undefined value assigned in array_set_to_undefined.main" ]]
+    [[ "$output" =~ "array_set_to_undefined.zig:4:" ]]
+}
