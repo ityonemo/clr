@@ -149,8 +149,8 @@ test "struct_field_ptr records origin on field pointer" {
     defer refinements.deinit();
 
     // Create field entities first
-    const field0_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const field1_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const field0_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const field1_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
 
     // Create a struct with type_id = 100
     // Note: fields array is owned by refinements, freed on deinit
@@ -158,11 +158,11 @@ test "struct_field_ptr records origin on field pointer" {
     fields[0] = field0_gid;
     fields[1] = field1_gid;
 
-    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .analyte = .{}, .fields = fields, .type_id = 100 } });
-    const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .analyte = .{}, .type_id = 0 } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = fields, .type_id = 100 } });
+    const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .type_id = 0 } });
 
     // Create field pointer (result of struct_field_ptr)
-    const field_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = field1_gid, .analyte = .{}, .type_id = 0 } });
+    const field_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = field1_gid, .type_id = 0 } });
 
     var results = [_]Inst{
         .{ .refinement = base_ptr_gid }, // inst 0: pointer to struct
@@ -192,7 +192,7 @@ test "field_parent_ptr succeeds when origin matches" {
     defer refinements.deinit();
 
     // Create the field pointer with matching origin
-    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
     const field_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = scalar_gid,
         .analyte = .{ .fieldparentptr_safety = .{ .field_index = 0, .container_type_id = 100 } },
@@ -203,8 +203,8 @@ test "field_parent_ptr succeeds when origin matches" {
     // Note: fields array is owned by refinements, freed on deinit
     const parent_fields = try allocator.alloc(Gid, 1);
     parent_fields[0] = scalar_gid;
-    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .analyte = .{}, .fields = parent_fields, .type_id = 100 } });
-    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .analyte = .{}, .type_id = 0 } });
+    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = parent_fields, .type_id = 100 } });
+    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .type_id = 0 } });
 
     var results = [_]Inst{
         .{ .refinement = field_ptr_gid }, // inst 0: field pointer
@@ -228,10 +228,10 @@ test "field_parent_ptr errors on non-field pointer" {
     defer refinements.deinit();
 
     // Create a regular pointer with NO fieldparentptr_safety
-    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = scalar_gid,
-        .analyte = .{}, // No fieldparentptr_safety set
+        // No fieldparentptr_safety set
         .type_id = 0,
     } });
 
@@ -239,8 +239,8 @@ test "field_parent_ptr errors on non-field pointer" {
     // Note: fields array is owned by refinements, freed on deinit
     const parent_fields = try allocator.alloc(Gid, 1);
     parent_fields[0] = scalar_gid;
-    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .analyte = .{}, .fields = parent_fields, .type_id = 100 } });
-    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .analyte = .{}, .type_id = 0 } });
+    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = parent_fields, .type_id = 100 } });
+    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .type_id = 0 } });
 
     var results = [_]Inst{
         .{ .refinement = ptr_gid }, // inst 0: regular pointer (not from field access)
@@ -265,7 +265,7 @@ test "field_parent_ptr errors on wrong container type" {
     defer refinements.deinit();
 
     // Field pointer claims to be from type_id 100
-    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
     const field_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = scalar_gid,
         .analyte = .{ .fieldparentptr_safety = .{ .field_index = 0, .container_type_id = 100 } },
@@ -276,8 +276,8 @@ test "field_parent_ptr errors on wrong container type" {
     // Note: fields array is owned by refinements, freed on deinit
     const parent_fields = try allocator.alloc(Gid, 1);
     parent_fields[0] = scalar_gid;
-    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .analyte = .{}, .fields = parent_fields, .type_id = 200 } });
-    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .analyte = .{}, .type_id = 0 } });
+    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = parent_fields, .type_id = 200 } });
+    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .type_id = 0 } });
 
     var results = [_]Inst{
         .{ .refinement = field_ptr_gid }, // inst 0: field pointer from type 100
@@ -303,8 +303,8 @@ test "field_parent_ptr errors on wrong field index" {
     defer refinements.deinit();
 
     // Field pointer is from field 0
-    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const scalar2_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const scalar2_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
     const field_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = scalar_gid,
         .analyte = .{ .fieldparentptr_safety = .{ .field_index = 0, .container_type_id = 100 } },
@@ -316,8 +316,8 @@ test "field_parent_ptr errors on wrong field index" {
     const parent_fields = try allocator.alloc(Gid, 2);
     parent_fields[0] = scalar_gid;
     parent_fields[1] = scalar2_gid;
-    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .analyte = .{}, .fields = parent_fields, .type_id = 100 } });
-    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .analyte = .{}, .type_id = 0 } });
+    const parent_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = parent_fields, .type_id = 100 } });
+    const result_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = parent_struct_gid, .type_id = 0 } });
 
     var results = [_]Inst{
         .{ .refinement = field_ptr_gid }, // inst 0: field pointer from field 0

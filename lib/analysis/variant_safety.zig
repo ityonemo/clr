@@ -358,8 +358,8 @@ test "set_union_tag sets active variant" {
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
 
-    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{ .analyte = .{}, .fields = fields, .type_id = 0 } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+    const union_eidx = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -395,14 +395,14 @@ test "struct_field_ptr allows access to active variant" {
     // Create fields array - only field 1 needs an entity
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -431,14 +431,14 @@ test "struct_field_ptr errors on inactive variant" {
     // Create fields array
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -468,7 +468,7 @@ test "struct_field_val errors on inactive variant" {
     // Create fields array
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[2] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    fields[2] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
@@ -505,15 +505,15 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
     // Create fields array
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[0] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    fields[0] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .analyte = .{}, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);

@@ -19,13 +19,13 @@ pub const Analyte = @import("Analyte.zig");
 pub const Refinement = union(enum) {
     pub const Scalar = struct {
         gid: Gid = 0,
-        analyte: Analyte,
+        analyte: Analyte = .{},
         type_id: Tid,
     };
 
     pub const Indirected = struct {
         gid: Gid = 0,
-        analyte: Analyte,
+        analyte: Analyte = .{},
         type_id: Tid,
         to: Gid,
     };

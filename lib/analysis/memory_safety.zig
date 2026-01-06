@@ -1255,7 +1255,7 @@ test "bitcast propagates stack metadata via shared pointee" {
         } },
     }, .type_id = 0 } });
     _ = try Inst.clobberInst(&refinements, &results, 0, .{ .pointer = .{
-        .analyte = .{}, // Pointer has no memory_safety, it's on pointee
+        // Pointer has no memory_safety, it's on pointee
         .type_id = 0,
         .to = pointee_idx,
     } });
@@ -1293,7 +1293,7 @@ test "ret_safe detects escape when returning stack pointer from same function" {
     var results = [_]Inst{.{}} ** 3;
 
     // Pointer with stack_ptr from test_func (current function)
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
     _ = try Inst.clobberInst(&refinements, &results, 0, .{ .pointer = .{
         .analyte = .{ .memory_safety = .{ .stack = .{
             .meta = .{
@@ -1331,7 +1331,7 @@ test "ret_safe allows returning arg (empty function name)" {
     var results = [_]Inst{.{}} ** 3;
 
     // Pointer with empty function name (from caller via arg)
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
     _ = try Inst.clobberInst(&refinements, &results, 0, .{ .pointer = .{
         .analyte = .{ .memory_safety = .{ .stack = .{
             .meta = .{
@@ -1622,8 +1622,8 @@ test "onFinish allows passed allocation" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
     // Create typed return slot: pointer to scalar (matches what ret_safe will return)
-    const pointee_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
-    const return_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_gid } });
+    const pointee_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const return_gid = try refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = pointee_gid } });
 
     var results = [_]Inst{.{}} ** 5;
     const state = State{

@@ -368,7 +368,7 @@ test "buildPathName for struct_field_ptr builds field path" {
     // Create a pointer to struct refinement for inst 0
     // The struct has type_id = 100
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .analyte = .{}, .type_id = 0 } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .type_id = 0 } });
 
     // Inst 0: named variable "foo" pointing to struct
     // Inst 1: struct_field_ptr accessing field 0 (bar) of inst 0
@@ -395,7 +395,7 @@ test "buildPathName for compound path: foo.?.bar" {
     // Create refinements for the path: foo (optional containing ptr to struct)
     // When unwrapped, gives pointer to struct with type_id = 100
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .analyte = .{}, .type_id = 0 } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .type_id = 0 } });
 
     // Inst 0: named variable "foo" (the optional)
     // Inst 1: optional_payload of inst 0 -> foo.? (gives ptr to struct)

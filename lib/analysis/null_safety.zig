@@ -297,7 +297,7 @@ test "is_non_null records check on optional" {
     defer refinements.deinit();
 
     // Create an optional refinement
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -324,7 +324,7 @@ test "is_null records check on optional" {
     defer refinements.deinit();
 
     // Create an optional refinement
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -413,7 +413,7 @@ test "optional_payload errors on unchecked unwrap" {
     defer refinements.deinit();
 
     // Create an optional with NO null_safety set (unchecked)
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -484,8 +484,8 @@ test "store to optional with null sets null state" {
     defer refinements.deinit();
 
     // Create an optional and a pointer to it
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .analyte = .{}, .type_id = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .type_id = 0 } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -509,8 +509,8 @@ test "store to optional with value sets non_null state" {
     defer refinements.deinit();
 
     // Create an optional and a pointer to it
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .analyte = .{}, .type_id = 0, .to = 0 } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .analyte = .{}, .type_id = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .type_id = 0 } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);

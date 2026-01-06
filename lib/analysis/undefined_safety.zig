@@ -1214,7 +1214,7 @@ test "load from undefined inst returns error" {
         } } } },
         .type_id = 0,
     } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try std.testing.expectError(
@@ -1238,10 +1238,10 @@ test "load from defined inst does not return error" {
 
     // Create pointer -> defined scalar
     const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
 
     // Set up result for the load instruction (index 0)
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .analyte = .{}, .type_id = 0 } });
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .type_id = 0 } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
@@ -1262,7 +1262,7 @@ test "load from inst without undefined tracking does not return error" {
 
     // Create pointer -> scalar with no undefined tracking (undefined = null)
     const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = null }, .type_id = 0 } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .analyte = .{}, .type_id = 0, .to = pointee_idx } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
