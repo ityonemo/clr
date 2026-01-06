@@ -299,3 +299,48 @@ load test_helper
     [[ "$output" =~ "undefined value assigned in array_set_to_undefined.main" ]]
     [[ "$output" =~ "array_set_to_undefined.zig:4:" ]]
 }
+
+@test "detects undefined struct field in array" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_of_structs_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_of_structs_undefined.main" ]]
+    [[ "$output" =~ "array_of_structs_undefined.zig:10:" ]]
+}
+
+@test "no error when array of structs element is defined (uniform region model)" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_of_structs_defined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined pointer in array" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_of_pointers_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_of_pointers_undefined.main" ]]
+    [[ "$output" =~ "array_of_pointers_undefined.zig:5:" ]]
+}
+
+@test "no error when array of pointers element is defined (uniform region model)" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_of_pointers_defined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined array element passed to function" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_pass_to_function.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_pass_to_function.main" ]]
+    [[ "$output" =~ "array_pass_to_function.zig:9:" ]]
+}
+
+@test "detects undefined after multiple assignments (last write wins)" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_multiple_assignments.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_multiple_assignments.main" ]]
+    [[ "$output" =~ "array_multiple_assignments.zig:6:" ]]
+}
+
+@test "detects undefined when loading array element to local variable" {
+    run compile_and_run "$TEST_CASES/undefined/regions/array_load_then_use.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in array_load_then_use.main" ]]
+    [[ "$output" =~ "array_load_then_use.zig:5:" ]]
+}

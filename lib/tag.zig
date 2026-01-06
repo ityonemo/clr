@@ -1213,10 +1213,10 @@ pub const ArrayElemVal = struct {
         const base_refinement = state.refinements.at(base_ref).*;
         switch (base_refinement) {
             .region => |r| {
-                // Uniform region: result shares the region's element entity
-                // Copy the element's refinement to this instruction's result
-                const elem_ref = state.refinements.at(r.to).*;
-                _ = try Inst.clobberInst(state.refinements, state.results, index, elem_ref);
+                // Uniform region: semideep copy the element
+                // Need semideep copy because structs/unions have allocated fields
+                const new_gid = try state.refinements.semideepCopy(r.to);
+                state.results[index].refinement = new_gid;
             },
             else => {
                 // Not a region - fallback to scalar
