@@ -32,11 +32,19 @@ This is an active rewrite of the original Elixir-based proof-of-concept in Zig. 
 Currently implemented:
 - Undefined value tracking (use before assignment, field-level tracking for structs)
 - Memory safety analysis (use-after-free, double-free, memory leaks)
-- Allocator mismatch detection (freeing with wrong allocator)
+- Full `std.mem.Allocator` interface coverage:
+  - `create`/`destroy` - single item allocation
+  - `alloc`/`free` - slice allocation (including `alignedAlloc`, `allocSentinel`, etc.)
+  - `realloc`/`remap` - slice reallocation with old-slice-freed tracking
+  - `dupe`/`dupeZ` - slice duplication
+  - Allocator mismatch detection (freeing with wrong allocator, create/destroy vs alloc/free)
+- Derived pointer tracking (cannot free field pointers, subslices - only root allocations)
+- Pointer arithmetic safety (blocks ptr_add/ptr_sub on single-item pointers)
 - Null safety (unchecked optional unwrap detection)
 - Variant safety (accessing inactive union fields, ambiguous variant after branches)
 - Interprocedural analysis (tracking values across function calls via pointer arguments)
 - Struct and union field tracking (pointer fields, nested types)
+- Slice tracking (alloc/free with regions, subslice derivation)
 - Error union support (try expressions, wrap/unwrap payload)
 - Switch statement support (n-way merging with variant tracking)
 - Source location and variable name tracking for error messages

@@ -514,3 +514,66 @@ load test_helper
     [[ "$output" =~ "free of field pointer" ]]
     [[ "$output" =~ "free_subslice.main" ]]
 }
+
+@test "detects pointer arithmetic on single-item pointer" {
+    run compile_and_run "$TEST_CASES/allocator/basic/ptr_add_single_item.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "pointer arithmetic on single-item pointer" ]]
+    [[ "$output" =~ "ptr_add_single_item.main" ]]
+}
+
+# =============================================================================
+# Realloc/remap tests
+# =============================================================================
+
+@test "no false positive for correct realloc usage" {
+    run compile_and_run "$TEST_CASES/allocator/basic/realloc_basic.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects use-after-realloc on old slice" {
+    run compile_and_run "$TEST_CASES/allocator/basic/realloc_use_after.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free" ]]
+    [[ "$output" =~ "realloc_use_after.main" ]]
+}
+
+@test "detects double-free after realloc" {
+    run compile_and_run "$TEST_CASES/allocator/basic/realloc_double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free" ]]
+    [[ "$output" =~ "realloc_double_free.main" ]]
+}
+
+@test "no false positive for correct remap usage" {
+    run compile_and_run "$TEST_CASES/allocator/basic/remap_basic.zig"
+    [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# Dupe/dupeZ tests
+# =============================================================================
+
+@test "no false positive for correct dupe usage" {
+    run compile_and_run "$TEST_CASES/allocator/basic/dupe_basic.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no false positive for correct dupeZ usage" {
+    run compile_and_run "$TEST_CASES/allocator/basic/dupeZ_basic.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects memory leak from dupe" {
+    run compile_and_run "$TEST_CASES/allocator/basic/dupe_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "dupe_leak.main" ]]
+}
+
+@test "detects use-after-free from dupe" {
+    run compile_and_run "$TEST_CASES/allocator/basic/dupe_use_after_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free" ]]
+    [[ "$output" =~ "dupe_use_after_free.main" ]]
+}

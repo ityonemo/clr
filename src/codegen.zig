@@ -344,11 +344,12 @@ fn extractAllocAllocType(info: *const FnInfo, datum: Data) []const u8 {
         else => return ".{ .unknown = {} }",
     };
 
-    // Return type is Allocator.Error![]T - unwrap error union to get []T
+    // Return type is Allocator.Error![]T or ?[]T - unwrap to get []T
     const slice_type: InternPool.Index = blk: {
         const return_key = info.ip.indexToKey(return_type);
         break :blk switch (return_key) {
             .error_union_type => |eu| eu.payload_type,
+            .opt_type => |child| child, // remap returns ?[]T
             .ptr_type => return_type, // Already unwrapped
             else => return ".{ .unknown = {} }",
         };

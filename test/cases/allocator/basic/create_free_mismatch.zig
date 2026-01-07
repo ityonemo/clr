@@ -9,7 +9,8 @@ pub fn main() u8 {
 
     // Convert to a slice of one and try to free with free (slice) - MISMATCH!
     // free expects a slice from alloc, not a single item from create
-    const slice: []u8 = @as([*]u8, @ptrCast(ptr))[0..1];
+    // Use *[1]u8 cast to avoid ptr_add (full array slice doesn't need arithmetic)
+    const slice: []u8 = @as(*[1]u8, @ptrCast(ptr));
     allocator.free(slice);
 
     return 0;

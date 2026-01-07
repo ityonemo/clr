@@ -20,31 +20,6 @@ Using `std.heap.GeneralPurposeAllocator` generates deeply nested struct types th
 
 **Planned fix**: Add `unknown` variant to `lib/tag.zig` Type union to handle complex types that exceed the depth limit.
 
-### Struct/Union Field Clobber Memory Leaks
-
-When a struct or union field containing an allocated pointer is overwritten (clobbered) without first freeing the old value, this might create a memory leak. This case is not currently tested.
-
-**Example**:
-```zig
-var container: Container = .{ .ptr = try allocator.create(u8) };
-container.ptr = try allocator.create(u8);  // Leaks the first allocation!
-```
-
-**Planned**: Add test cases for detecting leaks when struct/union pointer fields are clobbered.
-
-### Struct Field Tracking
-
-Struct field tracking is implemented for most cases:
-
-**What works**:
-- `struct_field_val`: Extracting a field value from a struct by value is tracked
-- `struct_field_ptr`: Field pointers inherit undefined state from their parent field and propagate changes back
-- Field-level undefined detection when accessing struct fields
-- Origin tracking prevents freeing field pointers (only parent allocations can be freed)
-
-**What doesn't work**:
-- Memory safety for individual fields beyond origin tracking is not implemented
-
 ### DbgVarVal Analysis Handlers
 
 The `dbg_var_ptr` instruction requires analysis module handlers to retroactively set variable names on analysis states (because in AIR, `dbg_var_ptr` comes after `store` instructions that create the states).
@@ -93,7 +68,6 @@ The following AIR instruction tags are not yet implemented and produce `.unimple
 
 **Type conversions**:
 - `intcast` - Integer type casting
-- `ptr_add` - Pointer arithmetic
 
 **Error unions**:
 - `wrap_errunion_err` - Wrap error into error union
@@ -147,12 +121,6 @@ The current early_returns implementation stores full State objects (with cloned 
 2. The `splatMergeEarlyReturns` function rebuilds clean States because stored States may have stale pointers (results, branch_returns point to freed memory). Is there a cleaner architecture?
 3. Should `branchIsUnreachable` be split into variants for cond_br/switch_br vs early_returns contexts?
 4. The current approach iterates over all results and recursively merges. For large functions, this could be expensive. Is there a more targeted approach?
-
-## Might Do
-
-### Pointer Arithmetic on Single-Item Pointers
-
-Pointer arithmetic (`ptr_add`, `ptr_sub`) on single-item pointers (`*T`) is tracked but not validated. Using pointer arithmetic to access beyond a single-item allocation is undefined behavior in Zig. CLR could potentially detect this by tracking whether a pointer points to a single-item vs a region.
 
 ## Desired But Unknown How to Implement
 
@@ -219,7 +187,9 @@ Slice and array bounds checking is not performed. Out-of-bounds access on region
 
 ### Pointer Arithmetic
 
-General pointer arithmetic safety is not tracked. (May implement a weak version: disallow pointer arithmetic unless within a tracked region.)
+General pointer arithmetic safety is partially implemented. `ptr_add` and `ptr_sub` are blocked on pointers that don't point to regions (i.e., single-item pointers from `create`). Pointer arithmetic within allocated regions is allowed.
+
+Full pointer arithmetic bounds checking (ensuring the result stays within the region) is not tracked.
 
 ### Resource Cleanup Beyond Memory
 

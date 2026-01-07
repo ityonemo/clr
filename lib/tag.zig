@@ -709,8 +709,12 @@ pub const OptionalPayload = struct {
                 if (src_ref.* == .optional) {
                     // Extract the payload from the optional (optional.to is the inner value)
                     state.results[index].refinement = src_ref.optional.to;
+                } else if (src_ref.* == .errorunion) {
+                    // For remap which uses alloc_realloc but returns ?[]T not Error![]T,
+                    // the AIR uses optional_payload but the refinement is errorunion
+                    state.results[index].refinement = src_ref.errorunion.to;
                 } else {
-                    // Not an optional - might be error union or direct pass-through
+                    // Not an optional or errorunion - direct pass-through
                     state.results[index].refinement = src_ref_gid;
                 }
             },

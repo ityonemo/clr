@@ -643,3 +643,39 @@ To identify runtime allocator types, trace the inst_ref back through the AIR:
 - **Runtime allocators** (e.g., `gpa.allocator()`): Track via `.allocator` refinement type with `type_id` from the callee function
 
 The `.allocator` refinement is created by `MkAllocator` tag when codegen detects a call returning `std.mem.Allocator`. The `type_id` is the InternPool index of the callee function (e.g., the `.allocator()` method). At `alloc_create`/`alloc_destroy` time, the handler reads `type_id` from the allocator argument's refinement and compares them to detect mismatches.
+
+## Derived Pointer Tracking (root_gid)
+
+Pointers derived from allocations (field pointers, subslices) cannot be freed directly - only the root allocation can be freed. This is tracked via `root_gid` in the pointer's `memory_safety` analyte.
+
+### How root_gid Works
+
+- **Root pointers** (from `create`/`alloc`): `root_gid = null` - these can be freed
+- **Derived pointers**: `root_gid = <gid of parent>` - cannot be freed
+
+### Operations that Set root_gid
+
+| Operation | Creates | root_gid set to |
+|-----------|---------|-----------------|
+| `alloc_create` | Pointer to scalar | `null` (root) |
+| `alloc_alloc` | Pointer to region | `null` (root) |
+| `struct_field_ptr` | Pointer to field | Container's GID |
+| `slice_ptr` | Pointer to region | Region's GID |
+
+### Key Architecture Points
+
+1. **root_gid is set on the POINTER**, not the pointee. The pointer's `memory_safety.allocated.root_gid` or `memory_safety.stack.root_gid` tracks derivation.
+
+2. **Operations that SHARE refinement** (like `ptr_add`, `bitcast`) preserve `root_gid` automatically because they use the same refinement entity.
+
+3. **Operations that CREATE new pointer entities** (like `slice_ptr`, `struct_field_ptr`) must explicitly set `root_gid` via a `memory_safety` handler.
+
+4. **struct_field_ptr uses container_gid** (not pointee_gid) so that `@fieldParentPtr` can recover the original container.
+
+### Example: Subslice Cannot Be Freed
+
+```zig
+const slice = allocator.alloc(u8, 10);  // root_gid = null
+const subslice = slice[2..5];           // slice_ptr creates new ptr with root_gid = region_gid
+allocator.free(subslice);               // ERROR: cannot free derived pointer
+```

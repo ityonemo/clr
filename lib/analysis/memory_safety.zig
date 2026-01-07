@@ -253,6 +253,31 @@ pub const MemorySafety = union(enum) {
         ptr.analyte.memory_safety = ptr_ms;
     }
 
+    /// ptr_add/ptr_sub performs pointer arithmetic.
+    /// This is only valid on pointers to regions (many-item pointers, slices).
+    /// Pointer arithmetic on single-item pointers (*T) is undefined behavior.
+    pub fn ptr_add(state: State, index: usize, params: tag.PtrAdd) !void {
+        _ = index;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        const ptr_idx = params.ptr orelse return; // Interned pointer - can't check
+        const ptr_gid = state.results[ptr_idx].refinement orelse return;
+        const ptr_ref = refinements.at(ptr_gid);
+        if (ptr_ref.* != .pointer) return;
+
+        // Check what the pointer points to
+        const pointee_ref = refinements.at(ptr_ref.pointer.to);
+        if (pointee_ref.* != .region) {
+            // Pointer arithmetic on non-region pointer (single-item pointer)
+            try ctx.meta.print(ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
+            return error.PtrArithmeticOnSingleItem;
+        }
+    }
+
+    /// ptr_sub has the same safety requirements as ptr_add
+    pub const ptr_sub = ptr_add;
+
     /// field_parent_ptr recovers the parent container pointer from a field pointer.
     /// We use the stored root_gid to reconnect to the original container entity.
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
@@ -1131,6 +1156,34 @@ pub const MemorySafety = union(enum) {
         // memory_safety may be null for stack allocations or untracked pointers
         const ms = pointee_analyte.memory_safety orelse return;
         // Only check use-after-free for heap allocations
+        if (ms != .allocated) return;
+
+        if (ms.allocated.freed) |free_site| {
+            return reportUseAfterFree(ctx, ms.allocated, free_site);
+        }
+    }
+
+    /// Handle pointer/slice element pointer access - detect use-after-free for slices.
+    /// For slices, the base is pointer → region → element.
+    /// This handles both ptr_elem_ptr and slice_elem_ptr (uniform region model).
+    pub fn ptr_elem_ptr(state: State, index: usize, params: tag.PtrElemPtr) !void {
+        _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // base must exist for slice_elem_ptr
+        const base = params.base orelse return;
+        const base_ref = results[base].refinement orelse return;
+        const base_refinement = refinements.at(base_ref).*;
+
+        // For slices: base is pointer → region
+        if (base_refinement != .pointer) return;
+        const region_idx = base_refinement.pointer.to;
+        const region_ref = refinements.at(region_idx);
+        if (region_ref.* != .region) return;
+
+        const ms = region_ref.region.analyte.memory_safety orelse return;
         if (ms != .allocated) return;
 
         if (ms.allocated.freed) |free_site| {
