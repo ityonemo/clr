@@ -37,3 +37,24 @@ load test_helper
     run compile_and_run "$TEST_CASES/field_safety/valid_union_field.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Global fieldParentPtr tests
+# =============================================================================
+
+@test "no error when fieldParentPtr on global struct field" {
+    run compile_and_run "$TEST_CASES/field_safety/globals/valid_struct_field.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects fieldParentPtr on global standalone variable" {
+    run compile_and_run "$TEST_CASES/field_safety/globals/invalid_standalone.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "fieldParentPtr on non-field pointer" ]]
+    [[ "$output" =~ "invalid_standalone.get_parent" ]]
+}
+
+@test "no error when fieldParentPtr on global union field" {
+    run compile_and_run "$TEST_CASES/field_safety/globals/valid_union_field.zig"
+    [ "$status" -eq 0 ]
+}

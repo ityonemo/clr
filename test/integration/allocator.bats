@@ -577,3 +577,32 @@ load test_helper
     [[ "$output" =~ "use after free" ]]
     [[ "$output" =~ "dupe_use_after_free.main" ]]
 }
+
+# =============================================================================
+# Global pointer tests
+# =============================================================================
+
+@test "detects use-after-free through global pointer" {
+    run compile_and_run "$TEST_CASES/allocator/globals/use_after_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free" ]]
+    [[ "$output" =~ "use_after_free.use_global" ]]
+}
+
+@test "detects double-free through global pointer" {
+    run compile_and_run "$TEST_CASES/allocator/globals/double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free" ]]
+    [[ "$output" =~ "double_free.free_global" ]]
+}
+
+@test "detects memory leak through global pointer" {
+    run compile_and_run "$TEST_CASES/allocator/globals/leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+}
+
+@test "no false positive for correct global pointer usage" {
+    run compile_and_run "$TEST_CASES/allocator/globals/correct_usage.zig"
+    [ "$status" -eq 0 ]
+}

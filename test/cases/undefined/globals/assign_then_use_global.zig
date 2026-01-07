@@ -1,8 +1,16 @@
-// Test that assigning to an undefined global then using it is safe
+// Test that assigning to an undefined global in one function
+// and using it in another is safe
 var global_value: u8 = undefined;
 
-pub fn main() u8 {
+fn assign_global() void {
     global_value = 42;
-    // After assignment, global should be defined
+}
+
+fn use_global() u8 {
     return global_value;
+}
+
+pub fn main() u8 {
+    assign_global();
+    return use_global();
 }

@@ -151,3 +151,26 @@ load test_helper
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_via_array_arg.zig" ]]
 }
+
+# =============================================================================
+# Global stack pointer tests
+# =============================================================================
+
+@test "detects stack pointer escape to global variable" {
+    run compile_and_run "$TEST_CASES/stack_pointer/globals/escape_to_global.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "escape_to_global" ]]
+}
+
+@test "no false positive for heap pointer in global" {
+    run compile_and_run "$TEST_CASES/stack_pointer/globals/no_escape_heap.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects parameter stack pointer escape to global" {
+    run compile_and_run "$TEST_CASES/stack_pointer/globals/escape_param_to_global.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "escape_param_to_global" ]]
+}

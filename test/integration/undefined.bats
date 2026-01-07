@@ -352,7 +352,7 @@ load test_helper
 @test "detects undefined global variable used before assignment" {
     run compile_and_run "$TEST_CASES/undefined/globals/use_undefined_global.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use of undefined value found in use_undefined_global.main" ]]
+    [[ "$output" =~ "use of undefined value found in use_undefined_global.use_global" ]]
     [[ "$output" =~ "use_undefined_global.zig:6:" ]]
 }
 

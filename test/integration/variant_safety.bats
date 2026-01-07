@@ -94,3 +94,24 @@ load test_helper
     [[ "$output" =~ "access of union with ambiguous active variant" ]]
     [[ "$output" =~ "switch_else_unsafe.zig:23" ]]
 }
+
+# =============================================================================
+# Global union tests
+# =============================================================================
+
+@test "detects inactive variant access on global union" {
+    run compile_and_run "$TEST_CASES/variant_safety/globals/inactive_access.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of inactive union variant" ]]
+    [[ "$output" =~ "inactive_access.get_int" ]]
+}
+
+@test "no error when accessing active variant of global union" {
+    run compile_and_run "$TEST_CASES/variant_safety/globals/active_access.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when global union variant is checked before access" {
+    run compile_and_run "$TEST_CASES/variant_safety/globals/checked_access.zig"
+    [ "$status" -eq 0 ]
+}

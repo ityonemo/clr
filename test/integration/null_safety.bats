@@ -45,3 +45,24 @@ load test_helper
     [[ "$output" =~ "ambiguous_unwrap.main" ]]
     [[ "$output" =~ "ambiguous_unwrap.zig:8:" ]]
 }
+
+# =============================================================================
+# Global optional tests
+# =============================================================================
+
+@test "detects unwrap of null-initialized global optional" {
+    run compile_and_run "$TEST_CASES/null_safety/globals/unchecked_unwrap.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "optional unwrap of known null" ]]
+    [[ "$output" =~ "unchecked_unwrap.unwrap_global" ]]
+}
+
+@test "no error when global optional is null-checked before unwrap" {
+    run compile_and_run "$TEST_CASES/null_safety/globals/checked_unwrap.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when global optional is assigned non-null before unwrap" {
+    run compile_and_run "$TEST_CASES/null_safety/globals/assigned_non_null.zig"
+    [ "$status" -eq 0 ]
+}
