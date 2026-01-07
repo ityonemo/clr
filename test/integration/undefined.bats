@@ -344,3 +344,24 @@ load test_helper
     [[ "$output" =~ "use of undefined value found in array_load_then_use.main" ]]
     [[ "$output" =~ "array_load_then_use.zig:5:" ]]
 }
+
+# =============================================================================
+# Global Variable Tests
+# =============================================================================
+
+@test "detects undefined global variable used before assignment" {
+    run compile_and_run "$TEST_CASES/undefined/globals/use_undefined_global.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in use_undefined_global.main" ]]
+    [[ "$output" =~ "use_undefined_global.zig:6:" ]]
+}
+
+@test "no error when global is initialized with value" {
+    run compile_and_run "$TEST_CASES/undefined/globals/use_defined_global.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when undefined global is assigned before use" {
+    run compile_and_run "$TEST_CASES/undefined/globals/assign_then_use_global.zig"
+    [ "$status" -eq 0 ]
+}
