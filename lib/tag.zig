@@ -203,6 +203,78 @@ pub const AllocDestroy = struct {
     }
 };
 
+/// Slice allocation: allocator.alloc(T, len)
+/// Returns Allocator.Error![]T, which is errorunion → pointer → region → element_type
+pub const AllocAlloc = struct {
+    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
+    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
+    ty: Type, // Element type T (not the slice type)
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // AllocAlloc returns Allocator.Error![]T
+        // Create: errorunion → pointer → region → element_type
+        // Create element refinement from type info
+        const element_ref = try typeToRefinement(self.ty, state.refinements);
+        const element_idx = try state.refinements.appendEntity(element_ref);
+        // Create region pointing to element (uniform region model - all elements share state)
+        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_idx } });
+        // Create pointer to region (the slice itself)
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = region_idx } });
+        // Wrap in error union
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .type_id = 0, .to = ptr_idx } });
+        try splat(.alloc_alloc, state, index, self);
+    }
+};
+
+/// Slice deallocation: allocator.free(slice)
+/// Takes a slice and returns void
+pub const AllocFree = struct {
+    /// Index into results[] array for the slice being freed
+    slice: usize,
+    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
+    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.alloc_free, state, index, self);
+    }
+};
+
+/// Slice resize: allocator.resize(slice, new_n)
+/// Returns bool - true if in-place resize succeeded, false otherwise.
+/// No allocation tracking needed - just produces a scalar result.
+pub const AllocResize = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // resize returns a bool - create scalar result
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+        try splat(.alloc_resize, state, index, .{});
+    }
+};
+
+/// Slice reallocation: allocator.realloc(slice, new_n) or allocator.remap(slice, new_n)
+/// Frees the old slice and returns a new slice.
+/// realloc returns Allocator.Error![]T, remap returns ?[]T
+pub const AllocRealloc = struct {
+    /// Index into results[] array for the old slice being freed
+    slice: usize,
+    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
+    allocator_inst: ?usize, // Optional instruction index for runtime allocator
+    ty: Type, // Element type T (not the slice type)
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // AllocRealloc returns Allocator.Error![]T (for realloc) or ?[]T (for remap)
+        // For now, treat both as errorunion - the unwrap logic handles both
+        // Create: errorunion → pointer → region → element_type
+        const element_ref = try typeToRefinement(self.ty, state.refinements);
+        const element_idx = try state.refinements.appendEntity(element_ref);
+        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_idx } });
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = region_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .type_id = 0, .to = ptr_idx } });
+        try splat(.alloc_realloc, state, index, self);
+    }
+};
+
 /// Entity operation: CREATE
 /// Creates an .allocator refinement from a call to .allocator() method.
 /// The type_id uniquely identifies the allocator type (e.g., GPA vs PageAllocator).
@@ -1192,38 +1264,120 @@ pub const UnionInit = struct {
 /// ArrayElemVal extracts a value from an array/region at a given index.
 /// With uniform regions, all indices share the same element entity.
 pub const ArrayElemVal = struct {
-    /// Base instruction containing the array/region
+    /// Base instruction containing the array/region or slice
     base: ?usize,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const base = self.base orelse {
-            // Interned/global array - create a scalar result
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
-            try splat(.array_elem_val, state, index, self);
-            return;
-        };
-
-        const base_ref = state.results[base].refinement orelse {
-            // No refinement on base - create scalar fallback
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
-            try splat(.array_elem_val, state, index, self);
-            return;
-        };
+        // base must exist - slice_elem_val always has a base
+        const base = self.base.?;
+        // base must have a refinement - it's the slice/array value
+        const base_ref = state.results[base].refinement.?;
 
         const base_refinement = state.refinements.at(base_ref).*;
         switch (base_refinement) {
             .region => |r| {
-                // Uniform region: semideep copy the element
-                // Need semideep copy because structs/unions have allocated fields
+                // Array: region → element. Semideep copy the element.
                 const new_gid = try state.refinements.semideepCopy(r.to);
                 state.results[index].refinement = new_gid;
             },
-            else => {
-                // Not a region - fallback to scalar
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+            .pointer => |p| {
+                // Slice: pointer → region → element. Follow pointer to region.
+                const region = state.refinements.at(p.to).region;
+                const new_gid = try state.refinements.semideepCopy(region.to);
+                state.results[index].refinement = new_gid;
             },
+            else => @panic("ArrayElemVal: expected region or pointer to region"),
         }
         try splat(.array_elem_val, state, index, self);
+    }
+};
+
+/// Pointer arithmetic (ptr_add, ptr_sub).
+/// Passes through the pointer operand's refinement since the result is still a pointer
+/// to the same allocation.
+pub const PtrAdd = struct {
+    /// Source pointer instruction
+    ptr: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const ptr_idx = self.ptr orelse {
+            // Interned pointer - create fresh
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            try splat(.ptr_add, state, index, self);
+            return;
+        };
+
+        // Share the pointer's refinement - result points to same allocation
+        if (state.results[ptr_idx].refinement) |src_gid| {
+            state.results[index].refinement = src_gid;
+        }
+        try splat(.ptr_add, state, index, self);
+    }
+};
+
+/// Convert array/many-pointer to slice.
+/// Since many-pointer and slice have the same structure (pointer→region→element),
+/// this just shares the source refinement to preserve memory_safety tracking.
+pub const ArrayToSlice = struct {
+    /// Source instruction (array or many-pointer)
+    src: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const src_idx = self.src orelse {
+            // Interned source - create fresh pointer→region
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            try splat(.array_to_slice, state, index, self);
+            return;
+        };
+
+        // Share the source refinement - both many-pointer and slice are pointer→region
+        if (state.results[src_idx].refinement) |src_gid| {
+            state.results[index].refinement = src_gid;
+        } else {
+            // Source has no refinement - create fresh
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+        }
+        try splat(.array_to_slice, state, index, self);
+    }
+};
+
+/// Extract pointer from slice.
+/// For a slice (pointer → region → element), returns the pointer→region part.
+/// This preserves memory safety tracking including is_slice flag.
+pub const SlicePtr = struct {
+    /// Source slice instruction index (null for interned/comptime slices)
+    slice: ?usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const slice_idx = self.slice orelse {
+            // Interned slice (e.g., string literal) - create fresh pointer→region
+            // No memory_safety needed - these are static data, not heap allocations
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            try splat(.slice_ptr, state, index, self);
+            return;
+        };
+
+        // Runtime slice - must have refinement
+        const slice_gid = state.results[slice_idx].refinement orelse
+            @panic("slice_ptr: slice instruction has no refinement");
+
+        // Slice is pointer → region → element
+        const slice_ref = state.refinements.at(slice_gid);
+        if (slice_ref.* != .pointer) @panic("slice_ptr: expected pointer refinement for slice");
+
+        // Create a NEW pointer that points to the SAME region
+        // This allows memory_safety.slice_ptr to set root_gid on the pointer
+        const region_gid = slice_ref.pointer.to;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+        try splat(.slice_ptr, state, index, self);
     }
 };
 
@@ -1234,47 +1388,18 @@ pub const PtrElemPtr = struct {
     base: ?usize,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const base = self.base orelse {
-            // Interned/global pointer - create a pointer to scalar result
-            const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
-            try splat(.ptr_elem_ptr, state, index, self);
-            return;
-        };
+        // base must exist - slice_elem_ptr always has a base
+        const base = self.base.?;
+        // base must have a refinement - it's the slice value
+        const base_ref = state.results[base].refinement.?;
 
-        const base_ref = state.results[base].refinement orelse {
-            // No refinement on base - create pointer to scalar fallback
-            const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
-            try splat(.ptr_elem_ptr, state, index, self);
-            return;
-        };
-
-        // base should be a pointer to a region
+        // base is the slice value: pointer → region → element
         const base_refinement = state.refinements.at(base_ref).*;
-        switch (base_refinement) {
-            .pointer => |p| {
-                // Follow pointer to get the region
-                const pointee = state.refinements.at(p.to).*;
-                switch (pointee) {
-                    .region => |r| {
-                        // Uniform region: create pointer to the shared element
-                        // The pointer points to the SAME element entity (r.to)
-                        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = r.to } });
-                    },
-                    else => {
-                        // Not a region - fallback to pointer to scalar
-                        const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-                        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
-                    },
-                }
-            },
-            else => {
-                // Not a pointer - fallback to pointer to scalar
-                const pointee_idx = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
-            },
-        }
+        // Slice is pointer → region
+        const ptr = base_refinement.pointer;
+        const region = state.refinements.at(ptr.to).region;
+        // Create pointer to the shared element (uniform region model)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region.to } });
         try splat(.ptr_elem_ptr, state, index, self);
     }
 };
@@ -1287,6 +1412,10 @@ pub const AnyTag = union(enum) {
     alloc: Alloc,
     alloc_create: AllocCreate,
     alloc_destroy: AllocDestroy,
+    alloc_alloc: AllocAlloc, // Slice allocation: allocator.alloc()
+    alloc_free: AllocFree, // Slice deallocation: allocator.free()
+    alloc_resize: AllocResize, // Slice resize: allocator.resize() - returns bool
+    alloc_realloc: AllocRealloc, // Slice reallocation: allocator.realloc()/remap()
     mkallocator: MkAllocator,
     arg: Arg,
     bitcast: Bitcast,
@@ -1308,6 +1437,7 @@ pub const AnyTag = union(enum) {
     bit_and: Simple(.bit_and),
     cmp_eq: Simple(.cmp_eq),
     cmp_gt: Simple(.cmp_gt),
+    cmp_lt: Simple(.cmp_lt),
     cmp_lte: Simple(.cmp_lte),
     ctz: Simple(.ctz),
     sub: Simple(.sub),
@@ -1315,7 +1445,7 @@ pub const AnyTag = union(enum) {
     // Unimplemented tags (no-op)
     add_with_overflow: OverflowOp(.add_with_overflow),
     aggregate_init: Unimplemented(.{}),
-    array_to_slice: Unimplemented(.{}),
+    array_to_slice: ArrayToSlice,
     block: Block,
     cond_br: CondBr,
     switch_br: SwitchBr,
@@ -1326,12 +1456,16 @@ pub const AnyTag = union(enum) {
     is_null: IsNull,
     memset_safe: Unimplemented(.{ .void = true }),
     noop_pruned_debug: Unimplemented(.{ .void = true }),
-    ptr_add: Unimplemented(.{}),
+    ptr_add: PtrAdd,
+    ptr_sub: PtrAdd, // Same logic as ptr_add
     ret_addr: Unimplemented(.{}),
     ret_load: RetLoad,
     ret_ptr: RetPtr,
     slice: Unimplemented(.{}),
-    slice_len: Unimplemented(.{}),
+    slice_len: Simple(.slice_len), // Get length of slice - produces scalar
+    slice_ptr: SlicePtr, // Extract pointer from slice - produces pointer
+    slice_elem_ptr: PtrElemPtr, // Slice element pointer - same as ptr_elem_ptr (uniform region)
+    slice_elem_val: ArrayElemVal, // Slice element value - same as array_elem_val (uniform region)
     stack_trace_frames: Unimplemented(.{}),
     struct_field_ptr: StructFieldPtr,
     struct_field_val: StructFieldVal,

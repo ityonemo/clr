@@ -201,6 +201,62 @@ load test_helper
 }
 
 # =============================================================================
+# Array pointer field tests
+# =============================================================================
+
+@test "no false positive for correct array pointer field usage" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/correct_usage.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects use-after-free through array pointer field" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/use_after_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free in use_after_free.main" ]]
+    [[ "$output" =~ "use_after_free.zig" ]]
+}
+
+@test "detects double-free through array pointer field" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free in double_free.main" ]]
+    [[ "$output" =~ "double_free.zig" ]]
+}
+
+@test "detects memory leak in array pointer field" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak in leak.main" ]]
+    [[ "$output" =~ "leak.zig" ]]
+}
+
+@test "no false positive when callee frees array pointer field" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/pass_to_callee_noleak.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects leak when callee doesn't free array pointer field" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/pass_to_callee_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak in" ]]
+    [[ "$output" =~ "pass_to_callee_leak.zig" ]]
+}
+
+@test "detects double-free when caller frees after callee freed array pointer field" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/pass_to_callee_double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free in pass_to_callee_double_free.main" ]]
+    [[ "$output" =~ "pass_to_callee_double_free.zig" ]]
+}
+
+@test "detects use-after-free when caller uses array pointer field after callee freed" {
+    run compile_and_run "$TEST_CASES/allocator/array_pointer_field/pass_to_callee_use_after_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free in pass_to_callee_use_after_free.main" ]]
+    [[ "$output" =~ "pass_to_callee_use_after_free.zig" ]]
+}
+
+# =============================================================================
 # Clobber leak detection tests
 # =============================================================================
 
@@ -349,4 +405,112 @@ load test_helper
     [[ "$output" =~ "use_after_free_field_ptr.zig:12:21)" ]]
     [[ "$output" =~ "allocated in use_after_free_field_ptr.main" ]]
     [[ "$output" =~ "use_after_free_field_ptr.zig:9:38)" ]]
+}
+
+# =============================================================================
+# Slice allocator tests (allocator.alloc/free)
+# =============================================================================
+
+@test "no false positive for correct slice usage" {
+    run compile_and_run "$TEST_CASES/allocator/slice/correct_usage.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects use-after-free for slice" {
+    run compile_and_run "$TEST_CASES/allocator/slice/use_after_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free in use_after_free.main" ]]
+    [[ "$output" =~ "use_after_free.zig:9:" ]]
+    [[ "$output" =~ "'slice' freed in use_after_free.main" ]]
+    [[ "$output" =~ "use_after_free.zig:7:" ]]
+}
+
+@test "detects double-free for slice" {
+    run compile_and_run "$TEST_CASES/allocator/slice/double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free in double_free.main" ]]
+    [[ "$output" =~ "double_free.zig:8:" ]]
+    [[ "$output" =~ "'slice' previously freed in double_free.main" ]]
+    [[ "$output" =~ "double_free.zig:7:" ]]
+}
+
+@test "detects memory leak for slice" {
+    run compile_and_run "$TEST_CASES/allocator/slice/leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak in leak.main" ]]
+    [[ "$output" =~ "leak.zig:8:" ]]
+}
+
+@test "no false positive when callee frees slice from caller" {
+    run compile_and_run "$TEST_CASES/allocator/slice/pass_to_callee_noleak.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects leak when callee doesn't free slice from caller" {
+    run compile_and_run "$TEST_CASES/allocator/slice/pass_to_callee_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak in pass_to_callee_leak.consumer" ]]
+    [[ "$output" =~ "pass_to_callee_leak.zig" ]]
+}
+
+@test "detects double-free across caller/callee for slice" {
+    run compile_and_run "$TEST_CASES/allocator/slice/pass_to_callee_double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free in pass_to_callee_double_free.main" ]]
+    [[ "$output" =~ "pass_to_callee_double_free.zig" ]]
+}
+
+@test "detects use-after-free across caller/callee for slice" {
+    run compile_and_run "$TEST_CASES/allocator/slice/pass_to_callee_use_after_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free in pass_to_callee_use_after_free.main" ]]
+    [[ "$output" =~ "pass_to_callee_use_after_free.zig" ]]
+}
+
+# =============================================================================
+# Allocator interface coverage tests
+# =============================================================================
+
+@test "allocator interface - all methods work correctly" {
+    run compile_and_run "$TEST_CASES/allocator/basic/allocator_interface.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects alloc/destroy method mismatch" {
+    run compile_and_run "$TEST_CASES/allocator/basic/alloc_destroy_mismatch.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "allocation method mismatch" ]]
+    [[ "$output" =~ "allocated with" ]]
+    [[ "$output" =~ "alloc, freed with destroy" ]]
+}
+
+@test "detects create/free method mismatch" {
+    run compile_and_run "$TEST_CASES/allocator/basic/create_free_mismatch.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "allocation method mismatch" ]]
+    [[ "$output" =~ "allocated with" ]]
+    [[ "$output" =~ "create, freed with free" ]]
+}
+
+@test "detects freeing stack array" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_stack_array.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of stack memory" ]]
+    [[ "$output" =~ "free_stack_array.main" ]]
+    [[ "$output" =~ "pointer is to local variable" ]]
+}
+
+@test "detects freeing slice to stack array" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_stack_slice.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of stack memory" ]]
+    [[ "$output" =~ "free_stack_slice.main" ]]
+    [[ "$output" =~ "pointer is to local variable" ]]
+}
+
+@test "detects freeing sub-slice of allocated slice" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_subslice.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of field pointer" ]]
+    [[ "$output" =~ "free_subslice.main" ]]
 }

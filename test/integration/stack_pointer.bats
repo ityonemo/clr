@@ -114,3 +114,40 @@ load test_helper
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_via_struct_arg.zig" ]]
 }
+
+# =============================================================================
+# Array (region) stack pointer tests
+# =============================================================================
+
+@test "detects stack pointer escape in array return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/region/stack_ptr_in_array.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "stack_ptr_in_array.zig" ]]
+}
+
+@test "detects stack pointer escape via array element" {
+    run compile_and_run "$TEST_CASES/stack_pointer/region/stack_ptr_escaped_via_element.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "stack_ptr_escaped_via_element.zig" ]]
+}
+
+@test "detects parameter pointer escape in array return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/region/param_ptr_escape.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "param_ptr_escape.zig" ]]
+}
+
+@test "no false positive for passed-in pointer in array return" {
+    run compile_and_run "$TEST_CASES/stack_pointer/region/no_escape.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects stack pointer escape via array argument" {
+    run compile_and_run "$TEST_CASES/stack_pointer/region/escape_via_array_arg.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "stack pointer escape" ]]
+    [[ "$output" =~ "escape_via_array_arg.zig" ]]
+}

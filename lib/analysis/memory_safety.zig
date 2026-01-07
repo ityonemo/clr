@@ -36,6 +36,7 @@ pub const Allocated = struct {
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
     name_at_alloc: ?[]const u8 = null, // Full path name when allocated (e.g., "container.ptr")
     returned: bool = false, // true if this allocation was returned to caller (not a local leak)
+    is_slice: bool = false, // true if allocated with alloc (slice), false if create (single item)
 };
 
 pub const MemorySafety = union(enum) {
@@ -183,25 +184,14 @@ pub const MemorySafety = union(enum) {
     }
 
     /// struct_field_ptr creates a pointer to a field of a struct/union.
-    /// Copy the field's memory_safety to the pointer so it knows what kind of memory it points to.
-    /// This preserves root_gid which is needed to detect "free of field pointer" errors.
+    /// Set root_gid on the POINTER to mark it as a derived pointer that cannot be freed directly.
+    /// root_gid points to the CONTAINER so field_parent_ptr can recover the parent.
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
         const refinements = state.refinements;
         const ptr_idx = state.results[index].refinement orelse return;
         const ptr = &refinements.at(ptr_idx).pointer;
 
-        const pointee_idx = ptr.to;
-        const pointee = refinements.at(pointee_idx);
-        const pointee_analyte = getAnalytePtr(pointee);
-
-        // If pointee has memory_safety, copy it to the pointer
-        if (pointee_analyte.memory_safety) |ms| {
-            ptr.analyte.memory_safety = ms;
-            return;
-        }
-
-        // Pointee has no memory_safety - this can happen for newly created union fields.
-        // Propagate from the base container and set on both pointee and pointer.
+        // Get container from base pointer
         const base = params.base orelse return;
         const base_idx = state.results[base].refinement orelse return;
         const base_ref = refinements.at(base_idx);
@@ -212,22 +202,55 @@ pub const MemorySafety = union(enum) {
         const container_analyte = getAnalytePtr(container);
         const container_ms = container_analyte.memory_safety orelse return;
 
-        // Create memory_safety for the field with root_gid pointing to container
+        // Create memory_safety for the pointer with root_gid pointing to container
         const container_gid = container.getGid();
-        const field_ms: MemorySafety = switch (container_ms) {
+        ptr.analyte.memory_safety = switch (container_ms) {
             .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = container_gid } },
             .allocated => |a| .{ .allocated = .{
                 .meta = a.meta,
                 .freed = a.freed,
                 .type_id = a.type_id,
                 .root_gid = container_gid,
+                .is_slice = a.is_slice,
+            } },
+            .unset => .{ .unset = {} },
+        };
+    }
+
+    /// slice_ptr extracts the pointer from a slice.
+    /// The resulting pointer is a derived pointer - it cannot be freed directly.
+    /// We set root_gid on the pointer to the region, so free detection knows it's derived.
+    pub fn slice_ptr(state: State, index: usize, params: tag.SlicePtr) !void {
+        const refinements = state.refinements;
+        _ = params;
+
+        // Get the result pointer
+        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr = &refinements.at(ptr_idx).pointer;
+
+        // Get the region this pointer points to
+        const region_idx = ptr.to;
+        const region = refinements.at(region_idx);
+        if (region.* != .region) return;
+
+        // Get the region's memory_safety
+        const region_ms = region.region.analyte.memory_safety orelse return;
+
+        // Create memory_safety for the pointer with root_gid pointing to the region
+        const region_gid = region.getGid();
+        const ptr_ms: MemorySafety = switch (region_ms) {
+            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = region_gid } },
+            .allocated => |a| .{ .allocated = .{
+                .meta = a.meta,
+                .freed = a.freed,
+                .type_id = a.type_id,
+                .root_gid = region_gid,
+                .is_slice = a.is_slice,
             } },
             .unset => .{ .unset = {} },
         };
 
-        // Set on both pointee and pointer
-        pointee_analyte.memory_safety = field_ms;
-        ptr.analyte.memory_safety = field_ms;
+        ptr.analyte.memory_safety = ptr_ms;
     }
 
     /// field_parent_ptr recovers the parent container pointer from a field pointer.
@@ -339,7 +362,8 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .scalar, .allocator, .void, .noreturn, .unimplemented, .region => {},
+            .region => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
+            .scalar, .allocator, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -380,7 +404,8 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .scalar, .void, .noreturn, .unimplemented, .region, .allocator => {},
+            .region => |r| clearAllocationsReturned(refinements, r.to),
+            .scalar, .void, .noreturn, .unimplemented, .allocator => {},
         }
     }
 
@@ -436,7 +461,8 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
-            .scalar, .allocator, .void, .noreturn, .unimplemented, .region => {},
+            .region => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
+            .scalar, .allocator, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -526,6 +552,7 @@ pub const MemorySafety = union(enum) {
             .meta = alloc_base.meta,
             .type_id = alloc_base.type_id,
             .root_gid = null,
+            .is_slice = false, // create allocates single item
         } };
 
         // Set memory_safety on pointer
@@ -533,10 +560,11 @@ pub const MemorySafety = union(enum) {
             .meta = alloc_base.meta,
             .type_id = alloc_base.type_id,
             .root_gid = null,
+            .is_slice = false, // create allocates single item
         } };
 
         // Set allocation state recursively on the pointee
-        setAllocatedRecursive(state.refinements, pointee_ref, alloc_base, null);
+        setAllocatedRecursive(state.refinements, pointee_ref, alloc_base, null, false);
     }
 
     /// Get a mutable pointer to the Analyte for any refinement type that has one
@@ -598,6 +626,10 @@ pub const MemorySafety = union(enum) {
                 // but don't recurse into what it points to (that's separate memory)
                 p.analyte.memory_safety = ms;
             },
+            .region => |*r| {
+                r.analyte.memory_safety = ms;
+                setStackRecursive(refinements, r.to, meta, child_root);
+            },
             else => {},
         }
     }
@@ -612,12 +644,13 @@ pub const MemorySafety = union(enum) {
     /// Recursively set .allocated memory_safety on all members of a refinement.
     /// Root gets root_gid from base (typically null), children get root_gid = root's gid.
     /// Pointers STOP recursion (they point to separate memory).
-    fn setAllocatedRecursive(refinements: *Refinements, idx: Gid, base: AllocatedBase, root_gid: ?Gid) void {
+    fn setAllocatedRecursive(refinements: *Refinements, idx: Gid, base: AllocatedBase, root_gid: ?Gid, is_slice: bool) void {
         const ref = refinements.at(idx);
         const ms: MemorySafety = .{ .allocated = .{
             .meta = base.meta,
             .type_id = base.type_id,
             .root_gid = root_gid,
+            .is_slice = is_slice,
         } };
         // Children point to actual root (null for root, else the root's gid)
         const child_root = root_gid orelse ref.getGid();
@@ -627,29 +660,33 @@ pub const MemorySafety = union(enum) {
             .@"struct" => |*st| {
                 st.analyte.memory_safety = ms;
                 for (st.fields) |field_idx| {
-                    setAllocatedRecursive(refinements, field_idx, base, child_root);
+                    setAllocatedRecursive(refinements, field_idx, base, child_root, is_slice);
                 }
             },
             .@"union" => |*u| {
                 u.analyte.memory_safety = ms;
                 for (u.fields) |field_idx_opt| {
                     if (field_idx_opt) |field_idx| {
-                        setAllocatedRecursive(refinements, field_idx, base, child_root);
+                        setAllocatedRecursive(refinements, field_idx, base, child_root, is_slice);
                     }
                 }
             },
             .optional => |*o| {
                 o.analyte.memory_safety = ms;
-                setAllocatedRecursive(refinements, o.to, base, child_root);
+                setAllocatedRecursive(refinements, o.to, base, child_root, is_slice);
             },
             .errorunion => |*e| {
                 e.analyte.memory_safety = ms;
-                setAllocatedRecursive(refinements, e.to, base, child_root);
+                setAllocatedRecursive(refinements, e.to, base, child_root, is_slice);
             },
             .pointer => |*p| {
                 // Set memory_safety on the pointer field itself (it's part of the struct)
                 // but don't recurse into what it points to (that's separate memory)
                 p.analyte.memory_safety = ms;
+            },
+            .region => |*r| {
+                r.analyte.memory_safety = ms;
+                setAllocatedRecursive(refinements, r.to, base, child_root, is_slice);
             },
             else => {},
         }
@@ -684,6 +721,7 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| setFreedRecursive(refinements, o.to, free_meta),
             .errorunion => |e| setFreedRecursive(refinements, e.to, free_meta),
+            .region => |r| setFreedRecursive(refinements, r.to, free_meta),
             else => {},
         }
     }
@@ -751,12 +789,309 @@ pub const MemorySafety = union(enum) {
             return reportMismatchedAllocator(ctx, a, destroy_type_id);
         }
 
+        // destroy expects single item (create), not slice (alloc)
+        if (a.is_slice) {
+            return reportMethodMismatch(ctx, a, true, false);
+        }
+
         // Mark as freed using setFreedRecursive to propagate to all fields
         const free_meta: Free = .{
             .meta = ctx.meta,
             .name_at_free = ctx.buildPathName(results, refinements, ptr),
         };
         setFreedRecursive(refinements, pointee_idx, free_meta);
+    }
+
+    /// Handle allocator.alloc() - marks slice region as allocated
+    /// Result structure: errorunion → pointer → region → element
+    pub fn alloc_alloc(state: State, index: usize, params: tag.AllocAlloc) !void {
+        // Result is errorunion -> pointer -> region -> element
+        const eu_idx = state.results[index].refinement.?;
+        const eu = &state.refinements.at(eu_idx).errorunion;
+        const ptr_ref = eu.to;
+        const ptr = &state.refinements.at(ptr_ref).pointer;
+        const region_ref = ptr.to;
+        const region = &state.refinements.at(region_ref).region;
+        const element_ref = region.to;
+
+        // Determine type_id: prefer refinement-based if available (runtime allocators)
+        const type_id = blk: {
+            if (params.allocator_inst) |alloc_inst| {
+                if (state.results[alloc_inst].refinement) |alloc_gid| {
+                    const alloc_ref = state.refinements.at(alloc_gid);
+                    if (alloc_ref.* == .allocator) {
+                        break :blk alloc_ref.allocator.type_id;
+                    }
+                }
+            }
+            // Fall back to codegen-extracted type_id (comptime allocators)
+            break :blk params.type_id;
+        };
+
+        const alloc_base: AllocatedBase = .{
+            .meta = state.ctx.meta,
+            .type_id = type_id,
+            .root_gid = null, // This is the root allocation
+        };
+
+        // Set memory_safety on errorunion
+        eu.analyte.memory_safety = .{ .allocated = .{
+            .meta = alloc_base.meta,
+            .type_id = alloc_base.type_id,
+            .root_gid = null,
+            .is_slice = true, // alloc allocates a slice
+        } };
+
+        // Set memory_safety on pointer
+        ptr.analyte.memory_safety = .{ .allocated = .{
+            .meta = alloc_base.meta,
+            .type_id = alloc_base.type_id,
+            .root_gid = null,
+            .is_slice = true, // alloc allocates a slice
+        } };
+
+        // Set memory_safety on region
+        region.analyte.memory_safety = .{ .allocated = .{
+            .meta = alloc_base.meta,
+            .type_id = alloc_base.type_id,
+            .root_gid = null,
+            .is_slice = true, // alloc allocates a slice
+        } };
+
+        // Set allocation state recursively on the element (and any nested pointers)
+        setAllocatedRecursive(state.refinements, element_ref, alloc_base, null, true);
+    }
+
+    /// Handle allocator.free() - marks slice as freed
+    /// Slice structure: pointer → region → element
+    pub fn alloc_free(state: State, index: usize, params: tag.AllocFree) !void {
+        _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+        const slice = params.slice;
+
+        // Get the pointer refinement (slice is pointer → region → element)
+        const ptr_idx = results[slice].refinement orelse @panic("alloc_free: inst has no refinement");
+        const ptr_refinement = refinements.at(ptr_idx);
+        if (ptr_refinement.* != .pointer) @panic("alloc_free: expected pointer refinement");
+
+        // Check the POINTER's memory_safety first - derived pointers (from slice_ptr) have root_gid set
+        if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
+            switch (ptr_ms) {
+                .allocated => |a| {
+                    if (a.root_gid != null) {
+                        return reportFreeFieldPointer(ctx, a);
+                    }
+                },
+                .stack => |s| {
+                    if (s.root_gid != null) {
+                        return reportFreeFieldPointerStack(ctx, s);
+                    }
+                },
+                .unset => {},
+            }
+        }
+
+        // Get the pointee entity via ptr.to
+        // This can be either:
+        // - region (for proper slices from alloc)
+        // - scalar (for single pointers from create that were type-converted to slice)
+        const pointee_idx = ptr_refinement.pointer.to;
+        const pointee_ref = refinements.at(pointee_idx);
+
+        const pointee_analyte: *Analyte = switch (pointee_ref.*) {
+            .region => |*r| &r.analyte,
+            .scalar => |*s| &s.analyte,
+            else => @panic("alloc_free: expected region or scalar refinement"),
+        };
+
+        // Get memory_safety from pointee
+        const ms = &(pointee_analyte.memory_safety orelse
+            @panic("alloc_free: pointee has no memory_safety"));
+
+        switch (ms.*) {
+            .stack => |sp| {
+                // Check if this is a field pointer (root_gid != null means it's a field)
+                if (sp.root_gid != null) {
+                    return reportFreeFieldPointerStack(ctx, sp);
+                }
+                return reportFreeStackMemory(ctx, sp);
+            },
+            .unset => @panic("alloc_free: region memory_safety is unset"),
+            .allocated => {},
+        }
+
+        const a = ms.allocated;
+
+        // Check if this is a field pointer (root_gid != null means it's a field, can't free directly)
+        if (a.root_gid != null) {
+            return reportFreeFieldPointer(ctx, a);
+        }
+
+        if (a.freed) |previous_free| {
+            return reportDoubleFree(ctx, a, previous_free);
+        }
+
+        // Determine type_id: prefer refinement-based if available (runtime allocators)
+        const free_type_id = blk: {
+            if (params.allocator_inst) |alloc_inst| {
+                if (results[alloc_inst].refinement) |alloc_gid| {
+                    const alloc_ref = refinements.at(alloc_gid);
+                    if (alloc_ref.* == .allocator) {
+                        break :blk alloc_ref.allocator.type_id;
+                    }
+                }
+            }
+            // Fall back to codegen-extracted type_id (comptime allocators)
+            break :blk params.type_id;
+        };
+
+        if (a.type_id != free_type_id) {
+            return reportMismatchedAllocator(ctx, a, free_type_id);
+        }
+
+        // free expects slice (alloc), not single item (create)
+        if (!a.is_slice) {
+            return reportMethodMismatch(ctx, a, false, true);
+        }
+
+        // Mark as freed using setFreedRecursive to propagate to all fields
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = ctx.buildPathName(results, refinements, slice),
+        };
+        setFreedRecursive(refinements, pointee_idx, free_meta);
+    }
+
+    /// Handle allocator.realloc()/remap() - marks old slice as freed, new slice as allocated
+    /// Old slice structure: pointer → region → element
+    /// New result: errorunion → pointer → region → element
+    pub fn alloc_realloc(state: State, index: usize, params: tag.AllocRealloc) !void {
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+        const slice = params.slice;
+
+        // === 1. Mark old slice as freed ===
+
+        // Get the old pointer refinement
+        const old_ptr_idx = results[slice].refinement orelse @panic("alloc_realloc: old slice has no refinement");
+        const old_ptr_refinement = refinements.at(old_ptr_idx);
+        if (old_ptr_refinement.* != .pointer) @panic("alloc_realloc: expected pointer refinement for old slice");
+
+        // Get the old region entity
+        const old_region_idx = old_ptr_refinement.pointer.to;
+        const old_region_ref = refinements.at(old_region_idx);
+        if (old_region_ref.* != .region) @panic("alloc_realloc: expected region refinement for old slice");
+
+        const old_region_analyte = &old_region_ref.region.analyte;
+
+        // Get memory_safety from old region
+        const old_ms = &(old_region_analyte.memory_safety orelse
+            @panic("alloc_realloc: old region has no memory_safety"));
+
+        // Check for invalid operations on old slice
+        switch (old_ms.*) {
+            .stack => |sp| {
+                if (sp.root_gid != null) {
+                    return reportFreeFieldPointerStack(ctx, sp);
+                }
+                return reportFreeStackMemory(ctx, sp);
+            },
+            .unset => @panic("alloc_realloc: old region memory_safety is unset"),
+            .allocated => {},
+        }
+
+        const old_a = old_ms.allocated;
+
+        // Check for field pointer
+        if (old_a.root_gid != null) {
+            return reportFreeFieldPointer(ctx, old_a);
+        }
+
+        // Check for double-free
+        if (old_a.freed) |previous_free| {
+            return reportDoubleFree(ctx, old_a, previous_free);
+        }
+
+        // Determine type_id for the free operation
+        const free_type_id = blk: {
+            if (params.allocator_inst) |alloc_inst| {
+                if (results[alloc_inst].refinement) |alloc_gid| {
+                    const alloc_ref = refinements.at(alloc_gid);
+                    if (alloc_ref.* == .allocator) {
+                        break :blk alloc_ref.allocator.type_id;
+                    }
+                }
+            }
+            break :blk params.type_id;
+        };
+
+        // Check for mismatched allocator
+        if (old_a.type_id != free_type_id) {
+            return reportMismatchedAllocator(ctx, old_a, free_type_id);
+        }
+
+        // Mark old slice as freed
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = ctx.buildPathName(results, refinements, slice),
+        };
+        setFreedRecursive(refinements, old_region_idx, free_meta);
+
+        // === 2. Mark new slice as allocated ===
+
+        // Result is errorunion → pointer → region → element
+        const eu_idx = results[index].refinement orelse @panic("alloc_realloc: no result refinement");
+        const eu = refinements.at(eu_idx);
+        if (eu.* != .errorunion) @panic("alloc_realloc: expected errorunion result");
+
+        const new_ptr_idx = eu.errorunion.to;
+        const new_ptr = refinements.at(new_ptr_idx);
+        if (new_ptr.* != .pointer) @panic("alloc_realloc: expected pointer inside errorunion");
+
+        const new_region_idx = new_ptr.pointer.to;
+        const new_region = refinements.at(new_region_idx);
+        if (new_region.* != .region) @panic("alloc_realloc: expected region inside pointer");
+
+        const new_element_ref = new_region.region.to;
+
+        // Determine type_id for allocation (same as free_type_id)
+        const type_id = free_type_id;
+
+        const alloc_base: AllocatedBase = .{
+            .meta = ctx.meta,
+            .type_id = type_id,
+            .root_gid = null,
+        };
+
+        // Set memory_safety on errorunion
+        eu.errorunion.analyte.memory_safety = .{ .allocated = .{
+            .meta = alloc_base.meta,
+            .type_id = alloc_base.type_id,
+            .root_gid = null,
+            .is_slice = true, // realloc works with slices
+        } };
+
+        // Set memory_safety on pointer
+        new_ptr.pointer.analyte.memory_safety = .{ .allocated = .{
+            .meta = alloc_base.meta,
+            .type_id = alloc_base.type_id,
+            .root_gid = null,
+            .is_slice = true, // realloc works with slices
+        } };
+
+        // Set memory_safety on region
+        new_region.region.analyte.memory_safety = .{ .allocated = .{
+            .meta = alloc_base.meta,
+            .type_id = alloc_base.type_id,
+            .root_gid = null,
+            .is_slice = true, // realloc works with slices
+        } };
+
+        // Set allocation state recursively on the element
+        setAllocatedRecursive(refinements, new_element_ref, alloc_base, null, true);
     }
 
     /// Handle load - detect use-after-free.
@@ -796,6 +1131,33 @@ pub const MemorySafety = union(enum) {
         // memory_safety may be null for stack allocations or untracked pointers
         const ms = pointee_analyte.memory_safety orelse return;
         // Only check use-after-free for heap allocations
+        if (ms != .allocated) return;
+
+        if (ms.allocated.freed) |free_site| {
+            return reportUseAfterFree(ctx, ms.allocated, free_site);
+        }
+    }
+
+    /// Handle array/slice element value access - detect use-after-free for slices.
+    /// For slices, the base is pointer → region → element.
+    pub fn array_elem_val(state: State, index: usize, params: tag.ArrayElemVal) !void {
+        _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // base must exist for slice_elem_val
+        const base = params.base orelse return;
+        const base_ref = results[base].refinement orelse return;
+        const base_refinement = refinements.at(base_ref).*;
+
+        // For slices: base is pointer → region
+        if (base_refinement != .pointer) return;
+        const region_idx = base_refinement.pointer.to;
+        const region_ref = refinements.at(region_idx);
+        if (region_ref.* != .region) return;
+
+        const ms = region_ref.region.analyte.memory_safety orelse return;
         if (ms != .allocated) return;
 
         if (ms.allocated.freed) |free_site| {
@@ -903,6 +1265,21 @@ pub const MemorySafety = union(enum) {
         const msg = std.fmt.bufPrint(&buf, "freed with {s}\n", .{destroy_type_name}) catch return error.FormatError;
         try ctx.writer.writeAll(msg);
         return error.MismatchedAllocator;
+    }
+
+    /// Report mismatched allocation method (create vs alloc)
+    /// alloc_is_slice: true if allocation was made with alloc (slice)
+    /// free_is_slice: true if free was attempted with free (expects slice)
+    fn reportMethodMismatch(ctx: *Context, allocation: Allocated, alloc_is_slice: bool, free_is_slice: bool) anyerror {
+        try ctx.meta.print(ctx.writer, "allocation method mismatch in ", .{});
+        const alloc_method = if (alloc_is_slice) "alloc" else "create";
+        const free_method = if (free_is_slice) "free" else "destroy";
+        try allocation.meta.print(ctx.writer, "allocated with ", .{});
+        try ctx.writer.writeAll(alloc_method);
+        try ctx.writer.writeAll(", freed with ");
+        try ctx.writer.writeAll(free_method);
+        try ctx.writer.writeAll("\n");
+        return error.MethodMismatch;
     }
 
     fn reportFreeStackMemory(ctx: *Context, sp: Stack) anyerror {
@@ -1100,7 +1477,8 @@ pub const MemorySafety = union(enum) {
                 ref.allocator.analyte.memory_safety = .{ .unset = {} };
             },
             .void => {},
-            .noreturn, .unimplemented, .region => unreachable,
+            .region => |r| retval_init(refinements, r.to, ctx),
+            .noreturn, .unimplemented => unreachable,
         }
     }
 };

@@ -148,6 +148,12 @@ The current early_returns implementation stores full State objects (with cloned 
 3. Should `branchIsUnreachable` be split into variants for cond_br/switch_br vs early_returns contexts?
 4. The current approach iterates over all results and recursively merges. For large functions, this could be expensive. Is there a more targeted approach?
 
+## Might Do
+
+### Pointer Arithmetic on Single-Item Pointers
+
+Pointer arithmetic (`ptr_add`, `ptr_sub`) on single-item pointers (`*T`) is tracked but not validated. Using pointer arithmetic to access beyond a single-item allocation is undefined behavior in Zig. CLR could potentially detect this by tracking whether a pointer points to a single-item vs a region.
+
 ## Desired But Unknown How to Implement
 
 ### Ownership Transfer to Objects or Collections
@@ -155,6 +161,10 @@ The current early_returns implementation stores full State objects (with cloned 
 Passing allocation responsibility to objects or collections (e.g., inserting into an ArrayList that takes ownership) is not tracked. The analyzer cannot determine when an object or collection becomes responsible for freeing memory.
 
 ## Not Planned for Near Future
+
+### Alignment Protection
+
+Detection of alignment violations (e.g., casting a pointer to a type with stricter alignment requirements) is not tracked.
 
 ### Full Interprocedural Analysis
 
@@ -191,7 +201,7 @@ The analyzer specifically recognizes `std.mem.Allocator` operations. Custom allo
 
 ### Bounds Checking
 
-Slice and array bounds checking is not performed. Out-of-bounds access is not detected.
+Slice and array bounds checking is not performed. Out-of-bounds access on regions is not detected.
 
 ### Optional Pointers in AIR
 

@@ -103,8 +103,11 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .set_union_tag => payloadSetUnionTag(info, datum),
         .get_union_tag => payloadGetUnionTag(info, datum),
         .@"try", .try_cold => payloadTry(info, datum),
-        .array_elem_val => payloadArrayElemVal(info, datum),
-        .ptr_elem_ptr => payloadPtrElemPtr(info, datum),
+        .array_elem_val, .slice_elem_val => payloadArrayElemVal(info, datum),
+        .ptr_elem_ptr, .slice_elem_ptr => payloadPtrElemPtr(info, datum),
+        .slice_ptr => payloadSlicePtr(info, datum),
+        .array_to_slice => payloadArrayToSlice(info, datum),
+        .ptr_add, .ptr_sub => payloadPtrAdd(info, datum),
         else => ".{}",
     };
 }
@@ -184,6 +187,41 @@ fn payloadPtrElemPtr(info: *const FnInfo, datum: Data) []const u8 {
     const lhs_ref: Ref = @enumFromInt(lhs_raw);
     const base: ?usize = if (lhs_ref.toIndex()) |idx| @intFromEnum(idx) else null;
     return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d} }}", .{base}, null);
+}
+
+/// Payload for slice_ptr - extracts the pointer from a slice.
+/// ty_op format: operand is the slice value.
+fn payloadSlicePtr(info: *const FnInfo, datum: Data) []const u8 {
+    // Read ty_op as raw bytes to get the operand
+    const raw_ptr: [*]const u32 = @ptrCast(&datum);
+    // ty_op: { ty: Ref (u32), operand: Ref (u32) }
+    const operand_raw: u32 = raw_ptr[1];
+    const operand_ref: Ref = @enumFromInt(operand_raw);
+    const slice: ?usize = if (operand_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(info.arena, ".{{ .slice = {?d} }}", .{slice}, null);
+}
+
+/// Payload for array_to_slice - converts array/many-pointer to slice.
+/// ty_op format: operand is the array/many-pointer value.
+fn payloadArrayToSlice(info: *const FnInfo, datum: Data) []const u8 {
+    // Read ty_op as raw bytes to get the operand
+    const raw_ptr: [*]const u32 = @ptrCast(&datum);
+    // ty_op: { ty: Ref (u32), operand: Ref (u32) }
+    const operand_raw: u32 = raw_ptr[1];
+    const operand_ref: Ref = @enumFromInt(operand_raw);
+    const src: ?usize = if (operand_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {?d} }}", .{src}, null);
+}
+
+/// Payload for ptr_add/ptr_sub - pointer arithmetic.
+/// ty_pl with Bin payload: lhs = pointer, rhs = offset.
+fn payloadPtrAdd(info: *const FnInfo, datum: Data) []const u8 {
+    const payload_index = datum.ty_pl.payload;
+    // Bin: lhs (Ref as u32), rhs (Ref as u32)
+    const lhs_raw = info.extra[payload_index];
+    const lhs_ref: Ref = @enumFromInt(lhs_raw);
+    const ptr: ?usize = if (lhs_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d} }}", .{ptr}, null);
 }
 
 /// Payload for ret_safe - just the src, caller_refinements and return_gid come from State.
@@ -285,6 +323,48 @@ fn extractAllocCreateType(info: *const FnInfo, datum: Data) []const u8 {
     };
 
     return typeToString(info.name_map, info.field_map, info.arena, info.ip, pointee_type);
+}
+
+/// Extract element type T from allocator.alloc() return type Allocator.Error![]T
+fn extractAllocAllocType(info: *const FnInfo, datum: Data) []const u8 {
+    const callee_ref = datum.pl_op.operand;
+    const ip_idx = callee_ref.toInterned() orelse return ".{ .unknown = {} }";
+
+    // Get function and its type
+    const func_key = info.ip.indexToKey(ip_idx);
+    const func_ty = switch (func_key) {
+        .func => |f| f.ty,
+        else => return ".{ .unknown = {} }",
+    };
+
+    // Get function type to access return_type
+    const func_type_key = info.ip.indexToKey(func_ty);
+    const return_type = switch (func_type_key) {
+        .func_type => |ft| ft.return_type,
+        else => return ".{ .unknown = {} }",
+    };
+
+    // Return type is Allocator.Error![]T - unwrap error union to get []T
+    const slice_type: InternPool.Index = blk: {
+        const return_key = info.ip.indexToKey(return_type);
+        break :blk switch (return_key) {
+            .error_union_type => |eu| eu.payload_type,
+            .ptr_type => return_type, // Already unwrapped
+            else => return ".{ .unknown = {} }",
+        };
+    };
+
+    // Now unwrap []T to get element type T
+    // Slice is ptr_type with .flags.size = .slice
+    const element_type: InternPool.Index = blk: {
+        const slice_key = info.ip.indexToKey(slice_type);
+        break :blk switch (slice_key) {
+            .ptr_type => |p| p.child,
+            else => return ".{ .unknown = {} }",
+        };
+    };
+
+    return typeToString(info.name_map, info.field_map, info.arena, info.ip, element_type);
 }
 
 /// Payload for struct_field_ptr_index_N - gets pointer to a struct field.
@@ -402,6 +482,59 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 const allocator_inst = extractAllocatorInst(datum, info.extra);
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, ptr_inst, allocator_info.id, allocator_inst }, null);
+            }
+            if (isAllocatorAlloc(info.ip, datum)) {
+                // Prune allocator.alloc() - emit special tag for slice tracking
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                const element_type = extractAllocAllocType(info, datum);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
+            }
+            if (isAllocatorFree(info.ip, datum)) {
+                // Prune allocator.free() - emit special tag with slice inst
+                // free has 2 args: (self, slice) - we want arg index 1 (same as destroy)
+                const slice_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
+                    // Can't determine slice instruction, fall through to regular call
+                    const call_parts = payloadCallParts(info, datum);
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
+                };
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_free = .{{ .slice = {d}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, slice_inst, allocator_info.id, allocator_inst }, null);
+            }
+            // alignedAlloc is like alloc but FQN doesn't match "mem.Allocator.alloc" pattern
+            if (isAllocatorAlignedAlloc(info.ip, datum)) {
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                const element_type = extractAllocAllocType(info, datum);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
+            }
+            // resize returns bool - emit alloc_resize tag (produces scalar)
+            if (isAllocatorResize(info.ip, datum)) {
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_resize = .{{}} }});\n", .{inst_index}, null);
+            }
+            // realloc/remap frees old slice and returns new slice
+            if (isAllocatorRealloc(info.ip, datum) or isAllocatorRemap(info.ip, datum)) {
+                const slice_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
+                    const call_parts = payloadCallParts(info, datum);
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
+                };
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                const element_type = extractAllocAllocType(info, datum);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_realloc = .{{ .slice = {d}, .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, slice_inst, allocator_info.id, allocator_inst, element_type }, null);
+            }
+            // dupe/dupeZ allocate a copy - treat like alloc
+            if (isAllocatorDupe(info.ip, datum) or isAllocatorDupeZ(info.ip, datum)) {
+                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
+                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
+                const element_type = extractAllocAllocType(info, datum);
+                const allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
             }
             // Check if call returns std.mem.Allocator - emit mkallocator tag
             if (getCallAllocatorReturnInfo(info.ip, datum)) |allocator_info| {
@@ -550,9 +683,10 @@ fn typeToStringInner(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), fiel
         .f16_type, .f32_type, .f64_type, .f80_type, .f128_type => ".{ .id = null, .ty = .{ .scalar = {} } }",
         .bool_type, .c_char_type, .comptime_int_type, .comptime_float_type => ".{ .id = null, .ty = .{ .scalar = {} } }",
         .undefined_type, .null_type, .anyerror_type, .type_type => ".{ .id = null, .ty = .{ .scalar = {} } }",
-        // Pointer types (well-known)
-        .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => ".{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } }",
-        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => ".{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .scalar = {} } } } }",
+        // Many-pointers are pointer → region → element (same as slices)
+        .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => ".{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .region = &.{ .id = null, .ty = .{ .scalar = {} } } } } } }",
+        // Slices are pointer → region → element
+        .slice_const_u8_type, .slice_const_u8_sentinel_0_type => ".{ .id = null, .ty = .{ .pointer = &.{ .id = null, .ty = .{ .region = &.{ .id = null, .ty = .{ .scalar = {} } } } } } }",
         // For other types, need to look up in InternPool
         else => if (name_map) |nm| typeToStringLookup(nm, field_map, arena, ip, ty, visited) else typeToStringLookupNoNames(arena, ip, ty, visited),
     };
@@ -574,6 +708,10 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
         },
         .ptr_type => |ptr| blk: {
             const child_str = typeToStringInner(null, null, arena, ip, ptr.child, visited);
+            // Slices and many-pointers are pointer → region → element
+            if (ptr.flags.size == .slice or ptr.flags.size == .many) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .pointer = &.{{ .id = null, .ty = .{{ .region = &{s} }} }} }} }}", .{child_str}, null);
+            }
             break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .pointer = &{s} }} }}", .{child_str}, null);
         },
         .opt_type => |child| blk: {
@@ -612,6 +750,10 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         },
         .ptr_type => |ptr| blk: {
             const child_str = typeToStringInner(name_map, field_map, arena, ip, ptr.child, visited);
+            // Slices and many-pointers are pointer → region → element
+            if (ptr.flags.size == .slice or ptr.flags.size == .many) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .pointer = &.{{ .id = null, .ty = .{{ .region = &{s} }} }} }} }}", .{child_str}, null);
+            }
             break :blk clr_allocator.allocPrint(arena, ".{{ .id = null, .ty = .{{ .pointer = &{s} }} }}", .{child_str}, null);
         },
         .opt_type => |child| blk: {
@@ -1269,6 +1411,54 @@ fn isAllocatorDestroy(ip: *const InternPool, datum: Data) bool {
     return isAllocatorDestroyFqn(fqn);
 }
 
+/// Check if an interned function reference is an Allocator.alloc call (slice allocation)
+fn isAllocatorAlloc(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorAllocFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.free call (slice deallocation)
+fn isAllocatorFree(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorFreeFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.alignedAlloc call
+fn isAllocatorAlignedAlloc(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorAlignedAllocFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.resize call
+fn isAllocatorResize(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorResizeFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.remap call
+fn isAllocatorRemap(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorRemapFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.realloc call
+fn isAllocatorRealloc(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorReallocFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.dupe call
+fn isAllocatorDupe(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorDupeFqn(fqn);
+}
+
+/// Check if an interned function reference is an Allocator.dupeZ call
+fn isAllocatorDupeZ(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isAllocatorDupeZFqn(fqn);
+}
+
 /// Extract FQN from a call instruction's callee reference
 fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
     const callee_ref = datum.pl_op.operand;
@@ -1519,6 +1709,54 @@ pub fn isAllocatorCreateFqn(fqn: []const u8) bool {
 /// Matches patterns like "mem.Allocator.destroy__anon_*" or "std.mem.Allocator.destroy__anon_*"
 pub fn isAllocatorDestroyFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.Allocator.destroy") != null;
+}
+
+/// Check if FQN is an Allocator.alloc call (testable without InternPool)
+/// Matches patterns like "mem.Allocator.alloc" for slice allocation
+pub fn isAllocatorAllocFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.alloc") != null;
+}
+
+/// Check if FQN is an Allocator.free call (testable without InternPool)
+/// Matches patterns like "mem.Allocator.free" for slice deallocation
+pub fn isAllocatorFreeFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.free") != null;
+}
+
+/// Check if FQN is an Allocator.alignedAlloc call (testable without InternPool)
+/// Note: alignedAlloc FQN doesn't match the generic "mem.Allocator.alloc" pattern
+pub fn isAllocatorAlignedAllocFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.alignedAlloc") != null;
+}
+
+/// Check if FQN is an Allocator.resize call (testable without InternPool)
+/// resize returns bool - in-place resize attempt
+pub fn isAllocatorResizeFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.resize") != null;
+}
+
+/// Check if FQN is an Allocator.remap call (testable without InternPool)
+/// remap returns ?[]T - resize with potential relocation
+pub fn isAllocatorRemapFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.remap") != null;
+}
+
+/// Check if FQN is an Allocator.realloc call (testable without InternPool)
+/// realloc returns Error![]T - full reallocation
+pub fn isAllocatorReallocFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.realloc") != null;
+}
+
+/// Check if FQN is an Allocator.dupe call (testable without InternPool)
+/// dupe returns Error![]T - allocates copy of slice
+pub fn isAllocatorDupeFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.dupe") != null;
+}
+
+/// Check if FQN is an Allocator.dupeZ call (testable without InternPool)
+/// dupeZ returns Error![:0]T - allocates copy with null terminator
+pub fn isAllocatorDupeZFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.Allocator.dupeZ") != null;
 }
 
 /// Check if a type (by InternPool index) is std.mem.Allocator.
