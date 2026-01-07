@@ -66,7 +66,7 @@ pub const Name = u32;
 /// the parameters of a instruction.  Some operations are expected to set
 /// the type based on interned information; in those cases, the type will be used.
 pub const Type = struct {
-    id: ?Name,
+    id: ?Name = null,
     ty: union(enum) {
         scalar: void,
         pointer: *const Type,
@@ -83,15 +83,15 @@ pub const Type = struct {
 };
 
 /// Source reference for instructions - indicates where a value comes from.
-/// Used by store, br, ret_safe, and other tags that reference source values,
-/// as well as by calls.
+/// Used by store, br, ret_safe, load, and other tags that reference source values.
 pub const Src = union(enum) {
     /// Runtime value from a result in the results table (index into results[])
     inst: usize,
-    /// Compile-time known value (interned in InternPool)
-    interned: Type,
-    /// Other sources (globals, etc.) - currently unimplemented
-    other: void,
+    /// Interned variable by nav_idx - look up in refinements.getGlobal()
+    /// If found, it's a tracked user global; if not, it's a non-user interned var
+    int_var: u32,
+    /// Interned constant - reify refinement from embedded type
+    int_const: Type,
 };
 
 /// Convert a Type (from codegen) to a Refinement.
@@ -100,28 +100,28 @@ pub const Src = union(enum) {
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
     const type_id = ty.id orelse 0;
     return switch (ty.ty) {
-        .scalar => .{ .scalar = .{ .type_id = type_id } },
+        .scalar => .{ .scalar = .{} },
         .void => .void,
         .pointer => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .pointer = .{ .type_id = type_id, .to = child_idx } };
+            return .{ .pointer = .{ .to = child_idx } };
         },
         .optional => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .optional = .{ .type_id = type_id, .to = child_idx } };
+            return .{ .optional = .{ .to = child_idx } };
         },
         .errorunion => |child| {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .errorunion = .{ .type_id = type_id, .to = child_idx } };
+            return .{ .errorunion = .{ .to = child_idx } };
         },
         .null => |child| {
             // .null is a null optional value - creates same structure as .optional
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .optional = .{ .type_id = type_id, .to = child_idx } };
+            return .{ .optional = .{ .to = child_idx } };
         },
         .undefined => |child| {
             // .undefined wraps a type - recurse into inner type.
@@ -138,7 +138,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
             // Region container has null undefined (only child has undefined state)
-            return .{ .region = .{ .type_id = type_id, .to = child_idx } };
+            return .{ .region = .{ .to = child_idx } };
         },
         inline .@"struct", .@"union" => |type_fields, class_tag| blk: {
             const allocator = refinements.list.allocator;
@@ -168,7 +168,7 @@ pub const Alloc = struct {
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
         const pointee_idx = try state.refinements.appendEntity(pointee_ref);
         // Create pointer entity pointing to the typed pointee
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = pointee_idx } });
         try splat(.alloc, state, index, self);
     }
 };
@@ -184,9 +184,9 @@ pub const AllocCreate = struct {
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
         const pointee_idx = try state.refinements.appendEntity(pointee_ref);
         // Create pointer entity pointing to the typed pointee
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .to = pointee_idx } });
         // Wrap in error union
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .type_id = 0, .to = ptr_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .to = ptr_idx } });
         try splat(.alloc_create, state, index, self);
     }
 };
@@ -217,11 +217,11 @@ pub const AllocAlloc = struct {
         const element_ref = try typeToRefinement(self.ty, state.refinements);
         const element_idx = try state.refinements.appendEntity(element_ref);
         // Create region pointing to element (uniform region model - all elements share state)
-        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_idx } });
+        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .to = element_idx } });
         // Create pointer to region (the slice itself)
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = region_idx } });
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .to = region_idx } });
         // Wrap in error union
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .type_id = 0, .to = ptr_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .to = ptr_idx } });
         try splat(.alloc_alloc, state, index, self);
     }
 };
@@ -247,7 +247,7 @@ pub const AllocResize = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = self;
         // resize returns a bool - create scalar result
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.alloc_resize, state, index, .{});
     }
 };
@@ -268,9 +268,9 @@ pub const AllocRealloc = struct {
         // Create: errorunion → pointer → region → element_type
         const element_ref = try typeToRefinement(self.ty, state.refinements);
         const element_idx = try state.refinements.appendEntity(element_ref);
-        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_idx } });
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = region_idx } });
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .type_id = 0, .to = ptr_idx } });
+        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .to = element_idx } });
+        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .to = region_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .to = ptr_idx } });
         try splat(.alloc_realloc, state, index, self);
     }
 };
@@ -321,14 +321,19 @@ pub const Arg = struct {
                 state.results[index].refinement = @intCast(src_gid);
                 // name_id is in inst_tag (stored by Inst.apply)
             },
-            .interned => |ty| {
+            .int_const => |ty| {
                 // Compile-time constant - create entity from type info in global table
                 const ref = try typeToRefinement(ty, state.refinements);
                 const local_idx = try state.refinements.appendEntity(ref);
                 state.results[index].refinement = local_idx;
                 // name_id is in inst_tag (stored by Inst.apply)
             },
-            .other => @panic("Arg: .other source not yet implemented"),
+            .int_var => |nav_idx| {
+                // Interned variable - look up its GID from the global_map
+                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+                    @panic("Arg: interned variable not registered");
+                state.results[index].refinement = global_gid;
+            },
         }
         try splat(.arg, state, index, self);
     }
@@ -356,7 +361,7 @@ pub const Bitcast = struct {
                 if (self.ty.ty == .optional and src_ref.* == .pointer) {
                     // Create optional wrapper that points to the existing pointer entity
                     const opt_gid = try state.refinements.appendEntity(.{
-                        .optional = .{ .type_id = 0, .to = src_gid },
+                        .optional = .{ .to = src_gid },
                     });
                     state.results[index].refinement = opt_gid;
                 } else {
@@ -364,7 +369,13 @@ pub const Bitcast = struct {
                     state.results[index].refinement = src_gid;
                 }
             },
-            .interned, .other => {},
+            .int_var => |nav_idx| {
+                // Interned variable pointer - look up its GID
+                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+                    @panic("Bitcast: interned variable not registered");
+                state.results[index].refinement = global_gid;
+            },
+            .int_const => {},
         }
 
         try splat(.bitcast, state, index, self);
@@ -401,8 +412,14 @@ pub const Br = struct {
                 const src_gid = state.results[src].refinement orelse return;
                 state.results[self.block].refinement = src_gid;
             },
-            // Interned values are handled by analysis modules (e.g., undefined.br marks as defined)
-            .interned, .other => {},
+            .int_var => |nav_idx| {
+                // Global variable - share its GID with the block
+                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+                    @panic("Br: global variable not registered");
+                state.results[self.block].refinement = global_gid;
+            },
+            // Interned constants are handled by analysis modules (e.g., undefined.br marks as defined)
+            .int_const => {},
         }
         try splat(.br, state, index, self);
     }
@@ -511,43 +528,37 @@ pub const DbgVarVal = struct {
 /// Load dereferences a pointer and produces the value stored at that memory location.
 /// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
 pub const Load = struct {
-    /// Index into results[] array. Null when loading from a global or constant
-    /// pointer (interned value with no instruction to trace).
-    ptr: ?usize,
-    /// Type of the loaded value (from AIR ty_op)
-    ty: Type,
+    /// Source pointer - instruction, interned variable, or interned constant
+    ptr_src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const ptr = self.ptr orelse {
-            // Interned/global pointer - use type info to create proper structure
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-            try splat(.load, state, index, self);
-            return;
-        };
-
-        const ptr_ref = state.results[ptr].refinement orelse {
-            // Pointer has no refinement - use type info to create proper structure
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-            // Path derived from inst_tag.load.ptr at error time
-            try splat(.load, state, index, self);
-            return;
-        };
-
-        // Follow pointer to get pointee
-        const pointee_idx = switch (state.refinements.at(ptr_ref).*) {
-            .pointer => |p| p.to,
-            else => {
-                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-                // Path derived from inst_tag.load.ptr at error time
+        // Get the pointer's refinement GID based on source type
+        const ptr_gid: ?Gid = switch (self.ptr_src) {
+            .inst => |ptr| state.results[ptr].refinement,
+            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_const => |ty| {
+                // Interned constant pointer - create refinement from type
+                const ref = try typeToRefinement(ty, state.refinements);
+                _ = try Inst.clobberInst(state.refinements, state.results, index, ref);
                 try splat(.load, state, index, self);
                 return;
             },
         };
 
+        const effective_ptr_gid = ptr_gid orelse {
+            // No pointer refinement - this is a bug, panic
+            @panic("Load: pointer source has no refinement");
+        };
+
+        // Follow pointer to get pointee
+        const pointee_idx = switch (state.refinements.at(effective_ptr_gid).*) {
+            .pointer => |p| p.to,
+            else => @panic("Load: expected pointer refinement"),
+        };
+
         // Semideep copy: create new entity copying values, but pointers reference same target
         const new_idx = try state.refinements.semideepCopy(pointee_idx);
         state.results[index].refinement = new_idx;
-        // Path derived from inst_tag.load.ptr at error time
         try splat(.load, state, index, self);
     }
 };
@@ -588,7 +599,7 @@ pub const StructFieldPtr = struct {
         switch (container) {
             .@"struct" => |data| {
                 const field_idx = data.fields[self.field_index];
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = field_idx } });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = field_idx } });
             },
             .@"union" => |data| {
                 const field_idx = idx: {
@@ -605,7 +616,7 @@ pub const StructFieldPtr = struct {
                     state.refinements.at(container_idx).@"union".fields[self.field_index] = new_idx;
                     break :idx new_idx;
                 };
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = field_idx } });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = field_idx } });
             },
             else => |t| std.debug.panic("struct_field_ptr: expected struct or union, got {s}", .{@tagName(t)}),
         }
@@ -718,13 +729,20 @@ pub const OptionalPayload = struct {
                     state.results[index].refinement = src_ref_gid;
                 }
             },
-            .interned => {
-                // optional_payload shouldn't receive interned values
-                @panic("optional_payload: unexpected interned source");
+            .int_const => {
+                // optional_payload shouldn't receive interned constants
+                @panic("optional_payload: unexpected int_const source");
             },
-            .other => {
-                // Global/external source - mark as unimplemented
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
+            .int_var => |nav_idx| {
+                // Interned variable - look up its GID and extract payload
+                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+                    @panic("OptionalPayload: interned variable not registered");
+                const src_ref = state.refinements.at(global_gid);
+                if (src_ref.* == .optional) {
+                    state.results[index].refinement = src_ref.optional.to;
+                } else {
+                    state.results[index].refinement = global_gid;
+                }
             },
         }
         try splat(.optional_payload, state, index, self);
@@ -769,7 +787,7 @@ pub const RetSafe = struct {
                 // Deep copy to avoid double-free when struct/union fields are freed
                 cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(src_gid).*);
             },
-            .interned => |ty| {
+            .int_const => |ty| {
                 // Comptime return value
                 if (ty.ty == .void) {
                     cloned.at(return_gid).* = .void;
@@ -783,9 +801,11 @@ pub const RetSafe = struct {
                     splatInitDefined(cloned, return_gid, state.ctx);
                 }
             },
-            .other => {
-                // Global/other source - not yet supported
-                @panic("ret_safe: .other source not yet implemented");
+            .int_var => |nav_idx| {
+                // Return an interned variable - copy its value to return slot
+                const global_gid = cloned.getGlobal(nav_idx) orelse
+                    @panic("RetSafe: interned variable not registered");
+                cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(global_gid).*);
             },
         }
 
@@ -826,7 +846,7 @@ pub const RetPtr = struct {
         const return_idx = try state.refinements.appendEntity(return_ref);
 
         // Create a pointer to this entity as the result
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = return_idx } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = return_idx } });
 
         try splat(.ret_ptr, state, index, self);
     }
@@ -943,8 +963,16 @@ pub const UnwrapErrunionPayload = struct {
                 const payload_gid = src_ref.errorunion.to;
                 state.results[index].refinement = payload_gid;
             },
-            .interned, .other => {
-                std.debug.panic("unwrap_errunion_payload: interned/other sources not supported", .{});
+            .int_var => |nav_idx| {
+                // Global variable - look up its GID and extract payload
+                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+                    @panic("UnwrapErrunionPayload: global variable not registered");
+                const src_ref = state.refinements.at(global_gid).*;
+                const payload_gid = src_ref.errorunion.to;
+                state.results[index].refinement = payload_gid;
+            },
+            .int_const => {
+                std.debug.panic("unwrap_errunion_payload: int_const sources not supported", .{});
             },
         }
         try splat(.unwrap_errunion_payload, state, index, self);
@@ -977,20 +1005,26 @@ pub const WrapErrunionPayload = struct {
                 const src_ref = state.refinements.at(src_gid).*;
                 break :blk try Refinement.copyTo(src_ref, state.refinements, state.refinements);
             },
-            .interned => |i| blk: {
-                // Create from type - wrap in Type struct
-                const ref = try typeToRefinement(.{ .id = i.id, .ty = i.ty }, state.refinements);
-                break :blk try state.refinements.appendEntity(ref);
+            .int_var => |nav_idx| blk: {
+                // Get GID from global_map
+                const global_gid = state.refinements.getGlobal(nav_idx) orelse {
+                    // Interned var not found - create based on type
+                    const ref = try typeToRefinement(self.ty.ty.errorunion.*, state.refinements);
+                    break :blk try state.refinements.appendEntity(ref);
+                };
+                // Deep copy the global so we have our own entity
+                const global_ref = state.refinements.at(global_gid).*;
+                break :blk try Refinement.copyTo(global_ref, state.refinements, state.refinements);
             },
-            .other => blk: {
-                const ref = try typeToRefinement(self.ty.ty.errorunion.*, state.refinements);
+            .int_const => |ty| blk: {
+                // Create from type
+                const ref = try typeToRefinement(ty, state.refinements);
                 break :blk try state.refinements.appendEntity(ref);
             },
         };
 
         // Create the errorunion that points to the payload
         const errunion_gid = try state.refinements.appendEntity(.{ .errorunion = .{
-            .type_id = self.ty.id orelse 0,
             .to = payload_gid,
         } });
 
@@ -1031,7 +1065,6 @@ pub const ErrunionPayloadPtrSet = struct {
         // Pointer is defined (we have a valid address to the payload)
         const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{
             .analyte = .{ .undefined = .{ .defined = {} } },
-            .type_id = 0,
             .to = payload_gid,
         } });
 
@@ -1043,7 +1076,7 @@ pub const ErrunionPayloadPtrSet = struct {
 pub fn Simple(comptime instr: anytype) type {
     return struct {
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             try splat(instr, state, index, self);
         }
     };
@@ -1059,8 +1092,8 @@ pub fn OverflowOp(comptime instr: anytype) type {
             const allocator = state.refinements.list.allocator;
 
             // Create two scalar fields (result and overflow flag)
-            const field0_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            const field1_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+            const field0_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const field1_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
 
             // clobberInst takes ownership of fields slice
             const fields = allocator.alloc(Gid, 2) catch @panic("out of memory");
@@ -1102,7 +1135,7 @@ pub const IsNonNull = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.is_non_null, state, index, self);
     }
 };
@@ -1115,7 +1148,7 @@ pub const IsNull = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.is_null, state, index, self);
     }
 };
@@ -1215,7 +1248,7 @@ pub const GetUnionTag = struct {
     operand: ?usize, // the union instruction we're getting the tag from
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{ .type_id = 0 } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.get_union_tag, state, index, self);
     }
 };
@@ -1246,12 +1279,16 @@ pub const UnionInit = struct {
                         // Runtime value - share the source entity
                         fields[i] = state.results[src].refinement;
                     },
-                    .interned => |init_ty| {
+                    .int_const => |init_ty| {
                         // Comptime value - create entity from type
                         const field_ref = try typeToRefinement(init_ty, state.refinements);
                         fields[i] = try state.refinements.appendEntity(field_ref);
                     },
-                    .other => @panic("UnionInit: .other source not yet implemented"),
+                    .int_var => |nav_idx| {
+                        // Interned variable - look up its GID
+                        fields[i] = state.refinements.getGlobal(nav_idx) orelse
+                            @panic("UnionInit: interned variable not registered");
+                    },
                 }
             } else {
                 // Inactive field
@@ -1306,9 +1343,9 @@ pub const PtrAdd = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const ptr_idx = self.ptr orelse {
             // Interned pointer - create fresh
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
             try splat(.ptr_add, state, index, self);
             return;
         };
@@ -1331,9 +1368,9 @@ pub const ArrayToSlice = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const src_idx = self.src orelse {
             // Interned source - create fresh pointer→region
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
             try splat(.array_to_slice, state, index, self);
             return;
         };
@@ -1343,9 +1380,9 @@ pub const ArrayToSlice = struct {
             state.results[index].refinement = src_gid;
         } else {
             // Source has no refinement - create fresh
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
         }
         try splat(.array_to_slice, state, index, self);
     }
@@ -1362,9 +1399,9 @@ pub const SlicePtr = struct {
         const slice_idx = self.slice orelse {
             // Interned slice (e.g., string literal) - create fresh pointer→region
             // No memory_safety needed - these are static data, not heap allocations
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .type_id = 0, .to = element_gid } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
+            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
             try splat(.slice_ptr, state, index, self);
             return;
         };
@@ -1380,7 +1417,7 @@ pub const SlicePtr = struct {
         // Create a NEW pointer that points to the SAME region
         // This allows memory_safety.slice_ptr to set root_gid on the pointer
         const region_gid = slice_ref.pointer.to;
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region_gid } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
         try splat(.slice_ptr, state, index, self);
     }
 };
@@ -1403,7 +1440,7 @@ pub const PtrElemPtr = struct {
         const ptr = base_refinement.pointer;
         const region = state.refinements.at(ptr.to).region;
         // Create pointer to the shared element (uniform region model)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .type_id = 0, .to = region.to } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region.to } });
         try splat(.ptr_elem_ptr, state, index, self);
     }
 };
@@ -1531,6 +1568,16 @@ pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void
             Analysis.retval_init_defined(refinements, gid);
         } else if (@hasDecl(Analysis, "retval_init")) {
             Analysis.retval_init(refinements, gid, ctx);
+        }
+    }
+}
+
+/// Initialize a global variable refinement.
+/// Dispatches to init_global handlers to set up analysis state (e.g., undefined tracking).
+pub fn splatInitGlobal(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool) void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "init_global")) {
+            Analysis.init_global(refinements, gid, ctx, is_undefined);
         }
     }
 }
@@ -1982,7 +2029,7 @@ test "dbg_var_ptr sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc to create a pointer
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
     try std.testing.expect(results[1].name_id == null);
 
     // dbg_var_ptr should set the name_id on the target instruction
@@ -2026,7 +2073,7 @@ test "dbg_var_val sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // Set up a result at index 1
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .type_id = 0 } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
     try std.testing.expect(results[1].name_id == null);
 
     // dbg_var_val should set the name_id on the target instruction
@@ -2048,7 +2095,7 @@ test "arg shares eidx from caller (global refinements)" {
     defer refinements.deinit();
 
     // With global refinements, the caller's entity is already in refinements
-    const arg_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const arg_gid = try refinements.appendEntity(.{ .scalar = .{} });
 
     var results = [_]Inst{.{}} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -2077,10 +2124,10 @@ test "br shares source refinement with block" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a block at index 0
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
 
     // Create a value at index 1
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{ .type_id = 0 } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
     const src_gid = results[1].refinement.?;
 
     // br should share the source refinement with the block
@@ -2126,14 +2173,13 @@ test "optional_payload extracts inner value from optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional with a scalar inside, marked as non-null (checked)
-    const inner_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const opt_gid = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .non_null = .{
             .function = "test",
             .file = "test.zig",
             .line = 1,
         } } },
-        .type_id = 0,
         .to = inner_gid,
     } });
     results[0].refinement = opt_gid;
@@ -2160,8 +2206,8 @@ test "unwrap_errunion_payload extracts payload from error union" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an error union with a scalar payload
-    const payload_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-    const eu_gid = try refinements.appendEntity(.{ .errorunion = .{ .type_id = 0, .to = payload_gid } });
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const eu_gid = try refinements.appendEntity(.{ .errorunion = .{ .to = payload_gid } });
     results[0].refinement = eu_gid;
 
     // unwrap_errunion_payload should extract the payload
@@ -2214,12 +2260,12 @@ test "block creates refinement based on type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Block with scalar type
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
 
     // Block with void type
-    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .id = null, .ty = .{ .void = {} } } } });
+    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .ty = .{ .void = {} } } } });
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
@@ -2260,8 +2306,8 @@ test "struct_field_ptr gets pointer to struct field" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a pointer to a struct with two scalar fields
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{} });
     const fields = try allocator.alloc(Gid, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
@@ -2269,11 +2315,11 @@ test "struct_field_ptr gets pointer to struct field" {
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = struct_eidx } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = struct_eidx } });
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -2297,8 +2343,8 @@ test "struct_field_val extracts field value from struct" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a struct with two scalar fields (both defined)
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } } } });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } } } });
     const fields = try allocator.alloc(Gid, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;
@@ -2309,7 +2355,7 @@ test "struct_field_val extracts field value from struct" {
     results[0].refinement = struct_eidx;
 
     // struct_field_val should extract field 0
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } });
 
     // Result should share the field's entity
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
@@ -2330,8 +2376,8 @@ test "is_non_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional
-    const inner_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = inner_gid } });
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
     results[0].refinement = opt_gid;
 
     // is_non_null should record the check
@@ -2358,8 +2404,8 @@ test "is_null records check on optional" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an optional
-    const inner_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = inner_gid } });
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
     results[0].refinement = opt_gid;
 
     // is_null should record the check
@@ -2386,8 +2432,8 @@ test "set_union_tag updates union variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a union with two fields
-    const field0_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-    const field1_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const field0_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const field1_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const fields = try allocator.alloc(?Gid, 2);
     fields[0] = field0_gid;
     fields[1] = field1_gid;
@@ -2395,11 +2441,11 @@ test "set_union_tag updates union variant" {
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .type_id = 0, .to = union_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = union_gid } });
     results[0].refinement = ptr_gid;
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
 
     // The union's active field should be set (field 1), others null
     const union_ref = refinements.at(union_gid);
@@ -2422,7 +2468,7 @@ test "get_union_tag produces scalar" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a union
-    const field_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const field_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const fields = try allocator.alloc(?Gid, 1);
     fields[0] = field_gid;
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{
@@ -2453,12 +2499,12 @@ test "union_init creates union with active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a value to use as the init value
-    const val_gid = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    const val_gid = try refinements.appendEntity(.{ .scalar = .{} });
     results[0].refinement = val_gid;
 
     // union_init should create a union with active variant set
     try Inst.apply(state, 1, .{ .union_init = .{
-        .ty = .{ .id = null, .ty = .{ .@"union" = &.{ .{ .id = null, .ty = .{ .scalar = {} } }, .{ .id = null, .ty = .{ .scalar = {} } } } } },
+        .ty = .{ .ty = .{ .@"union" = &.{ .{ .ty = .{ .scalar = {} } }, .{ .ty = .{ .scalar = {} } } } } },
         .field_index = 1,
         .init = .{ .inst = 0 },
     } });

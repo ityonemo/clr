@@ -121,7 +121,10 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
         },
         .load => |l| {
             // Load inherits name from its pointer source
-            const ptr = l.ptr orelse return null;
+            const ptr = switch (l.ptr_src) {
+                .inst => |idx| idx,
+                .int_var, .int_const => return null,
+            };
             return self.buildPathName(results, refinements, ptr);
         },
         .arg => |a| {
@@ -132,7 +135,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
             // Optional unwrap: base.?
             const src_idx = switch (op.src) {
                 .inst => |idx| idx,
-                .interned, .other => return null,
+                .int_const, .int_var => return null,
             };
             const base_path = self.buildPathName(results, refinements, src_idx) orelse return null;
             const arena_alloc = self.error_name_arena.allocator();
@@ -283,7 +286,7 @@ test "buildPathName returns name from arg tag" {
     defer refinements.deinit();
 
     // Inst with arg tag containing name_id
-    var results = [_]Inst{.{ .inst_tag = .{ .arg = .{ .value = .{ .other = {} }, .name_id = 2 } } }};
+    var results = [_]Inst{.{ .inst_tag = .{ .arg = .{ .value = .{ .int_const = .{ .ty = .{ .scalar = {} } } }, .name_id = 2 } } }};
 
     const path = ctx.buildPathName(&results, &refinements, 0);
     try std.testing.expectEqualStrings("bar", path.?);
@@ -303,7 +306,7 @@ test "buildPathName for load inherits from pointer source" {
     // Inst 1: load from inst 0
     var results = [_]Inst{
         .{ .name_id = 1 }, // foo
-        .{ .inst_tag = .{ .load = .{ .ptr = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .load = .{ .ptr_src = .{ .inst = 0 } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 1);
@@ -368,13 +371,13 @@ test "buildPathName for struct_field_ptr builds field path" {
     // Create a pointer to struct refinement for inst 0
     // The struct has type_id = 100
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .type_id = 0 } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
 
     // Inst 0: named variable "foo" pointing to struct
     // Inst 1: struct_field_ptr accessing field 0 (bar) of inst 0
     var results = [_]Inst{
         .{ .name_id = 1, .refinement = ptr_gid }, // foo
-        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 1);
@@ -395,7 +398,7 @@ test "buildPathName for compound path: foo.?.bar" {
     // Create refinements for the path: foo (optional containing ptr to struct)
     // When unwrapped, gives pointer to struct with type_id = 100
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 100, .fields = &.{} } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid, .type_id = 0 } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
 
     // Inst 0: named variable "foo" (the optional)
     // Inst 1: optional_payload of inst 0 -> foo.? (gives ptr to struct)
@@ -403,7 +406,7 @@ test "buildPathName for compound path: foo.?.bar" {
     var results = [_]Inst{
         .{ .name_id = 1 }, // foo
         .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 0 } } }, .refinement = ptr_gid },
-        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 1, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 1, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 2);

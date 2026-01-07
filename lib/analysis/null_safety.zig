@@ -180,18 +180,17 @@ pub const NullSafety = union(enum) {
 
         // Check if we're storing null or a value
         switch (params.src) {
-            .interned => |ty| {
+            .int_const => |ty| {
                 if (ty.ty == .@"null") {
                     pointee.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
                 } else {
                     pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
                 }
             },
-            .inst => {
-                // Runtime value - mark as non_null
+            .inst, .int_var => {
+                // Runtime value or interned var - mark as non_null
                 pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
             },
-            .other => @panic("store: unexpected .other src for optional"),
         }
     }
 
@@ -281,8 +280,8 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
 }
 
 // Helper type for testing null stores
-const test_scalar_type: tag.Type = .{ .id = null, .ty = .{ .scalar = {} } };
-const test_null_type: tag.Type = .{ .id = null, .ty = .{ .@"null" = &test_scalar_type } };
+const test_scalar_type: tag.Type = .{ .ty = .{ .scalar = {} } };
+const test_null_type: tag.Type = .{ .ty = .{ .@"null" = &test_scalar_type } };
 
 test "is_non_null records check on optional" {
     const allocator = std.testing.allocator;
@@ -297,7 +296,7 @@ test "is_non_null records check on optional" {
     defer refinements.deinit();
 
     // Create an optional refinement
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -324,7 +323,7 @@ test "is_null records check on optional" {
     defer refinements.deinit();
 
     // Create an optional refinement
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -356,7 +355,7 @@ test "cond_br sets non_null on true branch after is_non_null check" {
             .inst = 1,
             .kind = .non_null,
         } } },
-        .type_id = 0, .to = 0,
+        .to = 0,
     } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 3;
@@ -388,7 +387,7 @@ test "cond_br sets null on false branch after is_non_null check" {
             .inst = 1,
             .kind = .non_null,
         } } },
-        .type_id = 0, .to = 0,
+        .to = 0,
     } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 3;
@@ -413,7 +412,7 @@ test "optional_payload errors on unchecked unwrap" {
     defer refinements.deinit();
 
     // Create an optional with NO null_safety set (unchecked)
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -437,7 +436,7 @@ test "optional_payload errors on known null unwrap" {
     // Create an optional known to be null
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .@"null" = .{ .function = "", .file = "", .line = 0, .column = null } } },
-        .type_id = 0, .to = 0,
+        .to = 0,
     } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
@@ -462,7 +461,7 @@ test "optional_payload succeeds on checked non_null" {
     // Create an optional known to be non-null
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .non_null = .{ .function = "", .file = "", .line = 0, .column = null } } },
-        .type_id = 0, .to = 0,
+        .to = 0,
     } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
@@ -484,14 +483,14 @@ test "store to optional with null sets null state" {
     defer refinements.deinit();
 
     // Create an optional and a pointer to it
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .type_id = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
     // Store null to the optional
-    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .interned = .{ .id = null, .ty = .{ .@"null" = &test_scalar_type } } } });
+    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .int_const = .{ .ty = .{ .@"null" = &test_scalar_type } } } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");
@@ -509,8 +508,8 @@ test "store to optional with value sets non_null state" {
     defer refinements.deinit();
 
     // Create an optional and a pointer to it
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .type_id = 0, .to = 0 } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx, .type_id = 0 } });
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);

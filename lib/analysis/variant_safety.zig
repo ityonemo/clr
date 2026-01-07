@@ -359,13 +359,13 @@ test "set_union_tag sets active variant" {
     for (fields) |*f| f.* = null;
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 0 } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
     // Set variant 1 as active
-    try VariantSafety.set_union_tag(state, 1, .{ .ptr = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try VariantSafety.set_union_tag(state, 1, .{ .ptr = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
 
     // Check variant_safety was created
     const u = refinements.at(union_eidx).@"union";
@@ -395,20 +395,20 @@ test "struct_field_ptr allows access to active variant" {
     // Create fields array - only field 1 needs an entity
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{} });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
     // Access active field 1 - should succeed
-    try VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
 }
 
 test "struct_field_ptr errors on inactive variant" {
@@ -431,20 +431,20 @@ test "struct_field_ptr errors on inactive variant" {
     // Create fields array
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{} });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
     // Access inactive field 0 - should error
-    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -468,7 +468,7 @@ test "struct_field_val errors on inactive variant" {
     // Create fields array
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[2] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    fields[2] = try refinements.appendEntity(.{ .scalar = .{} });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
@@ -480,7 +480,7 @@ test "struct_field_val errors on inactive variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access inactive field 0 - should error
-    const result = VariantSafety.struct_field_val(state, 1, .{ .operand = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_val(state, 1, .{ .operand = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -505,21 +505,21 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
     // Create fields array
     const fields = try allocator.alloc(?Gid, 3);
     for (fields) |*f| f.* = null;
-    fields[0] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
-    fields[1] = try refinements.appendEntity(.{ .scalar = .{ .type_id = 0 } });
+    fields[0] = try refinements.appendEntity(.{ .scalar = .{} });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{} });
 
     const union_eidx = try refinements.appendEntity(.{ .@"union" = .{
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 0,
     } });
-    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx, .type_id = 0 } });
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = union_eidx } });
 
     var results = [_]Inst{.{ .refinement = ptr_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
     // Access any field when ambiguous - should error
-    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expectError(error.AmbiguousVariantAccess, result);
 }
 

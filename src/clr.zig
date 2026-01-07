@@ -67,6 +67,8 @@ pub const FnInfo = struct {
     data: []const Data,
     extra: []const u32,
     param_names: []const []const u8,
+    /// Root module name for filtering user code from stdlib
+    root_name: []const u8 = "",
 };
 
 pub const FuncMir = struct {
@@ -85,9 +87,43 @@ pub const FuncMir = struct {
 // Collection of MIR structs
 var mir_list: std.ArrayListUnmanaged(*const FuncMir) = .empty;
 
+/// Information about a global variable for tracking
+pub const GlobalInfo = struct {
+    nav_idx: u32,
+    is_undefined: bool,
+    type_str: []const u8, // Pre-formatted type string for codegen
+};
+
+/// Registry of global variables encountered during codegen.
+/// Maps nav_idx to GlobalInfo to avoid duplicates.
+var global_registry: std.AutoHashMapUnmanaged(u32, GlobalInfo) = .empty;
+
+/// Register a global variable. Returns the nav_idx for reference.
+pub fn registerGlobal(nav_idx: u32, is_undefined: bool, type_str: []const u8) u32 {
+    if (global_registry.get(nav_idx) == null) {
+        global_registry.put(clr_allocator.allocator(), nav_idx, .{
+            .nav_idx = nav_idx,
+            .is_undefined = is_undefined,
+            .type_str = type_str,
+        }) catch {};
+    }
+    return nav_idx;
+}
+
+/// Get all registered globals as an iterator
+pub fn getGlobalsIterator() std.AutoHashMapUnmanaged(u32, GlobalInfo).ValueIterator {
+    return global_registry.valueIterator();
+}
+
+/// Get the number of registered globals
+pub fn getGlobalsCount() usize {
+    return global_registry.count();
+}
+
 export fn init(avt: *const clr_allocator.AllocatorVTable) ?*const u8 {
     clr_allocator.init(avt);
     mir_list = .empty;
+    global_registry = .empty;
     vtable = .{
         .deinit = null,
         .mir_deinit = mirDeinit,
@@ -187,6 +223,7 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         .data = data,
         .extra = extra,
         .param_names = param_names,
+        .root_name = root_name,
     };
 
     // Generate Zig source for this function

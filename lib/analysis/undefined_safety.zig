@@ -419,16 +419,16 @@ pub const UndefinedSafety = union(enum) {
         _ = state;
         _ = index;
         // For .inst: result shares source's entity, undefined state already correct
-        if (params.src == .interned) {
-            @panic("optional_payload: interned source unimplemented");
+        if (params.src == .int_const) {
+            @panic("optional_payload: int_const source unimplemented");
         }
     }
 
-    /// For interned (compile-time constant) args, set everything to defined.
-    /// For eidx args, the entity was copied with its existing state - no change needed.
+    /// For int_const (compile-time constant) args, set everything to defined.
+    /// For inst/int_var args, the entity was copied with its existing state - no change needed.
     pub fn arg(state: State, index: usize, params: tag.Arg) !void {
         switch (params.value) {
-            .interned => {
+            .int_const => {
                 // Compile-time constants are always defined
                 const idx = state.results[index].refinement.?;
                 setDefinedRecursive(state.refinements, idx);
@@ -436,7 +436,9 @@ pub const UndefinedSafety = union(enum) {
             .inst => {
                 // Runtime value - undefined state was already copied from caller
             },
-            .other => {},
+            .int_var => {
+                // Interned var - undefined state was set during Refinements.initWithGlobals
+            },
         }
     }
 
@@ -448,12 +450,11 @@ pub const UndefinedSafety = union(enum) {
         // When source is an eidx with existing refinement, undefined state is already set.
         // When br creates a new scalar (interned source), we need to set undefined.
         switch (params.src) {
-            .inst => {}, // Source has existing refinement with undefined state
-            .interned => {
+            .inst, .int_var => {}, // Source has existing refinement with undefined state
+            .int_const => {
                 const block_idx = state.results[params.block].refinement orelse return;
                 setDefinedRecursive(state.refinements, block_idx);
             },
-            .other => @panic("br: unexpected .other source"),
         }
     }
 
@@ -463,15 +464,14 @@ pub const UndefinedSafety = union(enum) {
         _ = index;
         // Only handle interned non-void returns - those are the ones that create new entities
         switch (params.src) {
-            .interned => |ty| {
+            .int_const => |ty| {
                 if (ty.ty != .void) {
                     // Interned values are compile-time constants, so defined
                     // With global refinements, return_gid points to slot in state.refinements
                     setDefinedRecursive(state.refinements, state.return_gid);
                 }
             },
-            .inst => {}, // Already has undefined state from callee
-            .other => {},
+            .inst, .int_var => {}, // Already has undefined state from callee or initWithGlobals
         }
     }
 
@@ -625,9 +625,9 @@ pub const UndefinedSafety = union(enum) {
         // Follow pointer to get pointee - panic on unexpected types
         const pointee_idx = refinements.at(ptr_idx).pointer.to;
 
-        // Check if source is an undefined type (interned with .undefined wrapper)
+        // Check if source is an undefined type (int_const with .undefined wrapper)
         const is_undef = switch (params.src) {
-            .interned => |ty| ty.ty == .undefined,
+            .int_const => |ty| ty.ty == .undefined,
             else => false,
         };
 
@@ -705,13 +705,32 @@ pub const UndefinedSafety = union(enum) {
                         },
                     }
                 },
-                .interned => |ty| {
+                .int_const => |ty| {
                     // Compile-time source - apply defined/undefined based on type
                     applyInternedType(refinements, pointee_idx, ty, state.ctx);
                 },
-                .other => {
-                    // Other sources (globals) - just mark as defined
-                    setDefinedRecursive(refinements, pointee_idx);
+                .int_var => |nav_idx| {
+                    // Global source - look up in global_map and handle like .inst
+                    const global_gid = refinements.getGlobal(nav_idx) orelse {
+                        // Global not found (shouldn't happen) - just mark as defined
+                        setDefinedRecursive(refinements, pointee_idx);
+                        return;
+                    };
+                    // When storing a pointer value, update the destination's `to` field
+                    switch (refinements.at(pointee_idx).*) {
+                        .scalar => |*s| s.analyte.undefined = .{ .defined = {} },
+                        .pointer => |*p| {
+                            // If global is also a pointer, update .to to share the target
+                            if (refinements.at(global_gid).* == .pointer) {
+                                const global_ptr = refinements.at(global_gid).pointer;
+                                p.to = global_ptr.to;
+                                p.analyte.undefined = .{ .defined = {} };
+                            } else {
+                                p.analyte.undefined = .{ .defined = {} };
+                            }
+                        },
+                        else => setDefinedRecursive(refinements, pointee_idx),
+                    }
                 },
             }
         }
@@ -721,20 +740,26 @@ pub const UndefinedSafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
-        const ptr = params.ptr orelse {
-            // Interned/global pointer - tag handler created new entity, set undefined state
-            const result_idx = results[index].refinement.?;
-            ensureUndefinedStateSet(refinements, result_idx);
-            return;
+
+        // Get pointer GID based on source type
+        const ptr_idx: ?Gid = switch (params.ptr_src) {
+            .inst => |ptr| results[ptr].refinement,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx),
+            .int_const => {
+                // Interned constant - tag handler created new entity, set undefined state
+                const result_idx = results[index].refinement.?;
+                ensureUndefinedStateSet(refinements, result_idx);
+                return;
+            },
         };
-        const ptr_idx = results[ptr].refinement orelse {
+        const effective_ptr_idx = ptr_idx orelse {
             // No refinement on pointer - tag handler created new entity, set undefined state
             const result_idx = results[index].refinement.?;
             ensureUndefinedStateSet(refinements, result_idx);
             return;
         };
         // Follow pointer to get to pointee
-        const pointee_idx = switch (refinements.at(ptr_idx).*) {
+        const pointee_idx = switch (refinements.at(effective_ptr_idx).*) {
             .pointer => |p| p.to,
             else => {
                 // Not a pointer - tag handler created new entity, set undefined state
@@ -1072,6 +1097,16 @@ pub const UndefinedSafety = union(enum) {
             .noreturn, .unimplemented => unreachable,
         }
     }
+
+    /// Initialize the undefined state on a global variable refinement.
+    /// If is_undefined is true, marks as undefined; otherwise marks as defined.
+    pub fn init_global(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool) void {
+        if (is_undefined) {
+            setUndefinedRecursive(refinements, gid, .{ .undefined = .{ .meta = ctx.meta } });
+        } else {
+            setDefinedRecursive(refinements, gid);
+        }
+    }
 };
 
 const debug = @import("builtin").mode == .Debug;
@@ -1137,7 +1172,7 @@ test "alloc creates pointer to typed pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer to typed pointee)
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
 
     // alloc creates pointer; pointee type is determined by .ty parameter
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1160,7 +1195,7 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
 
     // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
     const eu_idx = results[1].refinement.?;
@@ -1186,8 +1221,8 @@ test "store with .undefined type wrapper sets undefined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with .undefined wrapper
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .undefined = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1210,8 +1245,8 @@ test "store with defined value sets defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store a defined value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1234,9 +1269,9 @@ test "store with .null to optional sets inner to defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc at instruction 1 with optional type, then store null
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .id = null, .ty = .{ .optional = &.{ .id = null, .ty = .{ .scalar = {} } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .optional = &.{ .ty = .{ .scalar = {} } } } } } });
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .interned = .{ .id = null, .ty = .{ .null = &.{ .id = null, .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .null = &.{ .ty = .{ .scalar = {} } } } } } } });
 
     // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1271,14 +1306,13 @@ test "load from undefined inst returns error" {
             .file = "test.zig",
             .line = 1,
         } } } },
-        .type_id = 0,
     } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
     try std.testing.expectError(
         error.UseBeforeAssign,
-        UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } }),
+        UndefinedSafety.load(state, 0, .{ .ptr_src = .{ .inst = 1 } }),
     );
 }
 
@@ -1296,14 +1330,14 @@ test "load from defined inst does not return error" {
     var results = [_]Inst{.{}} ** 3;
 
     // Create pointer -> defined scalar
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } }, .type_id = 0 } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } } } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .to = pointee_idx } });
 
     // Set up result for the load instruction (index 0)
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{ .type_id = 0 } });
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{} });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try UndefinedSafety.load(state, 0, .{ .ptr_src = .{ .inst = 1 } });
 }
 
 test "load from inst without undefined tracking does not return error" {
@@ -1320,11 +1354,11 @@ test "load from inst without undefined tracking does not return error" {
     var results = [_]Inst{.{}} ** 3;
 
     // Create pointer -> scalar with no undefined tracking (undefined = null)
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = null }, .type_id = 0 } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .type_id = 0, .to = pointee_idx } });
+    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = null } } });
+    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .to = pointee_idx } });
 
     const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try UndefinedSafety.load(state, 0, .{ .ptr = 1, .ty = .{ .id = null, .ty = .{ .scalar = {} } } });
+    try UndefinedSafety.load(state, 0, .{ .ptr_src = .{ .inst = 1 } });
 }
 
 fn testGetName(id: u32) []const u8 {
