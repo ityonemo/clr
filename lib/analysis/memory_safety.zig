@@ -24,6 +24,7 @@ pub const Stack = struct {
     };
 };
 
+
 pub const Free = struct {
     meta: Meta,
     name_at_free: ?[]const u8 = null, // Full path name (arena-allocated at store time)
@@ -41,6 +42,7 @@ pub const Allocated = struct {
 
 pub const MemorySafety = union(enum) {
     stack: Stack,
+    global: Meta,
     allocated: Allocated,
     unset: void,
 
@@ -66,8 +68,11 @@ pub const MemorySafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
-        // ptr is null for stores to interned/global locations - no memory safety tracking needed
-        const ptr = params.ptr orelse return;
+        // Get ptr instruction index - skip for globals/constants (no memory safety tracking needed)
+        const ptr = switch (params.ptr) {
+            .inst => |idx| idx,
+            .int_var, .int_const => return, // globals/constants - no memory safety tracking
+        };
         const src = switch (params.src) {
             .inst => |idx| idx,
             // comptime/interned values don't have memory safety tracking - skip
@@ -172,15 +177,24 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// For interned args, no memory safety tracking needed (constants have no allocation state).
-    /// For eidx args, memory safety state was already copied from caller.
-    /// TODO: See LIMITATIONS.md - interned pointer args may need special handling.
+    /// For inst args, memory safety state was already copied from caller.
+    /// For int_const pointer args, mark the pointee as global memory.
     pub fn arg(state: State, index: usize, params: tag.Arg) !void {
-        _ = state;
-        _ = index;
-        _ = params;
-        // Nothing to do - interned values have no memory safety state,
-        // and eidx values already have their state copied from caller.
+        // Only handle int_const pointers (compile-time/global pointers)
+        if (params.value != .int_const) return;
+        const ty = params.value.int_const;
+        if (ty.ty != .pointer) return;
+
+        // Get the pointer refinement created by the Arg tag handler
+        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr_ref = state.refinements.at(ptr_idx);
+        if (ptr_ref.* != .pointer) return;
+
+        // Mark the pointee as global memory
+        const pointee_idx = ptr_ref.pointer.to;
+        const pointee = state.refinements.at(pointee_idx);
+        const pointee_analyte = getAnalytePtr(pointee);
+        pointee_analyte.memory_safety = .{ .global = state.ctx.meta };
     }
 
     /// struct_field_ptr creates a pointer to a field of a struct/union.
@@ -191,9 +205,12 @@ pub const MemorySafety = union(enum) {
         const ptr_idx = state.results[index].refinement orelse return;
         const ptr = &refinements.at(ptr_idx).pointer;
 
-        // Get container from base pointer
-        const base = params.base orelse return;
-        const base_idx = state.results[base].refinement orelse return;
+        // Get container from base pointer - only handle instruction bases
+        const base_idx: Gid = switch (params.base) {
+            .inst => |inst| state.results[inst].refinement orelse return,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_const => return, // constant base - no memory safety tracking
+        };
         const base_ref = refinements.at(base_idx);
         if (base_ref.* != .pointer) return;
 
@@ -213,6 +230,7 @@ pub const MemorySafety = union(enum) {
                 .root_gid = container_gid,
                 .is_slice = a.is_slice,
             } },
+            .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
         };
     }
@@ -247,6 +265,7 @@ pub const MemorySafety = union(enum) {
                 .root_gid = region_gid,
                 .is_slice = a.is_slice,
             } },
+            .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
         };
 
@@ -293,6 +312,7 @@ pub const MemorySafety = union(enum) {
         const parent_gid: ?Gid = switch (ms) {
             .stack => |s| s.root_gid,
             .allocated => |a| a.root_gid,
+            .global => return, // Global pointer, no parent tracking
             .unset => return, // Unset pointer, can't recover parent
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
@@ -315,6 +335,7 @@ pub const MemorySafety = union(enum) {
                 .type_id = a.type_id,
                 .root_gid = null,
             } },
+            .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
         };
     }
@@ -469,7 +490,7 @@ pub const MemorySafety = union(enum) {
                             return reportStackEscape(ms, ctx);
                         }
                     },
-                    .allocated, .unset => {},
+                    .allocated, .global, .unset => {},
                 }
             },
             .@"struct" => |s| {
@@ -495,10 +516,11 @@ pub const MemorySafety = union(enum) {
     /// With global refinements, args share entities directly with caller.
     /// Stack pointer escapes through args are detected by checking arg pointees.
     pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
+        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+
         // Check for stack pointer escapes via pointer arguments
         // If a pointer arg's pointee contains a stack pointer from this function,
         // it escapes to the caller via the shared global refinements table
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
         for (results) |inst| {
             // Only check args (instructions with .arg tag)
             const any_tag = inst.inst_tag orelse continue;
@@ -513,7 +535,29 @@ pub const MemorySafety = union(enum) {
             try checkStackEscapeRecursive(refinements, refinement.pointer.to, ctx, func_name);
         }
 
+        // Check for stack pointer escapes to global variables
+        // If a global contains a stack pointer from this function, it escapes
+        if (refinements.global_cutoff) |cutoff| {
+            for (0..cutoff) |gid_usize| {
+                const gid: Gid = @intCast(gid_usize);
+                try checkStackEscapeRecursive(refinements, gid, ctx, func_name);
+            }
+        }
+
+        // Build set of GIDs reachable from globals (allocations stored there aren't leaks)
+        var global_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer global_reachable.deinit();
+        if (refinements.global_cutoff) |cutoff| {
+            for (0..cutoff) |gid_usize| {
+                const gid: Gid = @intCast(gid_usize);
+                collectReachableGids(refinements, gid, &global_reachable);
+            }
+        }
+
         // Check for memory leaks - allocation state is on the POINTEE
+        // In main (stack depth 1), also check allocations stored in globals
+        const in_main = ctx.stacktrace.items.len == 1;
+
         for (results) |inst| {
             const idx = inst.refinement orelse continue;
             const refinement = refinements.at(idx);
@@ -529,10 +573,88 @@ pub const MemorySafety = union(enum) {
             if (ms != .allocated) continue;
 
             const allocation = ms.allocated;
-            // Skip if freed or returned to caller
-            if (allocation.freed == null and !allocation.returned) {
+            // Skip if freed, returned to caller, or (in non-main) reachable from a global
+            // In main, even global-reachable allocations must be freed before program exit
+            const skip_global_reachable = !in_main and global_reachable.contains(pointee_idx);
+            if (allocation.freed == null and !allocation.returned and !skip_global_reachable) {
                 return reportMemoryLeak(ctx, allocation);
             }
+        }
+
+        // In main, also check allocations stored directly in global entities
+        if (in_main) {
+            if (refinements.global_cutoff) |cutoff| {
+                for (0..cutoff) |gid_usize| {
+                    const gid: Gid = @intCast(gid_usize);
+                    try checkGlobalAllocationLeaks(refinements, gid, ctx);
+                }
+            }
+        }
+    }
+
+    /// Check if a GID (or any reachable entity) contains an unfreed allocation
+    fn checkGlobalAllocationLeaks(refinements: *Refinements, gid: Gid, ctx: *Context) !void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |p| {
+                // Check if the pointer points to an allocated entity
+                const pointee = refinements.at(p.to);
+                const pointee_analyte = getAnalytePtr(pointee);
+                if (pointee_analyte.memory_safety) |ms| {
+                    if (ms == .allocated) {
+                        const allocation = ms.allocated;
+                        if (allocation.freed == null and !allocation.returned) {
+                            return reportMemoryLeak(ctx, allocation);
+                        }
+                    }
+                }
+                // Recurse to nested pointers
+                try checkGlobalAllocationLeaks(refinements, p.to, ctx);
+            },
+            .optional => |o| try checkGlobalAllocationLeaks(refinements, o.to, ctx),
+            .errorunion => |e| try checkGlobalAllocationLeaks(refinements, e.to, ctx),
+            .region => |r| try checkGlobalAllocationLeaks(refinements, r.to, ctx),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    try checkGlobalAllocationLeaks(refinements, field_gid, ctx);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        try checkGlobalAllocationLeaks(refinements, field_gid, ctx);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Recursively collect all GIDs reachable via .to fields from a starting GID.
+    fn collectReachableGids(refinements: *Refinements, gid: Gid, reachable: *std.AutoHashMap(Gid, void)) void {
+        // Already visited
+        if (reachable.contains(gid)) return;
+        reachable.put(gid, {}) catch return;
+
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |p| collectReachableGids(refinements, p.to, reachable),
+            .optional => |o| collectReachableGids(refinements, o.to, reachable),
+            .errorunion => |e| collectReachableGids(refinements, e.to, reachable),
+            .region => |r| collectReachableGids(refinements, r.to, reachable),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    collectReachableGids(refinements, field_gid, reachable);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        collectReachableGids(refinements, field_gid, reachable);
+                    }
+                }
+            },
+            else => {},
         }
     }
 
@@ -758,9 +880,19 @@ pub const MemorySafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
-        const ptr = params.ptr;
 
-        const ptr_idx = results[ptr].refinement orelse @panic("alloc_destroy: inst has no refinement");
+        // Resolve ptr source to get the pointer's refinement index
+        const ptr_idx: Gid = switch (params.ptr) {
+            .inst => |inst| results[inst].refinement orelse @panic("alloc_destroy: inst has no refinement"),
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+                // Trying to free a pointer to a global variable
+                return reportFreeGlobalMemory(ctx);
+            },
+            .int_const => {
+                // Trying to free an interned constant pointer (e.g., pointer to global)
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
         const ptr_refinement = refinements.at(ptr_idx);
         if (ptr_refinement.* != .pointer) @panic("alloc_destroy: expected pointer refinement");
 
@@ -781,6 +913,7 @@ pub const MemorySafety = union(enum) {
                 }
                 return reportFreeStackMemory(ctx, sp);
             },
+            .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_destroy: pointee memory_safety is unset"),
             .allocated => {},
         }
@@ -820,9 +953,11 @@ pub const MemorySafety = union(enum) {
         }
 
         // Mark as freed using setFreedRecursive to propagate to all fields
+        // Note: We only reach here for .inst case (int_var/int_const return early above)
+        const ptr_inst = params.ptr.inst;
         const free_meta: Free = .{
             .meta = ctx.meta,
-            .name_at_free = ctx.buildPathName(results, refinements, ptr),
+            .name_at_free = ctx.buildPathName(results, refinements, ptr_inst),
         };
         setFreedRecursive(refinements, pointee_idx, free_meta);
     }
@@ -894,10 +1029,19 @@ pub const MemorySafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
-        const slice = params.slice;
 
-        // Get the pointer refinement (slice is pointer → region → element)
-        const ptr_idx = results[slice].refinement orelse @panic("alloc_free: inst has no refinement");
+        // Resolve slice source to get the pointer's refinement index
+        const ptr_idx: Gid = switch (params.slice) {
+            .inst => |inst| results[inst].refinement orelse @panic("alloc_free: inst has no refinement"),
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+                // Trying to free a global slice
+                return reportFreeGlobalMemory(ctx);
+            },
+            .int_const => {
+                // Trying to free an interned constant slice
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
         const ptr_refinement = refinements.at(ptr_idx);
         if (ptr_refinement.* != .pointer) @panic("alloc_free: expected pointer refinement");
 
@@ -914,6 +1058,7 @@ pub const MemorySafety = union(enum) {
                         return reportFreeFieldPointerStack(ctx, s);
                     }
                 },
+                .global => return reportFreeGlobalMemory(ctx),
                 .unset => {},
             }
         }
@@ -932,10 +1077,14 @@ pub const MemorySafety = union(enum) {
         };
 
         // Get memory_safety from pointee
-        const ms = &(pointee_analyte.memory_safety orelse
-            @panic("alloc_free: pointee has no memory_safety"));
+        // If pointee has no memory_safety, treat as untracked (likely from global load)
+        const ms_ptr = &(pointee_analyte.memory_safety orelse {
+            // No memory_safety means untracked - likely loaded from a global pointer variable
+            // This is a known limitation, treat as attempting to free unknown memory
+            return reportFreeGlobalMemory(ctx);
+        });
 
-        switch (ms.*) {
+        switch (ms_ptr.*) {
             .stack => |sp| {
                 // Check if this is a field pointer (root_gid != null means it's a field)
                 if (sp.root_gid != null) {
@@ -943,11 +1092,12 @@ pub const MemorySafety = union(enum) {
                 }
                 return reportFreeStackMemory(ctx, sp);
             },
+            .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_free: region memory_safety is unset"),
             .allocated => {},
         }
 
-        const a = ms.allocated;
+        const a = ms_ptr.allocated;
 
         // Check if this is a field pointer (root_gid != null means it's a field, can't free directly)
         if (a.root_gid != null) {
@@ -982,9 +1132,11 @@ pub const MemorySafety = union(enum) {
         }
 
         // Mark as freed using setFreedRecursive to propagate to all fields
+        // Note: We only reach here for .inst case (int_var/int_const return early above)
+        const slice_inst = params.slice.inst;
         const free_meta: Free = .{
             .meta = ctx.meta,
-            .name_at_free = ctx.buildPathName(results, refinements, slice),
+            .name_at_free = ctx.buildPathName(results, refinements, slice_inst),
         };
         setFreedRecursive(refinements, pointee_idx, free_meta);
     }
@@ -996,12 +1148,21 @@ pub const MemorySafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
-        const slice = params.slice;
 
         // === 1. Mark old slice as freed ===
 
-        // Get the old pointer refinement
-        const old_ptr_idx = results[slice].refinement orelse @panic("alloc_realloc: old slice has no refinement");
+        // Resolve slice source to get the pointer's refinement index
+        const old_ptr_idx: Gid = switch (params.slice) {
+            .inst => |inst| results[inst].refinement orelse @panic("alloc_realloc: old slice has no refinement"),
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+                // Trying to realloc a global slice
+                return reportFreeGlobalMemory(ctx);
+            },
+            .int_const => {
+                // Trying to realloc an interned constant slice
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
         const old_ptr_refinement = refinements.at(old_ptr_idx);
         if (old_ptr_refinement.* != .pointer) @panic("alloc_realloc: expected pointer refinement for old slice");
 
@@ -1024,6 +1185,7 @@ pub const MemorySafety = union(enum) {
                 }
                 return reportFreeStackMemory(ctx, sp);
             },
+            .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_realloc: old region memory_safety is unset"),
             .allocated => {},
         }
@@ -1059,9 +1221,11 @@ pub const MemorySafety = union(enum) {
         }
 
         // Mark old slice as freed
+        // Note: We only reach here for .inst case (int_var/int_const return early above)
+        const slice_inst = params.slice.inst;
         const free_meta: Free = .{
             .meta = ctx.meta,
-            .name_at_free = ctx.buildPathName(results, refinements, slice),
+            .name_at_free = ctx.buildPathName(results, refinements, slice_inst),
         };
         setFreedRecursive(refinements, old_region_idx, free_meta);
 
@@ -1137,8 +1301,8 @@ pub const MemorySafety = union(enum) {
             } };
         }
 
-        // Get ptr_idx from ptr_src - .int_const loads have no memory safety tracking needed
-        const ptr_idx: Gid = switch (params.ptr_src) {
+        // Get ptr_idx from ptr - .int_const loads have no memory safety tracking needed
+        const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
             .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
             .int_const => return, // No memory safety tracking for interned constants
@@ -1367,6 +1531,11 @@ pub const MemorySafety = union(enum) {
         return error.FreeFieldPointer;
     }
 
+    fn reportFreeGlobalMemory(ctx: *Context) anyerror {
+        try ctx.meta.print(ctx.writer, "free of global/comptime memory in ", .{});
+        return error.FreeGlobalMemory;
+    }
+
     // =========================================================================
     // Branch merging
     // =========================================================================
@@ -1381,8 +1550,8 @@ pub const MemorySafety = union(enum) {
         branches: []const ?State,
         branch_gids: []const ?Gid,
     ) !void {
-        _ = ctx;
         _ = merge_tag;
+        _ = ctx;
         const orig_ref = refinements.at(orig_gid);
 
         // Only pointer and scalar refinements have analytes
@@ -1445,7 +1614,7 @@ pub const MemorySafety = union(enum) {
                             else => unreachable,
                         };
                         if (branch_analyte.memory_safety) |ms| {
-                            if (ms == .allocated) {
+                            if (ms == .allocated or ms == .global) {
                                 orig_analyte.memory_safety = ms;
                                 break;
                             }
@@ -1453,6 +1622,7 @@ pub const MemorySafety = union(enum) {
                     }
                 },
                 .stack => {}, // Stack pointers don't need merge handling
+                .global => {}, // Global pointers don't need merge handling
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it
@@ -1847,7 +2017,7 @@ test "alloc_destroy marks allocation as freed" {
     ctx.meta.line = 20;
 
     // Destroy allocation (ptr points to unwrapped pointer at inst 1)
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 10, .allocator_inst = null } });
 
     // With new architecture, allocation state is on the POINTEE (accessed via ptr.to)
     const ptr_idx = results[1].refinement.?;
@@ -1881,12 +2051,12 @@ test "alloc_destroy detects double free" {
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
     // First free
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 10, .allocator_inst = null } });
 
     // Second free should error
     try std.testing.expectError(
         error.DoubleFree,
-        Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } }),
+        Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 10, .allocator_inst = null } }),
     );
 }
 
@@ -1911,7 +2081,7 @@ test "alloc_destroy detects mismatched allocator" {
     // Destroy with different allocator
     try std.testing.expectError(
         error.MismatchedAllocator,
-        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 11, .allocator_inst = null } }),
+        Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 11, .allocator_inst = null } }),
     );
 }
 
@@ -1935,7 +2105,7 @@ test "alloc_destroy detects freeing stack memory" {
     // Trying to free stack memory should error
     try std.testing.expectError(
         error.FreeStackMemory,
-        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = 0, .type_id = 10, .allocator_inst = null } }),
+        Inst.apply(state, 1, .{ .alloc_destroy = .{ .ptr = .{ .inst = 0 }, .type_id = 10, .allocator_inst = null } }),
     );
 }
 
@@ -1956,13 +2126,13 @@ test "load detects use after free" {
     // Create, unwrap, store (to make it defined), and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
-    try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 10, .allocator_inst = null } });
 
     // Load after free should error
     try std.testing.expectError(
         error.UseAfterFree,
-        Inst.apply(state, 4, .{ .load = .{ .ptr_src = .{ .inst = 1 } } }),
+        Inst.apply(state, 4, .{ .load = .{ .ptr = .{ .inst = 1 } } }),
     );
 }
 
@@ -1983,10 +2153,10 @@ test "load from live allocation does not error" {
     // Create, unwrap, and store to allocation (not freed)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // Load from live allocation should succeed
-    try Inst.apply(state, 3, .{ .load = .{ .ptr_src = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
 }
 
 test "onFinish detects memory leak" {
@@ -2033,7 +2203,7 @@ test "onFinish allows freed allocation" {
     // Create, unwrap, and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
-    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = 1, .type_id = 10, .allocator_inst = null } });
+    try Inst.apply(state, 2, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 10, .allocator_inst = null } });
 
     // onFinish should not error
     try MemorySafety.onFinish(&results, &ctx, &refinements);
@@ -2067,7 +2237,7 @@ test "onFinish allows passed allocation" {
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // Store to make the pointee defined
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // Return the pointer (marks as passed)
     try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 1 } } });
@@ -2118,39 +2288,39 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     // inst 1: unwrap_errunion_payload - get the pointer
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // inst 2: store_safe - make pointee defined
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // inst 3: alloc - create struct on stack with a pointer field
     const struct_ty: tag.Type = .{ .ty = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } }} } };
     try Inst.apply(state, 3, .{ .alloc = .{ .ty = struct_ty } });
     // inst 4: store_safe - initialize struct with undefined
-    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 3, .src = .{ .int_const = .{ .ty = .{ .undefined = &struct_ty } } } } });
+    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = .{ .inst = 3 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &struct_ty } } } } });
 
     // inst 5: struct_field_ptr - get pointer to field 0
     try Inst.apply(state, 5, .{ .struct_field_ptr = .{
-        .base = 3,
+        .base = .{ .inst = 3 },
         .field_index = 0,
         .ty = .{ .ty = .{ .pointer = &.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } } } },
     } });
     // inst 6: store_safe - store the allocation pointer into struct field
-    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = 5, .src = .{ .inst = 1 } } });
+    try Inst.apply(state, 6, .{ .store_safe = .{ .ptr = .{ .inst = 5 }, .src = .{ .inst = 1 } } });
 
     // === LOAD POINTER FROM STRUCT FIELD ===
     // inst 7: load - load struct from stack alloc
-    try Inst.apply(state, 7, .{ .load = .{ .ptr_src = .{ .inst = 3 } } });
+    try Inst.apply(state, 7, .{ .load = .{ .ptr = .{ .inst = 3 } } });
     // inst 8: struct_field_val - get pointer field value
     try Inst.apply(state, 8, .{ .struct_field_val = .{ .operand = 7, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } } } });
 
     // === FREE THE LOADED POINTER ===
     // inst 9: alloc_destroy - free via the loaded pointer
-    try Inst.apply(state, 9, .{ .alloc_destroy = .{ .ptr = 8, .type_id = 10, .allocator_inst = null } });
+    try Inst.apply(state, 9, .{ .alloc_destroy = .{ .ptr = .{ .inst = 8 }, .type_id = 10, .allocator_inst = null } });
 
     // === VERIFICATION ===
     // The original struct field pointer (stored via inst 6) should also be marked as freed.
     // This requires that load shares the pointer entity instead of copying it.
     //
     // Load the struct again and get the field - check its memory_safety state
-    try Inst.apply(state, 10, .{ .load = .{ .ptr_src = .{ .inst = 3 } } });
+    try Inst.apply(state, 10, .{ .load = .{ .ptr = .{ .inst = 3 } } });
 
     // Get the struct field pointer from the original struct (via struct_field_ptr at inst 5)
     const field_ptr_ref = results[5].refinement.?;
@@ -2197,11 +2367,11 @@ test "global refinements: freeing struct pointer field is visible immediately" {
     const struct_ty: tag.Type = .{ .ty = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } }} } };
     try Inst.apply(state, 2, .{ .alloc = .{ .ty = struct_ty } });
     // inst 3 = store undefined struct
-    try Inst.apply(state, 3, .{ .store_safe = .{ .ptr = 2, .src = .{ .int_const = .{ .ty = .{ .undefined = &struct_ty } } } } });
+    try Inst.apply(state, 3, .{ .store_safe = .{ .ptr = .{ .inst = 2 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &struct_ty } } } } });
     // inst 4 = struct_field_ptr to field 0
-    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } } } } } });
+    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = .{ .inst = 2 }, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } } } } } });
     // inst 5 = store allocation pointer into struct field
-    try Inst.apply(state, 5, .{ .store_safe = .{ .ptr = 4, .src = .{ .inst = 1 } } });
+    try Inst.apply(state, 5, .{ .store_safe = .{ .ptr = .{ .inst = 4 }, .src = .{ .inst = 1 } } });
 
     // Get the allocation's POINTEE entity for later verification
     const alloc_ptr_ref = results[1].refinement.?;
@@ -2216,9 +2386,9 @@ test "global refinements: freeing struct pointer field is visible immediately" {
     try std.testing.expect(pointee_ms_before.allocated.freed == null);
 
     // inst 6 = load from struct field to get the pointer
-    try Inst.apply(state, 6, .{ .load = .{ .ptr_src = .{ .inst = 4 } } });
+    try Inst.apply(state, 6, .{ .load = .{ .ptr = .{ .inst = 4 } } });
     // inst 7 = alloc_destroy to free the pointer
-    try Inst.apply(state, 7, .{ .alloc_destroy = .{ .ptr = 6, .type_id = 10, .allocator_inst = null } });
+    try Inst.apply(state, 7, .{ .alloc_destroy = .{ .ptr = .{ .inst = 6 }, .type_id = 10, .allocator_inst = null } });
 
     // With global refinements, the allocation should be marked as freed immediately
     // No backpropagation needed - modifications are direct

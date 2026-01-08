@@ -257,7 +257,7 @@ test "instLine for store_safe" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .store_safe, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = 3, .src = .{ .inst = 4 } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 3 }, .src = .{ .inst = 4 } } });\n", result);
 }
 
 test "instLine for load" {
@@ -275,7 +275,7 @@ test "instLine for load" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .load, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr_src = .{ .inst = 5 } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .load = .{ .ptr = .{ .inst = 5 } } });\n", result);
 }
 
 test "generateFunction produces complete function" {
@@ -323,7 +323,7 @@ test "generateFunction produces complete function" {
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
         \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
-        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr_src = .{ .inst = 0 } } });
+        \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
         \\    try Inst.mergeEarlyReturns(state);
         \\    try Inst.onFinish(state);
@@ -347,7 +347,7 @@ test "epilogue generates correct output with typed return slot" {
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
         \\const Gid = clr.Gid;
-        \\const Arg = clr.Arg;
+        \\const Src = clr.Src;
         \\const State = clr.State;
         \\
         \\const global_defs = [_]clr.GlobalDef{
@@ -932,7 +932,7 @@ test "instLine for struct_field_ptr_index_0" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_0, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = 2, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = .{ .inst = 2 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for struct_field_ptr_index_1" {
@@ -951,7 +951,7 @@ test "instLine for struct_field_ptr_index_1" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_1, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = 1, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = .{ .inst = 1 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });\n", result);
 }
 
 test "instLine for get_union_tag" {
@@ -1005,7 +1005,7 @@ test "instLine for store (same as store_safe)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .store, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .store = .{ .ptr = 1, .src = .{ .inst = 2 } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 2 } } });\n", result);
 }
 
 // =============================================================================
@@ -1120,7 +1120,7 @@ test "generateFunction with simple cond_br block" {
         \\
         \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = 3 } });
-        \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = 0, .src = .{ .inst = 3 } } });
+        \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 3 } } });
         \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .int_const = .{ .ty = .{ .void = {} } } } } });
         \\}
         \\
@@ -1141,14 +1141,14 @@ test "generateFunction with simple cond_br block" {
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
         \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .ty = .{ .void = {} } } } });
-        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr_src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
         \\    try Inst.apply(state, 4, .{ .noop = .{} });
         \\    try Inst.apply(state, 5, .{ .noop = .{} });
         \\    try Inst.apply(state, 6, .{ .noop = .{} });
         \\    try Inst.cond_br(state, 7, fn_42_cond_br_true_7, fn_42_cond_br_false_7);
-        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr_src = .{ .inst = 0 } } });
+        \\    try Inst.apply(state, 8, .{ .load = .{ .ptr = .{ .inst = 0 } } });
         \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .inst = 8 } } });
         \\    try Inst.mergeEarlyReturns(state);
         \\    try Inst.onFinish(state);

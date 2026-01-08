@@ -21,10 +21,16 @@ pub const INVALID_GID: Gid = std.math.maxInt(Gid);
 pub const GlobalDef = struct {
     /// InternPool Nav index - uniquely identifies this global
     nav_idx: u32,
-    /// True if the global was declared with `= undefined`
-    is_undefined: bool,
-    /// The type of the global variable
+    /// The type of the global variable.
+    /// If the global was declared with `= undefined`, this will be wrapped
+    /// in `.{ .ty = .{ .undefined = &inner_type } }` (consistent with store_safe).
     ty: tag.Type,
+    /// Source file path where global is defined
+    file: []const u8 = "",
+    /// Source line number (0-indexed)
+    line: u32 = 0,
+    /// Source column number (0-indexed)
+    column: u32 = 0,
 };
 
 pub const Analyte = @import("Analyte.zig");
@@ -291,6 +297,11 @@ list: std.array_list.AlignedManaged(Refinement, null),
 /// Used to look up global refinements when they're referenced in AIR.
 global_map: std.AutoHashMap(u32, Gid),
 
+/// Cutoff index: all refinements with GID < global_cutoff are global-related.
+/// Used by onFinish to determine which allocations are reachable from globals.
+/// Set at the end of initWithGlobals, null if no globals.
+global_cutoff: ?Gid = null,
+
 pub fn init(allocator: Allocator) Refinements {
     return .{
         .list = std.array_list.AlignedManaged(Refinement, null).init(allocator),
@@ -309,20 +320,35 @@ pub fn initWithGlobals(allocator: Allocator, ctx: *@import("Context.zig"), compt
     };
 
     inline for (global_defs) |def| {
+        // Check if the type is wrapped in .undefined (indicates global was `= undefined`)
+        // or .null (indicates global was `= null` for optionals)
+        // typeToRefinement will unwrap these automatically, but we need to know
+        // to mark the pointee appropriately
+        const is_undefined = def.ty.ty == .undefined;
+        const is_null = def.ty.ty == .null;
+
         // Create pointee refinement entity for the global's value
         const pointee_ref = tag.typeToRefinement(def.ty, &self) catch @panic("typeToRefinement failed for global");
         const pointee_gid = self.appendEntity(pointee_ref) catch @panic("appendEntity failed for global pointee");
 
         // Create pointer refinement pointing to the value (like alloc does)
-        const ptr_ref: Refinement = .{ .pointer = .{ .to = pointee_gid } };
+        // The pointer itself is always defined (it's a valid global address)
+        const ptr_ref: Refinement = .{ .pointer = .{
+            .to = pointee_gid,
+            .analyte = .{ .undefined = .{ .defined = {} } },
+        } };
         const ptr_gid = self.appendEntity(ptr_ref) catch @panic("appendEntity failed for global pointer");
 
         // Register the POINTER's GID in global_map (not the pointee)
         self.global_map.put(def.nav_idx, ptr_gid) catch {};
 
-        // Dispatch to analysis modules to initialize state on the POINTEE (e.g., undefined tracking)
-        tag.splatInitGlobal(&self, pointee_gid, ctx, def.is_undefined);
+        // Dispatch to analysis modules to initialize state on the POINTEE (e.g., undefined tracking, null state)
+        const loc = tag.GlobalLocation{ .file = def.file, .line = def.line, .column = def.column };
+        tag.splatInitGlobal(&self, pointee_gid, ctx, is_undefined, is_null, loc);
     }
+
+    // Record cutoff - all entities created so far are global-related
+    self.global_cutoff = @intCast(self.list.items.len);
 
     return self;
 }
@@ -445,6 +471,8 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     while (it.next()) |entry| {
         try new.global_map.put(entry.key_ptr.*, entry.value_ptr.*);
     }
+    // Copy global_cutoff
+    new.global_cutoff = self.global_cutoff;
     return new;
 }
 
@@ -586,4 +614,40 @@ pub fn testValid(self: *Refinements) void {
         null_safety_analysis.testValid(refinement);
         variant_safety_analysis.testValid(refinement);
     }
+}
+
+test "initWithGlobals sets null_safety for null optional global" {
+    const Context = @import("Context.zig");
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Create global_defs with a null optional
+    const inner_scalar: tag.Type = .{ .ty = .{ .scalar = {} } };
+    const optional_type: tag.Type = .{ .ty = .{ .optional = &inner_scalar } };
+    const null_type: tag.Type = .{ .ty = .{ .null = &optional_type } };
+
+    const global_defs = [_]GlobalDef{
+        .{ .nav_idx = 100, .ty = null_type, .file = "test.zig", .line = 1, .column = 1 },
+    };
+
+    var refinements = initWithGlobals(allocator, &ctx, &global_defs);
+    defer refinements.deinit();
+
+    // Get the global pointer GID
+    const ptr_gid = refinements.getGlobal(100).?;
+    const ptr = refinements.at(ptr_gid);
+
+    // Follow pointer to pointee (the optional)
+    try std.testing.expect(ptr.* == .pointer);
+    const opt_gid = ptr.pointer.to;
+    const opt = refinements.at(opt_gid);
+
+    // Verify it's an optional with null_safety set to .@"null"
+    try std.testing.expect(opt.* == .optional);
+    const ns = opt.optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .@"null");
 }

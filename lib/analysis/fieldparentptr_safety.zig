@@ -22,8 +22,11 @@ pub const FieldParentPtrSafety = struct {
         const ptr = &refinements.at(ptr_idx).pointer;
 
         // Get the container's type_id from the base pointer
-        const base = params.base orelse return; // interned base, can't track
-        const base_ref = results[base].refinement orelse return;
+        const base_ref: Gid = switch (params.base) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_const => return, // interned constant, can't track
+        };
         const base_refinement = refinements.at(base_ref);
         if (base_refinement.* != .pointer) return;
 
@@ -171,7 +174,7 @@ test "struct_field_ptr records origin on field pointer" {
     const state = testState(&ctx, &results, &refinements);
 
     // Call struct_field_ptr to set origin tracking
-    try FieldParentPtrSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
+    try FieldParentPtrSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
 
     // Verify fieldparentptr_safety was set
     const ptr_ref = refinements.at(field_ptr_gid);

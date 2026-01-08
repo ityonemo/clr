@@ -181,6 +181,7 @@ fn formatMemSafety(ms: ?@import("analysis/memory_safety.zig").MemorySafety) []co
         return switch (m) {
             .allocated => |a| if (a.freed != null) "freed" else "allocated",
             .stack => "stack",
+            .global => "global",
             .unset => "unset",
         };
     }

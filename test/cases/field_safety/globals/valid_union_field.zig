@@ -11,7 +11,7 @@ fn get_int_ptr() *i32 {
 }
 
 fn get_parent(int_ptr: *i32) *Value {
-    return @fieldParentPtr(int_ptr, "int");
+    return @fieldParentPtr("int", int_ptr);
 }
 
 pub fn main() u8 {

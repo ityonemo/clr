@@ -169,8 +169,12 @@ pub const NullSafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const ptr = params.ptr orelse return;
-        const ptr_idx = results[ptr].refinement orelse return;
+        // Get pointer GID based on ptr type (like load does)
+        const ptr_idx: Gid = switch (params.ptr) {
+            .inst => |ptr| results[ptr].refinement orelse return,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_const => return, // constant pointers - no null tracking
+        };
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
 
@@ -239,6 +243,26 @@ pub const NullSafety = union(enum) {
         }
         // Different states - reset to unknown (requires re-check)
         return .{ .unknown = null };
+    }
+
+    /// Initialize the null state on a global variable refinement.
+    /// If is_null is true and the gid points to an optional, marks it as known null.
+    pub fn init_global(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation) void {
+        _ = ctx;
+        _ = is_undefined; // Handled by undefined_safety.init_global
+        if (!is_null_opt) return;
+
+        // Only optionals can be marked as null
+        const ref = refinements.at(gid);
+        if (ref.* != .optional) return;
+
+        // Mark as known null with location info
+        ref.optional.analyte.null_safety = .{ .@"null" = .{
+            .function = "",
+            .file = loc.file,
+            .line = loc.line,
+            .column = loc.column,
+        } };
     }
 };
 
@@ -490,7 +514,7 @@ test "store to optional with null sets null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store null to the optional
-    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .int_const = .{ .ty = .{ .@"null" = &test_scalar_type } } } });
+    try NullSafety.store(state, 1, .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .@"null" = &test_scalar_type } } } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");
@@ -515,8 +539,60 @@ test "store to optional with value sets non_null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store a runtime value to the optional
-    try NullSafety.store(state, 1, .{ .ptr = 0, .src = .{ .inst = 1 } });
+    try NullSafety.store(state, 1, .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .non_null);
+}
+
+test "init_global sets null state on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
+
+    // Initialize as null global
+    const loc = tag.GlobalLocation{ .file = "test.zig", .line = 1, .column = 1 };
+    NullSafety.init_global(&refinements, opt_eidx, &ctx, false, true, loc);
+
+    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .@"null");
+    try std.testing.expectEqualStrings("test.zig", ns.@"null".file);
+}
+
+test "semideepCopy preserves null_safety on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an inner scalar first (for the optional to point to)
+    const inner_eidx = try refinements.appendEntity(.{ .scalar = .{} });
+
+    // Create an optional with null_safety set to .@"null"
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .@"null" = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
+        .to = inner_eidx,
+    } });
+
+    // Copy it
+    const copy_eidx = try refinements.semideepCopy(opt_eidx);
+
+    // Verify the copy has the same null_safety
+    const ns = refinements.at(copy_eidx).optional.analyte.null_safety.?;
+    try std.testing.expect(ns == .@"null");
+    try std.testing.expectEqualStrings("test.zig", ns.@"null".file);
 }

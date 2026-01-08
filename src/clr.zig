@@ -90,8 +90,10 @@ var mir_list: std.ArrayListUnmanaged(*const FuncMir) = .empty;
 /// Information about a global variable for tracking
 pub const GlobalInfo = struct {
     nav_idx: u32,
-    is_undefined: bool,
-    type_str: []const u8, // Pre-formatted type string for codegen
+    type_str: []const u8, // Pre-formatted type string (wrapped in .undefined if global is undefined)
+    file: []const u8 = "",
+    line: u32 = 0,
+    column: u32 = 0,
 };
 
 /// Registry of global variables encountered during codegen.
@@ -99,11 +101,11 @@ pub const GlobalInfo = struct {
 var global_registry: std.AutoHashMapUnmanaged(u32, GlobalInfo) = .empty;
 
 /// Register a global variable. Returns the nav_idx for reference.
-pub fn registerGlobal(nav_idx: u32, is_undefined: bool, type_str: []const u8) u32 {
+/// The type_str should be wrapped in .{ .ty = .{ .undefined = &inner } } if the global is undefined.
+pub fn registerGlobal(nav_idx: u32, type_str: []const u8) u32 {
     if (global_registry.get(nav_idx) == null) {
         global_registry.put(clr_allocator.allocator(), nav_idx, .{
             .nav_idx = nav_idx,
-            .is_undefined = is_undefined,
             .type_str = type_str,
         }) catch {};
     }
@@ -118,6 +120,34 @@ pub fn getGlobalsIterator() std.AutoHashMapUnmanaged(u32, GlobalInfo).ValueItera
 /// Get the number of registered globals
 pub fn getGlobalsCount() usize {
     return global_registry.count();
+}
+
+/// Update location info for all registered globals that don't have it yet.
+/// Called after generateFunction with access to Zcu.
+pub fn updateGlobalLocations(zcu: *Zcu) void {
+    const ip = &zcu.intern_pool;
+    var it = global_registry.iterator();
+    while (it.next()) |entry| {
+        // Skip if already has location
+        if (entry.value_ptr.line != 0) continue;
+
+        const nav_idx: InternPool.Nav.Index = @enumFromInt(entry.key_ptr.*);
+
+        // Get source location info
+        const inst_info = ip.getNav(nav_idx).srcInst(ip).resolveFull(ip) orelse continue;
+        const file_idx = inst_info.file;
+        const file = zcu.fileByIndex(file_idx);
+        const zir = file.zir orelse continue;
+        const decl = zir.getDeclaration(inst_info.inst);
+
+        // Get file path and dupe to persistent allocator
+        const file_path = clr_allocator.allocator().dupe(u8, file.path.sub_path) catch continue;
+
+        entry.value_ptr.file = file_path;
+        // Add 1 to convert from 0-indexed to 1-indexed (consistent with dbg_stmt handling)
+        entry.value_ptr.line = decl.src_line + 1;
+        entry.value_ptr.column = decl.src_column + 1;
+    }
 }
 
 export fn init(avt: *const clr_allocator.AllocatorVTable) ?*const u8 {
@@ -229,6 +259,9 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Generate Zig source for this function
     const text = clr_codegen.generateFunction(func_index, fqn, &info, base_line, file_path);
 
+    // Update location info for any globals that were registered during codegen
+    updateGlobalLocations(zcu);
+
     // Convert hash maps to slices for storage on FuncMir
     const name_mappings = convertNameMapToSlice(&name_map);
     const field_mappings = convertFieldMapToSlice(&field_map);
@@ -292,7 +325,95 @@ fn updateFunc(_: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, mir_ptr: c_anyop
     mir_list.append(clr_allocator.allocator(), mir) catch return;
 }
 
-fn updateNav(_: c_anyopaque_t, _: c_anyopaque_const_t, _: u32) callconv(.c) void {}
+fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) callconv(.c) void {
+    const pt: *const Zcu.PerThread = @ptrCast(@alignCast(pt_ptr));
+    const zcu = pt.zcu;
+    const ip = &zcu.intern_pool;
+    const nav_index: InternPool.Nav.Index = @enumFromInt(nav_index_raw);
+    const nav = ip.getNav(nav_index);
+
+    // Only process fully resolved navs
+    const resolved = switch (nav.status) {
+        .fully_resolved => |r| r,
+        else => return,
+    };
+
+    // Skip functions - we only want global variables
+    const type_tag = ip.zigTypeTag(ip.typeOf(resolved.val));
+    if (type_tag == .@"fn") return;
+
+    // Get root module name to filter user code from stdlib
+    const root_name = zcu.root_mod.fully_qualified_name;
+    const fqn = nav.fqn.toSlice(ip);
+
+    // Skip non-user globals (stdlib, compiler_rt, etc)
+    if (!std.mem.startsWith(u8, fqn, root_name)) return;
+
+    // Note: Don't skip if already registered - updateNav has accurate type info
+    // (including null/undefined status) that codegen may not have had access to.
+
+    // Create arena for type string generation
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    // Get the type of this global
+    const nav_type = nav.typeOf(ip);
+
+    // Get the actual init value - for variables, we need to look inside
+    const val_key = ip.indexToKey(resolved.val);
+    const init_val: InternPool.Index = switch (val_key) {
+        .variable => |v| v.init,
+        else => resolved.val,
+    };
+
+    // Check if value is undefined or null
+    const init_key = if (init_val != .none) ip.indexToKey(init_val) else val_key;
+    const is_undefined = (init_key == .undef) or (init_val == .none);
+    const is_null = switch (init_key) {
+        .opt => |opt| opt.val == .none,
+        else => false,
+    };
+
+    // Generate type string
+    const type_str = clr_codegen.typeToStringForGlobal(arena.allocator(), ip, nav_type);
+
+    // Wrap in .undefined if the global is undefined, or .null if it's a null optional
+    // For .null, we need the INNER type (not the optional wrapper) since .null implies optional
+    const final_type_str = if (is_undefined)
+        clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .undefined = &{s} }} }}", .{type_str}, null)
+    else if (is_null) blk: {
+        // Extract the child type from the optional
+        const type_key = ip.indexToKey(nav_type);
+        const inner_type = if (type_key == .opt_type) type_key.opt_type else nav_type;
+        const inner_type_str = clr_codegen.typeToStringForGlobal(arena.allocator(), ip, inner_type);
+        break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .null = &{s} }} }}", .{inner_type_str}, null);
+    } else
+        clr_allocator.allocator().dupe(u8, type_str) catch return;
+
+    // Get source location info
+    var file_path: []const u8 = "";
+    var line: u32 = 0;
+    var column: u32 = 0;
+    if (nav.srcInst(ip).resolveFull(ip)) |inst_info| {
+        const file_idx = inst_info.file;
+        const file = zcu.fileByIndex(file_idx);
+        if (file.zir) |zir| {
+            const decl = zir.getDeclaration(inst_info.inst);
+            file_path = clr_allocator.allocator().dupe(u8, file.path.sub_path) catch "";
+            line = decl.src_line + 1;
+            column = decl.src_column + 1;
+        }
+    }
+
+    // Register the global
+    global_registry.put(clr_allocator.allocator(), nav_index_raw, .{
+        .nav_idx = nav_index_raw,
+        .type_str = final_type_str,
+        .file = file_path,
+        .line = line,
+        .column = column,
+    }) catch {};
+}
 
 fn updateLineNumber(_: c_anyopaque_t, _: c_anyopaque_const_t, _: u32) callconv(.c) void {}
 

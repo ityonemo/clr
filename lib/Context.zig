@@ -73,7 +73,10 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
     const t = inst.inst_tag orelse return null;
     switch (t) {
         .struct_field_ptr => |sfp| {
-            const base = sfp.base orelse return null;
+            const base = switch (sfp.base) {
+                .inst => |inst_idx| inst_idx,
+                .int_var, .int_const => return null, // global/constant base - no path name
+            };
             const base_path = self.buildPathName(results, refinements, base);
 
             // Get field name from container's type_id
@@ -121,7 +124,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
         },
         .load => |l| {
             // Load inherits name from its pointer source
-            const ptr = switch (l.ptr_src) {
+            const ptr = switch (l.ptr) {
                 .inst => |idx| idx,
                 .int_var, .int_const => return null,
             };
@@ -306,7 +309,7 @@ test "buildPathName for load inherits from pointer source" {
     // Inst 1: load from inst 0
     var results = [_]Inst{
         .{ .name_id = 1 }, // foo
-        .{ .inst_tag = .{ .load = .{ .ptr_src = .{ .inst = 0 } } } },
+        .{ .inst_tag = .{ .load = .{ .ptr = .{ .inst = 0 } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 1);
@@ -377,7 +380,7 @@ test "buildPathName for struct_field_ptr builds field path" {
     // Inst 1: struct_field_ptr accessing field 0 (bar) of inst 0
     var results = [_]Inst{
         .{ .name_id = 1, .refinement = ptr_gid }, // foo
-        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 1);
@@ -406,7 +409,7 @@ test "buildPathName for compound path: foo.?.bar" {
     var results = [_]Inst{
         .{ .name_id = 1 }, // foo
         .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 0 } } }, .refinement = ptr_gid },
-        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = 1, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = .{ .inst = 1 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 2);

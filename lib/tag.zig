@@ -118,7 +118,9 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             return .{ .errorunion = .{ .to = child_idx } };
         },
         .null => |child| {
-            // .null is a null optional value - creates same structure as .optional
+            // .null always wraps the INNER type of an optional (e.g., *u8 for ?*u8)
+            // We create an optional refinement around the inner type
+            // Codegen ensures .null never wraps .optional directly
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
             return .{ .optional = .{ .to = child_idx } };
@@ -192,8 +194,8 @@ pub const AllocCreate = struct {
 };
 
 pub const AllocDestroy = struct {
-    /// Index into results[] array for the pointer being freed
-    ptr: usize,
+    /// Source of pointer being freed - instruction index or interned pointer
+    ptr: Src,
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
     allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
 
@@ -229,8 +231,8 @@ pub const AllocAlloc = struct {
 /// Slice deallocation: allocator.free(slice)
 /// Takes a slice and returns void
 pub const AllocFree = struct {
-    /// Index into results[] array for the slice being freed
-    slice: usize,
+    /// Source of slice being freed - instruction index or interned pointer
+    slice: Src,
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
     allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
 
@@ -256,8 +258,8 @@ pub const AllocResize = struct {
 /// Frees the old slice and returns a new slice.
 /// realloc returns Allocator.Error![]T, remap returns ?[]T
 pub const AllocRealloc = struct {
-    /// Index into results[] array for the old slice being freed
-    slice: usize,
+    /// Source of old slice being freed - instruction index or interned pointer
+    slice: Src,
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
     allocator_inst: ?usize, // Optional instruction index for runtime allocator
     ty: Type, // Element type T (not the slice type)
@@ -529,11 +531,11 @@ pub const DbgVarVal = struct {
 /// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
 pub const Load = struct {
     /// Source pointer - instruction, interned variable, or interned constant
-    ptr_src: Src,
+    ptr: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get the pointer's refinement GID based on source type
-        const ptr_gid: ?Gid = switch (self.ptr_src) {
+        const ptr_gid: ?Gid = switch (self.ptr) {
             .inst => |ptr| state.results[ptr].refinement,
             .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
             .int_const => |ty| {
@@ -570,29 +572,34 @@ pub const Load = struct {
 /// Used by struct_field_ptr_index_N instructions.
 /// Note: Zig AIR uses this for both struct and union field access.
 pub const StructFieldPtr = struct {
-    /// Base pointer to the struct or union
-    base: ?usize,
+    /// Base pointer to the struct or union - instruction or global
+    base: Src,
     /// Index of the field to access
     field_index: usize,
     /// Result type (pointer to field type)
     ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const base = self.base orelse {
-            // Interned/global base - use type info to create proper structure
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-            try splat(.struct_field_ptr, state, index, self);
-            return;
+        // Get the base pointer's refinement based on source type
+        const base_ref: ?Gid = switch (self.base) {
+            .inst => |inst| state.results[inst].refinement,
+            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_const => {
+                // Interned constant base - use type info to create proper structure
+                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                try splat(.struct_field_ptr, state, index, self);
+                return;
+            },
         };
 
-        // base produces pointer refinement, follow to struct or union
-        const base_ref = state.results[base].refinement orelse {
+        const effective_base_ref = base_ref orelse {
             // Base has no refinement - use type info
             _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
             try splat(.struct_field_ptr, state, index, self);
             return;
         };
-        const base_refinement = state.refinements.at(base_ref).*;
+
+        const base_refinement = state.refinements.at(effective_base_ref).*;
         const container_idx = base_refinement.pointer.to;
         const container = state.refinements.at(container_idx).*;
 
@@ -604,15 +611,13 @@ pub const StructFieldPtr = struct {
             .@"union" => |data| {
                 const field_idx = idx: {
                     if (data.fields[self.field_index]) |idx| break :idx idx;
-                    // Field is inactive - check if this is a tagged union
-                    if (data.analyte.variant_safety != null) {
-                        // Tagged union: accessing inactive field is an error
-                        try state.ctx.meta.print(state.ctx.writer, "access of inactive union variant in ", .{});
-                        return error.InactiveVariantAccess;
-                    }
-                    // Untagged union: create entity on first access and persist it
+                    // Field is inactive - create entity for it
+                    // For tagged unions, the analysis module (variant_safety) will report the error
+                    // For untagged unions, this creates the entity on first access
                     const new_field_ref = try typeToRefinement(self.ty.ty.pointer.*, state.refinements);
                     const new_idx = try state.refinements.appendEntity(new_field_ref);
+                    // Persist in union's fields array (for untagged unions, this is correct;
+                    // for tagged unions, variant_safety will report error before this matters)
                     state.refinements.at(container_idx).@"union".fields[self.field_index] = new_idx;
                     break :idx new_idx;
                 };
@@ -930,15 +935,66 @@ pub const RetLoad = struct {
 /// We do NOT modify the ptr instruction's refinement - it still points to the same
 /// pointer entity. We only update the pointee's analysis state.
 pub const Store = struct {
-    /// Index into results[] for the pointer being stored through.
-    /// Null when storing to a global or constant pointer (interned value).
-    ptr: ?usize,
+    /// Pointer being stored through - can be local inst, global (int_var), or constant.
+    ptr: Src,
     /// Source value being stored.
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-        // The ptr instruction's entity is unchanged - we only update the pointee's analysis state
+
+        // Get pointer GID and follow to pointee
+        const ptr_gid: ?Gid = switch (self.ptr) {
+            .inst => |ptr| state.results[ptr].refinement,
+            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_const => null,
+        };
+        const effective_ptr_gid = ptr_gid orelse {
+            try splat(.store, state, index, self);
+            return;
+        };
+        const ptr_ref = state.refinements.at(effective_ptr_gid);
+        if (ptr_ref.* != .pointer) {
+            try splat(.store, state, index, self);
+            return;
+        }
+        const pointee_gid = ptr_ref.pointer.to;
+        const pointee = state.refinements.at(pointee_gid);
+
+        // Get source refinement GID
+        const src_gid: ?Gid = switch (self.src) {
+            .inst => |src| state.results[src].refinement,
+            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_const => null,
+        };
+
+        // Update structural .to fields when storing compatible types
+        // This ensures that loads through the destination reach the correct target
+        if (src_gid) |src_ref| {
+            const src = state.refinements.at(src_ref);
+            switch (pointee.*) {
+                .pointer => |*p| {
+                    // Storing pointer into pointer slot - share the target
+                    if (src.* == .pointer) {
+                        p.to = src.pointer.to;
+                    }
+                },
+                .optional => |*o| {
+                    // Storing optional into optional slot - share the payload
+                    if (src.* == .optional) {
+                        o.to = src.optional.to;
+                    }
+                },
+                .errorunion => |*e| {
+                    // Storing errorunion into errorunion slot - share the payload
+                    if (src.* == .errorunion) {
+                        e.to = src.errorunion.to;
+                    }
+                },
+                else => {},
+            }
+        }
+
         try splat(.store, state, index, self);
     }
 };
@@ -1062,9 +1118,8 @@ pub const ErrunionPayloadPtrSet = struct {
         const payload_gid = errunion_ref.errorunion.to;
 
         // Create a new pointer that points to the payload
-        // Pointer is defined (we have a valid address to the payload)
+        // Analysis modules will set appropriate analyte state via splat
         const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{
-            .analyte = .{ .undefined = .{ .defined = {} } },
             .to = payload_gid,
         } });
 
@@ -1212,7 +1267,7 @@ pub const Noop = struct {
 /// SetUnionTag sets the active tag on a union without setting the payload.
 /// This marks the specified field as active (undefined) and all others as inactive.
 pub const SetUnionTag = struct {
-    ptr: ?usize, // union pointer instruction
+    ptr: Src, // union pointer - instruction or global
     field_index: ?usize, // which field is being activated
     ty: Type, // type of the activated field
 
@@ -1220,9 +1275,15 @@ pub const SetUnionTag = struct {
         // Result is void (no new entity created)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
 
-        // Follow the pointer to get the union refinement - Zig's safety checks will panic on wrong types
+        // Get the union pointer's refinement based on source type
+        const ptr_eidx: Gid = switch (self.ptr) {
+            .inst => |inst| state.results[inst].refinement.?,
+            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx).?,
+            .int_const => return, // comptime constant - no tracking needed
+        };
+
+        // Follow the pointer to get the union refinement
         const field_idx = self.field_index.?;
-        const ptr_eidx = state.results[self.ptr.?].refinement.?;
         const union_eidx = state.refinements.at(ptr_eidx).pointer.to;
 
         // Deactivate all fields
@@ -1572,12 +1633,19 @@ pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void
     }
 }
 
+/// Source location info for global variable definitions
+pub const GlobalLocation = struct {
+    file: []const u8,
+    line: u32,
+    column: u32,
+};
+
 /// Initialize a global variable refinement.
-/// Dispatches to init_global handlers to set up analysis state (e.g., undefined tracking).
-pub fn splatInitGlobal(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool) void {
+/// Dispatches to init_global handlers to set up analysis state (e.g., undefined tracking, null state).
+pub fn splatInitGlobal(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool, is_null: bool, loc: GlobalLocation) void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_global")) {
-            Analysis.init_global(refinements, gid, ctx, is_undefined);
+            Analysis.init_global(refinements, gid, ctx, is_undefined, is_null, loc);
         }
     }
 }
@@ -1613,7 +1681,7 @@ pub fn splatMergeEarlyReturns(
         };
     }
 
-    try splatMerge(.early_return, results, ctx, refinements, branches, base_gid);
+    try splatMerge(.early_return, results, ctx, refinements, branches, base_gid, null);
 
     // Also merge the return value from all early_returns.
     // The return_gid is not in the results table (ret_safe sets result to void),
@@ -1752,11 +1820,13 @@ pub fn splatMerge(
     refinements: *Refinements,
     branches: []const State,
     merge_base_gid: ?Gid,
+    branch_base_len: ?Gid,
 ) !void {
     const allocator = ctx.allocator;
 
-    // Record base_len before merge - entities >= this index were created by branches
-    const base_len = refinements.list.items.len;
+    // Use provided base_len if available, otherwise calculate from current refinements.
+    // branch_base_len should be passed when entities were added to parent after cloning branches.
+    const base_len = branch_base_len orelse @as(Gid, @intCast(refinements.list.items.len));
 
     // Build filtered branch array - null for unreachable
     const filtered = try allocator.alloc(?State, branches.len);
@@ -1827,8 +1897,26 @@ pub fn splatMerge(
             if (consistent_branch_gid) |new_gid| {
                 if (new_gid != orig_gid) {
                     // All reachable branches have same entity, different from orig.
-                    // Update parent's result slot to use the branch's entity.
-                    result.refinement = new_gid;
+                    // Check if it's a new entity created by branches (GID >= base_len)
+                    if (new_gid >= base_len) {
+                        // Entity only exists in branch refinements - copy to parent
+                        for (filtered) |branch_opt| {
+                            const branch = branch_opt orelse continue;
+                            const src_ref = branch.refinements.at(new_gid).*;
+                            const copied_gid = try Refinement.copyTo(
+                                src_ref,
+                                branch.refinements,
+                                refinements,
+                            );
+                            result.refinement = copied_gid;
+                            // Don't update branch_gids - they need to stay pointing to
+                            // original branch entities for mergeRefinementRecursive to look them up
+                            break;
+                        }
+                    } else {
+                        // Entity already exists in parent - just update result
+                        result.refinement = new_gid;
+                    }
                 }
             }
         }
@@ -2319,7 +2407,7 @@ test "struct_field_ptr gets pointer to struct field" {
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -2445,7 +2533,7 @@ test "set_union_tag updates union variant" {
     results[0].refinement = ptr_gid;
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
 
     // The union's active field should be set (field 1), others null
     const union_ref = refinements.at(union_gid);

@@ -34,19 +34,104 @@ Global variables and types are not fully tracked through the analysis.
 
 **Planned fix**: May require more sophisticated analysis for generating dependency understanding and retriggering analysis on functions when globals change.
 
-### Interned Pointer Arguments (Memory Safety)
+### Global Pointer Variables (Dereferencing)
 
-When a compile-time constant pointer is passed as a function argument (e.g., a pointer to a global or string literal), the memory safety analysis doesn't set any state on it. This is probably correct for most cases, but edge cases may exist.
+When a global variable is itself a pointer (e.g., `var global_ptr: *u8 = &global_value;`), passing the pointer value directly does not properly track that it points to global memory.
 
-**Example**: Passing `&global_var` as an argument - the memory safety analysis currently does nothing. This may need special handling if we want to track globals.
+**Example that should fail but doesn't**:
+```zig
+var global_value: u8 = 42;
+var global_ptr: *u8 = &global_value;  // Global pointer to global memory
 
-**Investigation needed**: Determine if interned pointer arguments need memory safety state initialization.
+fn do_free(ptr: *u8) void {
+    allocator.destroy(ptr);  // Should fail - ptr points to global memory
+}
+
+pub fn main() void {
+    do_free(global_ptr);  // Passes the VALUE of global_ptr, not &global_ptr
+}
+```
+
+**Why it's not detected**: The current implementation marks pointees as `.global` when an `int_const` pointer is passed (like `&global_value`). But when passing `global_ptr`, the value is loaded from a global variable first, then passed. The loaded pointer value isn't recognized as pointing to global memory.
+
+**What works**: Passing `&global_value` directly (interned pointer) IS properly tracked.
+
+**Future fix**: Track that global pointer variables contain values that point to global memory. May require analyzing the global's initial value from the InternPool.
 
 ### Region Allocation/Freeing
 
 Region-based memory management (allocating from a region, freeing entire regions) is not tracked.
 
 **Planned**: Support for region allocators and tracking region lifetimes.
+
+### Global Union Initial Values
+
+Global unions don't have their initial variant tracked. The analyzer extracts global types from the InternPool but not their initial values.
+
+**Example that triggers false positive**:
+```zig
+var global: Value = .{ .int = 42 };  // Initialized with .int
+
+fn set_float() void {
+    global = .{ .float = 3.14 };
+}
+
+fn checked_access() i32 {
+    if (global == .int) {
+        return global.int;  // FALSE POSITIVE: reports inactive variant access
+    }
+    return 0;
+}
+```
+
+**Why**: After `set_float()` runs, the analysis knows `.float` is active but has no record of `.int` ever being initialized (the initial value isn't tracked). When the tag check proves `.int` is active, we can't update variant_safety because the field entity doesn't exist.
+
+**Workaround**: Ensure the variant you're checking was set in code the analyzer can see (not just the global initializer).
+
+**Future fix**: Extract initial values from the InternPool during codegen and pass them to `initWithGlobals`. The initial value IS available in the InternPool - we just need to read it. This would also allow `const` unions to have their active variant set correctly from initialization.
+
+**Note**: Also need to verify that `var u: MyUnion = undefined;` does the right thing - all variants should be inactive and accessing any field should be an error until a variant is explicitly set.
+
+### Global Field Pointer Tracking (fieldParentPtr)
+
+Pointers to global struct/union fields are computed at compile time and interned. No `struct_field_ptr` instruction is generated, so `fieldparentptr_safety` tracking is not set up.
+
+**Example that won't be tracked**:
+```zig
+var global_point: Point = .{ .x = 10, .y = 20 };
+
+fn get_x_ptr() *i32 {
+    return &global_point.x;  // Interned at comptime, no struct_field_ptr
+}
+
+fn get_parent(x_ptr: *i32) *Point {
+    return @fieldParentPtr("x", x_ptr);  // Can't verify - no tracking
+}
+```
+
+**Why**: Zig computes `&global.field` addresses at compile time and interns them directly. The address is embedded in the binary, so no runtime `struct_field_ptr` instruction is generated that would set up our tracking.
+
+**Future fix**: Extract field pointer info from the InternPool during codegen. When an interned pointer points to a global struct field, we could set up `fieldparentptr_safety` based on the InternPool's knowledge of the pointer's origin.
+
+### Global Allocation Leak Detection
+
+Allocations stored in global variables are exempt from leak detection. The analyzer tracks which refinements are reachable from globals and skips leak detection for those allocations entirely.
+
+**Impact**: Memory allocated and stored in a global variable will not be flagged as a leak, even if it is never freed.
+
+**Example**:
+```zig
+var global_ptr: ?*u8 = null;
+
+pub fn main() void {
+    global_ptr = allocator.create(u8);  // Not flagged as leak
+    // Never freed - but no error reported
+}
+```
+
+**Rationale**: Global-stored allocations often have program lifetime and are intentionally not freed. Detecting "true" leaks at program end would require whole-program analysis.
+
+**Future improvement**: Could add optional program-end leak detection that checks if global-reachable allocations are freed before `main` returns.
 
 ### Loops
 
@@ -80,6 +165,21 @@ The following AIR instruction tags are not yet implemented and produce `.unimple
 - `noop_pruned_debug` - Pruned debug instruction (produces void)
 
 ## Needs Investigation
+
+### Review All Parameters That Should Be Src Type
+
+After refactoring `Store.ptr` from `?usize` to `Src` type (to support globals), other tag struct parameters may also need to be converted to `Src` for consistency and global support:
+
+**Candidates to review**:
+- `alloc_destroy.ptr` - currently `usize`, may need `Src` for freeing global allocations
+- `dbg_var_ptr.ptr` - currently `?usize`, may need `Src` for global variable names
+- `set_union_tag.ptr` - currently `usize`, may need `Src` for global unions
+
+**Already using Src**:
+- `Store.ptr` - converted to support globals
+- `Load.ptr` - already uses `Src` for globals
+
+**Note**: Not all `ptr` fields need to be `Src`. Some are indices into local results (like `struct_field_ptr.base`) which will never be globals.
 
 ### Move Semantics (Stack to Allocated)
 

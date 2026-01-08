@@ -130,13 +130,17 @@ pub fn cond_br(
     // Restore ctx.meta for the merge - errors should point to the cond_br location
     ctx.meta = saved_meta;
 
+    // Record base_len BEFORE creating void - branches may have created entities at same indices
+    const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
+
     // Mark the block instruction as void
     results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 
     // Merge: walk results and call analysis merge for each slot that has refinements
     // Pass null for merge_base_gid - regular branch merges should merge all entities
+    // Pass branch_base_len so splatMerge knows which entities existed before branches
     const branches = [_]State{ true_state, false_state };
-    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches, null);
+    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches, null, branch_base_len);
 
     // Propagate early_returns to parent if tracking (ownership transfer)
     if (state.early_returns) |parent_early| {
@@ -238,12 +242,16 @@ pub fn switch_br(
     // Restore ctx.meta for the merge - errors should point to the switch_br location
     ctx.meta = saved_meta;
 
+    // Record base_len BEFORE creating void - branches may have created entities at same indices
+    const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
+
     // Mark the switch instruction as void
     results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 
     // Merge all branches using splatMerge
     // Pass null for merge_base_gid - regular branch merges should merge all entities
-    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states, null);
+    // Pass branch_base_len so splatMerge knows which entities existed before branches
+    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states, null, branch_base_len);
 
     // Propagate early_returns to parent if tracking (ownership transfer)
     if (state.early_returns) |parent_early| {
@@ -417,7 +425,7 @@ test "store_safe with undef keeps state undefined" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
 
     // alloc's pointee stays undefined after store_safe with undef
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -441,7 +449,7 @@ test "store_safe with value sets state to defined" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // alloc's pointee becomes defined after store_safe with real value
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -467,10 +475,10 @@ test "load from undefined instruction reports use before assign" {
 
     // Set up: alloc creates pointer to future, store with .undefined transforms to scalar+undefined
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
 
     // Load from undefined instruction should return error
-    try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr_src = .{ .inst = 1 } } }));
+    try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } }));
 }
 
 test "load from defined instruction does not report error" {
@@ -491,10 +499,10 @@ test "load from defined instruction does not report error" {
 
     // Set up: alloc then store a real value
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // Load from defined instruction should NOT return error
-    try Inst.apply(state, 3, .{ .load = .{ .ptr_src = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
 }
 
 test "all instructions get valid refinements after operations" {
@@ -516,8 +524,8 @@ test "all instructions get valid refinements after operations" {
     // Apply various operations that should all set refinements
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = 1, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
-    try Inst.apply(state, 3, .{ .load = .{ .ptr_src = .{ .inst = 1 } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
     try Inst.apply(state, 4, .{ .block = .{ .ty = .{ .ty = .{ .void = {} } } } });
 
     // All instructions should have valid refinements
@@ -557,7 +565,7 @@ test "ret_safe writes return value to return slot" {
 
     // Allocate and store a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // Return the value from instruction 0
     try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
@@ -628,7 +636,7 @@ test "ret_safe at entrypoint succeeds" {
 
     // Allocate a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = 0, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
 
     // Return - should just succeed without error
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });

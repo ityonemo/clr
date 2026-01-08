@@ -31,6 +31,13 @@ load test_helper
     [[ "$output" =~ "free of stack memory" ]]
 }
 
+@test "detects freeing pointer to global variable" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_global_ptr.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of global/comptime memory" ]]
+    [[ "$output" =~ "free_global_ptr.main" ]]
+}
+
 @test "detects mismatched allocator for create/destroy" {
     run compile_and_run "$TEST_CASES/allocator/basic/mismatched_allocator.zig"
     [ "$status" -ne 0 ]
@@ -605,4 +612,32 @@ load test_helper
 @test "no false positive for correct global pointer usage" {
     run compile_and_run "$TEST_CASES/allocator/globals/correct_usage.zig"
     [ "$status" -eq 0 ]
+}
+
+@test "detects free of global memory (direct)" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_global_ptr.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of global/comptime memory" ]]
+    [[ "$output" =~ "free_global_ptr.main" ]]
+}
+
+@test "detects free of global memory (laundered through function)" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_global_ptr_laundered.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of global/comptime memory" ]]
+    [[ "$output" =~ "free_global_ptr_laundered.do_free" ]]
+}
+
+@test "detects free of global memory (indirect through function)" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_global_ptr_indirect.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of global/comptime memory" ]]
+    [[ "$output" =~ "free_global_ptr_indirect.do_free" ]]
+}
+
+@test "detects free of global slice" {
+    run compile_and_run "$TEST_CASES/allocator/basic/free_global_slice.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of global/comptime memory" ]]
+    [[ "$output" =~ "free_global_slice.main" ]]
 }

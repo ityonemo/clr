@@ -73,8 +73,12 @@ pub const VariantSafety = struct {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // Follow pointer to get to union - Zig's safety checks will panic on wrong types
-        const ptr_ref = results[params.ptr.?].refinement.?;
+        // Get the union pointer's refinement based on source type
+        const ptr_ref: Gid = switch (params.ptr) {
+            .inst => |inst| results[inst].refinement.?,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx).?,
+            .int_const => return, // comptime constant - no variant tracking
+        };
         const container_idx = refinements.at(ptr_ref).pointer.to;
         const u = &refinements.at(container_idx).@"union";
         const field_idx = params.field_index.?;
@@ -100,9 +104,12 @@ pub const VariantSafety = struct {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // base can be null for interned/global pointers - skip variant checking for those
-        const base = params.base orelse return;
-        const base_ref = results[base].refinement orelse return;
+        // Get base pointer refinement - handle instruction or global base
+        const base_ref: Gid = switch (params.base) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_const => return, // constant base - no variant checking
+        };
 
         // Follow pointer to container - must be a pointer
         const container_idx = refinements.at(base_ref).pointer.to;
@@ -113,16 +120,38 @@ pub const VariantSafety = struct {
         }
     }
 
-    /// Handle cond_br - tag checks validate but don't change the active variant.
-    /// Only set_union_tag/union_init should modify variant_safety.
-    /// This is intentionally a no-op: the original variant set by set_union_tag
-    /// determines what's safe to access, not tag checks.
+    /// Handle cond_br - tag checks validate but don't change the global's active variant.
+    /// Only set_union_tag should modify the global's variant_safety.
+    /// For the LOCAL copy (loaded union), we update variant_safety to reflect what we know
+    /// in this branch.
     pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
-        _ = state;
         _ = index;
-        _ = params;
-        // No-op: tag checks don't change which variant is active.
-        // The original set_union_tag establishes the active variant.
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // Only handle if there's union tag info and this is the true branch
+        const union_check = params.union_tag orelse return;
+        if (!params.branch) return; // Only update on true branch
+
+        // Find the union's refinement via the operand instruction
+        const union_eidx = results[union_check.union_inst].refinement orelse return;
+        const union_ref = refinements.at(union_eidx);
+        if (union_ref.* != .@"union") return;
+
+        // Only update the LOCAL copy's variant_safety - don't touch globals
+        // Tag checks observe the variant, they don't change it
+        const u = &union_ref.@"union";
+        const vs = &(u.analyte.variant_safety orelse return);
+
+        // Only update if the field entity exists
+        if (union_check.field_index >= u.fields.len) return;
+        if (u.fields[union_check.field_index] == null) return;
+
+        for (vs.active_metas) |*meta| {
+            meta.* = null;
+        }
+        vs.active_metas[union_check.field_index] = ctx.meta;
     }
 
     /// Handle switch_br - when switching on a union tag, update the active variant.
@@ -365,7 +394,7 @@ test "set_union_tag sets active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Set variant 1 as active
-    try VariantSafety.set_union_tag(state, 1, .{ .ptr = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
+    try VariantSafety.set_union_tag(state, 1, .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
 
     // Check variant_safety was created
     const u = refinements.at(union_eidx).@"union";
@@ -408,7 +437,7 @@ test "struct_field_ptr allows access to active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access active field 1 - should succeed
-    try VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
+    try VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
 }
 
 test "struct_field_ptr errors on inactive variant" {
@@ -444,7 +473,7 @@ test "struct_field_ptr errors on inactive variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access inactive field 0 - should error
-    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -519,7 +548,7 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access any field when ambiguous - should error
-    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expectError(error.AmbiguousVariantAccess, result);
 }
 

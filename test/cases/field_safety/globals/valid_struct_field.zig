@@ -11,7 +11,7 @@ fn get_x_ptr() *i32 {
 }
 
 fn get_parent(x_ptr: *i32) *Point {
-    return @fieldParentPtr(x_ptr, "x");
+    return @fieldParentPtr("x", x_ptr);
 }
 
 pub fn main() u8 {

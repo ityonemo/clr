@@ -376,8 +376,8 @@ fn payloadStructFieldPtr(info: *const FnInfo, datum: Data, field_index: usize) [
         typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
     else
         ".{ .unknown = {} }"; // Will cause compile error if hit
-    const base_ptr: ?usize = if (datum.ty_op.operand.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d}, .field_index = {d}, .ty = {s} }}", .{ base_ptr, field_index, ty_str }, null);
+    const base_src = srcString(info, datum.ty_op.operand);
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s} }}", .{ base_src, field_index, ty_str }, null);
 }
 
 /// Payload for struct_field_val - extracts a field value from a struct by value.
@@ -473,16 +473,16 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, created_type }, null);
             }
             if (isAllocatorDestroy(info.ip, datum)) {
-                // Prune allocator.destroy() - emit special tag with pointer inst
-                const ptr_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
-                    // Can't determine ptr instruction, fall through to regular call
+                // Prune allocator.destroy() - emit special tag with pointer src
+                const ptr_src = extractDestroyPtrSrc(info, datum) orelse {
+                    // Can't determine ptr source, fall through to regular call
                     const call_parts = payloadCallParts(info, datum);
                     break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {d}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, ptr_inst, allocator_info.id, allocator_inst }, null);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {s}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, ptr_src, allocator_info.id, allocator_inst }, null);
             }
             if (isAllocatorAlloc(info.ip, datum)) {
                 // Prune allocator.alloc() - emit special tag for slice tracking
@@ -493,17 +493,17 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
             }
             if (isAllocatorFree(info.ip, datum)) {
-                // Prune allocator.free() - emit special tag with slice inst
+                // Prune allocator.free() - emit special tag with slice src
                 // free has 2 args: (self, slice) - we want arg index 1 (same as destroy)
-                const slice_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
-                    // Can't determine slice instruction, fall through to regular call
+                const slice_src = extractDestroyPtrSrc(info, datum) orelse {
+                    // Can't determine slice source, fall through to regular call
                     const call_parts = payloadCallParts(info, datum);
                     break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_free = .{{ .slice = {d}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, slice_inst, allocator_info.id, allocator_inst }, null);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_free = .{{ .slice = {s}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, slice_src, allocator_info.id, allocator_inst }, null);
             }
             // alignedAlloc is like alloc but FQN doesn't match "mem.Allocator.alloc" pattern
             if (isAllocatorAlignedAlloc(info.ip, datum)) {
@@ -519,7 +519,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             }
             // realloc/remap frees old slice and returns new slice
             if (isAllocatorRealloc(info.ip, datum) or isAllocatorRemap(info.ip, datum)) {
-                const slice_inst = extractDestroyPtrInst(datum, info.extra, info.tags, info.data) orelse {
+                const slice_src = extractDestroyPtrSrc(info, datum) orelse {
                     const call_parts = payloadCallParts(info, datum);
                     break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
                 };
@@ -527,7 +527,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
                 const element_type = extractAllocAllocType(info, datum);
                 const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_realloc = .{{ .slice = {d}, .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, slice_inst, allocator_info.id, allocator_inst, element_type }, null);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_realloc = .{{ .slice = {s}, .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, slice_src, allocator_info.id, allocator_inst, element_type }, null);
             }
             // dupe/dupeZ allocate a copy - treat like alloc
             if (isAllocatorDupe(info.ip, datum) or isAllocatorDupeZ(info.ip, datum)) {
@@ -547,7 +547,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
         },
         else => blk: {
             const tag_payload = payload(info, tag, datum, arg_counter);
-            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
+            const result = clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
+            break :blk result;
         },
     };
 }
@@ -676,25 +677,52 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
         else => return null, // Need fully resolved to check init
     };
 
+    // Check if global is undefined
+    // Strategy: Use InternPool's isUndef and isVariable helpers, then access
+    // the variable.init field through a volatile read to prevent optimization issues
     const is_undefined = if (init_val != .none) blk: {
-        const init_key = ip.indexToKey(init_val);
-        break :blk init_key == .undef;
-    } else true; // No init = undefined
+        // Direct undef check
+        if (ip.isUndef(init_val)) break :blk true;
+
+        // For variables, we need to check their init field
+        if (ip.isVariable(init_val)) {
+            // Get the Key - copy to local to avoid DLL issues with union field access
+            const init_key = ip.indexToKey(init_val);
+            // Use volatile pointer to prevent compiler from optimizing the read
+            const key_ptr: *const volatile InternPool.Key = @ptrCast(&init_key);
+            const stable_key = key_ptr.*;
+
+            // Now safely access the variable field
+            const var_init = stable_key.variable.init;
+            if (var_init == .none) break :blk true;
+            // Use ip.isUndef on the init value
+            break :blk ip.isUndef(var_init);
+        }
+        break :blk false;
+    } else true;
 
     // Get the pointee type (what the pointer points to)
     const ptr_type = ip.indexToKey(ptr.ty);
     const pointee_type = if (ptr_type == .ptr_type) ptr_type.ptr_type.child else .none;
-    const type_str = if (pointee_type != .none)
+    const inner_type_str = if (pointee_type != .none)
         typeToString(info.name_map, info.field_map, info.arena, ip, pointee_type)
     else
         ".{ .ty = .{ .scalar = {} } }";
 
+    // Wrap in .undefined if global is undefined (consistent with store_safe approach)
+    // Use global allocator (not arena) because this string must persist until epilogue runs
+    const type_str = if (is_undefined)
+        clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .undefined = &{s} }} }}", .{inner_type_str}, null)
+    else
+        clr_allocator.allocator().dupe(u8, inner_type_str) catch inner_type_str;
+
     // Register this global
     const nav_idx_int: u32 = @intFromEnum(nav_idx);
-    _ = clr.registerGlobal(nav_idx_int, is_undefined, type_str);
+    _ = clr.registerGlobal(nav_idx_int, type_str);
 
     // Return just the nav_idx number as a string
-    return clr_allocator.allocPrint(info.arena, "{d}", .{nav_idx_int}, null);
+    // Using global allocator instead of arena to avoid potential DLL boundary issues
+    return clr_allocator.allocPrint(clr_allocator.allocator(), "{d}", .{nav_idx_int}, null);
 }
 
 /// Convert an AIR Ref to a Src union string with .undefined wrapper.
@@ -734,6 +762,12 @@ const VisitedTypes = std.AutoArrayHashMapUnmanaged(InternPool.Index, void);
 fn typeToString(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), field_map: ?*clr.FieldHashMap, arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
     var visited = VisitedTypes{};
     return typeToStringInner(name_map, field_map, arena, ip, ty, &visited);
+}
+
+/// Public wrapper for typeToString for use by updateNav.
+/// Doesn't register names since we don't have name maps in updateNav.
+pub fn typeToStringForGlobal(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index) []const u8 {
+    return typeToString(null, null, arena, ip, ty);
 }
 
 /// Inner function with cycle detection via visited set.
@@ -792,10 +826,73 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             const child_str = typeToStringInner(null, null, arena, ip, arr.child, visited);
             break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .region = &{s} }} }}", .{child_str}, null);
         },
-        // Skip struct/union field names when no name_map
-        .struct_type, .union_type => ".{ .ty = .{ .scalar = {} } }",
+        // Handle struct/union types without name registration (for globals)
+        .struct_type => structTypeToStringSimple(arena, ip, ty, visited),
+        .union_type => unionTypeToStringSimple(arena, ip, ty, visited),
         else => ".{ .ty = .{ .scalar = {} } }",
     };
+}
+
+/// Simple union type string without name registration (for global variables)
+fn unionTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    const loaded = ip.loadUnionType(type_index);
+    const field_types = loaded.field_types.get(ip);
+    const type_id: u32 = @intFromEnum(type_index);
+
+    if (field_types.len == 0) {
+        return clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"union\" = &.{{}} }} }}", .{type_id}, null);
+    }
+
+    // Limit recursion depth
+    if (visited.count() > 20) {
+        return ".{ .ty = .{ .scalar = {} } }";
+    }
+
+    var result = std.ArrayListUnmanaged(u8){};
+    const header = clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"union\" = &.{{ ", .{type_id}, null);
+    result.appendSlice(arena, header) catch @panic("out of memory");
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        const field_type_str = typeToStringInner(null, null, arena, ip, field_type, visited);
+        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
+    }
+
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    return result.items;
+}
+
+/// Simple struct type string without name registration (for global variables)
+fn structTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    const loaded = ip.loadStructType(type_index);
+    const field_types = loaded.field_types.get(ip);
+    const type_id: u32 = @intFromEnum(type_index);
+
+    if (field_types.len == 0) {
+        return clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"struct\" = &.{{}} }} }}", .{type_id}, null);
+    }
+
+    // Limit recursion depth
+    if (visited.count() > 20) {
+        return ".{ .ty = .{ .scalar = {} } }";
+    }
+
+    var result = std.ArrayListUnmanaged(u8){};
+    const header = clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"struct\" = &.{{ ", .{type_id}, null);
+    result.appendSlice(arena, header) catch @panic("out of memory");
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        const field_type_str = typeToStringInner(null, null, arena, ip, field_type, visited);
+        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
+    }
+
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    return result.items;
 }
 
 /// Look up a non-well-known type in the InternPool.
@@ -1052,7 +1149,18 @@ fn aggregateValueToString(arena: std.mem.Allocator, ip: *const InternPool, type_
 fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
     // bin_op: lhs = destination ptr, rhs = source value
     const is_undef = isUndefRef(info.ip, datum.bin_op.rhs);
-    const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
+
+    // Get ptr string - can be .inst, .int_var (global), or .int_const
+    const ptr_str: []const u8 = if (datum.bin_op.lhs.toIndex()) |idx|
+        clr_allocator.allocPrint(info.arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null)
+    else if (datum.bin_op.lhs.toInterned()) |interned_idx| blk: {
+        // Check if it's a global variable
+        if (tryGlobalRef(info, interned_idx)) |nav_idx_str| {
+            break :blk clr_allocator.allocPrint(info.arena, ".{{ .int_var = {s} }}", .{nav_idx_str}, null);
+        }
+        // Interned constant pointer
+        break :blk ".{ .int_const = .{ .ty = .{ .scalar = {} } } }";
+    } else ".{ .int_const = .{ .ty = .{ .scalar = {} } } }";
 
     // Check if storing an interned Allocator value - emit special allocator source
     if (datum.bin_op.rhs.toInterned()) |interned_idx| {
@@ -1060,7 +1168,7 @@ fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
         if (isAllocatorType(info.ip, ty)) {
             // Extract the allocator type ID from the vtable
             const alloc_info = extractAllocatorTypeFromInterned(info.ip, interned_idx);
-            return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .src = .{{ .int_const = .{{ .ty = .{{ .allocator = {d} }} }} }} }}", .{ ptr, alloc_info.id }, null);
+            return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s}, .src = .{{ .int_const = .{{ .ty = .{{ .allocator = {d} }} }} }} }}", .{ ptr_str, alloc_info.id }, null);
         }
     }
 
@@ -1069,7 +1177,7 @@ fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
         srcStringUndef(info.arena, info.ip, datum.bin_op.rhs)
     else
         srcString(info, datum.bin_op.rhs);
-    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .src = {s} }}", .{ ptr, src_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s}, .src = {s} }}", .{ ptr_str, src_str }, null);
 }
 
 fn payloadLoad(info: *const FnInfo, datum: Data) []const u8 {
@@ -1081,22 +1189,22 @@ fn payloadLoad(info: *const FnInfo, datum: Data) []const u8 {
 
     // Check for .none first (toIndex asserts on .none)
     if (datum.ty_op.operand == .none) {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr_src = .{{ .int_const = {s} }} }}", .{ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .int_const = {s} }} }}", .{ty_str}, null);
     }
     if (datum.ty_op.operand.toIndex()) |idx| {
         // Runtime instruction index
         const ptr = @intFromEnum(idx);
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr_src = .{{ .inst = {d} }} }}", .{ptr}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .inst = {d} }} }}", .{ptr}, null);
     } else if (datum.ty_op.operand.toInterned()) |interned_idx| {
         // Interned pointer - check if it's a variable (user or non-user)
         if (tryGlobalRef(info, interned_idx)) |nav_idx_str| {
             // Interned variable - emit .int_var with nav_idx
-            return clr_allocator.allocPrint(info.arena, ".{{ .ptr_src = .{{ .int_var = {s} }} }}", .{nav_idx_str}, null);
+            return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .int_var = {s} }} }}", .{nav_idx_str}, null);
         }
         // Interned constant pointer
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr_src = .{{ .int_const = {s} }} }}", .{ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .int_const = {s} }} }}", .{ty_str}, null);
     } else {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr_src = .{{ .int_const = {s} }} }}", .{ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .int_const = {s} }} }}", .{ty_str}, null);
     }
 }
 
@@ -1132,7 +1240,7 @@ fn payloadRetLoad(info: *const FnInfo, datum: Data) []const u8 {
 /// Extracts union pointer, field index, and field type from the interned tag value.
 fn payloadSetUnionTag(info: *const FnInfo, datum: Data) []const u8 {
     // bin_op: lhs = union ptr, rhs = new tag value (interned enum)
-    const ptr: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
+    const ptr_src = srcString(info, datum.bin_op.lhs);
 
     // Extract field index and field type from interned enum tag value
     var field_index: ?u32 = null;
@@ -1183,7 +1291,7 @@ fn payloadSetUnionTag(info: *const FnInfo, datum: Data) []const u8 {
     else
         ".{ .ty = .{ .scalar = {} } }"; // Fallback for untagged unions or errors
 
-    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d}, .field_index = {?d}, .ty = {s} }}", .{ ptr, field_index, ty_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s}, .field_index = {?d}, .ty = {s} }}", .{ ptr_src, field_index, ty_str }, null);
 }
 
 /// Payload for get_union_tag - gets the active tag from a union.
@@ -1257,10 +1365,10 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
             // Runtime value from local instruction - look up entity index from results
             const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(info.arena, "{s} Arg{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Src{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(info.arena, "{s}, Arg{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Src{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
@@ -1269,10 +1377,10 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
             // Interned constant - pass type info so runtime can create entity
             const type_str = typeToString(null, null, info.arena, info.ip, val_type);
             if (first) {
-                args_str = clr_allocator.allocPrint(info.arena, "{s} Arg{{ .int_const = {s} }}", .{ args_str, type_str }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Src{{ .int_const = {s} }}", .{ args_str, type_str }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(info.arena, "{s}, Arg{{ .int_const = {s} }}", .{ args_str, type_str }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Src{{ .int_const = {s} }}", .{ args_str, type_str }, null);
             }
         }
     }
@@ -1456,14 +1564,14 @@ fn countArgs(tags: []const Tag) u32 {
     return count;
 }
 
-/// Generate parameter list string like "arg0: Arg, arg1: Arg"
+/// Generate parameter list string like "arg0: Src, arg1: Src"
 fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
     if (arg_count == 0) return "";
 
-    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: Arg", .{}, null);
+    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: Src", .{}, null);
     var i: u32 = 1;
     while (i < arg_count) : (i += 1) {
-        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: Arg", .{ result, i }, null);
+        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: Src", .{ result, i }, null);
     }
     return result;
 }
@@ -1945,20 +2053,27 @@ pub fn isAllocatorRef(ip: *const InternPool, ref: Ref, tags: []const Tag, data: 
     return false;
 }
 
-/// Extract the pointer slot being destroyed from a destroy call.
+/// Extract the pointer source being destroyed from a destroy call.
 /// destroy(self, ptr) - the second argument (index 1) is the pointer.
-fn extractDestroyPtrInst(datum: Data, extra: []const u32, tags: []const Tag, data: []const Data) ?usize {
-    _ = tags;
-    _ = data;
+/// Returns a Src string like ".{ .inst = N }" or ".{ .int_var = N }" or ".{ .int_const = ... }"
+fn extractDestroyPtrSrc(info: *const FnInfo, datum: Data) ?[]const u8 {
     const payload_index = datum.pl_op.payload;
-    const args_len = extra[payload_index];
+    const args_len = info.extra[payload_index];
 
     // destroy has 2 args: (self, ptr) - we want arg index 1
     if (args_len < 2) return null;
 
-    const ptr_arg_ref: Ref = @enumFromInt(extra[payload_index + 1 + 1]); // +1 for args_len, +1 for second arg
+    const ptr_arg_ref: Ref = @enumFromInt(info.extra[payload_index + 1 + 1]); // +1 for args_len, +1 for second arg
     if (ptr_arg_ref.toIndex()) |idx| {
-        return @intFromEnum(idx);
+        return clr_allocator.allocPrint(info.arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null);
+    } else if (ptr_arg_ref.toInterned()) |interned_idx| {
+        // Interned pointer - check if it's a global variable
+        if (tryGlobalRef(info, interned_idx)) |nav_idx_str| {
+            return clr_allocator.allocPrint(info.arena, ".{{ .int_var = {s} }}", .{nav_idx_str}, null);
+        }
+        // Interned constant pointer (like string literal or pointer to global)
+        // Use a simple pointer type - the runtime will report "free of global/comptime memory" error anyway
+        return ".{ .int_const = .{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } } }";
     }
     return null;
 }
@@ -2904,7 +3019,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
     var it = clr.getGlobalsIterator();
     while (it.next()) |g| {
         const entry = clr_allocator.allocPrint(clr_allocator.allocator(),
-            "\n    .{{ .nav_idx = {d}, .is_undefined = {}, .ty = {s} }},", .{ g.nav_idx, g.is_undefined, g.type_str }, null);
+            "\n    .{{ .nav_idx = {d}, .ty = {s}, .file = \"{s}\", .line = {d}, .column = {d} }},", .{ g.nav_idx, g.type_str, g.file, g.line, g.column }, null);
         global_defs_str.appendSlice(clr_allocator.allocator(), entry) catch @panic("out of memory");
     }
     global_defs_str.appendSlice(clr_allocator.allocator(), "\n};\n") catch @panic("out of memory");
@@ -2933,7 +3048,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
         \\const Inst = clr.Inst;
         \\const Refinements = clr.Refinements;
         \\const Gid = clr.Gid;
-        \\const Arg = clr.Arg;
+        \\const Src = clr.Src;
         \\const State = clr.State;
         \\
         \\{s}
@@ -2969,11 +3084,11 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    // Build parameter list: ctx + refinements + return_gid + arity Arg args
+    // Build parameter list: ctx + refinements + return_gid + arity Src args
     var params: []const u8 = "ctx: *Context, refinements: *Refinements, return_gid: Gid";
     var i: u32 = 0;
     while (i < arity) : (i += 1) {
-        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: Arg", .{params}, null);
+        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: Src", .{params}, null);
     }
 
     return clr_allocator.allocPrint(clr_allocator.allocator(),
