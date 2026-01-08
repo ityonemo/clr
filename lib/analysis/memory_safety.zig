@@ -46,6 +46,12 @@ pub const MemorySafety = union(enum) {
     allocated: Allocated,
     unset: void,
 
+    /// Trivial copy - no heap allocations to duplicate.
+    pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
+        _ = allocator;
+        return self;
+    }
+
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
         // Inst contains .pointer = Indirected, set memory_safety on pointer and pointee

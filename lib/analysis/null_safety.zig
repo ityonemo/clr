@@ -23,6 +23,12 @@ pub const NullSafety = union(enum) {
     non_null: Meta,
     @"null": Meta,
 
+    /// Trivial copy - no heap allocations to duplicate.
+    pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
+        _ = allocator;
+        return self;
+    }
+
     /// is_non_null sets the optional's null_safety to .unknown with check info.
     /// Only operates on optionals - null_safety must not be set on pointers (iron rule).
     pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {

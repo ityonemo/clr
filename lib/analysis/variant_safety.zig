@@ -44,6 +44,13 @@ pub fn testValid(refinement: Refinements.Refinement) void {
 pub const VariantSafety = struct {
     active_metas: []?Meta,
 
+    /// Deep copy - allocates new slice for active_metas.
+    pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
+        const new_active_metas = try allocator.alloc(?Meta, self.active_metas.len);
+        @memcpy(new_active_metas, self.active_metas);
+        return .{ .active_metas = new_active_metas };
+    }
+
     /// Validate that variant_safety state is consistent with the union refinement.
     /// - If active_metas[i] is non-null, fields[i] must also be non-null
     /// - active_metas[i] being null is always valid (either field is inactive or ambiguous after merge)

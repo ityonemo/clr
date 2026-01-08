@@ -164,16 +164,11 @@ pub const Refinement = union(enum) {
         }
 
         // Copy analyte - deep copy only when crossing between different refinement tables
-        var new_analyte = @field(src, @tagName(ref_tag)).analyte;
-        if (ref_tag == .@"union" and src_list != dst_list) {
-            // Different tables - deep copy variant_safety.active_metas to avoid sharing
-            if (@field(src, @tagName(ref_tag)).analyte.variant_safety) |vs| {
-                const new_active_metas = allocator.alloc(?Meta, vs.active_metas.len) catch @panic("out of memory");
-                @memcpy(new_active_metas, vs.active_metas);
-                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-            }
-        }
         // Same table: shallow copy is fine - mutations should be visible
+        const new_analyte = if (src_list != dst_list)
+            @field(src, @tagName(ref_tag)).analyte.copy(allocator) catch @panic("out of memory")
+        else
+            @field(src, @tagName(ref_tag)).analyte;
         @field(dst, @tagName(ref_tag)).analyte = new_analyte;
 
         // Recurse into each field
@@ -268,15 +263,8 @@ pub const Refinement = union(enum) {
             new_fields[i] = if (ref_tag == .@"union") new_idx else new_idx;
         }
 
-        // Deep copy analyte - variant_safety.active_metas is a slice that must not be shared
-        var new_analyte = src_data.analyte;
-        if (ref_tag == .@"union") {
-            if (src_data.analyte.variant_safety) |vs| {
-                const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
-                @memcpy(new_active_metas, vs.active_metas);
-                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-            }
-        }
+        // Deep copy analyte (handles variant_safety.active_metas slice duplication)
+        const new_analyte = try src_data.analyte.copy(allocator);
 
         return dst_list.appendEntity(@unionInit(Refinement, @tagName(ref_tag), .{
             .analyte = new_analyte,
@@ -448,15 +436,8 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                 // Deep copy fields
                 const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
                 @memcpy(new_fields, data.fields);
-                // Deep copy analyte, including variant_safety.active_metas if present
-                var new_analyte = data.analyte;
-                if (ref_tag == .@"union") {
-                    if (data.analyte.variant_safety) |vs| {
-                        const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
-                        @memcpy(new_active_metas, vs.active_metas);
-                        new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-                    }
-                }
+                // Deep copy analyte (handles variant_safety.active_metas slice duplication)
+                const new_analyte = try data.analyte.copy(allocator);
                 try new.list.append(@unionInit(Refinement, @tagName(ref_tag), .{
                     .analyte = new_analyte,
                     .fields = new_fields,
@@ -485,15 +466,8 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
             // Deep copy fields
             const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
             @memcpy(new_fields, data.fields);
-            // Deep copy analyte, including variant_safety.active_metas if present
-            var new_analyte = data.analyte;
-            if (ref_tag == .@"union") {
-                if (data.analyte.variant_safety) |vs| {
-                    const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
-                    @memcpy(new_active_metas, vs.active_metas);
-                    new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-                }
-            }
+            // Deep copy analyte (handles variant_safety.active_metas slice duplication)
+            const new_analyte = try data.analyte.copy(allocator);
             break :blk @unionInit(Refinement, @tagName(ref_tag), .{
                 .analyte = new_analyte,
                 .fields = new_fields,
@@ -506,7 +480,7 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
 
 /// Semideep copy within same table: creates new entity, copying values but sharing pointer targets.
 /// For struct/union, recursively copies value fields, but pointer fields reference same pointee.
-/// Always deep copies variant_safety.active_metas.
+/// Deep copies analyte via analyte.copy().
 pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
     const src = self.at(src_gid).*;
     return self.semideepCopyRefinement(src);
@@ -565,13 +539,8 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
                 else
                     null;
             }
-            // Always deep copy variant_safety.active_metas
-            var new_analyte = u.analyte;
-            if (u.analyte.variant_safety) |vs| {
-                const new_active_metas = try allocator.alloc(?Meta, vs.active_metas.len);
-                @memcpy(new_active_metas, vs.active_metas);
-                new_analyte.variant_safety = .{ .active_metas = new_active_metas };
-            }
+            // Deep copy analyte (handles variant_safety.active_metas slice duplication)
+            const new_analyte = try u.analyte.copy(allocator);
             break :blk try self.appendEntity(.{ .@"union" = .{
                 .analyte = new_analyte,
                 .fields = new_fields,

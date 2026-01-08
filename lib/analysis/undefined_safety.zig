@@ -22,6 +22,12 @@ pub const UndefinedSafety = union(enum) {
         name_when_set: ?[]const u8 = null, // Full path name (arena-allocated at store time)
     },
 
+    /// Trivial copy - no heap allocations to duplicate.
+    pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
+        _ = allocator;
+        return self;
+    }
+
     pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
         switch (self) {

@@ -11,6 +11,12 @@ pub const FieldParentPtrSafety = struct {
     field_index: usize, // Which field of the container
     container_type_id: Tid, // Type id for type identity & name lookup
 
+    /// Trivial copy - no heap allocations to duplicate.
+    pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
+        _ = allocator;
+        return self;
+    }
+
     /// Set fieldparentptr_safety on pointer created by struct_field_ptr.
     /// Records the container type and field index for later validation.
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
