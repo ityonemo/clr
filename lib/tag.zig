@@ -694,7 +694,7 @@ pub const StructFieldVal = struct {
 /// Used by @fieldParentPtr builtin.
 pub const FieldParentPtr = struct {
     /// Pointer to the field
-    field_ptr: ?usize,
+    field_ptr: Src,
     /// Index of the field within the container
     field_index: usize,
     /// Result type (pointer to parent container)
@@ -1366,12 +1366,14 @@ pub const UnionInit = struct {
 /// ArrayElemVal extracts a value from an array/region at a given index.
 /// With uniform regions, all indices share the same element entity.
 pub const ArrayElemVal = struct {
-    /// Base instruction containing the array/region or slice
-    base: ?usize,
+    /// Base containing the array/region or slice
+    base: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // base must exist - slice_elem_val always has a base
-        const base = self.base.?;
+        const base = switch (self.base) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
         // base must have a refinement - it's the slice/array value
         const base_ref = state.results[base].refinement.?;
 
@@ -1398,19 +1400,14 @@ pub const ArrayElemVal = struct {
 /// Passes through the pointer operand's refinement since the result is still a pointer
 /// to the same allocation.
 pub const PtrAdd = struct {
-    /// Source pointer instruction
-    ptr: ?usize,
+    /// Source pointer
+    ptr: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const ptr_idx = self.ptr orelse {
-            // Interned pointer - create fresh
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
-            try splat(.ptr_add, state, index, self);
-            return;
+        const ptr_idx = switch (self.ptr) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
         };
-
         // Share the pointer's refinement - result points to same allocation
         if (state.results[ptr_idx].refinement) |src_gid| {
             state.results[index].refinement = src_gid;
@@ -1423,19 +1420,14 @@ pub const PtrAdd = struct {
 /// Since many-pointer and slice have the same structure (pointer→region→element),
 /// this just shares the source refinement to preserve memory_safety tracking.
 pub const ArrayToSlice = struct {
-    /// Source instruction (array or many-pointer)
-    src: ?usize,
+    /// Source (array or many-pointer)
+    source: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const src_idx = self.src orelse {
-            // Interned source - create fresh pointer→region
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
-            try splat(.array_to_slice, state, index, self);
-            return;
+        const src_idx = switch (self.source) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
         };
-
         // Share the source refinement - both many-pointer and slice are pointer→region
         if (state.results[src_idx].refinement) |src_gid| {
             state.results[index].refinement = src_gid;
@@ -1486,12 +1478,14 @@ pub const SlicePtr = struct {
 /// Get a pointer to an array/region element.
 /// For uniform regions, returns a pointer to the shared element entity.
 pub const PtrElemPtr = struct {
-    /// Base instruction containing the pointer to array/region
-    base: ?usize,
+    /// Base containing the pointer to array/region
+    base: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // base must exist - slice_elem_ptr always has a base
-        const base = self.base.?;
+        const base = switch (self.base) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
         // base must have a refinement - it's the slice value
         const base_ref = state.results[base].refinement.?;
 

@@ -174,8 +174,8 @@ fn payloadUnOp(info: *const FnInfo, datum: Data) []const u8 {
 /// bin_op: lhs = array/region, rhs = index (ignored for uniform region model)
 fn payloadArrayElemVal(info: *const FnInfo, datum: Data) []const u8 {
     // lhs is the array/region source
-    const base: ?usize = if (datum.bin_op.lhs.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d} }}", .{base}, null);
+    const base_str = srcString(info, datum.bin_op.lhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {s} }}", .{base_str}, null);
 }
 
 /// Payload for ptr_elem_ptr - gets a pointer to an array/region element.
@@ -185,8 +185,8 @@ fn payloadPtrElemPtr(info: *const FnInfo, datum: Data) []const u8 {
     // Bin: lhs (Ref as u32), rhs (Ref as u32)
     const lhs_raw = info.extra[payload_index];
     const lhs_ref: Ref = @enumFromInt(lhs_raw);
-    const base: ?usize = if (lhs_ref.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(info.arena, ".{{ .base = {?d} }}", .{base}, null);
+    const base_str = srcString(info, lhs_ref);
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {s} }}", .{base_str}, null);
 }
 
 /// Payload for slice_ptr - extracts the pointer from a slice.
@@ -209,8 +209,8 @@ fn payloadArrayToSlice(info: *const FnInfo, datum: Data) []const u8 {
     // ty_op: { ty: Ref (u32), operand: Ref (u32) }
     const operand_raw: u32 = raw_ptr[1];
     const operand_ref: Ref = @enumFromInt(operand_raw);
-    const src: ?usize = if (operand_ref.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(info.arena, ".{{ .src = {?d} }}", .{src}, null);
+    const source_str = srcString(info, operand_ref);
+    return clr_allocator.allocPrint(info.arena, ".{{ .source = {s} }}", .{source_str}, null);
 }
 
 /// Payload for ptr_add/ptr_sub - pointer arithmetic.
@@ -220,8 +220,8 @@ fn payloadPtrAdd(info: *const FnInfo, datum: Data) []const u8 {
     // Bin: lhs (Ref as u32), rhs (Ref as u32)
     const lhs_raw = info.extra[payload_index];
     const lhs_ref: Ref = @enumFromInt(lhs_raw);
-    const ptr: ?usize = if (lhs_ref.toIndex()) |idx| @intFromEnum(idx) else null;
-    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {?d} }}", .{ptr}, null);
+    const ptr_str = srcString(info, lhs_ref);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s} }}", .{ptr_str}, null);
 }
 
 /// Payload for ret_safe - just the src, caller_refinements and return_gid come from State.
@@ -416,11 +416,11 @@ fn payloadFieldParentPtr(info: *const FnInfo, datum: Data) []const u8 {
     const field_ptr_raw = info.extra[payload_index];
     const field_index = info.extra[payload_index + 1];
 
-    // Convert the raw u32 to a Ref and extract the index
+    // Convert the raw u32 to a Ref and use srcString
     const field_ptr_ref: Ref = @enumFromInt(field_ptr_raw);
-    const field_ptr: ?usize = if (field_ptr_ref.toIndex()) |idx| @intFromEnum(idx) else null;
+    const field_ptr_str = srcString(info, field_ptr_ref);
 
-    return clr_allocator.allocPrint(info.arena, ".{{ .field_ptr = {?d}, .field_index = {d}, .ty = {s} }}", .{ field_ptr, field_index, ty_str }, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .field_ptr = {s}, .field_index = {d}, .ty = {s} }}", .{ field_ptr_str, field_index, ty_str }, null);
 }
 
 /// Payload for br (branch to block with value).

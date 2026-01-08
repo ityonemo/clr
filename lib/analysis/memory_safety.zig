@@ -280,7 +280,10 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const ptr_idx = params.ptr orelse return; // Interned pointer - can't check
+        const ptr_idx = switch (params.ptr) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
         const ptr_gid = state.results[ptr_idx].refinement orelse return;
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
@@ -302,7 +305,10 @@ pub const MemorySafety = union(enum) {
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
         const refinements = state.refinements;
 
-        const field_ptr = params.field_ptr orelse return; // Can't track interned
+        const field_ptr = switch (params.field_ptr) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
         const ptr_idx = state.results[field_ptr].refinement orelse return;
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
@@ -1338,8 +1344,10 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // base must exist for slice_elem_ptr
-        const base = params.base orelse return;
+        const base = switch (params.base) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
         const base_ref = results[base].refinement orelse return;
         const base_refinement = refinements.at(base_ref).*;
 
@@ -1365,8 +1373,10 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // base must exist for slice_elem_val
-        const base = params.base orelse return;
+        const base = switch (params.base) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
         const base_ref = results[base].refinement orelse return;
         const base_refinement = refinements.at(base_ref).*;
 

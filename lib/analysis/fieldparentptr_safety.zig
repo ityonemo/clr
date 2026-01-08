@@ -52,7 +52,10 @@ pub const FieldParentPtrSafety = struct {
         const results = state.results;
         const refinements = state.refinements;
 
-        const field_ptr = params.field_ptr orelse return; // interned ptr, can't track
+        const field_ptr = switch (params.field_ptr) {
+            .inst => |idx| idx,
+            .int_const, .int_var => @panic("global/interned source not implemented")
+        };
 
         const ptr_idx = results[field_ptr].refinement orelse return;
         const ptr_ref = refinements.at(ptr_idx);
@@ -215,7 +218,7 @@ test "field_parent_ptr succeeds when origin matches" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should succeed - type_id 100 matches, field_index 0 matches
-    try FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    try FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
 }
 
 test "field_parent_ptr errors on non-field pointer" {
@@ -250,7 +253,7 @@ test "field_parent_ptr errors on non-field pointer" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should error - pointer doesn't have fieldparentptr_safety
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expectError(error.InvalidFieldParentPtr, result);
 }
 
@@ -287,7 +290,7 @@ test "field_parent_ptr errors on wrong container type" {
 
     // Should error - type mismatch (100 != 200)
     // params.ty is pointer -> struct with type_id 200 (the claimed type)
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .id = 200, .ty = .{ .scalar = {} } } } } });
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .id = 200, .ty = .{ .scalar = {} } } } } });
     try std.testing.expectError(error.FieldParentPtrTypeMismatch, result);
 }
 
@@ -326,6 +329,6 @@ test "field_parent_ptr errors on wrong field index" {
 
     // Should error - field mismatch (claims field 1, but pointer is from field 0)
     // params.ty is pointer -> struct with type_id 100 (matching type, wrong field)
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = 0, .field_index = 1, .ty = .{ .ty = .{ .pointer = &.{ .id = 100, .ty = .{ .scalar = {} } } } } });
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .pointer = &.{ .id = 100, .ty = .{ .scalar = {} } } } } });
     try std.testing.expectError(error.FieldParentPtrFieldMismatch, result);
 }
