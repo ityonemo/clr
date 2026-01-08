@@ -83,7 +83,7 @@ pub const VariantSafety = struct {
         // Get the union pointer's refinement based on source type
         const ptr_ref: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement.?,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx).?,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx).?,
             .int_const => return, // comptime constant - no variant tracking
         };
         const container_idx = refinements.at(ptr_ref).pointer.to;
@@ -114,7 +114,7 @@ pub const VariantSafety = struct {
         // Get base pointer refinement - handle instruction or global base
         const base_ref: Gid = switch (params.base) {
             .inst => |inst| results[inst].refinement orelse return,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
             .int_const => return, // constant base - no variant checking
         };
 

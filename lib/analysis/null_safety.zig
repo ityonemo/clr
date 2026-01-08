@@ -178,7 +178,7 @@ pub const NullSafety = union(enum) {
         // Get pointer GID based on ptr type (like load does)
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
             .int_const => return, // constant pointers - no null tracking
         };
         const ptr_ref = refinements.at(ptr_idx);

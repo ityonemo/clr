@@ -87,29 +87,45 @@ pub const FuncMir = struct {
 // Collection of MIR structs
 var mir_list: std.ArrayListUnmanaged(*const FuncMir) = .empty;
 
-/// Information about a global variable for tracking
-pub const GlobalInfo = struct {
-    nav_idx: u32,
-    type_str: []const u8, // Pre-formatted type string (wrapped in .undefined if global is undefined)
+/// Source location for a global variable
+pub const SourceLoc = struct {
     file: []const u8 = "",
     line: u32 = 0,
     column: u32 = 0,
 };
 
+/// Child relationship info for global variables - mirrors GlobalDef.ChildInfo
+pub const ChildInfo = union(enum) {
+    scalar: void,
+    @"null": void, // optional that starts out null
+    indirect: ?u32, // IP index for indirect targets, null if undefined
+    struct_fields: []const ?u32, // IP indices for struct field globals
+    union_fields: ?u32, // IP index for active union field
+};
+
+/// Information about a global variable for tracking
+pub const GlobalInfo = struct {
+    ip_idx: u32,
+    type_str: []const u8, // Pre-formatted type string (wrapped in .undefined if global is undefined)
+    loc: ?SourceLoc = null,
+    children: ChildInfo = .{ .scalar = {} },
+};
+
 /// Registry of global variables encountered during codegen.
-/// Maps nav_idx to GlobalInfo to avoid duplicates.
+/// Maps ip_idx to GlobalInfo to avoid duplicates.
 var global_registry: std.AutoHashMapUnmanaged(u32, GlobalInfo) = .empty;
 
-/// Register a global variable. Returns the nav_idx for reference.
+/// Register a global variable. Returns the ip_idx for reference.
 /// The type_str should be wrapped in .{ .ty = .{ .undefined = &inner } } if the global is undefined.
-pub fn registerGlobal(nav_idx: u32, type_str: []const u8) u32 {
-    if (global_registry.get(nav_idx) == null) {
-        global_registry.put(clr_allocator.allocator(), nav_idx, .{
-            .nav_idx = nav_idx,
+pub fn registerGlobal(ip_idx: u32, type_str: []const u8, children: ChildInfo) u32 {
+    if (global_registry.get(ip_idx) == null) {
+        global_registry.put(clr_allocator.allocator(), ip_idx, .{
+            .ip_idx = ip_idx,
             .type_str = type_str,
+            .children = children,
         }) catch {};
     }
-    return nav_idx;
+    return ip_idx;
 }
 
 /// Get all registered globals as an iterator
@@ -124,16 +140,24 @@ pub fn getGlobalsCount() usize {
 
 /// Update location info for all registered globals that don't have it yet.
 /// Called after generateFunction with access to Zcu.
+/// Note: IP indices are pointers; we extract nav from base_addr to get location.
 pub fn updateGlobalLocations(zcu: *Zcu) void {
     const ip = &zcu.intern_pool;
     var it = global_registry.iterator();
     while (it.next()) |entry| {
         // Skip if already has location
-        if (entry.value_ptr.line != 0) continue;
+        if (entry.value_ptr.loc != null) continue;
 
-        const nav_idx: InternPool.Nav.Index = @enumFromInt(entry.key_ptr.*);
+        const ip_idx: InternPool.Index = @enumFromInt(entry.key_ptr.*);
 
-        // Get source location info
+        // Get the pointer key to extract the nav
+        const ptr_key = ip.indexToKey(ip_idx);
+        if (ptr_key != .ptr) continue;
+        const ptr = ptr_key.ptr;
+        if (ptr.base_addr != .nav) continue;
+        const nav_idx = ptr.base_addr.nav;
+
+        // Get source location info from the nav
         const inst_info = ip.getNav(nav_idx).srcInst(ip).resolveFull(ip) orelse continue;
         const file_idx = inst_info.file;
         const file = zcu.fileByIndex(file_idx);
@@ -143,10 +167,12 @@ pub fn updateGlobalLocations(zcu: *Zcu) void {
         // Get file path and dupe to persistent allocator
         const file_path = clr_allocator.allocator().dupe(u8, file.path.sub_path) catch continue;
 
-        entry.value_ptr.file = file_path;
-        // Add 1 to convert from 0-indexed to 1-indexed (consistent with dbg_stmt handling)
-        entry.value_ptr.line = decl.src_line + 1;
-        entry.value_ptr.column = decl.src_column + 1;
+        entry.value_ptr.loc = .{
+            .file = file_path,
+            // Add 1 to convert from 0-indexed to 1-indexed (consistent with dbg_stmt handling)
+            .line = decl.src_line + 1,
+            .column = decl.src_column + 1,
+        };
     }
 }
 
@@ -405,13 +431,14 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
         }
     }
 
-    // Register the global
+    // Register the global, preserving children if already set
+    // Note: nav_index_raw is used as temporary key until we can compute proper IP index
+    const existing_children = if (global_registry.get(nav_index_raw)) |existing| existing.children else ChildInfo{ .scalar = {} };
     global_registry.put(clr_allocator.allocator(), nav_index_raw, .{
-        .nav_idx = nav_index_raw,
+        .ip_idx = nav_index_raw, // TODO: compute proper IP index
         .type_str = final_type_str,
-        .file = file_path,
-        .line = line,
-        .column = column,
+        .loc = .{ .file = file_path, .line = line, .column = column },
+        .children = existing_children,
     }) catch {};
 }
 

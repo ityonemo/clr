@@ -365,3 +365,8 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/globals/assign_then_use_global.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no error when global pointer assigns to undefined global" {
+    run compile_and_run "$TEST_CASES/undefined/globals/pointer_to_global.zig"
+    [ "$status" -eq 0 ]
+}

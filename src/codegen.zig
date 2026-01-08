@@ -605,9 +605,15 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
             return ".{ .int_const = .{ .ty = .{ .scalar = {} } } }";
         }
 
+        // Check if this is a pointer to a field of a global struct (comptime field address)
+        // Returns IP index string; field pointers are now regular int_var entries
+        if (tryFieldPtrRef(info, interned_idx)) |ip_idx_str| {
+            return clr_allocator.allocPrint(arena, ".{{ .int_var = {s} }}", .{ip_idx_str}, null);
+        }
+
         // Check if this is a pointer to a global variable (user code, not stdlib)
-        if (tryGlobalRef(info, interned_idx)) |nav_idx_str| {
-            return clr_allocator.allocPrint(arena, ".{{ .int_var = {s} }}", .{nav_idx_str}, null);
+        if (tryGlobalRef(info, interned_idx)) |ip_idx_str| {
+            return clr_allocator.allocPrint(arena, ".{{ .int_var = {s} }}", .{ip_idx_str}, null);
         }
 
         // Comptime value - determine structure from type
@@ -701,6 +707,71 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
         break :blk false;
     } else true;
 
+    // Check if global is a null-initialized optional
+    const is_null = if (!is_undefined and init_val != .none) blk: {
+        // Get the actual init value (for variables, look inside)
+        const actual_init = if (ip.isVariable(init_val)) actual: {
+            const init_key = ip.indexToKey(init_val);
+            const key_ptr: *const volatile InternPool.Key = @ptrCast(&init_key);
+            const stable_key = key_ptr.*;
+            break :actual stable_key.variable.init;
+        } else init_val;
+
+        if (actual_init == .none) break :blk false;
+
+        // Check if it's an optional with null value
+        const actual_key = ip.indexToKey(actual_init);
+        const actual_key_ptr: *const volatile InternPool.Key = @ptrCast(&actual_key);
+        const stable_actual = actual_key_ptr.*;
+        break :blk switch (stable_actual) {
+            .opt => |opt| opt.val == .none,
+            else => false,
+        };
+    } else false;
+
+    // Check if the initial value is a pointer to another global
+    // This establishes pointer relationships (e.g., `var ptr: *u8 = &other_global;`)
+    // Returns the IP index of the target pointer (not the nav index)
+    const target_ip_idx: ?u32 = if (!is_undefined and init_val != .none) blk: {
+        // Helper to check if an index is a pointer to a nav-based global
+        // Returns the IP index of the pointer itself (the idx parameter)
+        const checkPointerToNav = struct {
+            fn check(intern_pool: *const InternPool, idx: InternPool.Index) ?u32 {
+                if (idx == .none) return null;
+                const key = intern_pool.indexToKey(idx);
+                // Use volatile to prevent DLL optimization issues
+                const key_ptr: *const volatile InternPool.Key = @ptrCast(&key);
+                const stable_key = key_ptr.*;
+                return switch (stable_key) {
+                    .ptr => |p| switch (p.base_addr) {
+                        // Return the IP index of this pointer (not the nav index)
+                        .nav => @intFromEnum(idx),
+                        else => null,
+                    },
+                    else => null,
+                };
+            }
+        }.check;
+
+        // Try direct check first
+        if (checkPointerToNav(ip, init_val)) |target| {
+            break :blk target;
+        }
+
+        // If init_val is a variable, check its init field
+        if (ip.isVariable(init_val)) {
+            const init_key = ip.indexToKey(init_val);
+            const key_ptr: *const volatile InternPool.Key = @ptrCast(&init_key);
+            const stable_key = key_ptr.*;
+            const var_init = stable_key.variable.init;
+            if (checkPointerToNav(ip, var_init)) |target| {
+                break :blk target;
+            }
+        }
+
+        break :blk null;
+    } else null;
+
     // Get the pointee type (what the pointer points to)
     const ptr_type = ip.indexToKey(ptr.ty);
     const pointee_type = if (ptr_type == .ptr_type) ptr_type.ptr_type.child else .none;
@@ -709,20 +780,130 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
     else
         ".{ .ty = .{ .scalar = {} } }";
 
-    // Wrap in .undefined if global is undefined (consistent with store_safe approach)
+    // Wrap in .undefined or .null if global is undefined/null (consistent with store_safe approach)
     // Use global allocator (not arena) because this string must persist until epilogue runs
     const type_str = if (is_undefined)
         clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .undefined = &{s} }} }}", .{inner_type_str}, null)
-    else
+    else if (is_null) blk: {
+        // For null optionals, .null wraps the INNER type (payload), not the optional itself
+        // Extract the optional's child type to avoid double-optional structure
+        const opt_child_type = if (pointee_type != .none) opt_blk: {
+            const pointee_key = ip.indexToKey(pointee_type);
+            // opt_type IS the child type (not a struct with .child field)
+            break :opt_blk if (pointee_key == .opt_type) pointee_key.opt_type else pointee_type;
+        } else pointee_type;
+        const opt_inner_str = if (opt_child_type != .none)
+            typeToString(info.name_map, info.field_map, info.arena, ip, opt_child_type)
+        else
+            ".{ .ty = .{ .scalar = {} } }";
+        break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .null = &{s} }} }}", .{opt_inner_str}, null);
+    } else
         clr_allocator.allocator().dupe(u8, inner_type_str) catch inner_type_str;
 
-    // Register this global
-    const nav_idx_int: u32 = @intFromEnum(nav_idx);
-    _ = clr.registerGlobal(nav_idx_int, type_str);
+    // Determine children based on target_ip_idx and is_null
+    // If this pointer points to another global, set up indirect relationship
+    // If it's a null optional, mark it as .@"null"
+    // TODO: For struct globals, we should populate struct_fields with field IP indices
+    const children: clr.ChildInfo = if (target_ip_idx) |target|
+        .{ .indirect = target }
+    else if (is_null)
+        .{ .@"null" = {} }
+    else
+        .{ .scalar = {} };
 
-    // Return just the nav_idx number as a string
+    // Register this global using IP index (the interned pointer value)
+    const ip_idx: u32 = @intFromEnum(interned_idx);
+    _ = clr.registerGlobal(ip_idx, type_str, children);
+
+    // Return just the IP index number as a string
     // Using global allocator instead of arena to avoid potential DLL boundary issues
-    return clr_allocator.allocPrint(clr_allocator.allocator(), "{d}", .{nav_idx_int}, null);
+    return clr_allocator.allocPrint(clr_allocator.allocator(), "{d}", .{ip_idx}, null);
+}
+
+/// Check if an interned value is a pointer to a field of a user global struct.
+/// This handles comptime-computed field addresses like `&global_struct.field`.
+/// Returns the IP index string for int_var if it's a field pointer; otherwise returns null.
+fn tryFieldPtrRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8 {
+    const ip = info.ip;
+    const val_key = ip.indexToKey(interned_idx);
+
+    // Check if this is a pointer
+    if (val_key != .ptr) return null;
+    const ptr = val_key.ptr;
+
+    // Check if the pointer has a nav base address (i.e., points into a global)
+    if (ptr.base_addr != .nav) return null;
+    const nav_idx = ptr.base_addr.nav;
+
+    // Get the nav to check if it's a user global
+    const nav = ip.getNav(nav_idx);
+    const fqn = nav.fqn.toSlice(ip);
+
+    // Only track user globals (starts with root module name)
+    if (!std.mem.startsWith(u8, fqn, info.root_name)) return null;
+
+    // Get the type of the container (the global's type)
+    const container_type = nav.typeOf(ip);
+    const container_key = ip.indexToKey(container_type);
+
+    // Must be a struct type
+    if (container_key != .struct_type) return null;
+
+    // Check if the pointer type is different from the container type
+    // If they're the same, it's a pointer to the struct itself, not a field
+    const pointer_type = ip.typeOf(interned_idx);
+    const pointer_key = ip.indexToKey(pointer_type);
+    if (pointer_key == .ptr_type) {
+        const pointee_type = pointer_key.ptr_type.child;
+        // If the pointee type is the same as the container type, it's &global (not &global.field)
+        if (pointee_type == container_type) return null;
+    }
+
+    // Load the struct type to find field offsets
+    const struct_type = ip.loadStructType(container_type);
+    const offsets = struct_type.offsets.get(ip);
+
+    // Find which field has this byte offset
+    var field_index: ?u32 = null;
+    for (offsets, 0..) |offset, i| {
+        if (offset == ptr.byte_offset) {
+            field_index = @intCast(i);
+            break;
+        }
+    }
+
+    // If we didn't find a matching field, this might be a nested field or invalid
+    _ = field_index orelse return null;
+
+    // Ensure the parent container global is registered using its IP index
+    // The parent pointer has byte_offset=0 and points to the container type
+    // We use interned_idx for this field pointer, but need parent_ip_idx for the parent
+    // Note: For now, register parent with the field's nav (simplified approach)
+    // TODO: Compute exact parent IP index by interning a Key.Ptr with byte_offset=0
+    const container_type_str = typeToString(info.name_map, info.field_map, info.arena, ip, container_type);
+    // Parent is a pointer to container_type, so wrap it
+    const parent_type_str = clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .pointer = &{s} }} }}", .{container_type_str}, null);
+
+    // For now, we'll use a sentinel approach - register with interned_idx as field pointer
+    // The parent relationship will need to be established via struct_fields
+    // TODO: Implement proper backtracking to get parent IP index
+
+    // Get the field type for the Src
+    const field_types = struct_type.field_types.get(ip);
+    const field_type = field_types[field_index.?];
+    const field_type_str = typeToString(info.name_map, info.field_map, info.arena, ip, field_type);
+
+    // Register this field pointer as a global with scalar children
+    // The type is a pointer to the field type
+    const type_str = clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .pointer = &{s} }} }}", .{field_type_str}, null);
+    const ip_idx: u32 = @intFromEnum(interned_idx);
+    _ = clr.registerGlobal(ip_idx, type_str, .{ .scalar = {} });
+
+    // Silence the unused variable warning
+    _ = parent_type_str;
+
+    // Return int_var with IP index (field pointers are now regular int_var entries)
+    return clr_allocator.allocPrint(clr_allocator.allocator(), "{d}", .{ip_idx}, null);
 }
 
 /// Convert an AIR Ref to a Src union string with .undefined wrapper.
@@ -3010,6 +3191,37 @@ pub fn emitGetFieldId(field_map: *clr.FieldHashMap) []const u8 {
     , .{switch_arms.items}, null);
 }
 
+/// Format ChildInfo union for code generation
+fn formatChildInfo(children: clr.ChildInfo) []const u8 {
+    const allocator = clr_allocator.allocator();
+    return switch (children) {
+        .scalar => ".{ .scalar = {} }",
+        .@"null" => ".{ .@\"null\" = {} }",
+        .indirect => |target| if (target) |t|
+            clr_allocator.allocPrint(allocator, ".{{ .indirect = {d} }}", .{t}, null)
+        else
+            ".{ .indirect = null }",
+        .struct_fields => |fields| blk: {
+            var buf = std.ArrayListUnmanaged(u8){};
+            buf.appendSlice(allocator, ".{ .struct_fields = &.{ ") catch @panic("OOM");
+            for (fields, 0..) |field, i| {
+                if (i > 0) buf.appendSlice(allocator, ", ") catch @panic("OOM");
+                const field_str = if (field) |f|
+                    clr_allocator.allocPrint(allocator, "{d}", .{f}, null)
+                else
+                    "null";
+                buf.appendSlice(allocator, field_str) catch @panic("OOM");
+            }
+            buf.appendSlice(allocator, " } }") catch @panic("OOM");
+            break :blk buf.items;
+        },
+        .union_fields => |active| if (active) |a|
+            clr_allocator.allocPrint(allocator, ".{{ .union_fields = {d} }}", .{a}, null)
+        else
+            ".{ .union_fields = null }",
+    };
+}
+
 /// Generate epilogue with imports and main function
 pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
     // Generate the global_defs array from registered globals
@@ -3018,8 +3230,17 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
     global_defs_str.appendSlice(clr_allocator.allocator(), "const global_defs = [_]clr.GlobalDef{") catch @panic("out of memory");
     var it = clr.getGlobalsIterator();
     while (it.next()) |g| {
+        // Format location info
+        const loc_str = if (g.loc) |loc|
+            clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .file = \"{s}\", .line = {d}, .column = {d} }}", .{ loc.file, loc.line, loc.column }, null)
+        else
+            "null";
+
+        // Format children info
+        const children_str = formatChildInfo(g.children);
+
         const entry = clr_allocator.allocPrint(clr_allocator.allocator(),
-            "\n    .{{ .nav_idx = {d}, .ty = {s}, .file = \"{s}\", .line = {d}, .column = {d} }},", .{ g.nav_idx, g.type_str, g.file, g.line, g.column }, null);
+            "\n    .{{ .ip_idx = {d}, .ty = {s}, .loc = {s}, .children = {s} }},", .{ g.ip_idx, g.type_str, loc_str, children_str }, null);
         global_defs_str.appendSlice(clr_allocator.allocator(), entry) catch @panic("out of memory");
     }
     global_defs_str.appendSlice(clr_allocator.allocator(), "\n};\n") catch @panic("out of memory");

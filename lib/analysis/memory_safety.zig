@@ -214,7 +214,7 @@ pub const MemorySafety = union(enum) {
         // Get container from base pointer - only handle instruction bases
         const base_idx: Gid = switch (params.base) {
             .inst => |inst| state.results[inst].refinement orelse return,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
             .int_const => return, // constant base - no memory safety tracking
         };
         const base_ref = refinements.at(base_idx);
@@ -286,11 +286,11 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const ptr_idx = switch (params.ptr) {
-            .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+        const ptr_gid: Gid = switch (params.ptr) {
+            .inst => |idx| state.results[idx].refinement orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
+            .int_const => return, // interned constant, can't track
         };
-        const ptr_gid = state.results[ptr_idx].refinement orelse return;
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
 
@@ -311,11 +311,11 @@ pub const MemorySafety = union(enum) {
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
         const refinements = state.refinements;
 
-        const field_ptr = switch (params.field_ptr) {
-            .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+        const ptr_idx: Gid = switch (params.field_ptr) {
+            .inst => |idx| state.results[idx].refinement orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
+            .int_const => return, // interned constant, can't track
         };
-        const ptr_idx = state.results[field_ptr].refinement orelse return;
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
 
@@ -358,13 +358,11 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const src = switch (params.src) {
-            .inst => |idx| idx,
+        const src_idx: Gid = switch (params.src) {
+            .inst => |idx| results[idx].refinement orelse return,
             // comptime/interned values don't have memory safety tracking - skip
             .int_const, .int_var => return,
         };
-        // refinement is null for uninitialized instructions - skip (would be caught by undefined analysis)
-        const src_idx = results[src].refinement orelse return;
 
         // Recursively check for allocations to mark as returned
         try markAllocationsAsReturned(refinements, src_idx, ctx);
@@ -1316,7 +1314,7 @@ pub const MemorySafety = union(enum) {
         // Get ptr_idx from ptr - .int_const loads have no memory safety tracking needed
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
             .int_const => return, // No memory safety tracking for interned constants
         };
         const ptr_refinement = refinements.at(ptr_idx);
@@ -1350,11 +1348,11 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const base = switch (params.base) {
-            .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+        const base_ref: Gid = switch (params.base) {
+            .inst => |idx| results[idx].refinement orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
+            .int_const => return, // interned constant, can't track
         };
-        const base_ref = results[base].refinement orelse return;
         const base_refinement = refinements.at(base_ref).*;
 
         // For slices: base is pointer → region
@@ -1379,11 +1377,11 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const base = switch (params.base) {
-            .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+        const base_ref: Gid = switch (params.base) {
+            .inst => |idx| results[idx].refinement orelse return,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
+            .int_const => return, // interned constant, can't track
         };
-        const base_ref = results[base].refinement orelse return;
         const base_refinement = refinements.at(base_ref).*;
 
         // For slices: base is pointer → region

@@ -87,8 +87,9 @@ pub const Type = struct {
 pub const Src = union(enum) {
     /// Runtime value from a result in the results table (index into results[])
     inst: usize,
-    /// Interned variable by nav_idx - look up in refinements.getGlobal()
+    /// Interned variable by IP index - look up in refinements.getGlobal()
     /// If found, it's a tracked user global; if not, it's a non-user interned var
+    /// This includes both direct globals and field pointers (which have their own IP index)
     int_var: u32,
     /// Interned constant - reify refinement from embedded type
     int_const: Type,
@@ -371,9 +372,9 @@ pub const Bitcast = struct {
                     state.results[index].refinement = src_gid;
                 }
             },
-            .int_var => |nav_idx| {
-                // Interned variable pointer - look up its GID
-                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+            .int_var => |ip_idx| {
+                // Interned variable pointer - look up its GID (works for both direct globals and field pointers)
+                const global_gid = state.refinements.getGlobal(ip_idx) orelse
                     @panic("Bitcast: interned variable not registered");
                 state.results[index].refinement = global_gid;
             },
@@ -537,7 +538,7 @@ pub const Load = struct {
         // Get the pointer's refinement GID based on source type
         const ptr_gid: ?Gid = switch (self.ptr) {
             .inst => |ptr| state.results[ptr].refinement,
-            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
             .int_const => |ty| {
                 // Interned constant pointer - create refinement from type
                 const ref = try typeToRefinement(ty, state.refinements);
@@ -583,7 +584,7 @@ pub const StructFieldPtr = struct {
         // Get the base pointer's refinement based on source type
         const base_ref: ?Gid = switch (self.base) {
             .inst => |inst| state.results[inst].refinement,
-            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
             .int_const => {
                 // Interned constant base - use type info to create proper structure
                 _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
@@ -738,9 +739,9 @@ pub const OptionalPayload = struct {
                 // optional_payload shouldn't receive interned constants
                 @panic("optional_payload: unexpected int_const source");
             },
-            .int_var => |nav_idx| {
+            .int_var => |ip_idx| {
                 // Interned variable - look up its GID and extract payload
-                const global_gid = state.refinements.getGlobal(nav_idx) orelse
+                const global_gid = state.refinements.getGlobal(ip_idx) orelse
                     @panic("OptionalPayload: interned variable not registered");
                 const src_ref = state.refinements.at(global_gid);
                 if (src_ref.* == .optional) {
@@ -806,9 +807,9 @@ pub const RetSafe = struct {
                     splatInitDefined(cloned, return_gid, state.ctx);
                 }
             },
-            .int_var => |nav_idx| {
-                // Return an interned variable - copy its value to return slot
-                const global_gid = cloned.getGlobal(nav_idx) orelse
+            .int_var => |ip_idx| {
+                // Return an interned variable - copy its value to return slot (works for field pointers too)
+                const global_gid = cloned.getGlobal(ip_idx) orelse
                     @panic("RetSafe: interned variable not registered");
                 cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(global_gid).*);
             },
@@ -946,7 +947,7 @@ pub const Store = struct {
         // Get pointer GID and follow to pointee
         const ptr_gid: ?Gid = switch (self.ptr) {
             .inst => |ptr| state.results[ptr].refinement,
-            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
             .int_const => null,
         };
         const effective_ptr_gid = ptr_gid orelse {
@@ -964,7 +965,7 @@ pub const Store = struct {
         // Get source refinement GID
         const src_gid: ?Gid = switch (self.src) {
             .inst => |src| state.results[src].refinement,
-            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx),
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
             .int_const => null,
         };
 
@@ -1061,9 +1062,9 @@ pub const WrapErrunionPayload = struct {
                 const src_ref = state.refinements.at(src_gid).*;
                 break :blk try Refinement.copyTo(src_ref, state.refinements, state.refinements);
             },
-            .int_var => |nav_idx| blk: {
-                // Get GID from global_map
-                const global_gid = state.refinements.getGlobal(nav_idx) orelse {
+            .int_var => |ip_idx| blk: {
+                // Get GID from global_map (works for both direct globals and field pointers)
+                const global_gid = state.refinements.getGlobal(ip_idx) orelse {
                     // Interned var not found - create based on type
                     const ref = try typeToRefinement(self.ty.ty.errorunion.*, state.refinements);
                     break :blk try state.refinements.appendEntity(ref);
@@ -1278,7 +1279,7 @@ pub const SetUnionTag = struct {
         // Get the union pointer's refinement based on source type
         const ptr_eidx: Gid = switch (self.ptr) {
             .inst => |inst| state.results[inst].refinement.?,
-            .int_var => |nav_idx| state.refinements.getGlobal(nav_idx).?,
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx).?,
             .int_const => return, // comptime constant - no tracking needed
         };
 
@@ -1345,9 +1346,9 @@ pub const UnionInit = struct {
                         const field_ref = try typeToRefinement(init_ty, state.refinements);
                         fields[i] = try state.refinements.appendEntity(field_ref);
                     },
-                    .int_var => |nav_idx| {
-                        // Interned variable - look up its GID
-                        fields[i] = state.refinements.getGlobal(nav_idx) orelse
+                    .int_var => |ip_idx| {
+                        // Interned variable - look up its GID (works for field pointers too)
+                        fields[i] = state.refinements.getGlobal(ip_idx) orelse
                             @panic("UnionInit: interned variable not registered");
                     },
                 }
@@ -1372,7 +1373,7 @@ pub const ArrayElemVal = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const base = switch (self.base) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+            .int_const, .int_var => @panic("global/interned source not implemented"),
         };
         // base must have a refinement - it's the slice/array value
         const base_ref = state.results[base].refinement.?;
@@ -1406,7 +1407,7 @@ pub const PtrAdd = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const ptr_idx = switch (self.ptr) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+            .int_const, .int_var => @panic("global/interned source not implemented"),
         };
         // Share the pointer's refinement - result points to same allocation
         if (state.results[ptr_idx].refinement) |src_gid| {
@@ -1426,7 +1427,7 @@ pub const ArrayToSlice = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const src_idx = switch (self.source) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+            .int_const, .int_var => @panic("global/interned source not implemented"),
         };
         // Share the source refinement - both many-pointer and slice are pointer→region
         if (state.results[src_idx].refinement) |src_gid| {
@@ -1484,7 +1485,7 @@ pub const PtrElemPtr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const base = switch (self.base) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented")
+            .int_const, .int_var => @panic("global/interned source not implemented"),
         };
         // base must have a refinement - it's the slice value
         const base_ref = state.results[base].refinement.?;

@@ -266,7 +266,7 @@ pub const UndefinedSafety = union(enum) {
         // Get the union pointer's refinement based on source type
         const ptr_ref: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement.?,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx).?,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx).?,
             .int_const => return, // comptime constant - no undefined tracking
         };
         const container_idx = refinements.at(ptr_ref).pointer.to;
@@ -454,11 +454,8 @@ pub const UndefinedSafety = union(enum) {
                 const idx = state.results[index].refinement.?;
                 setDefinedRecursive(state.refinements, idx);
             },
-            .inst => {
-                // Runtime value - undefined state was already copied from caller
-            },
-            .int_var => {
-                // Interned var - undefined state was set during Refinements.initWithGlobals
+            .inst, .int_var => {
+                // Runtime value/interned var - undefined state was already copied or set
             },
         }
     }
@@ -643,7 +640,7 @@ pub const UndefinedSafety = union(enum) {
         // Get pointer GID based on ptr type (like load does)
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse @panic("store: ptr inst has no refinement"),
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse @panic("store: global not found"),
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse @panic("store: global not found"),
             .int_const => @panic("store: storing through constant pointer not supported"),
         };
         // Follow pointer to get pointee - panic on unexpected types
@@ -660,7 +657,7 @@ pub const UndefinedSafety = union(enum) {
             // Build full path name for the destination pointer
             const name_when_set: ?[]const u8 = switch (params.ptr) {
                 .inst => |ptr| state.ctx.buildPathName(results, refinements, ptr),
-                .int_var => null, // TODO: look up global name from nav_idx
+                .int_var => null, // TODO: look up global name from IP index
                 .int_const => null,
             };
             const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = name_when_set } };
@@ -727,9 +724,9 @@ pub const UndefinedSafety = union(enum) {
                     // Compile-time source - apply defined/undefined based on type
                     applyInternedType(refinements, pointee_idx, ty, state.ctx);
                 },
-                .int_var => |nav_idx| {
+                .int_var => |ip_idx| {
                     // Global source - look up in global_map and handle like .inst
-                    const global_gid = refinements.getGlobal(nav_idx) orelse {
+                    const global_gid = refinements.getGlobal(ip_idx) orelse {
                         // Global not found (shouldn't happen) - just mark as defined
                         setDefinedRecursive(refinements, pointee_idx);
                         return;
@@ -762,7 +759,7 @@ pub const UndefinedSafety = union(enum) {
         // Get pointer GID based on source type
         const ptr_idx: ?Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx),
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx),
             .int_const => {
                 // Interned constant - tag handler created new entity, set undefined state
                 const result_idx = results[index].refinement.?;
