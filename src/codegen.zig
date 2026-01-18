@@ -3268,10 +3268,13 @@ fn formatChildInfo(children: clr.ChildInfo) []const u8 {
             buf.appendSlice(allocator, " } }") catch @panic("OOM");
             break :blk buf.items;
         },
-        .union_fields => |active| if (active) |a|
-            clr_allocator.allocPrint(allocator, ".{{ .union_fields = {d} }}", .{a}, null)
-        else
-            ".{ .union_fields = null }",
+        .union_fields => |uf| blk: {
+            const active_str = if (uf.active_field_index) |idx|
+                clr_allocator.allocPrint(allocator, "@as(?usize, {d})", .{idx}, null)
+            else
+                "null";
+            break :blk clr_allocator.allocPrint(allocator, ".{{ .union_fields = .{{ .active_field_index = {s}, .num_fields = {d} }} }}", .{ active_str, uf.num_fields }, null);
+        },
     };
 }
 

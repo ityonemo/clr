@@ -100,7 +100,10 @@ pub const ChildInfo = union(enum) {
     @"null": void, // optional that starts out null
     indirect: ?u32, // IP index for indirect targets, null if undefined
     struct_fields: []const ?u32, // IP indices for struct field globals
-    union_fields: ?u32, // IP index for active union field
+    union_fields: struct {
+        active_field_index: ?usize, // which field is active (null if undefined)
+        num_fields: usize, // total number of fields
+    },
 };
 
 /// Information about a global variable for tracking
@@ -454,6 +457,40 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
     } else
         clr_allocator.allocator().dupe(u8, type_str) catch return;
 
+    // Detect union type and extract active field info
+    const children: ChildInfo = blk: {
+        const type_key = ip.indexToKey(nav_type);
+        if (type_key != .union_type) break :blk .{ .scalar = {} };
+
+        // Get the number of fields in this union
+        const loaded_union = ip.loadUnionType(nav_type);
+        const num_fields = loaded_union.field_types.len;
+
+        // If undefined, no active field
+        if (is_undefined) break :blk .{ .union_fields = .{ .active_field_index = null, .num_fields = num_fields } };
+
+        // Extract active field index from union init value
+        if (init_key == .un) {
+            const un = init_key.un;
+            // Get the tag to find the active field index
+            if (un.tag != .none) {
+                const tag_key = ip.indexToKey(un.tag);
+                if (tag_key == .enum_tag) {
+                    // The int field is an Index that holds the integer tag value
+                    const int_key = ip.indexToKey(tag_key.enum_tag.int);
+                    if (int_key == .int) {
+                        // Extract the field index from the integer value
+                        const field_index: usize = @intCast(int_key.int.storage.u64);
+                        break :blk .{ .union_fields = .{ .active_field_index = field_index, .num_fields = num_fields } };
+                    }
+                }
+            }
+        }
+
+        // Union type but couldn't determine active field
+        break :blk .{ .union_fields = .{ .active_field_index = null, .num_fields = num_fields } };
+    };
+
     // Get source location info
     var file_path: []const u8 = "";
     var line: u32 = 0;
@@ -469,14 +506,24 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
         }
     }
 
-    // Register the global, preserving children if already set
-    // Note: nav_index_raw is used as temporary key until we can compute proper IP index
-    const existing_children = if (global_registry.get(nav_index_raw)) |existing| existing.children else ChildInfo{ .scalar = {} };
-    global_registry.put(clr_allocator.allocator(), nav_index_raw, .{
-        .ip_idx = nav_index_raw, // TODO: compute proper IP index
+    // Register the global, using detected children (or preserving existing struct_fields/indirect)
+    // Look up the actual IP index if it was already registered by codegen
+    const actual_ip_idx = nav_to_ip.get(nav_index_raw) orelse nav_index_raw;
+
+    const final_children = blk: {
+        // If we detected union_fields, use them
+        if (children == .union_fields) break :blk children;
+        // Otherwise preserve existing struct_fields/indirect if already set
+        if (global_registry.get(actual_ip_idx)) |existing| {
+            if (existing.children != .scalar) break :blk existing.children;
+        }
+        break :blk children;
+    };
+    global_registry.put(clr_allocator.allocator(), actual_ip_idx, .{
+        .ip_idx = actual_ip_idx,
         .type_str = final_type_str,
         .loc = .{ .file = file_path, .line = line, .column = column },
-        .children = existing_children,
+        .children = final_children,
     }) catch {};
 }
 

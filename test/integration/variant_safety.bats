@@ -111,11 +111,12 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
-# KNOWN LIMITATION: Tag checks on globals don't propagate if the variant was never
-# statically initialized. The analysis doesn't track initial values of globals,
-# only their types. See LIMITATIONS.md for details.
 @test "no error when global union variant is checked before access" {
-    skip "Known limitation: tag checks on globals require prior static initialization of variant"
     run compile_and_run "$TEST_CASES/variant_safety/globals/checked_access.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no error when switch on global union dispatches correctly" {
+    run compile_and_run "$TEST_CASES/variant_safety/globals/switch_checked_access.zig"
     [ "$status" -eq 0 ]
 }

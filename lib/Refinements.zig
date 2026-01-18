@@ -44,7 +44,10 @@ pub const GlobalDef = struct {
         @"null": void, // special value for optional types that start out null.
         indirect: ?u32, // IP index for indirect targets, null if they start undefined.
         struct_fields: []const ?u32, // IP indices for struct field globals, null if they start undefined.
-        union_fields: ?u32, // IP index for an active union field (null if union starts inactive).
+        union_fields: struct {
+            active_field_index: ?usize, // which field is active (null if undefined)
+            num_fields: usize, // total number of fields
+        },
     };
 };
 
@@ -422,11 +425,37 @@ fn createGlobalEntity(
             @memcpy(struct_fields, &field_gids);
             pointee_gid = self.appendEntity(.{ .@"struct" = .{ .fields = struct_fields, .type_id = container_type_id } }) catch @panic("appendEntity failed for struct");
         },
-        .union_fields => {
-            // TODO: Implement union field children handling
-            // For now, fall back to creating from type structure
-            const pointee_ref = tag.typeToRefinement(def.ty, self) catch @panic("typeToRefinement failed for global");
-            pointee_gid = self.appendEntity(pointee_ref) catch @panic("appendEntity failed for global pointee");
+        .union_fields => |uaf| {
+            const allocator = self.list.allocator;
+
+            // Get the type_id from the def's type (unwrap undefined if needed)
+            const type_id: Tid = comptime blk: {
+                const inner_ty = if (def.ty.ty == .undefined) def.ty.ty.undefined else if (def.ty.ty == .null) def.ty.ty.null else &def.ty;
+                break :blk inner_ty.id orelse @compileError("union GlobalDef must have type_id");
+            };
+
+            // Get the union field types from the type
+            const union_field_types: []const tag.Type = comptime blk: {
+                const inner_ty = if (def.ty.ty == .undefined) def.ty.ty.undefined else if (def.ty.ty == .null) def.ty.ty.null else &def.ty;
+                break :blk inner_ty.ty.@"union";
+            };
+
+            // Allocate fields array - all null (inactive) initially
+            const fields = allocator.alloc(?Gid, uaf.num_fields) catch @panic("OOM");
+            @memset(fields, null);
+
+            // If there's an active field, create its entity
+            if (uaf.active_field_index) |active_idx| {
+                if (active_idx < union_field_types.len) {
+                    const field_ref = tag.typeToRefinement(union_field_types[active_idx], self) catch @panic("typeToRefinement failed for union field");
+                    fields[active_idx] = self.appendEntity(field_ref) catch @panic("appendEntity failed for union field");
+                }
+            }
+
+            pointee_gid = self.appendEntity(.{ .@"union" = .{
+                .fields = fields,
+                .type_id = type_id,
+            } }) catch @panic("appendEntity failed for union");
         },
     }
 

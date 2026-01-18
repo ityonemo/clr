@@ -127,10 +127,17 @@ pub const VariantSafety = struct {
         }
     }
 
-    /// Handle cond_br - tag checks validate but don't change the global's active variant.
-    /// Only set_union_tag should modify the global's variant_safety.
-    /// For the LOCAL copy (loaded union), we update variant_safety to reflect what we know
-    /// in this branch.
+    /// Handle cond_br - when a tag check validates, update variant_safety to reflect
+    /// what we know in this branch.
+    ///
+    /// ## Local vs Global Union Handling
+    ///
+    /// **Local unions**: The compiler reuses the same loaded value for both the check
+    /// and subsequent field access. We update the local copy's variant_safety.
+    ///
+    /// **Global unions**: The compiler generates SEPARATE load instructions for each
+    /// access. We must ALSO update the global's variant_safety so subsequent loads
+    /// (via semideepCopy) get the correct state within this branch.
     pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
         _ = index;
         const results = state.results;
@@ -146,19 +153,72 @@ pub const VariantSafety = struct {
         const union_ref = refinements.at(union_eidx);
         if (union_ref.* != .@"union") return;
 
-        // Only update the LOCAL copy's variant_safety - don't touch globals
-        // Tag checks observe the variant, they don't change it
         const u = &union_ref.@"union";
         const vs = &(u.analyte.variant_safety orelse return);
 
-        // Only update if the field entity exists
+        // Check field index bounds
         if (union_check.field_index >= u.fields.len) return;
-        if (u.fields[union_check.field_index] == null) return;
 
-        for (vs.active_metas) |*meta| {
+        // Only update variant_safety if no variant is currently known as active.
+        // If set_union_tag was called earlier, we already KNOW which variant is active
+        // and the cond_br is just a runtime safety check - don't override that knowledge.
+        var has_known_active = false;
+        for (vs.active_metas) |m| {
+            if (m != null) {
+                has_known_active = true;
+                break;
+            }
+        }
+
+        if (!has_known_active) {
+            // No known active variant - use the cond_br check to establish it.
+            // If the local field entity is null, create it.
+            if (u.fields[union_check.field_index] == null) {
+                u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
+                    .analyte = .{ .undefined = .{ .defined = {} } },
+                } }) catch return;
+            }
+
+            // Update local copy's variant_safety
+            for (vs.active_metas) |*meta| {
+                meta.* = null;
+            }
+            vs.active_metas[union_check.field_index] = ctx.meta;
+        }
+
+        // For globals: also update the global's variant_safety so subsequent loads see it
+        const inst_tag = results[union_check.union_inst].inst_tag orelse return;
+        if (inst_tag != .load) return;
+        const load_src = inst_tag.load.ptr;
+        if (load_src != .int_var) return; // Not a global
+        const global_ip_idx = load_src.int_var;
+
+        const global_ptr_gid = refinements.getGlobal(global_ip_idx) orelse return;
+        const global_pointee_gid = refinements.at(global_ptr_gid).pointer.to;
+        const global_union_ref = refinements.at(global_pointee_gid);
+        if (global_union_ref.* != .@"union") return;
+
+        const global_u = &global_union_ref.@"union";
+        const global_vs = &(global_u.analyte.variant_safety orelse return);
+
+        // Check field index bounds
+        if (union_check.field_index >= global_u.fields.len) return;
+
+        // For globals, we always update based on the cond_br check.
+        // Unlike locals where set_union_tag in the same function gives us accurate info,
+        // globals may have been modified by other functions. The cond_br check is our
+        // only source of truth in this function's analysis context.
+        // If the global's field entity is null, create it.
+        if (global_u.fields[union_check.field_index] == null) {
+            global_u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
+                .analyte = .{ .undefined = .{ .defined = {} } },
+            } }) catch return;
+        }
+
+        for (global_vs.active_metas) |*meta| {
             meta.* = null;
         }
-        vs.active_metas[union_check.field_index] = ctx.meta;
+        global_vs.active_metas[union_check.field_index] = ctx.meta;
     }
 
     /// Handle switch_br - when switching on a union tag, update the active variant.
@@ -189,6 +249,13 @@ pub const VariantSafety = struct {
         // Set this variant as active
         const field_index = union_check.field_index;
         if (field_index < vs.active_metas.len) {
+            // Create field entity if it doesn't exist (needed for global unions
+            // where set_union_tag may have nulled the field)
+            if (field_index < u.fields.len and u.fields[field_index] == null) {
+                u.fields[field_index] = refinements.appendEntity(.{ .scalar = .{
+                    .analyte = .{ .undefined = .{ .defined = {} } },
+                } }) catch return;
+            }
             vs.active_metas[field_index] = ctx.meta;
         }
     }
@@ -337,7 +404,7 @@ pub const VariantSafety = struct {
         }
         const orig_vs = &u.analyte.variant_safety.?;
 
-        // Merge: mark as active any variant that was active in ANY branch
+        // Merge: mark as active any variant that was active in ANY reachable branch
         for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
             const branch_gid = branch_gid_opt orelse continue;
@@ -362,6 +429,51 @@ pub const VariantSafety = struct {
                 }
             }
         }
+    }
+
+    /// Initialize variant_safety for a global union.
+    /// Sets the active_metas based on which field entity exists (was initialized).
+    pub fn init_global(
+        refinements: *Refinements,
+        ptr_gid: Gid,
+        pointee_gid: Gid,
+        ctx: *Context,
+        is_undefined: bool,
+        is_null_opt: bool,
+        loc: tag.GlobalLocation,
+        field_info: ?tag.GlobalFieldInfo,
+    ) void {
+        _ = ptr_gid;
+        _ = ctx;
+        _ = is_undefined;
+        _ = is_null_opt;
+        _ = field_info;
+
+        // Only unions have variant_safety
+        const pointee = refinements.at(pointee_gid);
+        if (pointee.* != .@"union") return;
+
+        const u = &pointee.@"union";
+        const allocator = refinements.list.allocator;
+
+        // Create active_metas array - all null initially
+        const active_metas = allocator.alloc(?Meta, u.fields.len) catch @panic("OOM");
+        @memset(active_metas, null);
+
+        // Find which field has an entity (the active one from initialization)
+        for (u.fields, 0..) |field_opt, i| {
+            if (field_opt != null) {
+                active_metas[i] = Meta{
+                    .function = "",
+                    .file = loc.file,
+                    .line = loc.line,
+                    .column = loc.column,
+                };
+                break;
+            }
+        }
+
+        u.analyte.variant_safety = .{ .active_metas = active_metas };
     }
 };
 
