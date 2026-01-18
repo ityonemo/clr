@@ -50,7 +50,6 @@ load test_helper
 }
 
 @test "detects fieldParentPtr on global standalone variable" {
-    skip "Known limitation: global field pointers are interned, no struct_field_ptr generated"
     run compile_and_run "$TEST_CASES/field_safety/globals/invalid_standalone.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr on non-field pointer" ]]
@@ -58,7 +57,6 @@ load test_helper
 }
 
 @test "no error when fieldParentPtr on global union field" {
-    skip "Known limitation: global field pointers are interned, no struct_field_ptr generated"
     run compile_and_run "$TEST_CASES/field_safety/globals/valid_union_field.zig"
     [ "$status" -eq 0 ]
 }
