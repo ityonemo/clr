@@ -9,7 +9,7 @@ const Analyte = @This();
 
 /// Analyte holds the analysis state for a value.
 /// Each analysis contributes its state type here.
-undefined: ?undefined_analysis.UndefinedSafety = null,
+undefined_safety: ?undefined_analysis.UndefinedSafety = null,
 memory_safety: ?memory_safety_analysis.MemorySafety = null,
 null_safety: ?null_safety_analysis.NullSafety = null,
 variant_safety: ?variant_safety_analysis.VariantSafety = null,

@@ -5,7 +5,7 @@
 //   1. Set up refinement STRUCTURE (pointer, scalar, struct, etc.)
 //   2. Call splat() to dispatch to analysis modules
 //   3. Use generic helpers like copyAnalyteState() that work on any analyte
-// If you find yourself writing `.analyte.undefined = ...` in a tag handler,
+// If you find yourself writing `.analyte.undefined_safety = ...` in a tag handler,
 // that logic belongs in an analysis module instead.
 // =============================================================================
 //
@@ -2444,8 +2444,8 @@ test "struct_field_val extracts field value from struct" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a struct with two scalar fields (both defined)
-    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } } } });
-    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined = .{ .defined = {} } } } });
+    const field0_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } });
+    const field1_eidx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } });
     const fields = try allocator.alloc(Gid, 2);
     fields[0] = field0_eidx;
     fields[1] = field1_eidx;

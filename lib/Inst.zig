@@ -430,7 +430,7 @@ test "store_safe with undef keeps state undefined" {
     // alloc's pointee stays undefined after store_safe with undef
     const pointee_idx = results[1].get(&refinements).pointer.to;
     const scalar = &refinements.at(pointee_idx).scalar;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(scalar.analyte.undefined.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(scalar.analyte.undefined_safety.?));
 }
 
 test "store_safe with value sets state to defined" {
@@ -454,7 +454,7 @@ test "store_safe with value sets state to defined" {
     // alloc's pointee becomes defined after store_safe with real value
     const pointee_idx = results[1].get(&refinements).pointer.to;
     const scalar = &refinements.at(pointee_idx).scalar;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(scalar.analyte.undefined.?));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(scalar.analyte.undefined_safety.?));
 }
 
 test "load from undefined instruction reports use before assign" {

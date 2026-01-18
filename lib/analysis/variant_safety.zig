@@ -175,7 +175,7 @@ pub const VariantSafety = struct {
             // If the local field entity is null, create it.
             if (u.fields[union_check.field_index] == null) {
                 u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined = .{ .defined = {} } },
+                    .analyte = .{ .undefined_safety = .{ .defined = {} } },
                 } }) catch return;
             }
 
@@ -211,7 +211,7 @@ pub const VariantSafety = struct {
         // If the global's field entity is null, create it.
         if (global_u.fields[union_check.field_index] == null) {
             global_u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
-                .analyte = .{ .undefined = .{ .defined = {} } },
+                .analyte = .{ .undefined_safety = .{ .defined = {} } },
             } }) catch return;
         }
 
@@ -253,7 +253,7 @@ pub const VariantSafety = struct {
             // where set_union_tag may have nulled the field)
             if (field_index < u.fields.len and u.fields[field_index] == null) {
                 u.fields[field_index] = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined = .{ .defined = {} } },
+                    .analyte = .{ .undefined_safety = .{ .defined = {} } },
                 } }) catch return;
             }
             vs.active_metas[field_index] = ctx.meta;

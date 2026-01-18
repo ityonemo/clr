@@ -110,7 +110,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
     return switch (ref) {
         .scalar => |s| std.fmt.bufPrint(buf, "({d}) scalar(undef={s}, mem={s})", .{
             gid,
-            formatUndefined(s.analyte.undefined),
+            formatUndefined(s.analyte.undefined_safety),
             formatMemSafety(s.analyte.memory_safety),
         }) catch "scalar(?)",
         .pointer => |p| blk: {
@@ -119,7 +119,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const pointee_desc = formatRefinementDeep(&inner_buf, p.to, pointee.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) pointer(undef={s}, mem={s}) → {s}", .{
                 gid,
-                formatUndefined(p.analyte.undefined),
+                formatUndefined(p.analyte.undefined_safety),
                 formatMemSafety(p.analyte.memory_safety),
                 pointee_desc,
             }) catch "pointer(?)";
@@ -131,7 +131,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const payload_desc = formatRefinementDeep(&inner_buf, o.to, payload.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) optional(undef={s}, mem={s}) → {s}", .{
                 gid,
-                formatUndefined(o.analyte.undefined),
+                formatUndefined(o.analyte.undefined_safety),
                 formatMemSafety(o.analyte.memory_safety),
                 payload_desc,
             }) catch "optional(?)";
@@ -143,7 +143,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const payload_desc = formatRefinementDeep(&inner_buf, e.to, payload.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) errorunion(undef={s}, mem={s}) → {s}", .{
                 gid,
-                formatUndefined(e.analyte.undefined),
+                formatUndefined(e.analyte.undefined_safety),
                 formatMemSafety(e.analyte.memory_safety),
                 payload_desc,
             }) catch "errorunion(?)";
