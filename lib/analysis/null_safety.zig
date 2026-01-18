@@ -253,9 +253,12 @@ pub const NullSafety = union(enum) {
 
     /// Initialize the null state on a global variable refinement.
     /// If is_null is true and the gid points to an optional, marks it as known null.
-    pub fn init_global(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation) void {
+    pub fn init_global(refinements: *Refinements, ptr_gid: Gid, pointee_gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation, field_info: ?tag.GlobalFieldInfo) void {
+        _ = ptr_gid; // Unused by null_safety
         _ = ctx;
         _ = is_undefined; // Handled by undefined_safety.init_global
+        _ = field_info; // Handled by fieldparentptr_safety.init_global
+        const gid = pointee_gid;
         if (!is_null_opt) return;
 
         // Only optionals can be marked as null
@@ -562,12 +565,14 @@ test "init_global sets null state on optional" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional
+    // Create an optional (pointee)
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
+    // Create pointer to the optional (ptr_gid)
+    const ptr_eidx = try refinements.appendEntity(.{ .pointer = .{ .to = opt_eidx } });
 
     // Initialize as null global
     const loc = tag.GlobalLocation{ .file = "test.zig", .line = 1, .column = 1 };
-    NullSafety.init_global(&refinements, opt_eidx, &ctx, false, true, loc);
+    NullSafety.init_global(&refinements, ptr_eidx, opt_eidx, &ctx, false, true, loc, null);
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");

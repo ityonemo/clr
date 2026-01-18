@@ -1115,9 +1115,12 @@ pub const UndefinedSafety = union(enum) {
 
     /// Initialize the undefined state on a global variable refinement.
     /// If is_undefined is true, marks as undefined; otherwise marks as defined.
-    pub fn init_global(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation) void {
+    pub fn init_global(refinements: *Refinements, ptr_gid: Gid, pointee_gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation, field_info: ?tag.GlobalFieldInfo) void {
+        _ = ptr_gid; // Unused by undefined_safety
         _ = ctx;
         _ = is_null_opt; // Handled by null_safety.init_global
+        _ = field_info; // Handled by fieldparentptr_safety.init_global
+        const gid = pointee_gid;
         if (is_undefined) {
             // Construct Meta from the global's source location
             // Function name is empty for globals (they're not in a function)

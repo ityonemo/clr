@@ -42,11 +42,9 @@ load test_helper
 # Global fieldParentPtr tests
 # =============================================================================
 
-# KNOWN LIMITATION: Global field pointers are interned at compile time.
-# Zig computes &global.field addresses at comptime, so no struct_field_ptr
-# instruction is generated. See LIMITATIONS.md for details.
+# Global field pointers are interned at compile time (no struct_field_ptr generated),
+# but we now track them via initWithGlobals with field_info.
 @test "no error when fieldParentPtr on global struct field" {
-    skip "Known limitation: global field pointers are interned, no struct_field_ptr generated"
     run compile_and_run "$TEST_CASES/field_safety/globals/valid_struct_field.zig"
     [ "$status" -eq 0 ]
 }

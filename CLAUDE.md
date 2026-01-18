@@ -24,6 +24,8 @@ To view the raw AIR for a function:
 
 This shows the instruction indices, tags, and nesting structure. Block bodies may have indices that are **higher** than post-block instructions (e.g., block at %10 may contain %16-%23, while %11-%15 come after the block).
 
+**IMPORTANT**: Do NOT use `-femit-air` or `--verbose-air` flags directly. The main Zig compiler is built in ReleaseFast mode which strips AIR emission support. Always use `./dump_air.sh` which uses a debug-mode Zig build.
+
 ## Testing
 
 ### Unit Tests

@@ -1,5 +1,6 @@
 const std = @import("std");
 const Refinements = @import("../Refinements.zig");
+const Gid = Refinements.Gid;
 const Tid = Refinements.Tid;
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
@@ -51,6 +52,61 @@ pub const FieldParentPtrSafety = struct {
         };
     }
 
+    /// Initialize fieldparentptr_safety on a global field pointer.
+    /// Called via splatInitGlobal when processing global struct field pointers.
+    pub fn init_global(refinements: *Refinements, ptr_gid: Gid, pointee_gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation, field_info: ?tag.GlobalFieldInfo) void {
+        _ = pointee_gid; // Unused by fieldparentptr_safety
+        _ = ctx;
+        _ = is_undefined; // Handled by undefined_safety.init_global
+        _ = is_null_opt; // Handled by null_safety.init_global
+        _ = loc;
+
+        const info = field_info orelse return;
+
+        // Set fieldparentptr_safety on the pointer
+        const ptr_ref = refinements.at(ptr_gid);
+        if (ptr_ref.* != .pointer) return;
+
+        ptr_ref.pointer.analyte.fieldparentptr_safety = .{
+            .field_index = info.field_index,
+            .container_type_id = info.container_type_id,
+        };
+    }
+
+    /// Merge fieldparentptr_safety from branches to original.
+    /// Takes the first non-null value from branches if original is null.
+    pub fn merge(
+        ctx: *Context,
+        comptime merge_tag: anytype,
+        refinements: *Refinements,
+        orig_gid: Gid,
+        branches: []const ?State,
+        branch_gids: []const ?Gid,
+    ) !void {
+        _ = ctx;
+        _ = merge_tag;
+
+        const orig_ref = refinements.at(orig_gid);
+        if (orig_ref.* != .pointer) return;
+
+        // If original already has fieldparentptr_safety, keep it
+        if (orig_ref.pointer.analyte.fieldparentptr_safety != null) return;
+
+        // Look for first branch that has fieldparentptr_safety set
+        for (branches, branch_gids) |branch_opt, branch_gid_opt| {
+            const branch = branch_opt orelse continue;
+            const branch_gid = branch_gid_opt orelse continue;
+
+            const branch_ref = branch.refinements.at(branch_gid);
+            if (branch_ref.* != .pointer) continue;
+
+            if (branch_ref.pointer.analyte.fieldparentptr_safety) |fps| {
+                orig_ref.pointer.analyte.fieldparentptr_safety = fps;
+                return;
+            }
+        }
+    }
+
     /// Validate @fieldParentPtr usage.
     /// Checks that the field pointer actually came from a struct_field_ptr with matching type and field.
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
@@ -66,6 +122,7 @@ pub const FieldParentPtrSafety = struct {
         };
         const ptr_ref = refinements.at(ptr_idx);
 
+        // ptr must be a pointer refinement
         if (ptr_ref.* != .pointer) return;
 
         // Check 1: Pointer must have fieldparentptr_safety (came from struct_field_ptr)
@@ -138,7 +195,6 @@ pub const FieldParentPtrSafety = struct {
 // =============================================================================
 
 const Inst = @import("../Inst.zig");
-const Gid = Refinements.Gid;
 
 fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     return .{

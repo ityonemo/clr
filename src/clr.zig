@@ -115,8 +115,12 @@ pub const GlobalInfo = struct {
 /// Maps ip_idx to GlobalInfo to avoid duplicates.
 var global_registry: std.AutoHashMapUnmanaged(u32, GlobalInfo) = .empty;
 
+/// Maps nav_idx to ip_idx for looking up parent struct globals from field pointers.
+var nav_to_ip: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+
 /// Register a global variable. Returns the ip_idx for reference.
 /// The type_str should be wrapped in .{ .ty = .{ .undefined = &inner } } if the global is undefined.
+/// If nav_idx is provided, also records the nav→ip mapping for field pointer lookups.
 pub fn registerGlobal(ip_idx: u32, type_str: []const u8, children: ChildInfo) u32 {
     if (global_registry.get(ip_idx) == null) {
         global_registry.put(clr_allocator.allocator(), ip_idx, .{
@@ -126,6 +130,40 @@ pub fn registerGlobal(ip_idx: u32, type_str: []const u8, children: ChildInfo) u3
         }) catch {};
     }
     return ip_idx;
+}
+
+/// Register a global with nav→ip mapping for parent struct lookup.
+pub fn registerGlobalWithNav(ip_idx: u32, nav_idx: u32, type_str: []const u8, children: ChildInfo) u32 {
+    nav_to_ip.put(clr_allocator.allocator(), nav_idx, ip_idx) catch {};
+    return registerGlobal(ip_idx, type_str, children);
+}
+
+/// Register a struct field pointer and update the parent struct's struct_fields.
+/// nav_idx is the nav of the parent struct, field_index is which field, field_ip_idx is this field pointer's IP index.
+pub fn registerFieldPointer(nav_idx: u32, field_index: usize, num_fields: usize, field_ip_idx: u32, field_type_str: []const u8) void {
+    // Register the field pointer itself
+    _ = registerGlobal(field_ip_idx, field_type_str, .{ .scalar = {} });
+
+    // Find the parent struct by nav_idx
+    const parent_ip_idx = nav_to_ip.get(nav_idx) orelse return;
+    const parent = global_registry.getPtr(parent_ip_idx) orelse return;
+
+    // Get or create the struct_fields array
+    const struct_fields: []?u32 = switch (parent.children) {
+        .struct_fields => |existing| @constCast(existing),
+        else => blk: {
+            // First field pointer for this struct - allocate the array
+            const fields = clr_allocator.allocator().alloc(?u32, num_fields) catch return;
+            @memset(fields, null);
+            parent.children = .{ .struct_fields = fields };
+            break :blk fields;
+        },
+    };
+
+    // Update the field at this index
+    if (field_index < struct_fields.len) {
+        struct_fields[field_index] = field_ip_idx;
+    }
 }
 
 /// Get all registered globals as an iterator

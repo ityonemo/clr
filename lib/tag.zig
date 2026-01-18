@@ -1635,12 +1635,30 @@ pub const GlobalLocation = struct {
     column: u32,
 };
 
+/// Field pointer info for global struct field pointers.
+/// Used by fieldparentptr_safety to track field pointer origins.
+pub const GlobalFieldInfo = struct {
+    field_index: usize,
+    container_type_id: Refinements.Tid,
+};
+
 /// Initialize a global variable refinement.
 /// Dispatches to init_global handlers to set up analysis state (e.g., undefined tracking, null state).
-pub fn splatInitGlobal(refinements: *Refinements, gid: Gid, ctx: *Context, is_undefined: bool, is_null: bool, loc: GlobalLocation) void {
+/// ptr_gid is the pointer to the global, pointee_gid is what it points to.
+/// field_info is set for struct field pointers to track @fieldParentPtr origins.
+pub fn splatInitGlobal(
+    refinements: *Refinements,
+    ptr_gid: Gid,
+    pointee_gid: Gid,
+    ctx: *Context,
+    is_undefined: bool,
+    is_null: bool,
+    loc: GlobalLocation,
+    field_info: ?GlobalFieldInfo,
+) void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_global")) {
-            Analysis.init_global(refinements, gid, ctx, is_undefined, is_null, loc);
+            Analysis.init_global(refinements, ptr_gid, pointee_gid, ctx, is_undefined, is_null, loc, field_info);
         }
     }
 }

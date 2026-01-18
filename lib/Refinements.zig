@@ -325,7 +325,7 @@ pub fn initWithGlobals(allocator: Allocator, ctx: *@import("Context.zig"), compt
     // Recursively create all globals - order doesn't matter due to recursion
     // createGlobalEntity uses global_map to track already-created globals
     inline for (global_defs) |def| {
-        _ = createGlobalEntity(&self, def, global_defs, ctx);
+        _ = createGlobalEntity(&self, def, global_defs, ctx, null);
     }
 
     // Record cutoff - all entities created so far are global-related
@@ -336,14 +336,28 @@ pub fn initWithGlobals(allocator: Allocator, ctx: *@import("Context.zig"), compt
 
 /// Recursively create entity for a global, resolving pointer targets.
 /// Uses global_map to track ip_idx→gid for already-created globals.
+/// field_info is set when creating field pointer globals to track their origin.
 fn createGlobalEntity(
     self: *Refinements,
     comptime def: GlobalDef,
     comptime all_globals: []const GlobalDef,
     ctx: *@import("Context.zig"),
+    comptime field_info: ?tag.GlobalFieldInfo,
 ) Gid {
     // Check if already created (via global_map)
     if (self.global_map.get(def.ip_idx)) |existing_gid| {
+        // If we have field_info, we need to apply it even if the global was already created.
+        // This happens when a field pointer is registered before its parent struct.
+        if (field_info) |finfo| {
+            const ptr_ref = self.at(existing_gid);
+            if (ptr_ref.* != .pointer) {
+                @panic("createGlobalEntity: existing global with field_info is not a pointer");
+            }
+            ptr_ref.pointer.analyte.fieldparentptr_safety = .{
+                .field_index = finfo.field_index,
+                .container_type_id = finfo.container_type_id,
+            };
+        }
         return existing_gid;
     }
 
@@ -359,7 +373,7 @@ fn createGlobalEntity(
                 // This is a pointer global pointing to another global.
                 // First, recursively create the target global.
                 const target_def = comptime findGlobalDef(all_globals, target);
-                const target_ptr_gid = createGlobalEntity(self, target_def, all_globals, ctx);
+                const target_ptr_gid = createGlobalEntity(self, target_def, all_globals, ctx, null);
 
                 // Our value (the pointer) points to the target's value (pointee)
                 const target_pointee = self.at(target_ptr_gid).pointer.to;
@@ -377,8 +391,39 @@ fn createGlobalEntity(
             const pointee_ref = tag.typeToRefinement(def.ty, self) catch @panic("typeToRefinement failed for global");
             pointee_gid = self.appendEntity(pointee_ref) catch @panic("appendEntity failed for global pointee");
         },
-        .struct_fields, .union_fields => {
-            // TODO: Implement struct/union field children handling
+        .struct_fields => |field_ip_indices| {
+            // Struct global with field pointer children.
+            // Get the container type_id from the def's type
+            const container_type_id: Tid = comptime blk: {
+                const inner_ty = if (def.ty.ty == .undefined) def.ty.ty.undefined else if (def.ty.ty == .null) def.ty.ty.null else &def.ty;
+                break :blk inner_ty.id orelse @compileError("struct GlobalDef must have type_id");
+            };
+
+            // Create field pointer globals with field_info
+            var field_gids: [field_ip_indices.len]Gid = undefined;
+            inline for (field_ip_indices, 0..) |field_ip_idx_opt, field_idx| {
+                if (field_ip_idx_opt) |field_ip_idx| {
+                    const field_def = comptime findGlobalDef(all_globals, field_ip_idx);
+                    const finfo = tag.GlobalFieldInfo{
+                        .field_index = field_idx,
+                        .container_type_id = container_type_id,
+                    };
+                    const field_ptr_gid = createGlobalEntity(self, field_def, all_globals, ctx, finfo);
+                    // Get the pointee from the field pointer
+                    field_gids[field_idx] = self.at(field_ptr_gid).pointer.to;
+                } else {
+                    // Field not linked - create fresh scalar from type
+                    field_gids[field_idx] = self.appendEntity(.{ .scalar = .{} }) catch @panic("appendEntity failed");
+                }
+            }
+
+            // Create struct entity with field GIDs
+            const struct_fields = self.list.allocator.alloc(Gid, field_ip_indices.len) catch @panic("OOM for struct fields");
+            @memcpy(struct_fields, &field_gids);
+            pointee_gid = self.appendEntity(.{ .@"struct" = .{ .fields = struct_fields, .type_id = container_type_id } }) catch @panic("appendEntity failed for struct");
+        },
+        .union_fields => {
+            // TODO: Implement union field children handling
             // For now, fall back to creating from type structure
             const pointee_ref = tag.typeToRefinement(def.ty, self) catch @panic("typeToRefinement failed for global");
             pointee_gid = self.appendEntity(pointee_ref) catch @panic("appendEntity failed for global pointee");
@@ -394,10 +439,10 @@ fn createGlobalEntity(
     // Register in global_map
     self.global_map.put(def.ip_idx, ptr_gid) catch {};
 
-    // Dispatch to analysis modules to initialize state on the POINTEE
+    // Dispatch to analysis modules to initialize state
     const loc_info = def.loc orelse GlobalDef.SourceLoc{};
     const loc = tag.GlobalLocation{ .file = loc_info.file, .line = loc_info.line, .column = loc_info.column };
-    tag.splatInitGlobal(self, pointee_gid, ctx, is_undefined, is_null, loc);
+    tag.splatInitGlobal(self, ptr_gid, pointee_gid, ctx, is_undefined, is_null, loc, field_info);
 
     return ptr_gid;
 }
