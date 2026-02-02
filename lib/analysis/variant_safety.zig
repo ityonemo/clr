@@ -174,8 +174,10 @@ pub const VariantSafety = struct {
             // No known active variant - use the cond_br check to establish it.
             // If the local field entity is null, create it.
             if (u.fields[union_check.field_index] == null) {
+                // Inherit undefined_safety from the union itself - if the union is undefined,
+                // the field should also be undefined.
                 u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined_safety = .{ .defined = {} } },
+                    .analyte = .{ .undefined_safety = u.analyte.undefined_safety orelse .{ .defined = {} } },
                 } }) catch return;
             }
 
@@ -210,8 +212,10 @@ pub const VariantSafety = struct {
         // only source of truth in this function's analysis context.
         // If the global's field entity is null, create it.
         if (global_u.fields[union_check.field_index] == null) {
+            // Inherit undefined_safety from the global union itself - if the union is undefined,
+            // the field should also be undefined.
             global_u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
-                .analyte = .{ .undefined_safety = .{ .defined = {} } },
+                .analyte = .{ .undefined_safety = global_u.analyte.undefined_safety orelse .{ .defined = {} } },
             } }) catch return;
         }
 
@@ -252,8 +256,10 @@ pub const VariantSafety = struct {
             // Create field entity if it doesn't exist (needed for global unions
             // where set_union_tag may have nulled the field)
             if (field_index < u.fields.len and u.fields[field_index] == null) {
+                // Inherit undefined_safety from the union itself - if the union is undefined,
+                // the field should also be undefined.
                 u.fields[field_index] = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined_safety = .{ .defined = {} } },
+                    .analyte = .{ .undefined_safety = u.analyte.undefined_safety orelse .{ .defined = {} } },
                 } }) catch return;
             }
             vs.active_metas[field_index] = ctx.meta;

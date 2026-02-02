@@ -127,9 +127,21 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             return .{ .optional = .{ .to = child_idx } };
         },
         .undefined => |child| {
-            // .undefined wraps a type - recurse into inner type.
-            // The undefined.store handler checks for .undefined wrapper and marks as undefined.
-            return typeToRefinement(child.*, refinements);
+            // .undefined wraps a type - recurse into inner type and mark as undefined.
+            // This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
+            var inner_ref = try typeToRefinement(child.*, refinements);
+            // Set undefined state on the inner refinement
+            // Note: Meta is empty here; source location will be set later by init_global
+            const empty_meta = @import("Meta.zig"){ .file = "", .line = 0, .function = "" };
+            switch (inner_ref) {
+                .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
+                .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
+                .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
+                // Containers don't track undefined on themselves
+                .optional, .errorunion, .@"struct", .@"union", .region => {},
+                .void, .noreturn, .unimplemented => {},
+            }
+            return inner_ref;
         },
         .allocator => |alloc_type_id| {
             // Allocator refinement - type_id uniquely identifies allocator type

@@ -100,9 +100,10 @@ pub const ChildInfo = union(enum) {
     @"null": void, // optional that starts out null
     indirect: ?u32, // IP index for indirect targets, null if undefined
     struct_fields: []const ?u32, // IP indices for struct field globals
-    union_fields: struct {
-        active_field_index: ?usize, // which field is active (null if undefined)
+    union_field: struct {
+        active_field_index: ?usize, // which field is active (null if whole union undefined)
         num_fields: usize, // total number of fields
+        field_value_ip_idx: ?u32, // IP index for field value, null if undefined
     },
 };
 
@@ -441,8 +442,8 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
         else => false,
     };
 
-    // Generate type string
-    const type_str = clr_codegen.typeToStringForGlobal(arena.allocator(), ip, nav_type);
+    // Generate type string (with per-field undefined tracking for struct aggregates)
+    const type_str = clr_codegen.typeToStringForGlobalWithInit(arena.allocator(), ip, nav_type, init_val);
 
     // Wrap in .undefined if the global is undefined, or .null if it's a null optional
     // For .null, we need the INNER type (not the optional wrapper) since .null implies optional
@@ -467,7 +468,7 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
         const num_fields = loaded_union.field_types.len;
 
         // If undefined, no active field
-        if (is_undefined) break :blk .{ .union_fields = .{ .active_field_index = null, .num_fields = num_fields } };
+        if (is_undefined) break :blk .{ .union_field = .{ .active_field_index = null, .num_fields = num_fields, .field_value_ip_idx = null } };
 
         // Extract active field index from union init value
         if (init_key == .un) {
@@ -481,14 +482,17 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
                     if (int_key == .int) {
                         // Extract the field index from the integer value
                         const field_index: usize = @intCast(int_key.int.storage.u64);
-                        break :blk .{ .union_fields = .{ .active_field_index = field_index, .num_fields = num_fields } };
+                        // Check if field value is undefined
+                        const field_val_key = ip.indexToKey(un.val);
+                        const field_value_ip_idx: ?u32 = if (field_val_key == .undef) null else @intFromEnum(un.val);
+                        break :blk .{ .union_field = .{ .active_field_index = field_index, .num_fields = num_fields, .field_value_ip_idx = field_value_ip_idx } };
                     }
                 }
             }
         }
 
         // Union type but couldn't determine active field
-        break :blk .{ .union_fields = .{ .active_field_index = null, .num_fields = num_fields } };
+        break :blk .{ .union_field = .{ .active_field_index = null, .num_fields = num_fields, .field_value_ip_idx = null } };
     };
 
     // Get source location info
@@ -511,8 +515,8 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
     const actual_ip_idx = nav_to_ip.get(nav_index_raw) orelse nav_index_raw;
 
     const final_children = blk: {
-        // If we detected union_fields, use them
-        if (children == .union_fields) break :blk children;
+        // If we detected union_field, use them
+        if (children == .union_field) break :blk children;
         // Otherwise preserve existing struct_fields/indirect if already set
         if (global_registry.get(actual_ip_idx)) |existing| {
             if (existing.children != .scalar) break :blk existing.children;

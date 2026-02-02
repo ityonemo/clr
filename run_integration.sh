@@ -17,7 +17,14 @@ fi
 
 # Check if bats is available
 if command -v bats &> /dev/null; then
-    bats -j "$(nproc)" "$SCRIPT_DIR/test/integration/"
+    # Try parallel execution if GNU parallel is available
+    # GNU parallel is required (not moreutils parallel)
+    if parallel --version 2>&1 | grep -q "GNU parallel"; then
+        bats -j "$(nproc)" "$SCRIPT_DIR/test/integration/"
+    else
+        echo "Note: Install GNU parallel for faster test execution (sudo apt install parallel)"
+        bats "$SCRIPT_DIR/test/integration/"
+    fi
 else
     echo "BATS not installed. Install with:"
     echo "  Ubuntu/Debian: sudo apt install bats"

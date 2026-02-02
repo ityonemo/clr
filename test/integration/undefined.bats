@@ -247,6 +247,15 @@ load test_helper
     [[ "$output" =~ "tagged_field_missed_when_passed.zig" ]]
 }
 
+@test "detects undefined tagged union accessed directly" {
+    run compile_and_run "$TEST_CASES/undefined/unions/tagged_whole_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in tagged_whole_undefined.main" ]]
+    [[ "$output" =~ "tagged_whole_undefined.zig:9:" ]]
+    [[ "$output" =~ "undefined value assigned in tagged_whole_undefined.main" ]]
+    [[ "$output" =~ "tagged_whole_undefined.zig:7:" ]]
+}
+
 # =============================================================================
 # Union Tests - Untagged
 # =============================================================================
@@ -266,6 +275,15 @@ load test_helper
 @test "no error when untagged union is set via pointer" {
     run compile_and_run "$TEST_CASES/undefined/unions/untagged_set_via_pointer.zig"
     [ "$status" -eq 0 ]
+}
+
+@test "detects undefined untagged union accessed directly" {
+    run compile_and_run "$TEST_CASES/undefined/unions/untagged_whole_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in untagged_whole_undefined.main" ]]
+    [[ "$output" =~ "untagged_whole_undefined.zig:9:" ]]
+    [[ "$output" =~ "undefined value assigned in untagged_whole_undefined.main" ]]
+    [[ "$output" =~ "untagged_whole_undefined.zig:7:" ]]
 }
 
 # =============================================================================
@@ -368,5 +386,36 @@ load test_helper
 
 @test "no error when global pointer assigns to undefined global" {
     run compile_and_run "$TEST_CASES/undefined/globals/pointer_to_global.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined global union used before assignment" {
+    run compile_and_run "$TEST_CASES/undefined/globals/use_undefined_union.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in use_undefined_union.use_union" ]]
+    [[ "$output" =~ "use_undefined_union.zig:10:" ]]
+}
+
+@test "detects global union with undefined field value" {
+    run compile_and_run "$TEST_CASES/undefined/globals/use_union_undefined_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in use_union_undefined_field.use_union" ]]
+    [[ "$output" =~ "use_union_undefined_field.zig:10:" ]]
+}
+
+@test "no error when undefined global struct field is assigned before use" {
+    run compile_and_run "$TEST_CASES/undefined/globals/assign_then_use_struct.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined field in mixed struct init global" {
+    run compile_and_run "$TEST_CASES/undefined/globals/mixed_struct_undefined_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in mixed_struct_undefined_field.use_struct" ]]
+    [[ "$output" =~ "mixed_struct_undefined_field.zig:10:" ]]
+}
+
+@test "no error when accessing defined field in mixed struct init global" {
+    run compile_and_run "$TEST_CASES/undefined/globals/mixed_struct_defined_field.zig"
     [ "$status" -eq 0 ]
 }

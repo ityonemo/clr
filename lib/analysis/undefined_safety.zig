@@ -362,11 +362,21 @@ pub const UndefinedSafety = union(enum) {
     }
 
     /// Helper to recursively set all scalars/pointers in a refinement tree to defined.
+    /// Preserves existing undefined states (only sets to defined if currently null).
+    /// This allows per-field undefined tracking for structs like .{ .x = 42, .y = undefined }.
     fn setDefinedRecursive(refinements: *Refinements, idx: Gid) void {
         switch (refinements.at(idx).*) {
-            .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
+            .scalar => |*s| {
+                // Only set to defined if not already set (preserve existing undefined state)
+                if (s.analyte.undefined_safety == null) {
+                    s.analyte.undefined_safety = .{ .defined = {} };
+                }
+            },
             .pointer => |*p| {
-                p.analyte.undefined_safety = .{ .defined = {} };
+                // Only set to defined if not already set (preserve existing undefined state)
+                if (p.analyte.undefined_safety == null) {
+                    p.analyte.undefined_safety = .{ .defined = {} };
+                }
                 setDefinedRecursive(refinements, p.to);
             },
             .optional => |o| setDefinedRecursive(refinements, o.to),
@@ -379,16 +389,49 @@ pub const UndefinedSafety = union(enum) {
             .@"union" => |*u| {
                 // Set union's analyte to defined
                 u.analyte.undefined_safety = .{ .defined = {} };
-                // Also recurse into active fields (non-null)
+                // NOTE: Do NOT recurse into union fields. Union fields have their own
+                // independent undefined states based on whether the field VALUE is undefined
+                // (e.g., .{ .int = undefined } has a defined union but undefined field value).
+            },
+            .allocator => |*a| {
+                // Only set to defined if not already set
+                if (a.analyte.undefined_safety == null) {
+                    a.analyte.undefined_safety = .{ .defined = {} };
+                }
+            },
+            .void, .unimplemented, .noreturn => {},
+            .region => |r| setDefinedRecursive(refinements, r.to),
+        }
+    }
+
+    /// Helper to FORCE all scalars/pointers in a refinement tree to defined.
+    /// Unlike setDefinedRecursive, this always overwrites existing undefined states.
+    /// Used when explicitly storing a value (like .null to an optional).
+    fn forceDefinedRecursive(refinements: *Refinements, idx: Gid) void {
+        switch (refinements.at(idx).*) {
+            .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
+            .pointer => |*p| {
+                p.analyte.undefined_safety = .{ .defined = {} };
+                forceDefinedRecursive(refinements, p.to);
+            },
+            .optional => |o| forceDefinedRecursive(refinements, o.to),
+            .errorunion => |e| forceDefinedRecursive(refinements, e.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_idx| {
+                    forceDefinedRecursive(refinements, field_idx);
+                }
+            },
+            .@"union" => |*u| {
+                u.analyte.undefined_safety = .{ .defined = {} };
                 for (u.fields) |field_idx_opt| {
                     if (field_idx_opt) |field_idx| {
-                        setDefinedRecursive(refinements, field_idx);
+                        forceDefinedRecursive(refinements, field_idx);
                     }
                 }
             },
             .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
             .void, .unimplemented, .noreturn => {},
-            .region => |r| setDefinedRecursive(refinements, r.to),
+            .region => |r| forceDefinedRecursive(refinements, r.to),
         }
     }
 
@@ -537,6 +580,7 @@ pub const UndefinedSafety = union(enum) {
 
     /// Apply defined/undefined state from an interned type to a refinement.
     /// Handles field-level undefined for structs where some fields may be undefined.
+    /// Uses forceDefinedRecursive because explicit stores should overwrite existing undefined states.
     fn applyInternedType(refinements: *Refinements, idx: Gid, ty: tag.Type, ctx: *Context) void {
         switch (ty.ty) {
             .undefined => {
@@ -556,7 +600,7 @@ pub const UndefinedSafety = union(enum) {
                     },
                     else => {
                         // Non-struct refinement - just mark as defined
-                        setDefinedRecursive(refinements, idx);
+                        forceDefinedRecursive(refinements, idx);
                     },
                 }
             },
@@ -573,26 +617,26 @@ pub const UndefinedSafety = union(enum) {
                         p.analyte.undefined_safety = .{ .defined = {} };
                         applyInternedType(refinements, p.to, inner.*, ctx);
                     },
-                    else => setDefinedRecursive(refinements, idx),
+                    else => forceDefinedRecursive(refinements, idx),
                 }
             },
             .optional => |inner| {
                 switch (refinements.at(idx).*) {
                     .optional => |o| applyInternedType(refinements, o.to, inner.*, ctx),
-                    else => setDefinedRecursive(refinements, idx),
+                    else => forceDefinedRecursive(refinements, idx),
                 }
             },
             .errorunion => |inner| {
                 switch (refinements.at(idx).*) {
                     .errorunion => |e| applyInternedType(refinements, e.to, inner.*, ctx),
-                    else => setDefinedRecursive(refinements, idx),
+                    else => forceDefinedRecursive(refinements, idx),
                 }
             },
             .null => {
                 // Null value - mark inner as defined (it's explicitly null, not undefined)
                 switch (refinements.at(idx).*) {
-                    .optional => |o| setDefinedRecursive(refinements, o.to),
-                    else => setDefinedRecursive(refinements, idx),
+                    .optional => |o| forceDefinedRecursive(refinements, o.to),
+                    else => forceDefinedRecursive(refinements, idx),
                 }
             },
             .@"union" => |field_types| {
@@ -611,7 +655,7 @@ pub const UndefinedSafety = union(enum) {
                     },
                     else => {
                         // Non-union refinement - just mark as defined
-                        setDefinedRecursive(refinements, idx);
+                        forceDefinedRecursive(refinements, idx);
                     },
                 }
             },
@@ -619,14 +663,14 @@ pub const UndefinedSafety = union(enum) {
                 // Allocator value - mark as defined
                 switch (refinements.at(idx).*) {
                     .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
-                    else => setDefinedRecursive(refinements, idx),
+                    else => forceDefinedRecursive(refinements, idx),
                 }
             },
             .void => {},
             .region => |inner| {
                 switch (refinements.at(idx).*) {
                     .region => |r| applyInternedType(refinements, r.to, inner.*, ctx),
-                    else => setDefinedRecursive(refinements, idx),
+                    else => forceDefinedRecursive(refinements, idx),
                 }
             },
         }
@@ -908,14 +952,18 @@ pub const UndefinedSafety = union(enum) {
                     // Field was inactive - the tag handler created a fresh entity
                     // Check the union's analyte undefined state instead
                     if (u.analyte.undefined_safety) |undef| {
+                        // Set the result's undefined state before checking/reporting errors
+                        // This ensures testValid won't panic on the fresh result entity
+                        setUndefinedRecursive(refinements, result_idx, undef);
                         switch (undef) {
                             .undefined => return undef.reportUseBeforeAssign(ctx),
                             .inconsistent => return undef.reportInconsistentBranches(ctx),
                             .defined => {},
                         }
+                    } else {
+                        // No undefined state on union - set result to defined
+                        setDefinedRecursive(refinements, result_idx);
                     }
-                    // The fresh entity created by typeToRefinement needs undefined state set
-                    setDefinedRecursive(refinements, result_idx);
                 }
             },
             else => {

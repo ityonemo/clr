@@ -44,9 +44,10 @@ pub const GlobalDef = struct {
         @"null": void, // special value for optional types that start out null.
         indirect: ?u32, // IP index for indirect targets, null if they start undefined.
         struct_fields: []const ?u32, // IP indices for struct field globals, null if they start undefined.
-        union_fields: struct {
-            active_field_index: ?usize, // which field is active (null if undefined)
+        union_field: struct {
+            active_field_index: ?usize, // which field is active (null if whole union undefined)
             num_fields: usize, // total number of fields
+            field_value_ip_idx: ?u32, // IP index for field value, null if undefined
         },
     };
 };
@@ -425,7 +426,7 @@ fn createGlobalEntity(
             @memcpy(struct_fields, &field_gids);
             pointee_gid = self.appendEntity(.{ .@"struct" = .{ .fields = struct_fields, .type_id = container_type_id } }) catch @panic("appendEntity failed for struct");
         },
-        .union_fields => |uaf| {
+        .union_field => |uaf| {
             const allocator = self.list.allocator;
 
             // Get the type_id from the def's type (unwrap undefined if needed)
@@ -440,6 +441,9 @@ fn createGlobalEntity(
                 break :blk inner_ty.ty.@"union";
             };
 
+            // field_value_ip_idx == null means the field value is undefined
+            const field_value_is_undefined = uaf.field_value_ip_idx == null;
+
             // Allocate fields array - all null (inactive) initially
             const fields = allocator.alloc(?Gid, uaf.num_fields) catch @panic("OOM");
             @memset(fields, null);
@@ -448,7 +452,14 @@ fn createGlobalEntity(
             if (uaf.active_field_index) |active_idx| {
                 if (active_idx < union_field_types.len) {
                     const field_ref = tag.typeToRefinement(union_field_types[active_idx], self) catch @panic("typeToRefinement failed for union field");
-                    fields[active_idx] = self.appendEntity(field_ref) catch @panic("appendEntity failed for union field");
+                    const field_gid = self.appendEntity(field_ref) catch @panic("appendEntity failed for union field");
+                    fields[active_idx] = field_gid;
+
+                    // Initialize the field's undefined state
+                    // (splatInitGlobal for union won't recurse into fields, so we must do it here)
+                    const field_loc_info = def.loc orelse GlobalDef.SourceLoc{};
+                    const field_loc = tag.GlobalLocation{ .file = field_loc_info.file, .line = field_loc_info.line, .column = field_loc_info.column };
+                    tag.splatInitGlobal(self, 0, field_gid, ctx, field_value_is_undefined, false, field_loc, null);
                 }
             }
 
@@ -765,4 +776,83 @@ test "initWithGlobals sets null_safety for null optional global" {
     try std.testing.expect(opt.* == .optional);
     const ns = opt.optional.analyte.null_safety.?;
     try std.testing.expect(ns == .null);
+}
+
+test "initWithGlobals sets undefined_safety for undefined union global" {
+    const Context = @import("Context.zig");
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Create global_defs with an undefined union
+    const inner_scalar: tag.Type = .{ .ty = .{ .scalar = {} } };
+    const union_type: tag.Type = .{ .id = 5120, .ty = .{ .@"union" = &.{ inner_scalar, inner_scalar } } };
+    const undefined_union_type: tag.Type = .{ .ty = .{ .undefined = &union_type } };
+
+    const global_defs = [_]GlobalDef{
+        .{ .ip_idx = 100, .ty = undefined_union_type, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
+    };
+
+    var refinements = initWithGlobals(allocator, &ctx, &global_defs);
+    defer refinements.deinit();
+
+    // Get the global pointer GID
+    const ptr_gid = refinements.getGlobal(100).?;
+    const ptr = refinements.at(ptr_gid);
+
+    // Follow pointer to pointee (the union)
+    try std.testing.expect(ptr.* == .pointer);
+    const union_gid = ptr.pointer.to;
+    const u = refinements.at(union_gid);
+
+    // Verify it's a union with undefined_safety set to .undefined
+    try std.testing.expect(u.* == .@"union");
+    const us = u.@"union".analyte.undefined_safety.?;
+    try std.testing.expect(us == .undefined);
+
+    // Also verify fields are all null (no active field)
+    try std.testing.expect(u.@"union".fields[0] == null);
+    try std.testing.expect(u.@"union".fields[1] == null);
+}
+
+test "semideepCopy preserves union undefined_safety" {
+    const Context = @import("Context.zig");
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    // Create global_defs with an undefined union
+    const inner_scalar: tag.Type = .{ .ty = .{ .scalar = {} } };
+    const union_type: tag.Type = .{ .id = 5120, .ty = .{ .@"union" = &.{ inner_scalar, inner_scalar } } };
+    const undefined_union_type: tag.Type = .{ .ty = .{ .undefined = &union_type } };
+
+    const global_defs = [_]GlobalDef{
+        .{ .ip_idx = 100, .ty = undefined_union_type, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
+    };
+
+    var refinements = initWithGlobals(allocator, &ctx, &global_defs);
+    defer refinements.deinit();
+
+    // Get the global pointer and union
+    const ptr_gid = refinements.getGlobal(100).?;
+    const union_gid = refinements.at(ptr_gid).pointer.to;
+
+    // Semideep copy the union (simulating a load)
+    const copy_gid = try refinements.semideepCopy(union_gid);
+    const copy = refinements.at(copy_gid);
+
+    // Verify the copy is a union with undefined_safety preserved
+    try std.testing.expect(copy.* == .@"union");
+    const us = copy.@"union".analyte.undefined_safety.?;
+    try std.testing.expect(us == .undefined);
+
+    // Also verify fields are all null (no active field)
+    try std.testing.expect(copy.@"union".fields[0] == null);
+    try std.testing.expect(copy.@"union".fields[1] == null);
 }

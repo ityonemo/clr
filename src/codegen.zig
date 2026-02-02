@@ -1129,6 +1129,75 @@ fn structTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, typ
     return result.items;
 }
 
+/// Convert a type to string for global variables, with optional init value for per-field undefined tracking.
+/// If init_val is an aggregate, checks each field element for .undef and wraps those field types.
+pub fn typeToStringForGlobalWithInit(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, init_val: InternPool.Index) []const u8 {
+    // For struct types with aggregate init, check each field for undefined
+    const type_key = ip.indexToKey(ty);
+    if (type_key == .struct_type and init_val != .none) {
+        const init_key = ip.indexToKey(init_val);
+        if (init_key == .aggregate) {
+            return structTypeToStringWithInit(arena, ip, ty, init_key.aggregate);
+        }
+    }
+    // Fall back to standard conversion
+    return typeToStringForGlobal(arena, ip, ty);
+}
+
+/// Struct type string with per-field undefined tracking based on init values.
+fn structTypeToStringWithInit(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, agg: InternPool.Key.Aggregate) []const u8 {
+    const loaded = ip.loadStructType(type_index);
+    const field_types = loaded.field_types.get(ip);
+    const type_id: u32 = @intFromEnum(type_index);
+
+    if (field_types.len == 0) {
+        return clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"struct\" = &.{{}} }} }}", .{type_id}, null);
+    }
+
+    // Get the init values for each field
+    const field_values = switch (agg.storage) {
+        .elems => |elems| elems,
+        .repeated_elem, .bytes => return structTypeToStringSimpleNoVisited(arena, ip, type_index), // All same value or bytes, use simple path
+    };
+
+    var result = std.ArrayListUnmanaged(u8){};
+    const header = clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"struct\" = &.{{ ", .{type_id}, null);
+    result.appendSlice(arena, header) catch @panic("out of memory");
+
+    var visited = VisitedTypes{};
+    defer visited.deinit(arena);
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        // Check if this field's init value is undefined
+        const field_is_undef = if (i < field_values.len) blk: {
+            const field_val = field_values[i];
+            break :blk ip.indexToKey(field_val) == .undef;
+        } else false;
+
+        const field_type_str = typeToStringInner(null, null, arena, ip, field_type, &visited);
+        if (field_is_undef) {
+            // Wrap in .undefined
+            const wrapped = clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .undefined = &{s} }} }}", .{field_type_str}, null);
+            result.appendSlice(arena, wrapped) catch @panic("out of memory");
+        } else {
+            result.appendSlice(arena, field_type_str) catch @panic("out of memory");
+        }
+    }
+
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    return result.items;
+}
+
+/// Simple struct type string without visited tracking (for repeated_elem case)
+fn structTypeToStringSimpleNoVisited(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index) []const u8 {
+    var visited = VisitedTypes{};
+    defer visited.deinit(arena);
+    return structTypeToStringSimple(arena, ip, type_index, &visited);
+}
+
 /// Look up a non-well-known type in the InternPool.
 fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field_map: ?*clr.FieldHashMap, arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     // Check for cycles in recursive types (e.g., struct { next: ?*@This() })
@@ -1388,6 +1457,10 @@ fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
     const ptr_str: []const u8 = if (datum.bin_op.lhs.toIndex()) |idx|
         clr_allocator.allocPrint(info.arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null)
     else if (datum.bin_op.lhs.toInterned()) |interned_idx| blk: {
+        // Check if it's a pointer to a field of a global struct (comptime field address)
+        if (tryFieldPtrRef(info, interned_idx)) |ip_idx_str| {
+            break :blk clr_allocator.allocPrint(info.arena, ".{{ .int_var = {s} }}", .{ip_idx_str}, null);
+        }
         // Check if it's a global variable
         if (tryGlobalRef(info, interned_idx)) |nav_idx_str| {
             break :blk clr_allocator.allocPrint(info.arena, ".{{ .int_var = {s} }}", .{nav_idx_str}, null);
@@ -3268,12 +3341,16 @@ fn formatChildInfo(children: clr.ChildInfo) []const u8 {
             buf.appendSlice(allocator, " } }") catch @panic("OOM");
             break :blk buf.items;
         },
-        .union_fields => |uf| blk: {
+        .union_field => |uf| blk: {
             const active_str = if (uf.active_field_index) |idx|
                 clr_allocator.allocPrint(allocator, "@as(?usize, {d})", .{idx}, null)
             else
                 "null";
-            break :blk clr_allocator.allocPrint(allocator, ".{{ .union_fields = .{{ .active_field_index = {s}, .num_fields = {d} }} }}", .{ active_str, uf.num_fields }, null);
+            const field_value_str = if (uf.field_value_ip_idx) |idx|
+                clr_allocator.allocPrint(allocator, "@as(?u32, {d})", .{idx}, null)
+            else
+                "null";
+            break :blk clr_allocator.allocPrint(allocator, ".{{ .union_field = .{{ .active_field_index = {s}, .num_fields = {d}, .field_value_ip_idx = {s} }} }}", .{ active_str, uf.num_fields, field_value_str }, null);
         },
     };
 }
