@@ -38,6 +38,7 @@ Currently implemented:
   - `realloc`/`remap` - slice reallocation with old-slice-freed tracking
   - `dupe`/`dupeZ` - slice duplication
   - Allocator mismatch detection (freeing with wrong allocator, create/destroy vs alloc/free)
+  - Complex allocator types (GPA, ArenaAllocator, FixedBufferAllocator)
 - Derived pointer tracking (cannot free field pointers, subslices - only root allocations)
 - Pointer arithmetic safety (blocks ptr_add/ptr_sub on single-item pointers)
 - Null safety (unchecked optional unwrap detection)
@@ -54,7 +55,6 @@ Currently implemented:
 
 Planned (see LIMITATIONS.md for details):
 - Error path analysis (tracking allocations through catch/try error branches)
-- Complex generic types (GPA, ArenaAllocator - type serialization fails on deeply nested structs)
 - Regions (uniform element tracking for arrays/slices)
 - Moving provenance
 - Recursive datatypes

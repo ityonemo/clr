@@ -740,9 +740,9 @@ pub const UndefinedSafety = union(enum) {
                                 else => {},
                             }
                         },
-                        .@"struct" => |*s| {
+                        .@"struct" => |s| {
                             // When storing a struct value, mark all fields as defined
-                            s.analyte.undefined_safety = .{ .defined = {} };
+                            // Don't set undefined_safety on struct itself - it's a container type
                             for (s.fields) |field_idx| {
                                 setDefinedRecursive(refinements, field_idx);
                             }
@@ -1207,7 +1207,7 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
             // Note: .@"union" is intentionally not included here - unions use analyte.undefined
             // for tracking state when activating inactive fields
             if (data.analyte.undefined_safety != null) {
-                std.debug.panic("undefined state should not exist on container types, got {s}", .{@tagName(t)});
+                std.debug.panic("undefined state should not exist on container types, got {s} at idx {} (undefined_safety={any})", .{ @tagName(t), idx, data.analyte.undefined_safety });
             }
         },
         else => {},

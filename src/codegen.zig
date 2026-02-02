@@ -1037,6 +1037,7 @@ fn typeToStringInner(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), fiel
 /// Look up a non-well-known type without name registration (for callers without name_map).
 fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     if (visited.contains(ty)) {
+        // Cycle detected - use scalar as safe fallback for recursive types
         return ".{ .ty = .{ .scalar = {} } }";
     }
     visited.put(arena, ty, {}) catch @panic("out of memory");
@@ -1071,6 +1072,7 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
         // Handle struct/union types without name registration (for globals)
         .struct_type => structTypeToStringSimple(arena, ip, ty, visited),
         .union_type => unionTypeToStringSimple(arena, ip, ty, visited),
+        // Unknown type - use scalar as safe fallback (e.g. function pointers, enums)
         else => ".{ .ty = .{ .scalar = {} } }",
     };
 }
@@ -1085,7 +1087,7 @@ fn unionTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, type
         return clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"union\" = &.{{}} }} }}", .{type_id}, null);
     }
 
-    // Limit recursion depth
+    // Limit recursion depth - use scalar as safe fallback for deeply nested types
     if (visited.count() > 20) {
         return ".{ .ty = .{ .scalar = {} } }";
     }
@@ -1116,7 +1118,7 @@ fn structTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, typ
         return clr_allocator.allocPrint(arena, ".{{ .id = {d}, .ty = .{{ .@\"struct\" = &.{{}} }} }}", .{type_id}, null);
     }
 
-    // Limit recursion depth
+    // Limit recursion depth - use scalar as safe fallback for deeply nested types
     if (visited.count() > 20) {
         return ".{ .ty = .{ .scalar = {} } }";
     }
@@ -1296,21 +1298,28 @@ fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         // Get the inner type string (without the .id wrapper since we'll add our own)
         const field_type_inner = typeToStringInner(name_map, field_map, arena, ip, field_type, visited);
 
-        // Extract just the .ty = {...} part from the full Type and rebuild with our field name ID
-        // typeToStringInner returns ".{ .id = X, .ty = .{ ... } }"
-        // We need ".{ .id = FIELD_NAME_ID, .ty = .{ ... } }"
+        // Set the field's .id to the field name ID.
+        // typeToStringInner returns either:
+        //   ".{ .id = X, .ty = .{ ... } }" (for structs/unions)
+        //   ".{ .ty = .{ ... } }" (for pointers, scalars, etc.)
+        // We need to either replace the existing .id or prepend one.
         if (field_name_id != 0) {
-            // Replace ".{ .id = N," with ".{ .id = FIELD_NAME_ID,"
-            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}", .{field_name_id}, null);
-            // Find the position after ".{ .id = " and before the comma
-            if (std.mem.indexOf(u8, field_type_inner, ".{ .id = ")) |start| {
-                const after_prefix = field_type_inner[start + ".{ .id = ".len ..];
-                if (std.mem.indexOf(u8, after_prefix, ",")) |comma_pos| {
+            // Check if the type string starts with ".{ .id = " - only replace if at position 0
+            if (std.mem.startsWith(u8, field_type_inner, ".{ .id = ")) {
+                // Replace ".{ .id = N," with ".{ .id = FIELD_NAME_ID,"
+                const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}", .{field_name_id}, null);
+                const after_id = field_type_inner[".{ .id = ".len..];
+                if (std.mem.indexOf(u8, after_id, ",")) |comma_pos| {
                     result.appendSlice(arena, prefix) catch @panic("out of memory");
-                    result.appendSlice(arena, after_prefix[comma_pos..]) catch @panic("out of memory");
+                    result.appendSlice(arena, after_id[comma_pos..]) catch @panic("out of memory");
                 } else {
                     result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
                 }
+            } else if (std.mem.startsWith(u8, field_type_inner, ".{ .ty = ")) {
+                // Prepend ".{ .id = FIELD_NAME_ID, " and strip the leading ".{ "
+                const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}, ", .{field_name_id}, null);
+                result.appendSlice(arena, prefix) catch @panic("out of memory");
+                result.appendSlice(arena, field_type_inner[".{ ".len..]) catch @panic("out of memory");
             } else {
                 result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
             }
@@ -1367,18 +1376,24 @@ fn unionTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field
         // Get the inner type string
         const field_type_inner = typeToStringInner(name_map, field_map, arena, ip, field_type, visited);
 
-        // Replace existing .id with field_name_id if we have a name
+        // Set the variant's .id to the variant name ID.
+        // Same logic as structTypeToString - handle both .id and .ty prefix cases.
         if (field_name_id != 0) {
-            const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}", .{field_name_id}, null);
-            // Find the position after ".{ .id = " and before the comma
-            if (std.mem.indexOf(u8, field_type_inner, ".{ .id = ")) |start| {
-                const after_prefix = field_type_inner[start + ".{ .id = ".len ..];
-                if (std.mem.indexOf(u8, after_prefix, ",")) |comma_pos| {
+            if (std.mem.startsWith(u8, field_type_inner, ".{ .id = ")) {
+                // Replace ".{ .id = N," with ".{ .id = FIELD_NAME_ID,"
+                const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}", .{field_name_id}, null);
+                const after_id = field_type_inner[".{ .id = ".len..];
+                if (std.mem.indexOf(u8, after_id, ",")) |comma_pos| {
                     result.appendSlice(arena, prefix) catch @panic("out of memory");
-                    result.appendSlice(arena, after_prefix[comma_pos..]) catch @panic("out of memory");
+                    result.appendSlice(arena, after_id[comma_pos..]) catch @panic("out of memory");
                 } else {
                     result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
                 }
+            } else if (std.mem.startsWith(u8, field_type_inner, ".{ .ty = ")) {
+                // Prepend ".{ .id = FIELD_NAME_ID, " and strip the leading ".{ "
+                const prefix = clr_allocator.allocPrint(arena, ".{{ .id = {d}, ", .{field_name_id}, null);
+                result.appendSlice(arena, prefix) catch @panic("out of memory");
+                result.appendSlice(arena, field_type_inner[".{ ".len..]) catch @panic("out of memory");
             } else {
                 result.appendSlice(arena, field_type_inner) catch @panic("out of memory");
             }

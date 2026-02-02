@@ -82,6 +82,11 @@ bats test/integration/allocator.bats -f "double-free"
 
 **CRITICAL**: NEVER materially modify, comment out, or skip integration tests to make the test suite pass without permission. Failing tests are intentional - they serve as reminders of work to be done. If a test fails, fix the codegen or runtime - not the test. Minor updates like fixing line numbers after test file changes are fine. Integration tests should simply call `compile_and_run` and check the result.
 
+**CRITICAL**: NEVER delete, disable, skip, or remove integration tests without explicit permission. If a test is failing:
+1. Fix the underlying bug in codegen or runtime
+2. If the test cannot be fixed yet, ask before skipping it
+3. Skipped tests MUST have a comment explaining why and reference to tracking issue/doc
+
 **Important**: Do NOT report integration test failures as "pre-existing" unless you are CERTAIN the previous sprint left them as failures. Report failures without assuming they were already broken.
 
 **Important**: Integration tests MUST have comprehensive output checking. For error-detecting tests, verify:
