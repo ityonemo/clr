@@ -40,6 +40,10 @@ pub const State = struct {
     /// Each State contains a heap-allocated Refinements clone for ownership transfer.
     /// Null in test contexts that don't test return handling.
     early_returns: ?*std.ArrayListUnmanaged(State) = null,
+    /// Set by `repeat` to signal that one loop iteration completed.
+    /// Used by Inst.loop() to detect when to continue iterating.
+    /// Null outside of loop contexts.
+    loop_completed: ?*bool = null,
 };
 
 test {

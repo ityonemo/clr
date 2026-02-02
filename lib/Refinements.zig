@@ -742,6 +742,86 @@ pub fn testValid(self: *Refinements) void {
     }
 }
 
+/// Hash the analysis state of all refinements up to base_gid.
+/// Used for loop convergence detection - only hashes analyte fields, ignores metadata.
+pub fn hashAnalysisState(self: *Refinements, base_gid: Gid, hasher: *std.hash.Wyhash) void {
+    for (0..base_gid) |i| {
+        if (i >= self.list.items.len) break;
+        const ref = self.list.items[i];
+        hashRefinement(ref, hasher);
+    }
+}
+
+fn hashRefinement(ref: Refinement, hasher: *std.hash.Wyhash) void {
+    // Hash the refinement type tag
+    hasher.update(&.{@intFromEnum(ref)});
+    switch (ref) {
+        .scalar => |s| hashAnalyte(s.analyte, hasher),
+        .pointer => |p| hashAnalyte(p.analyte, hasher),
+        .optional => |o| hashAnalyte(o.analyte, hasher),
+        .errorunion => |e| hashAnalyte(e.analyte, hasher),
+        .region => |r| hashAnalyte(r.analyte, hasher),
+        .@"struct" => |s| hashAnalyte(s.analyte, hasher),
+        .@"union" => |u| hashAnalyte(u.analyte, hasher),
+        .allocator => |a| hashAnalyte(a.analyte, hasher),
+        .void, .noreturn, .unimplemented => {},
+    }
+}
+
+fn hashAnalyte(analyte: Analyte, hasher: *std.hash.Wyhash) void {
+    // Hash undefined_safety
+    if (analyte.undefined_safety) |us| {
+        hasher.update(&.{1}); // has undefined_safety
+        hasher.update(&.{@intFromEnum(us)});
+    } else {
+        hasher.update(&.{0}); // no undefined_safety
+    }
+
+    // Hash memory_safety
+    if (analyte.memory_safety) |ms| {
+        hasher.update(&.{1}); // has memory_safety
+        hasher.update(&.{@intFromEnum(ms)});
+        // Hash allocated state if present
+        switch (ms) {
+            .allocated => |a| {
+                hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
+                hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
+            },
+            .stack, .global, .unset => {},
+        }
+    } else {
+        hasher.update(&.{0}); // no memory_safety
+    }
+
+    // Hash null_safety
+    if (analyte.null_safety) |ns| {
+        hasher.update(&.{1}); // has null_safety
+        hasher.update(&.{@intFromEnum(ns)});
+    } else {
+        hasher.update(&.{0}); // no null_safety
+    }
+
+    // Hash variant_safety
+    if (analyte.variant_safety) |vs| {
+        hasher.update(&.{1}); // has variant_safety
+        // Hash active_metas - which fields are active matters for analysis
+        for (vs.active_metas) |am| {
+            hasher.update(&.{@as(u8, if (am != null) 1 else 0)});
+        }
+    } else {
+        hasher.update(&.{0}); // no variant_safety
+    }
+
+    // Hash fieldparentptr_safety
+    if (analyte.fieldparentptr_safety) |fps| {
+        hasher.update(&.{1}); // has fieldparentptr_safety
+        hasher.update(std.mem.asBytes(&fps.field_index));
+        hasher.update(std.mem.asBytes(&fps.container_type_id));
+    } else {
+        hasher.update(&.{0}); // no fieldparentptr_safety
+    }
+}
+
 test "initWithGlobals sets null_safety for null optional global" {
     const Context = @import("Context.zig");
     const allocator = std.testing.allocator;

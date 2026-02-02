@@ -410,6 +410,34 @@ pub const Block = struct {
     }
 };
 
+/// Loop instruction - marks a loop construct. Result type is always noreturn.
+/// The actual loop body execution is handled by Inst.loop() which calls the body function.
+/// This tag handler just marks the instruction result as noreturn.
+pub const Loop = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Loop result is always noreturn (loop body eventually br's out)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .noreturn = {} });
+        try splat(.loop, state, index, .{});
+    }
+};
+
+/// Repeat instruction - jumps back to parent loop.
+/// Signals that one iteration completed and the loop should continue.
+pub const Repeat = struct {
+    loop_inst: usize, // which loop instruction to repeat to
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Repeat is noreturn (control transfers back to loop start)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .noreturn = {} });
+        // Signal iteration completed via loop_completed flag if set
+        if (state.loop_completed) |completed| {
+            completed.* = true;
+        }
+        try splat(.repeat, state, index, self);
+    }
+};
+
 /// Br (break) transfers control to a block, optionally carrying a value.
 /// - `break :blk value` → src is .gid or .interned with the value
 /// - `break :blk` (void) → src is .interned with .void type
@@ -436,6 +464,42 @@ pub const Br = struct {
             // Interned constants are handled by analysis modules (e.g., undefined.br marks as defined)
             .int_const => {},
         }
+
+        // Check if this br targets a loop's exit block - if so, capture state
+        // Walk loop_stack to find which loop (if any) owns the target block
+        const ctx = state.ctx;
+        const allocator = ctx.allocator;
+        for (ctx.loop_stack.items) |*frame| {
+            if (frame.block_idx == self.block) {
+                // This br exits a loop - capture current state for merge
+                const cloned_results = allocator.alloc(Inst, state.results.len) catch @panic("OOM");
+                @memcpy(cloned_results, state.results);
+
+                const cloned_refinements = allocator.create(Refinements) catch @panic("OOM");
+                cloned_refinements.* = state.refinements.clone(allocator) catch @panic("OOM");
+
+                const br_state = Context.LoopFrame.BrState{
+                    .results = cloned_results,
+                    .refinements = cloned_refinements,
+                };
+
+                // Add to this frame's br_states for the target block
+                const gop = frame.br_states.getOrPut(allocator, self.block) catch @panic("OOM");
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{};
+                }
+                gop.value_ptr.append(allocator, br_state) catch @panic("OOM");
+
+                // Mark this branch as "exiting" so cond_br merge excludes it
+                // The state was captured to br_states, so it shouldn't participate
+                // in the local cond_br merge
+                if (state.branch_returns) |br| {
+                    br.* = true;
+                }
+                break;
+            }
+        }
+
         try splat(.br, state, index, self);
     }
 
@@ -1546,6 +1610,7 @@ pub const AnyTag = union(enum) {
     bit_and: Simple(.bit_and),
     cmp_eq: Simple(.cmp_eq),
     cmp_gt: Simple(.cmp_gt),
+    cmp_gte: Simple(.cmp_gte),
     cmp_lt: Simple(.cmp_lt),
     cmp_lte: Simple(.cmp_lte),
     ctz: Simple(.ctz),
@@ -1558,6 +1623,9 @@ pub const AnyTag = union(enum) {
     block: Block,
     cond_br: CondBr,
     switch_br: SwitchBr,
+    loop: Loop,
+    repeat: Repeat,
+    dbg_empty_stmt: Unimplemented(.{ .void = true }),
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
     is_non_err: Simple(.is_non_err), // produces boolean scalar

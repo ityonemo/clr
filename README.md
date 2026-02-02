@@ -49,11 +49,13 @@ Currently implemented:
 - Switch statement support (n-way merging with variant tracking)
 - Source location and variable name tracking for error messages
 - Branching/control flow with state merging
+- Loop analysis (fixed-point iteration with convergence detection)
+- Global variable tracking (undefined, variant, and memory safety)
 
 Planned (see LIMITATIONS.md for details):
-- Loop analysis (fixed-point iteration)
-- Globals
-- Regions
+- Error path analysis (tracking allocations through catch/try error branches)
+- Complex generic types (GPA, ArenaAllocator - type serialization fails on deeply nested structs)
+- Regions (uniform element tracking for arrays/slices)
 - Moving provenance
 - Recursive datatypes
 - Recursive functions

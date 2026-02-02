@@ -108,6 +108,8 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .slice_ptr => payloadSlicePtr(info, datum),
         .array_to_slice => payloadArrayToSlice(info, datum),
         .ptr_add, .ptr_sub => payloadPtrAdd(info, datum),
+        .loop => ".{}", // Loop uses Block payload, but tag handler doesn't need it
+        .repeat => payloadRepeat(info, datum),
         else => ".{}",
     };
 }
@@ -430,6 +432,12 @@ fn payloadBr(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.br.operand;
     const src_str = srcString(info, operand);
     return clr_allocator.allocPrint(info.arena, ".{{ .block = {d}, .src = {s} }}", .{ block_inst, src_str }, null);
+}
+
+/// Payload for repeat - extracts the loop instruction index.
+fn payloadRepeat(info: *const FnInfo, datum: Data) []const u8 {
+    const loop_inst = @intFromEnum(datum.repeat.loop_inst);
+    return clr_allocator.allocPrint(info.arena, ".{{ .loop_inst = {d} }}", .{loop_inst}, null);
 }
 
 /// Payload for block - extracts the block's result type.
@@ -2398,6 +2406,7 @@ const SubTag = union(enum) {
         /// If switching on a union tag, this contains the union inst and field index
         union_tag: ?UnionTagCheck = null,
     },
+    loop_body,
 };
 
 const FunctionGen = union(enum) {
@@ -2429,6 +2438,10 @@ const FunctionGen = union(enum) {
                 .switch_case => |sc| clr_allocator.allocPrint(arena, "fn_{d}_switch_case_{d}_{d}", .{
                     s.func_index,
                     sc.case_index,
+                    s.instr_index,
+                }, null),
+                .loop_body => clr_allocator.allocPrint(arena, "fn_{d}_loop_body_{d}", .{
+                    s.func_index,
                     s.instr_index,
                 }, null),
             },
@@ -2472,6 +2485,10 @@ const FunctionGen = union(enum) {
                     \\fn fn_{d}_switch_case_{d}_{d}(state: State) anyerror!void {{
                     \\
                 , .{ s.func_index, sc.case_index, s.instr_index }, null),
+                .loop_body => clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_loop_body_{d}(state: State) anyerror!void {{
+                    \\
+                , .{ s.func_index, s.instr_index }, null),
             },
         };
     }
@@ -2948,6 +2965,19 @@ fn generateOneFunction(
                     }
                 }
 
+                // Check for loop - add loop body to worklist
+                // Loop uses the same Block payload structure as block
+                if (tag == .loop) {
+                    if (extractBlockBody(idx, info.data, info.extra)) |body| {
+                        worklist.append(info.arena, .{ .sub = .{
+                            .func_index = func_index,
+                            .instr_index = idx,
+                            .tag = .loop_body,
+                            .body_indices = body,
+                        } }) catch @panic("out of memory");
+                    }
+                }
+
                 stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
@@ -3025,6 +3055,18 @@ fn generateOneFunction(
                     }
                 }
 
+                // Check for nested loop
+                if (tag == .loop) {
+                    if (extractBlockBody(idx, info.data, info.extra)) |body| {
+                        worklist.append(info.arena, .{ .sub = .{
+                            .func_index = func_index,
+                            .instr_index = idx,
+                            .tag = .loop_body,
+                            .body_indices = body,
+                        } }) catch @panic("out of memory");
+                    }
+                }
+
                 stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
             }
         },
@@ -3061,6 +3103,9 @@ fn generateOneFunction(
                 lines.append(info.arena, switch_br_line) catch @panic("out of memory");
                 total_len += switch_br_line.len;
             },
+            .loop_body => {
+                // No special tag line needed for loop body - loop handling is done in Inst.loop()
+            },
         },
         .full => {},
     }
@@ -3085,6 +3130,9 @@ fn generateOneFunction(
                 // Fallback to noop if extraction fails
                 line = generateNoopLine(info.arena, instr.idx);
             }
+        } else if (instr.tag == .loop) {
+            // Generate Inst.loop call with body function reference
+            line = generateLoopLine(info.arena, instr.idx, func_index);
         } else {
             line = _instLine(info, instr.tag, instr.datum, instr.idx, &arg_counter);
         }
@@ -3134,6 +3182,14 @@ fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u3
         \\    try Inst.cond_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d});
         \\
     , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
+}
+
+/// Generate the Inst.loop call line with body function reference
+fn generateLoopLine(arena: std.mem.Allocator, loop_idx: u32, func_index: u32) []const u8 {
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.loop(state, {d}, fn_{d}_loop_body_{d});
+        \\
+    , .{ loop_idx, func_index, loop_idx }, null);
 }
 
 /// Generate noop line for unreferenced instructions (gaps in the AIR array)

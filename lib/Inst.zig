@@ -281,6 +281,225 @@ pub fn switch_br(
     }
 }
 
+/// Execute a loop body with fixed-point iteration until convergence.
+/// The body is executed repeatedly until analysis state stabilizes or
+/// a cycle is detected. All iteration states are merged at the end.
+pub fn loop(
+    state: State,
+    comptime index: usize,
+    comptime body_fn: fn (State) anyerror!void,
+) !void {
+    const ctx = state.ctx;
+    const results = state.results;
+    const return_gid = state.return_gid;
+    const allocator = ctx.allocator;
+
+    const MAX_ITERATIONS = 10000;
+
+    // The loop's exit block is at index-1 (loops are always inside an outer block)
+    // Pattern: block @N { loop @N+1 { ... br @N ... } }
+    const exit_block_idx = index - 1;
+
+    // Push loop frame onto context's loop_stack (with pre-loop refinements snapshot)
+    var loop_frame = try Context.LoopFrame.init(allocator, state.refinements);
+    loop_frame.block_idx = exit_block_idx;
+    try ctx.loop_stack.append(allocator, loop_frame);
+
+    // Track seen states by hash for convergence/cycle detection
+    var seen_hashes = std.AutoHashMap(u64, usize).init(allocator);
+    defer seen_hashes.deinit();
+
+    // Accumulate iteration states for merging
+    var iteration_states = std.ArrayListUnmanaged(State){};
+    defer {
+        for (iteration_states.items) |iter_state| {
+            clear_results_list(iter_state.results, allocator);
+            iter_state.refinements.deinit();
+            allocator.destroy(iter_state.refinements);
+        }
+        iteration_states.deinit(allocator);
+    }
+
+    // Current refinements for iteration - starts as clone of input, updated after each iteration
+    var current_refinements_ptr = try allocator.create(Refinements);
+    current_refinements_ptr.* = try state.refinements.clone(allocator);
+    defer {
+        current_refinements_ptr.deinit();
+        allocator.destroy(current_refinements_ptr);
+    }
+
+    // Fixed-point iteration
+    var iteration: usize = 0;
+    while (iteration < MAX_ITERATIONS) : (iteration += 1) {
+        // Clone results and refinements for this iteration (from current state)
+        const iter_results = try clone_results_list(results, allocator);
+        var iter_refinements_ptr = try allocator.create(Refinements);
+        iter_refinements_ptr.* = try current_refinements_ptr.clone(allocator);
+
+        // Track if this iteration completes (repeat was executed)
+        var loop_completed: bool = false;
+
+        // Create GID tracking lists for this iteration
+        var iter_created = std.ArrayListUnmanaged(Refinements.Gid){};
+        defer iter_created.deinit(allocator);
+        var iter_modified = std.ArrayListUnmanaged(Refinements.Gid){};
+        defer iter_modified.deinit(allocator);
+
+        // Track if this iteration returns
+        var iter_returns: bool = false;
+
+        // Create branch-local early_returns list
+        var iter_early_returns = std.ArrayListUnmanaged(State){};
+
+        // Build state for this iteration
+        const iter_state = State{
+            .ctx = ctx,
+            .results = iter_results,
+            .refinements = iter_refinements_ptr,
+            .return_gid = return_gid,
+            .created_gids = &iter_created,
+            .modified_gids = &iter_modified,
+            .branch_returns = &iter_returns,
+            .early_returns = &iter_early_returns,
+            .loop_completed = &loop_completed,
+        };
+
+        // Execute loop body
+        try body_fn(iter_state);
+
+        // If body didn't complete (early return/break), exit iteration loop
+        if (!loop_completed) {
+            // Propagate early_returns to parent
+            if (state.early_returns) |parent_early| {
+                try parent_early.appendSlice(allocator, iter_early_returns.items);
+            } else {
+                for (iter_early_returns.items) |s| {
+                    s.refinements.deinit();
+                    allocator.destroy(s.refinements);
+                }
+            }
+            iter_early_returns.deinit(allocator);
+
+            // Clean up this iteration's state (not added to iteration_states)
+            clear_results_list(iter_results, allocator);
+            iter_refinements_ptr.deinit();
+            allocator.destroy(iter_refinements_ptr);
+            break;
+        }
+
+        // Hash post-iteration analysis state (only up to base_gid for pre-loop entities)
+        var hasher = std.hash.Wyhash.init(0);
+        iter_refinements_ptr.hashAnalysisState(state.base_gid, &hasher);
+        const hash = hasher.final();
+
+        // Check for convergence or cycle
+        if (seen_hashes.get(hash)) |_| {
+            // Seen this state before - converged or cycle detected
+            // Propagate early_returns and clean up
+            if (state.early_returns) |parent_early| {
+                try parent_early.appendSlice(allocator, iter_early_returns.items);
+            } else {
+                for (iter_early_returns.items) |s| {
+                    s.refinements.deinit();
+                    allocator.destroy(s.refinements);
+                }
+            }
+            iter_early_returns.deinit(allocator);
+
+            // Clean up this iteration (duplicate state, don't add)
+            clear_results_list(iter_results, allocator);
+            iter_refinements_ptr.deinit();
+            allocator.destroy(iter_refinements_ptr);
+            break;
+        }
+
+        // Record hash and save iteration state
+        try seen_hashes.put(hash, iteration);
+
+        // Propagate early_returns to parent (ownership transfer)
+        if (state.early_returns) |parent_early| {
+            try parent_early.appendSlice(allocator, iter_early_returns.items);
+        } else {
+            for (iter_early_returns.items) |s| {
+                s.refinements.deinit();
+                allocator.destroy(s.refinements);
+            }
+        }
+        iter_early_returns.deinit(allocator);
+
+        // Propagate created/modified GIDs to parent
+        if (state.created_gids) |parent_created| {
+            try parent_created.appendSlice(allocator, iter_created.items);
+        }
+        if (state.modified_gids) |parent_modified| {
+            try parent_modified.appendSlice(allocator, iter_modified.items);
+        }
+
+        // Save iteration state for final merge - clear dangling pointers
+        // (the local variables iter_created, iter_modified, iter_returns go out of scope)
+        const saved_state = State{
+            .ctx = ctx,
+            .results = iter_results,
+            .refinements = iter_refinements_ptr,
+            .return_gid = return_gid,
+            // Clear pointers to avoid dangling references
+            .created_gids = null,
+            .modified_gids = null,
+            .branch_returns = null,
+            .early_returns = null,
+            .loop_completed = null,
+        };
+        try iteration_states.append(allocator, saved_state);
+
+        // Update current_refinements for next iteration (use this iteration's output as next input)
+        current_refinements_ptr.deinit();
+        current_refinements_ptr.* = try iter_refinements_ptr.clone(allocator);
+    }
+
+    // Pop loop frame and collect br_states for merge
+    var frame = ctx.loop_stack.pop().?;
+    defer frame.deinit(allocator);
+
+    // Record base_len BEFORE creating void
+    const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
+
+    // Mark the loop instruction as void (loops have noreturn result type in AIR)
+    results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+
+    // Collect all states for merge: br_states (loop exits) at index 0, then iteration states
+    // Index 0 = "null case" (loop didn't run / broke out early) - important for memory_safety merge
+    var all_states = std.ArrayListUnmanaged(State){};
+    defer all_states.deinit(allocator);
+
+    // Add br_states FIRST (index 0) - these are states captured when br targeted this loop's exit block
+    // This is the "null case" - the state when the loop exits without running or breaks early
+    if (frame.br_states.get(exit_block_idx)) |br_state_list| {
+        for (br_state_list.items) |br_state| {
+            // Convert BrState to State for merge
+            const br_as_state = State{
+                .ctx = ctx,
+                .results = br_state.results,
+                .refinements = br_state.refinements,
+                .return_gid = return_gid,
+                .created_gids = null,
+                .modified_gids = null,
+                .branch_returns = null,
+                .early_returns = null,
+                .loop_completed = null,
+            };
+            try all_states.append(allocator, br_as_state);
+        }
+    }
+
+    // Add iteration states SECOND (index 1+) - these represent loop body executions
+    try all_states.appendSlice(allocator, iteration_states.items);
+
+    // Merge all states (iterations + exits)
+    if (all_states.items.len > 0) {
+        try tag.splatMerge(.loop, results, ctx, state.refinements, all_states.items, null, branch_base_len);
+    }
+}
+
 // =============================================================================
 // Results list management
 // =============================================================================

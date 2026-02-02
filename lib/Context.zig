@@ -25,6 +25,58 @@ getFieldId: *const fn (u32, u32) ?u32 = undefined,
 /// Arena for error path names - strings allocated here are freed all at once at end of run
 error_name_arena: std.heap.ArenaAllocator,
 
+/// Stack of active loop frames for tracking nested loop exits
+loop_stack: std.ArrayListUnmanaged(LoopFrame),
+
+/// Frame for tracking loop state during fixed-point iteration
+pub const LoopFrame = struct {
+    block_idx: usize, // which block this loop owns (for br matching)
+    br_states: std.AutoHashMapUnmanaged(usize, std.ArrayListUnmanaged(BrState)), // target_block -> exit states
+
+    /// Track regions being iterated in THIS loop (freed without pre-freed state)
+    /// Used to suppress double-free false positives for region cleanup loops
+    deferred_region_gids: std.AutoHashMapUnmanaged(Refinements.Gid, void),
+
+    /// Snapshot of refinements before loop for null-case comparison
+    /// Used to detect if a region was already freed BEFORE the loop
+    pre_loop_refinements: ?*Refinements,
+
+    pub const BrState = struct {
+        results: []Inst,
+        refinements: *Refinements,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, pre_loop_refs: *Refinements) error{OutOfMemory}!LoopFrame {
+        // Clone the refinements to capture pre-loop state
+        const pre_loop_snapshot = try allocator.create(Refinements);
+        pre_loop_snapshot.* = try pre_loop_refs.clone(allocator);
+        return .{
+            .block_idx = 0,
+            .br_states = .{},
+            .deferred_region_gids = .{},
+            .pre_loop_refinements = pre_loop_snapshot,
+        };
+    }
+
+    pub fn deinit(self: *LoopFrame, allocator: std.mem.Allocator) void {
+        var it = self.br_states.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |br_state| {
+                allocator.free(br_state.results);
+                br_state.refinements.deinit();
+                allocator.destroy(br_state.refinements);
+            }
+            entry.value_ptr.deinit(allocator);
+        }
+        self.br_states.deinit(allocator);
+        self.deferred_region_gids.deinit(allocator);
+        if (self.pre_loop_refinements) |pre_loop| {
+            pre_loop.deinit();
+            allocator.destroy(pre_loop);
+        }
+    }
+};
+
 const Context = @This();
 
 /// Default getName for tests - returns "unknown"
@@ -51,12 +103,17 @@ pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
         .getName = &testGetName,
         .getFieldId = &testGetFieldId,
         .error_name_arena = std.heap.ArenaAllocator.init(allocator),
+        .loop_stack = .{},
     };
 }
 
 pub fn deinit(self: *Context) void {
     self.stacktrace.deinit(self.allocator);
     self.error_name_arena.deinit();
+    for (self.loop_stack.items) |*frame| {
+        frame.deinit(self.allocator);
+    }
+    self.loop_stack.deinit(self.allocator);
 }
 
 /// Build a full access path name for an instruction by walking the tag chain.
