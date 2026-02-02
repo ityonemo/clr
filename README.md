@@ -55,6 +55,7 @@ Currently implemented:
 
 Planned (see LIMITATIONS.md for details):
 - Error path analysis (tracking allocations through catch/try error branches)
+- Interned constants (int_const values like string literals, comptime pointers)
 - Regions (uniform element tracking for arrays/slices)
 - Moving provenance
 - Recursive datatypes
