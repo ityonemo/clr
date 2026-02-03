@@ -12,13 +12,17 @@ Self-referential types like linked lists (`struct { next: ?*@This(), data: T }`)
 
 **Test plan**: Will be tested alongside ownership tracking for linked lists.
 
-### GeneralPurposeAllocator Type Complexity
+### Complex Type Extraction
 
-Using `std.heap.GeneralPurposeAllocator` generates deeply nested struct types that hit the recursion depth limit. The codegen emits `.{ .unknown = {} }` for these types, but the runtime `Type` union doesn't yet support the `unknown` variant.
+Some codegen paths emit `.{ .ty = .{ .unknown = {} } }` when type extraction fails, but the runtime `Type` union doesn't support the `unknown` variant. This causes compile errors in the generated analyzer.
 
-**Status**: Codegen succeeds, but the generated analyzer fails to compile due to missing `unknown` in `Type` union.
+**Affected cases**:
+- Some allocator type extraction paths (e.g., when callee reference cannot be resolved)
+- Deeply nested struct types that hit recursion limits
 
-**Planned fix**: Add `unknown` variant to `lib/tag.zig` Type union to handle complex types that exceed the depth limit.
+**Note**: Most unhandled types correctly use `.{ .ty = .{ .unimplemented = {} } }` which IS supported and will crash at runtime with a clear error if accessed.
+
+**Planned fix**: Replace remaining `.unknown` emissions with `.unimplemented` or add `unknown` variant to `lib/tag.zig` Type union.
 
 ### DbgVarVal Analysis Handlers
 
@@ -28,11 +32,15 @@ The similar `dbg_var_val` instruction (for non-pointer values) does not currentl
 
 **Investigation needed**: Test whether undefined tracking for value variables (not pointers) produces error messages that would benefit from variable names.
 
-### Global Types and Variables
+### Cross-Function Global Mutation
 
-Global variables and types are not fully tracked through the analysis.
+Global variables are tracked within individual functions, but mutations to globals by called functions are not propagated back to callers.
 
-**Planned fix**: May require more sophisticated analysis for generating dependency understanding and retriggering analysis on functions when globals change.
+**What works**: Reading/writing globals within a single function, detecting use of undefined globals, tracking variant state of global unions within a function.
+
+**What doesn't work**: If function A calls function B which modifies a global, function A's view of the global is not updated after the call returns.
+
+**Planned fix**: May require inter-function dependency analysis to re-analyze callers when callees modify globals.
 
 ### Global Pointer Variables (Dereferencing)
 
@@ -58,11 +66,13 @@ pub fn main() void {
 
 **Future fix**: Track that global pointer variables contain values that point to global memory. May require analyzing the global's initial value from the InternPool.
 
-### Region Allocation/Freeing
+### Arena-Style Allocators
 
-Region-based memory management (allocating from a region, freeing entire regions) is not tracked.
+Arena-style memory management (allocating from a region, freeing the entire arena at once) is not tracked beyond basic allocator mismatch detection.
 
-**Planned**: Support for region allocators and tracking region lifetimes.
+**Current behavior**: ArenaAllocator is recognized as a distinct allocator type for mismatch detection, but the "free everything at once" pattern is not specially handled.
+
+**Planned**: Track arena lifetimes so that allocations from an arena don't report as leaks when the arena itself is freed/deinitialized.
 
 ### Global Union Initial Values
 
@@ -133,36 +143,26 @@ pub fn main() void {
 
 **Future improvement**: Could add optional program-end leak detection that checks if global-reachable allocations are freed before `main` returns.
 
-### Loops
-
-Loop analysis is not implemented. The analyzer doesn't perform fixed-point iteration to reach stable states for loop bodies.
-
-**Impact**: Variables modified in loops, allocations in loops, and loop-dependent control flow are not properly analyzed.
-
-**Planned**: Implement fixed-point iteration for loops with proper state merging.
-
 ### Unimplemented AIR Tags
 
 The following AIR instruction tags are not yet implemented and produce `.unimplemented` refinements:
 
 **Array/Slice operations**:
 - `aggregate_init` - Initialize aggregate (array/struct) from elements
-- `array_to_slice` - Convert array to slice
-- `slice` - Create slice from pointer and length
-- `slice_len` - Get length of slice
+- `slice` - Create slice from pointer and length (subslices via `slice_ptr` ARE supported)
 
 **Type conversions**:
 - `intcast` - Integer type casting
 
 **Error unions**:
-- `wrap_errunion_err` - Wrap error into error union
+- `wrap_errunion_err` - Wrap error into error union (error propagation)
 
-**Debug/minor**:
+**Debug/minor** (these produce void and don't affect analysis):
 - `dbg_inline_block` - Inlined function debug info
-- `memset_safe` - Memory set (produces void)
+- `memset_safe` - Memory set
 - `ret_addr` - Return address for stack traces
 - `stack_trace_frames` - Stack trace frame info
-- `noop_pruned_debug` - Pruned debug instruction (produces void)
+- `noop_pruned_debug` - Pruned debug instruction
 
 ## Needs Investigation
 
