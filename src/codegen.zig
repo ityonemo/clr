@@ -63,7 +63,7 @@ fn registerFieldName(field_map: *clr.FieldHashMap, type_id: u32, field_index: u3
 }
 
 /// Returns alternative names, used for:
-/// - a keyword-safe tag name using @"..." syntax to handle reserved keywords 
+/// - a keyword-safe tag name using @"..." syntax to handle reserved keywords
 /// - naming overloads
 fn altName(tag: Tag) []const u8 {
     return switch (tag) {
@@ -815,8 +815,7 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
         else
             ".{ .ty = .{ .unimplemented = {} } }";
         break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .null = &{s} }} }}", .{opt_inner_str}, null);
-    } else
-        clr_allocator.allocator().dupe(u8, inner_type_str) catch inner_type_str;
+    } else clr_allocator.allocator().dupe(u8, inner_type_str) catch inner_type_str;
 
     // Determine children based on target_ip_idx and is_null
     // If this pointer points to another global, set up indirect relationship
@@ -825,7 +824,7 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
     const children: clr.ChildInfo = if (target_ip_idx) |target|
         .{ .indirect = target }
     else if (is_null)
-        .{ .@"null" = {} }
+        .{ .null = {} }
     else
         .{ .scalar = {} };
 
@@ -1072,9 +1071,9 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
         // Handle struct/union types without name registration (for globals)
         .struct_type => structTypeToStringSimple(arena, ip, ty, visited),
         .union_type => unionTypeToStringSimple(arena, ip, ty, visited),
-        // Enums and ints are scalars; function pointers etc. are unimplemented
+        // Enums, ints, and function types are scalars (we don't track them)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type => ".{ .ty = .{ .scalar = {} } }",
+        .enum_type, .int_type, .func_type => ".{ .ty = .{ .scalar = {} } }",
         else => ".{ .ty = .{ .unimplemented = {} } }",
     };
 }
@@ -1250,9 +1249,9 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         },
         .struct_type => structTypeToString(name_map, field_map, arena, ip, ty, visited),
         .union_type => unionTypeToString(name_map, field_map, arena, ip, ty, visited),
-        // Enums and ints are scalars; function pointers etc. are unimplemented
+        // Enums, ints, and function types are scalars (we don't track them)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type => ".{ .ty = .{ .scalar = {} } }",
+        .enum_type, .int_type, .func_type => ".{ .ty = .{ .scalar = {} } }",
         else => ".{ .ty = .{ .unimplemented = {} } }",
     };
 }
@@ -2534,7 +2533,6 @@ const FunctionGen = union(enum) {
     fn isSub(self: FunctionGen) bool {
         return self == .sub;
     }
-
 };
 
 /// Extract body indices from a block instruction
@@ -3315,13 +3313,13 @@ pub fn emitGetFieldId(field_map: *clr.FieldHashMap) []const u8 {
     const allocator = clr_allocator.allocator();
 
     if (field_map.count() == 0) {
-        return
-            \\pub fn getFieldId(type_id: u32, field_index: u32) ?u32 {
-            \\    _ = type_id;
-            \\    _ = field_index;
-            \\    return null;
-            \\}
-            \\
+        return 
+        \\pub fn getFieldId(type_id: u32, field_index: u32) ?u32 {
+        \\    _ = type_id;
+        \\    _ = field_index;
+        \\    return null;
+        \\}
+        \\
         ;
     }
 
@@ -3397,7 +3395,7 @@ fn formatChildInfo(children: clr.ChildInfo) []const u8 {
     const allocator = clr_allocator.allocator();
     return switch (children) {
         .scalar => ".{ .scalar = {} }",
-        .@"null" => ".{ .@\"null\" = {} }",
+        .null => ".{ .@\"null\" = {} }",
         .indirect => |target| if (target) |t|
             clr_allocator.allocPrint(allocator, ".{{ .indirect = {d} }}", .{t}, null)
         else
@@ -3447,8 +3445,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
         // Format children info
         const children_str = formatChildInfo(g.children);
 
-        const entry = clr_allocator.allocPrint(clr_allocator.allocator(),
-            "\n    .{{ .ip_idx = {d}, .ty = {s}, .loc = {s}, .children = {s} }},", .{ g.ip_idx, g.type_str, loc_str, children_str }, null);
+        const entry = clr_allocator.allocPrint(clr_allocator.allocator(), "\n    .{{ .ip_idx = {d}, .ty = {s}, .loc = {s}, .children = {s} }},", .{ g.ip_idx, g.type_str, loc_str, children_str }, null);
         global_defs_str.appendSlice(clr_allocator.allocator(), entry) catch @panic("out of memory");
     }
     global_defs_str.appendSlice(clr_allocator.allocator(), "\n};\n") catch @panic("out of memory");

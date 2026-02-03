@@ -24,7 +24,6 @@ pub const Stack = struct {
     };
 };
 
-
 pub const Free = struct {
     meta: Meta,
     name_at_free: ?[]const u8 = null, // Full path name (arena-allocated at store time)
@@ -94,8 +93,7 @@ pub const MemorySafety = union(enum) {
             // Get the pointee and check if it has allocation tracking
             const pointee_idx = src_refinement.pointer.to;
             const pointee = refinements.at(pointee_idx);
-            const pointee_analyte = getAnalytePtr(pointee);
-            if (pointee_analyte.memory_safety) |*ms| {
+            if (getAnalytePtr(pointee).memory_safety) |*ms| {
                 if (ms.* == .allocated) {
                     // Set name_at_alloc if not already set
                     if (ms.allocated.name_at_alloc == null) {
@@ -388,8 +386,7 @@ pub const MemorySafety = union(enum) {
                 // Check pointee's memory_safety for allocation state (heap allocation tracking)
                 const pointee_idx = p.to;
                 const pointee = refinements.at(pointee_idx);
-                const pointee_analyte = getAnalytePtr(pointee);
-                if (pointee_analyte.memory_safety) |*ms| {
+                if (getAnalytePtr(pointee).memory_safety) |*ms| {
                     if (ms.* == .allocated) {
                         // Mark the allocation as returned - not a leak in this function
                         ms.allocated.returned = true;
@@ -609,8 +606,7 @@ pub const MemorySafety = union(enum) {
             .pointer => |p| {
                 // Check if the pointer points to an allocated entity
                 const pointee = refinements.at(p.to);
-                const pointee_analyte = getAnalytePtr(pointee);
-                if (pointee_analyte.memory_safety) |ms| {
+                if (getAnalytePtr(pointee).memory_safety) |ms| {
                     if (ms == .allocated) {
                         const allocation = ms.allocated;
                         if (allocation.freed == null and !allocation.returned) {
@@ -705,26 +701,31 @@ pub const MemorySafety = union(enum) {
         };
 
         // Set memory_safety on errorunion
-        eu.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = false, // create allocates single item
-        } };
+        eu.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = false, // create allocates single item
+            },
+        };
 
         // Set memory_safety on pointer
-        ptr.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = false, // create allocates single item
-        } };
+        ptr.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = false, // create allocates single item
+            },
+        };
 
         // Set allocation state recursively on the pointee
         setAllocatedRecursive(state.refinements, pointee_ref, alloc_base, null, false);
     }
 
-    /// Get a mutable pointer to the Analyte for any refinement type that has one
+    /// Get a mutable pointer to the Analyte for any refinement type that has one.
+    /// Returns null for types without analytes (void, noreturn, unimplemented).
     fn getAnalytePtr(ref: *Refinements.Refinement) *Analyte {
         return switch (ref.*) {
             .scalar => |*s| &s.analyte,
@@ -734,7 +735,8 @@ pub const MemorySafety = union(enum) {
             .@"struct" => |*st| &st.analyte,
             .@"union" => |*u| &u.analyte,
             .region => |*r| &r.analyte,
-            else => @panic("refinement type does not have analyte"),
+            .allocator => |*a| &a.analyte,
+            .void, .noreturn, .unimplemented => @panic("refinement type does not have analyte"),
         };
     }
 
@@ -853,10 +855,9 @@ pub const MemorySafety = union(enum) {
     /// This propagates the freed state to all struct/union fields.
     fn setFreedRecursive(refinements: *Refinements, idx: Gid, free_meta: Free) void {
         const ref = refinements.at(idx);
-        const analyte = getAnalytePtr(ref);
 
         // Set freed on this entity if it has .allocated
-        if (analyte.memory_safety) |*ms| {
+        if (getAnalytePtr(ref).memory_safety) |*ms| {
             if (ms.* == .allocated) {
                 ms.allocated.freed = free_meta;
             }
@@ -1005,28 +1006,34 @@ pub const MemorySafety = union(enum) {
         };
 
         // Set memory_safety on errorunion
-        eu.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = true, // alloc allocates a slice
-        } };
+        eu.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = true, // alloc allocates a slice
+            },
+        };
 
         // Set memory_safety on pointer
-        ptr.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = true, // alloc allocates a slice
-        } };
+        ptr.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = true, // alloc allocates a slice
+            },
+        };
 
         // Set memory_safety on region
-        region.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = true, // alloc allocates a slice
-        } };
+        region.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = true, // alloc allocates a slice
+            },
+        };
 
         // Set allocation state recursively on the element (and any nested pointers)
         setAllocatedRecursive(state.refinements, element_ref, alloc_base, null, true);
@@ -1266,28 +1273,34 @@ pub const MemorySafety = union(enum) {
         };
 
         // Set memory_safety on errorunion
-        eu.errorunion.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = true, // realloc works with slices
-        } };
+        eu.errorunion.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = true, // realloc works with slices
+            },
+        };
 
         // Set memory_safety on pointer
-        new_ptr.pointer.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = true, // realloc works with slices
-        } };
+        new_ptr.pointer.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = true, // realloc works with slices
+            },
+        };
 
         // Set memory_safety on region
-        new_region.region.analyte.memory_safety = .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .type_id = alloc_base.type_id,
-            .root_gid = null,
-            .is_slice = true, // realloc works with slices
-        } };
+        new_region.region.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .is_slice = true, // realloc works with slices
+            },
+        };
 
         // Set allocation state recursively on the element
         setAllocatedRecursive(refinements, new_element_ref, alloc_base, null, true);
@@ -1899,22 +1912,30 @@ test "bitcast propagates stack metadata via shared pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Set up source pointer with stack metadata on POINTEE (new architecture)
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{
-        .memory_safety = .{ .stack = .{
-            .meta = .{
-                .function = "source_func",
-                .file = "source.zig",
-                .line = 42,
-                .column = 7,
+    const pointee_idx = try refinements.appendEntity(.{
+        .scalar = .{
+            .analyte = .{
+                .memory_safety = .{
+                    .stack = .{
+                        .meta = .{
+                            .function = "source_func",
+                            .file = "source.zig",
+                            .line = 42,
+                            .column = 7,
+                        },
+                        .root_gid = null,
+                        .name = .{ .variable = 5 }, // 5 -> "src_var"
+                    },
+                },
             },
-            .root_gid = null,
-            .name = .{ .variable = 5 }, // 5 -> "src_var"
-        } },
-    } } });
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .pointer = .{
-        // Pointer has no memory_safety, it's on pointee
-        .to = pointee_idx,
-    } });
+        },
+    });
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{
+        .pointer = .{
+            // Pointer has no memory_safety, it's on pointee
+            .to = pointee_idx,
+        },
+    });
 
     // Bitcast shares the refinement - both point to the same pointee
     try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .inst = 0 }, .ty = .{ .ty = .{ .scalar = {} } } } });
@@ -1950,18 +1971,24 @@ test "ret_safe detects escape when returning stack pointer from same function" {
 
     // Pointer with stack_ptr from test_func (current function)
     const pointee_idx = try refinements.appendEntity(.{ .scalar = .{} });
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .pointer = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{
-            .meta = .{
-                .function = "test_func",
-                .file = "test.zig",
-                .line = 5,
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{
+        .pointer = .{
+            .analyte = .{
+                .memory_safety = .{
+                    .stack = .{
+                        .meta = .{
+                            .function = "test_func",
+                            .file = "test.zig",
+                            .line = 5,
+                        },
+                        .root_gid = null,
+                        .name = .{ .variable = 6 }, // 6 -> "local"
+                    },
+                },
             },
-            .root_gid = null,
-            .name = .{ .variable = 6 }, // 6 -> "local"
-        } } },
-        .to = pointee_idx,
-    } });
+            .to = pointee_idx,
+        },
+    });
 
     const state = testState(&ctx, &results, &refinements);
     try std.testing.expectError(
@@ -1987,18 +2014,24 @@ test "ret_safe allows returning arg (empty function name)" {
 
     // Pointer with empty function name (from caller via arg)
     const pointee_idx = try refinements.appendEntity(.{ .scalar = .{} });
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .pointer = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{
-            .meta = .{
-                .function = "",
-                .file = "test.zig",
-                .line = 5,
+    _ = try Inst.clobberInst(&refinements, &results, 0, .{
+        .pointer = .{
+            .analyte = .{
+                .memory_safety = .{
+                    .stack = .{
+                        .meta = .{
+                            .function = "",
+                            .file = "test.zig",
+                            .line = 5,
+                        },
+                        .root_gid = null,
+                        .name = .{ .parameter = 3 }, // 3 -> "param"
+                    },
+                },
             },
-            .root_gid = null,
-            .name = .{ .parameter = 3 }, // 3 -> "param"
-        } } },
-        .to = pointee_idx,
-    } });
+            .to = pointee_idx,
+        },
+    });
 
     // Should NOT error - returning pointer from caller is fine
     const state = testState(&ctx, &results, &refinements);

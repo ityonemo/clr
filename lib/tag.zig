@@ -61,7 +61,7 @@ pub const analyses = .{ UndefinedSafety, MemorySafety, NullSafety, VariantSafety
 pub const Name = u32;
 
 /// Represents a struct or union field with type and optional name.
-/// 
+///
 /// This struct exists to propagate information from the AIR generator into
 /// the parameters of a instruction.  Some operations are expected to set
 /// the type based on interned information; in those cases, the type will be used.
@@ -79,7 +79,8 @@ pub const Type = struct {
         @"union": []const Type, // field types for union
         allocator: Name, // allocator type identified by type_id (vtable FQN hash)
         void: void,
-    }
+        unimplemented: void, // placeholder for unhandled types - will crash if accessed
+    },
 };
 
 /// Source reference for instructions - indicates where a value comes from.
@@ -168,6 +169,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             }
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
         },
+        .unimplemented => .unimplemented,
     };
 }
 

@@ -673,6 +673,9 @@ pub const UndefinedSafety = union(enum) {
                     else => forceDefinedRecursive(refinements, idx),
                 }
             },
+            .unimplemented => {
+                // Skip unimplemented types nested inside structs - nothing to track
+            },
         }
     }
 
