@@ -39,11 +39,6 @@ pub const Allocated = struct {
     is_slice: bool = false, // true if allocated with alloc (slice), false if create (single item)
 };
 
-/// ErrorStub marks errorunions from allocation instructions.
-/// On error path, these are "phantom" allocations that didn't actually happen.
-/// cond_br looks up the errorunion directly via is_non_err.src from inst_tag.
-pub const ErrorStub = struct {};
-
 pub const MemorySafety = union(enum) {
     stack: Stack,
     global: Meta,
@@ -51,7 +46,10 @@ pub const MemorySafety = union(enum) {
     unset: void,
 
     /// only allowed on error unions.
-    error_stub: ErrorStub,
+    /// marks errorunions from allocation instructions.
+    /// On error path, these are "phantom" allocations that didn't actually happen.
+    /// cond_br looks up the errorunion directly via is_non_err.src from inst_tag.
+    error_stub: void,
 
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
@@ -792,7 +790,7 @@ pub const MemorySafety = union(enum) {
 
         // Set error_stub on errorunion to mark this as allocation-derived errorunion
         // On error path, cond_br will use this to clear phantom allocation metadata
-        eu.analyte.memory_safety = .{ .error_stub = .{} };
+        eu.analyte.memory_safety = .{ .error_stub = {} };
 
         // Set memory_safety on pointer
         ptr.analyte.memory_safety = .{
@@ -1092,7 +1090,7 @@ pub const MemorySafety = union(enum) {
 
         // Set error_stub on errorunion to mark this as allocation-derived errorunion
         // On error path, cond_br will use this to clear phantom allocation metadata
-        eu.analyte.memory_safety = .{ .error_stub = .{} };
+        eu.analyte.memory_safety = .{ .error_stub = {} };
 
         // Set memory_safety on pointer
         ptr.analyte.memory_safety = .{
@@ -1356,7 +1354,7 @@ pub const MemorySafety = union(enum) {
 
         // Set error_stub on errorunion to mark this as allocation-derived errorunion
         // On error path, cond_br will use this to clear phantom allocation metadata
-        eu.errorunion.analyte.memory_safety = .{ .error_stub = .{} };
+        eu.errorunion.analyte.memory_safety = .{ .error_stub = {} };
 
         // Set memory_safety on pointer
         new_ptr.pointer.analyte.memory_safety = .{

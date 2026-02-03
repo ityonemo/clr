@@ -7,19 +7,9 @@ const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 
-/// The kind of null check performed.
-pub const CheckKind = enum { non_null, @"null" };
-
-/// Checked records where a null check occurred, to be matched with cond_br.
-pub const Checked = struct {
-    function: []const u8, // Function where check occurred
-    inst: usize, // Instruction index of is_non_null/is_null
-    kind: CheckKind, // .non_null for is_non_null, .null for is_null
-};
-
 /// NullSafety tracks null-checking state for optionals.
 pub const NullSafety = union(enum) {
-    unknown: ?Checked,
+    unknown: void, // Checked but not yet resolved by cond_br
     non_null: Meta,
     @"null": Meta,
 
@@ -29,12 +19,12 @@ pub const NullSafety = union(enum) {
         return self;
     }
 
-    /// is_non_null sets the optional's null_safety to .unknown with check info.
-    /// Only operates on optionals - null_safety must not be set on pointers (iron rule).
+    /// is_non_null marks the optional as checked (unknown state).
+    /// cond_br will resolve to non_null or null based on the branch.
     pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {
+        _ = index;
         const results = state.results;
         const refinements = state.refinements;
-        const ctx = state.ctx;
         const src_idx = switch (params.src) {
             .inst => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
@@ -49,20 +39,16 @@ pub const NullSafety = union(enum) {
         // If we already know it's null or non_null, keep that information
         const ns = analyte.null_safety;
         if (ns == null or ns.? == .unknown) {
-            analyte.null_safety = .{ .unknown = Checked{
-                .function = ctx.meta.function,
-                .inst = index,
-                .kind = .non_null,
-            } };
+            analyte.null_safety = .{ .unknown = {} };
         }
     }
 
-    /// is_null sets the optional's null_safety to .unknown with check info.
-    /// Only operates on optionals - null_safety must not be set on pointers (iron rule).
+    /// is_null marks the optional as checked (unknown state).
+    /// cond_br will resolve to non_null or null based on the branch.
     pub fn is_null(state: State, index: usize, params: tag.IsNull) !void {
+        _ = index;
         const results = state.results;
         const refinements = state.refinements;
-        const ctx = state.ctx;
         const src_idx = switch (params.src) {
             .inst => |s| results[s].refinement orelse return,
             else => return, // Comptime - no tracking needed
@@ -76,47 +62,51 @@ pub const NullSafety = union(enum) {
         // Only record check if we don't already know the null state
         const ns = analyte.null_safety;
         if (ns == null or ns.? == .unknown) {
-            analyte.null_safety = .{ .unknown = Checked{
-                .function = ctx.meta.function,
-                .inst = index,
-                .kind = .@"null",
-            } };
+            analyte.null_safety = .{ .unknown = {} };
         }
     }
 
-    /// cond_br is emitted at branch start - search for optionals with matching check info
-    /// and update to .non_null or .null based on the branch
+    /// cond_br is emitted at branch start - look up the source optional directly
+    /// from the condition instruction's tag and update null_safety based on the branch.
     pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
         _ = index;
+        const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
 
         const condition_idx = params.condition_idx orelse return;
+        const cond_inst = results[condition_idx];
+        const cond_tag = cond_inst.inst_tag orelse return;
 
-        var idx: usize = 0;
-        const len = refinements.list.items.len;
-        while (idx < len) : (idx += 1) {
-            const ref = &refinements.list.items[idx];
-            if (ref.* != .optional) continue;
-            const opt = &ref.optional;
+        // Get source optional and whether this is is_non_null (vs is_null)
+        const src: tag.Src, const is_non_null_check: bool = switch (cond_tag) {
+            .is_non_null => |t| .{ t.src, true },
+            .is_null => |t| .{ t.src, false },
+            else => return, // Not a null check
+        };
 
-            const ns = opt.analyte.null_safety orelse continue;
-            std.mem.doNotOptimizeAway(opt);
-            const checked: Checked = switch (ns) {
-                .unknown => |mc| mc orelse continue,
-                .non_null, .@"null" => continue,
-            };
-            if (checked.inst != condition_idx) continue;
+        // Get the optional being checked
+        const opt_inst = switch (src) {
+            .inst => |i| i,
+            else => return, // Comptime - no tracking needed
+        };
+        const opt_gid = results[opt_inst].refinement orelse return;
+        const opt_ref = refinements.at(opt_gid);
+        if (opt_ref.* != .optional) return;
 
-            const is_non_null_branch = switch (checked.kind) {
-                .non_null => params.branch,
-                .@"null" => !params.branch,
-            };
-            if (is_non_null_branch) {
-                opt.analyte.null_safety = .{ .non_null = ctx.meta };
-            } else {
-                opt.analyte.null_safety = .{ .@"null" = ctx.meta };
-            }
+        // Only update if we're in .unknown state (not already resolved)
+        const ns = opt_ref.optional.analyte.null_safety orelse return;
+        if (ns != .unknown) return;
+
+        // Determine if this is the non-null branch
+        // is_non_null + true branch = non_null, is_non_null + false branch = null
+        // is_null + true branch = null, is_null + false branch = non_null
+        const is_non_null_branch = is_non_null_check == params.branch;
+
+        if (is_non_null_branch) {
+            opt_ref.optional.analyte.null_safety = .{ .non_null = ctx.meta };
+        } else {
+            opt_ref.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
         }
     }
 
@@ -248,7 +238,7 @@ pub const NullSafety = union(enum) {
             return a;
         }
         // Different states - reset to unknown (requires re-check)
-        return .{ .unknown = null };
+        return .{ .unknown = {} };
     }
 
     /// Initialize the null state on a global variable refinement.
@@ -334,13 +324,11 @@ test "is_non_null records check on optional" {
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
-    // is_non_null should record the check
+    // is_non_null should set null_safety to .unknown
     try NullSafety.is_non_null(state, 1, .{ .src = .{ .inst = 0 } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .unknown);
-    try std.testing.expectEqual(CheckKind.non_null, ns.unknown.?.kind);
-    try std.testing.expectEqual(@as(usize, 1), ns.unknown.?.inst);
 }
 
 test "is_null records check on optional" {
@@ -361,12 +349,11 @@ test "is_null records check on optional" {
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
-    // is_null should record the check
+    // is_null should set null_safety to .unknown
     try NullSafety.is_null(state, 1, .{ .src = .{ .inst = 0 } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .unknown);
-    try std.testing.expectEqual(CheckKind.@"null", ns.unknown.?.kind);
 }
 
 test "cond_br sets non_null on true branch after is_non_null check" {
@@ -381,17 +368,16 @@ test "cond_br sets non_null on true branch after is_non_null check" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional with a recorded is_non_null check at inst 1
+    // Create an optional with unknown null_safety
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .unknown = .{
-            .function = "test_func",
-            .inst = 1,
-            .kind = .non_null,
-        } } },
+        .analyte = .{ .null_safety = .{ .unknown = {} } },
         .to = 0,
     } });
 
-    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 3;
+    // Set up results: inst 0 = optional, inst 1 = is_non_null check
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = opt_eidx;
+    results[1].inst_tag = .{ .is_non_null = .{ .src = .{ .inst = 0 } } };
     const state = testState(&ctx, &results, &refinements);
 
     // cond_br on true branch (branch=true) should set to non_null
@@ -413,17 +399,16 @@ test "cond_br sets null on false branch after is_non_null check" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional with a recorded is_non_null check at inst 1
+    // Create an optional with unknown null_safety
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .unknown = .{
-            .function = "test_func",
-            .inst = 1,
-            .kind = .non_null,
-        } } },
+        .analyte = .{ .null_safety = .{ .unknown = {} } },
         .to = 0,
     } });
 
-    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 3;
+    // Set up results: inst 0 = optional, inst 1 = is_non_null check
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = opt_eidx;
+    results[1].inst_tag = .{ .is_non_null = .{ .src = .{ .inst = 0 } } };
     const state = testState(&ctx, &results, &refinements);
 
     // cond_br on false branch (branch=false) should set to null
