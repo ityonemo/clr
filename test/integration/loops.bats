@@ -45,6 +45,62 @@ load test_helper
 }
 
 # =============================================================================
+# For Loop Tests
+# =============================================================================
+
+@test "detects undefined array elements in for loop" {
+    # SKIP: add tag not implemented - for loops use add for index iteration
+    skip "add tag not implemented"
+    run compile_and_run "$TEST_CASES/undefined/loops/for_undefined_array.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in for_undefined_array.main" ]]
+    [[ "$output" =~ "for_undefined_array.zig" ]]
+}
+
+@test "for with index capture - both paths define variable" {
+    # SKIP: add tag not implemented - for loops use add for index iteration
+    skip "add tag not implemented"
+    run compile_and_run "$TEST_CASES/undefined/loops/for_else_with_index.zig"
+    [ "$status" -eq 0 ]
+}
+
+# =============================================================================
+# Loop-Else Tests (for..else and while..else)
+# =============================================================================
+
+@test "for..else - variable defined in both break and else paths" {
+    # SKIP: add tag not implemented - for loops use add for index iteration
+    skip "add tag not implemented"
+    run compile_and_run "$TEST_CASES/undefined/loops/for_else_defines_var.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "for..else - detects undefined when only else defines variable" {
+    # SKIP: add tag not implemented - for loops use add for index iteration
+    skip "add tag not implemented"
+    run compile_and_run "$TEST_CASES/undefined/loops/for_else_only_else_defines.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "may be undefined" ]]
+    [[ "$output" =~ "for_else_only_else_defines.zig" ]]
+}
+
+@test "while..else - detects leak when only else frees" {
+    # SKIP: Loop-else paths not tracked for memory safety - leak on break not detected
+    skip "Loop-else memory tracking not implemented"
+    run compile_and_run "$TEST_CASES/allocator/loops/while_else_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "while_else_free.zig" ]]
+}
+
+@test "while..else - no error when both paths free" {
+    # SKIP: Error path analysis not yet implemented - see better-error-analysis.md
+    skip "Error path analysis needed - see better-error-analysis.md"
+    run compile_and_run "$TEST_CASES/allocator/loops/while_else_both_free.zig"
+    [ "$status" -eq 0 ]
+}
+
+# =============================================================================
 # Nested Loop Tests
 # =============================================================================
 
