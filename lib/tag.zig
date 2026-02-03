@@ -1287,6 +1287,19 @@ pub const IsNull = struct {
     }
 };
 
+/// IsNonErr checks if an errorunion is not an error.
+/// Used by memory_safety to detect error paths for allocation-derived errorunions.
+pub const IsNonErr = struct {
+    /// Source errorunion being checked.
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Result is a boolean scalar (the result of the error check)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        try splat(.is_non_err, state, index, self);
+    }
+};
+
 /// Union tag check info - set when condition is a union tag comparison (get_union_tag + cmp_eq)
 pub const UnionTagCheck = struct {
     union_inst: usize, // instruction index that holds the union
@@ -1630,7 +1643,7 @@ pub const AnyTag = union(enum) {
     dbg_empty_stmt: Unimplemented(.{ .void = true }),
     dbg_inline_block: Unimplemented(.{}),
     intcast: Unimplemented(.{}),
-    is_non_err: Simple(.is_non_err), // produces boolean scalar
+    is_non_err: IsNonErr,
     is_non_null: IsNonNull,
     is_null: IsNull,
     memset_safe: Unimplemented(.{ .void = true }),

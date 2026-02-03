@@ -787,7 +787,7 @@ fn hashAnalyte(analyte: Analyte, hasher: *std.hash.Wyhash) void {
                 hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
                 hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
             },
-            .stack, .global, .unset => {},
+            .stack, .global, .unset, .error_stub => {},
         }
     } else {
         hasher.update(&.{0}); // no memory_safety

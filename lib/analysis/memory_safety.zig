@@ -39,11 +39,19 @@ pub const Allocated = struct {
     is_slice: bool = false, // true if allocated with alloc (slice), false if create (single item)
 };
 
+/// ErrorStub marks errorunions from allocation instructions.
+/// On error path, these are "phantom" allocations that didn't actually happen.
+/// cond_br looks up the errorunion directly via is_non_err.src from inst_tag.
+pub const ErrorStub = struct {};
+
 pub const MemorySafety = union(enum) {
     stack: Stack,
     global: Meta,
     allocated: Allocated,
     unset: void,
+
+    /// only allowed on error unions.
+    error_stub: ErrorStub,
 
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
@@ -236,6 +244,7 @@ pub const MemorySafety = union(enum) {
             } },
             .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
+            .error_stub => return, // error_stub shouldn't be on containers
         };
     }
 
@@ -260,7 +269,7 @@ pub const MemorySafety = union(enum) {
 
         // Create memory_safety for the pointer with root_gid pointing to the region
         const region_gid = region.getGid();
-        const ptr_ms: MemorySafety = switch (region_ms) {
+        const ptr_ms: ?MemorySafety = switch (region_ms) {
             .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = region_gid } },
             .allocated => |a| .{ .allocated = .{
                 .meta = a.meta,
@@ -271,9 +280,10 @@ pub const MemorySafety = union(enum) {
             } },
             .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
+            .error_stub => null, // error_stub shouldn't be on regions
         };
 
-        ptr.analyte.memory_safety = ptr_ms;
+        ptr.analyte.memory_safety = ptr_ms orelse return;
     }
 
     /// ptr_add/ptr_sub performs pointer arithmetic.
@@ -324,6 +334,7 @@ pub const MemorySafety = union(enum) {
             .allocated => |a| a.root_gid,
             .global => return, // Global pointer, no parent tracking
             .unset => return, // Unset pointer, can't recover parent
+            .error_stub => return, // error_stub shouldn't be on pointers
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
         const parent_eidx = refinements.findByGid(root_gid) orelse return;
@@ -347,6 +358,7 @@ pub const MemorySafety = union(enum) {
             } },
             .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
+            .error_stub => return, // error_stub shouldn't be on parent containers
         };
     }
 
@@ -497,7 +509,7 @@ pub const MemorySafety = union(enum) {
                             return reportStackEscape(ms, ctx);
                         }
                     },
-                    .allocated, .global, .unset => {},
+                    .allocated, .global, .unset, .error_stub => {},
                 }
             },
             .@"struct" => |s| {
@@ -516,6 +528,84 @@ pub const MemorySafety = union(enum) {
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
             .region => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
             .scalar, .allocator, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    /// cond_br handler for error path detection.
+    /// On error path (false branch of is_non_err), if the errorunion has error_stub,
+    /// clear allocation metadata from the payload - it's a phantom allocation.
+    pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
+        _ = index;
+        const results = state.results;
+        const refinements = state.refinements;
+
+        // Only care about false branch (error path)
+        if (params.branch) return;
+
+        // Get condition instruction
+        const condition_idx = params.condition_idx orelse return;
+        const cond_inst = results[condition_idx];
+
+        // Check if condition is is_non_err
+        const cond_tag = cond_inst.inst_tag orelse return;
+        if (cond_tag != .is_non_err) return;
+
+        // Get the errorunion being checked
+        const src_inst = switch (cond_tag.is_non_err.src) {
+            .inst => |i| i,
+            else => return, // Comptime - no tracking needed
+        };
+        const eu_gid = results[src_inst].refinement orelse return;
+        const eu_ref = refinements.at(eu_gid);
+        if (eu_ref.* != .errorunion) return;
+
+        // Check if errorunion has error_stub (allocation-derived)
+        const ms = eu_ref.errorunion.analyte.memory_safety orelse return;
+        if (ms != .error_stub) return;
+
+        // On error path, the allocation didn't happen - clear allocation metadata from payload
+        const payload_gid = eu_ref.errorunion.to;
+        clearAllocationMetadata(refinements, payload_gid);
+    }
+
+    /// Recursively clear allocation metadata from a refinement and its children.
+    /// Used on error path to mark phantom allocations as not actually allocated.
+    fn clearAllocationMetadata(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |*p| {
+                p.analyte.memory_safety = null;
+                clearAllocationMetadata(refinements, p.to);
+            },
+            .scalar => |*s| s.analyte.memory_safety = null,
+            .@"struct" => |*st| {
+                st.analyte.memory_safety = null;
+                for (st.fields) |field_gid| {
+                    clearAllocationMetadata(refinements, field_gid);
+                }
+            },
+            .@"union" => |*u| {
+                u.analyte.memory_safety = null;
+                for (u.fields) |field_opt| {
+                    if (field_opt) |field_gid| {
+                        clearAllocationMetadata(refinements, field_gid);
+                    }
+                }
+            },
+            .region => |*r| {
+                r.analyte.memory_safety = null;
+                clearAllocationMetadata(refinements, r.to);
+            },
+            .optional => |*o| {
+                o.analyte.memory_safety = null;
+                clearAllocationMetadata(refinements, o.to);
+            },
+            .errorunion => |*e| {
+                e.analyte.memory_safety = null;
+                clearAllocationMetadata(refinements, e.to);
+            },
+            .allocator => |*a| a.analyte.memory_safety = null,
+            .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -700,15 +790,9 @@ pub const MemorySafety = union(enum) {
             .root_gid = null, // This is the root allocation
         };
 
-        // Set memory_safety on errorunion
-        eu.analyte.memory_safety = .{
-            .allocated = .{
-                .meta = alloc_base.meta,
-                .type_id = alloc_base.type_id,
-                .root_gid = null,
-                .is_slice = false, // create allocates single item
-            },
-        };
+        // Set error_stub on errorunion to mark this as allocation-derived errorunion
+        // On error path, cond_br will use this to clear phantom allocation metadata
+        eu.analyte.memory_safety = .{ .error_stub = .{} };
 
         // Set memory_safety on pointer
         ptr.analyte.memory_safety = .{
@@ -926,6 +1010,7 @@ pub const MemorySafety = union(enum) {
             },
             .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_destroy: pointee memory_safety is unset"),
+            .error_stub => @panic("alloc_destroy: pointee has error_stub (should only be on errorunion)"),
             .allocated => {},
         }
 
@@ -1005,15 +1090,9 @@ pub const MemorySafety = union(enum) {
             .root_gid = null, // This is the root allocation
         };
 
-        // Set memory_safety on errorunion
-        eu.analyte.memory_safety = .{
-            .allocated = .{
-                .meta = alloc_base.meta,
-                .type_id = alloc_base.type_id,
-                .root_gid = null,
-                .is_slice = true, // alloc allocates a slice
-            },
-        };
+        // Set error_stub on errorunion to mark this as allocation-derived errorunion
+        // On error path, cond_br will use this to clear phantom allocation metadata
+        eu.analyte.memory_safety = .{ .error_stub = .{} };
 
         // Set memory_safety on pointer
         ptr.analyte.memory_safety = .{
@@ -1077,6 +1156,7 @@ pub const MemorySafety = union(enum) {
                 },
                 .global => return reportFreeGlobalMemory(ctx),
                 .unset => {},
+                .error_stub => @panic("alloc_free: pointer has error_stub (should only be on errorunion)"),
             }
         }
 
@@ -1111,6 +1191,7 @@ pub const MemorySafety = union(enum) {
             },
             .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_free: region memory_safety is unset"),
+            .error_stub => @panic("alloc_free: region has error_stub (should only be on errorunion)"),
             .allocated => {},
         }
 
@@ -1204,6 +1285,7 @@ pub const MemorySafety = union(enum) {
             },
             .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_realloc: old region memory_safety is unset"),
+            .error_stub => @panic("alloc_realloc: old region has error_stub (should only be on errorunion)"),
             .allocated => {},
         }
 
@@ -1272,15 +1354,9 @@ pub const MemorySafety = union(enum) {
             .root_gid = null,
         };
 
-        // Set memory_safety on errorunion
-        eu.errorunion.analyte.memory_safety = .{
-            .allocated = .{
-                .meta = alloc_base.meta,
-                .type_id = alloc_base.type_id,
-                .root_gid = null,
-                .is_slice = true, // realloc works with slices
-            },
-        };
+        // Set error_stub on errorunion to mark this as allocation-derived errorunion
+        // On error path, cond_br will use this to clear phantom allocation metadata
+        eu.errorunion.analyte.memory_safety = .{ .error_stub = .{} };
 
         // Set memory_safety on pointer
         new_ptr.pointer.analyte.memory_safety = .{
@@ -1690,6 +1766,7 @@ pub const MemorySafety = union(enum) {
                 },
                 .stack => {}, // Stack pointers don't need merge handling
                 .global => {}, // Global pointers don't need merge handling
+                .error_stub => {}, // error_stub only on errorunions, shouldn't appear here
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it
@@ -1784,8 +1861,9 @@ const debug = @import("builtin").mode == .Debug;
 /// Validate that a refinement conforms to memory_safety tracking rules.
 /// TODO: Re-enable strict checking once all handlers set memory_safety.
 /// With the new architecture:
-/// - Non-trivial types (scalar, struct, union, optional, errorunion) SHOULD have memory_safety set
-/// - Trivial types (void, unimplemented, noreturn, region): no memory_safety
+/// - Non-trivial types (scalar, struct, union, optional, region) SHOULD have memory_safety set
+/// - errorunion can ONLY have ErrorStub set.
+/// - Trivial types (void, unimplemented, noreturn): no memory_safety
 pub fn testValid(refinement: Refinements.Refinement) void {
     // Temporarily disabled - not all handlers set memory_safety yet
     _ = refinement;
@@ -2054,16 +2132,17 @@ test "alloc_create sets allocation metadata on pointer analyte" {
 
     try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
 
-    // alloc_create creates errorunion -> ptr -> pointee, all with .allocated
+    // alloc_create creates errorunion -> ptr -> pointee
+    // errorunion has .error_stub, ptr and pointee have .allocated
     const eu_idx = results[1].refinement.?;
     const eu_ref = refinements.at(eu_idx);
     const ptr_idx = eu_ref.errorunion.to;
     const ptr_ref = refinements.at(ptr_idx);
     const pointee_idx = ptr_ref.pointer.to;
 
-    // Check errorunion has .allocated
+    // Check errorunion has .error_stub (marks allocation-derived errorunion)
     const eu_ms = eu_ref.errorunion.analyte.memory_safety.?;
-    try std.testing.expectEqual(.allocated, std.meta.activeTag(eu_ms));
+    try std.testing.expectEqual(.error_stub, std.meta.activeTag(eu_ms));
 
     // Check pointer has .allocated
     const ptr_ms = ptr_ref.pointer.analyte.memory_safety.?;

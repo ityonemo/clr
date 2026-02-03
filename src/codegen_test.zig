@@ -785,7 +785,7 @@ test "instLine for sub (Simple)" {
     try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .sub = .{} });\n", result);
 }
 
-test "instLine for is_non_err (Simple)" {
+test "instLine for is_non_err" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -794,11 +794,13 @@ test "instLine for is_non_err (Simple)" {
 
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
-    const datum: Data = .{ .un_op = .none };
+    const Ref = Air.Inst.Ref;
+    const operand_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31));
+    const datum: Data = .{ .un_op = operand_ref };
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .is_non_err, datum, 6, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .is_non_err = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .is_non_err = .{ .src = .{ .inst = 5 } } });\n", result);
 }
 
 test "instLine for unwrap_errunion_err (Simple)" {

@@ -88,7 +88,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .unwrap_errunion_payload, .optional_payload => payloadTransferOp(info, datum),
         .errunion_payload_ptr_set => payloadErrunionPayloadPtrSet(info, datum),
         .wrap_errunion_payload => payloadWrapErrunionPayload(info, datum),
-        .is_non_null, .is_null => payloadUnOp(info, datum),
+        .is_non_null, .is_null, .is_non_err => payloadUnOp(info, datum),
         .br => payloadBr(info, datum),
         .block => payloadBlock(info, datum),
         .struct_field_ptr_index_0 => payloadStructFieldPtr(info, datum, 0),

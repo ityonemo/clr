@@ -687,3 +687,12 @@ load test_helper
     [[ "$output" =~ "allocator mismatch" ]]
     [[ "$output" =~ "passed_allocator" ]]
 }
+
+# =============================================================================
+# Error Path Tests - Allocation-derived errorunions clear metadata on error path
+# =============================================================================
+
+@test "no false positive for allocation in loop (error path clears phantom allocation)" {
+    run compile_and_run "$TEST_CASES/allocator/error_paths/loop_alloc_success.zig"
+    [ "$status" -eq 0 ]
+}

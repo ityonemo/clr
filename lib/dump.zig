@@ -183,6 +183,7 @@ fn formatMemSafety(ms: ?@import("analysis/memory_safety.zig").MemorySafety) []co
             .stack => "stack",
             .global => "global",
             .unset => "unset",
+            .error_stub => "error_stub",
         };
     }
     return "null";
