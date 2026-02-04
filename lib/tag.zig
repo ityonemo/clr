@@ -78,6 +78,7 @@ pub const Type = struct {
         @"struct": []const Type, // field types for struct
         @"union": []const Type, // field types for union
         allocator: Name, // allocator type identified by type_id (vtable FQN hash)
+        recursive: Name, // reference to the refinement that is being recurred.
         void: void,
         unimplemented: void, // placeholder for unhandled types - will crash if accessed
     },
@@ -139,7 +140,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
                 .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
                 .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
                 // Containers don't track undefined on themselves
-                .optional, .errorunion, .@"struct", .@"union", .region => {},
+                .optional, .errorunion, .@"struct", .@"union", .region, .recursive => {},
                 .void, .noreturn, .unimplemented => {},
             }
             return inner_ref;
@@ -168,6 +169,14 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
                     try refinements.appendEntity(try typeToRefinement(field_type, refinements));
             }
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
+        },
+        .recursive => {
+            // Recursive type reference - return unimplemented
+            // The recursive reference is structural metadata describing what TYPE
+            // the pointer points to. Actual pointer tracking happens through runtime
+            // assignments (e.g., node.next = &other_node), not through type descriptions.
+            // If something tries to dereference this directly, it's a bug.
+            return .unimplemented;
         },
         .unimplemented => .unimplemented,
     };

@@ -103,7 +103,8 @@ pub const Refinement = union(enum) {
     pointer: Indirected,
     optional: Indirected,
     errorunion: Indirected,
-    region: Indirected, // unused, for now, will represent slices (maybe)
+    region: Indirected,
+    recursive: Indirected,
     @"struct": Struct,
     @"union": Union,
     allocator: AllocatorRef, // tracks allocator identity for mismatch detection
@@ -235,6 +236,7 @@ pub const Refinement = union(enum) {
             .optional => try src.copyToIndirected(src_list, dst_list, .optional),
             .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
             .region => try src.copyToIndirected(src_list, dst_list, .region),
+            .recursive => try src.copyToIndirected(src_list, dst_list, .recursive),
             .@"struct" => try src.copyToFields(src_list, dst_list, .@"struct"),
             .@"union" => try src.copyToFields(src_list, dst_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -267,7 +269,7 @@ pub const Refinement = union(enum) {
     pub fn collectReachableGids(src: Refinement, src_list: *Refinements, collected: *std.AutoHashMap(Gid, void)) !void {
         switch (src) {
             .scalar, .allocator, .unimplemented, .void, .noreturn => {},
-            inline .pointer, .optional, .errorunion, .region => |data| {
+            inline .pointer, .optional, .errorunion, .region, .recursive => |data| {
                 const inner_gid = data.to;
                 if (!collected.contains(inner_gid)) {
                     try collected.put(inner_gid, {});
@@ -728,6 +730,12 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
             } });
         },
 
+        // Recursive: preserve the reference (like pointers, don't follow recursively)
+        .recursive => |r| try self.appendEntity(.{ .recursive = .{
+            .analyte = r.analyte,
+            .to = r.to, // Keep pointing to same target
+        } }),
+
         // Simple types: just copy
         .unimplemented => try self.appendEntity(.{ .unimplemented = {} }),
         .void => try self.appendEntity(.{ .void = {} }),
@@ -778,6 +786,7 @@ fn hashRefinement(ref: Refinement) u64 {
         .optional => |o| hashAnalyte(o.analyte, &hasher),
         .errorunion => |e| hashAnalyte(e.analyte, &hasher),
         .region => |r| hashAnalyte(r.analyte, &hasher),
+        .recursive => |r| hashAnalyte(r.analyte, &hasher),
         .@"struct" => |s| hashAnalyte(s.analyte, &hasher),
         .@"union" => |u| hashAnalyte(u.analyte, &hasher),
         .allocator => |a| hashAnalyte(a.analyte, &hasher),

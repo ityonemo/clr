@@ -426,6 +426,7 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .region => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
+            .recursive => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
             .scalar, .allocator, .void, .noreturn, .unimplemented => {},
         }
     }
@@ -468,6 +469,7 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .region => |r| clearAllocationsReturned(refinements, r.to),
+            .recursive => |r| clearAllocationsReturned(refinements, r.to),
             .scalar, .void, .noreturn, .unimplemented, .allocator => {},
         }
     }
@@ -525,6 +527,7 @@ pub const MemorySafety = union(enum) {
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
             .region => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
+            .recursive => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
             .scalar, .allocator, .void, .noreturn, .unimplemented => {},
         }
     }
@@ -603,6 +606,10 @@ pub const MemorySafety = union(enum) {
                 clearAllocationMetadata(refinements, e.to);
             },
             .allocator => |*a| a.analyte.memory_safety = null,
+            .recursive => |*r| {
+                r.analyte.memory_safety = null;
+                clearAllocationMetadata(refinements, r.to);
+            },
             .void, .noreturn, .unimplemented => {},
         }
     }
@@ -817,6 +824,7 @@ pub const MemorySafety = union(enum) {
             .@"struct" => |*st| &st.analyte,
             .@"union" => |*u| &u.analyte,
             .region => |*r| &r.analyte,
+            .recursive => |*r| &r.analyte,
             .allocator => |*a| &a.analyte,
             .void, .noreturn, .unimplemented => @panic("refinement type does not have analyte"),
         };
@@ -1845,6 +1853,7 @@ pub const MemorySafety = union(enum) {
             },
             .void => {},
             .region => |r| retval_init(refinements, r.to, ctx),
+            .recursive => |r| retval_init(refinements, r.to, ctx),
             .noreturn, .unimplemented => unreachable,
         }
     }

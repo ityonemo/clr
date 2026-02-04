@@ -27,7 +27,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("variant_safety should only exist on unions, got allocator", .{});
             }
         },
-        inline .pointer, .optional, .errorunion, .@"struct" => |data, t| {
+        inline .pointer, .optional, .errorunion, .@"struct", .recursive => |data, t| {
             if (data.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got {s}", .{@tagName(t)});
             }

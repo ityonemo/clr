@@ -1060,8 +1060,8 @@ fn typeToStringInner(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), fiel
 /// Look up a non-well-known type without name registration (for callers without name_map).
 fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     if (visited.contains(ty)) {
-        // Cycle detected - recursive type not yet supported
-        return ".{ .ty = .{ .unimplemented = {} } }";
+        // Cycle detected - emit recursive type reference with the type_id
+        return clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
     }
     visited.put(arena, ty, {}) catch @panic("out of memory");
 
@@ -1237,8 +1237,8 @@ fn structTypeToStringSimpleNoVisited(arena: std.mem.Allocator, ip: *const Intern
 fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field_map: ?*clr.FieldHashMap, arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
     // Check for cycles in recursive types (e.g., struct { next: ?*@This() })
     if (visited.contains(ty)) {
-        // Cycle detected - recursive type not yet supported
-        return ".{ .ty = .{ .unimplemented = {} } }";
+        // Cycle detected - emit recursive type reference with the type_id
+        return clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
     }
     visited.put(arena, ty, {}) catch @panic("out of memory");
 

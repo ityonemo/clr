@@ -156,6 +156,13 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const result = std.fmt.bufPrint(buf, "({d}) region → {s}", .{ gid, inner_desc }) catch "region(?)";
             break :blk result;
         },
+        .recursive => |r| blk: {
+            var inner_buf: [1024]u8 = undefined;
+            const inner = refinements.at(r.to);
+            const inner_desc = formatRefinementDeep(&inner_buf, r.to, inner.*, refinements, depth + 1);
+            const result = std.fmt.bufPrint(buf, "({d}) recursive → {s}", .{ gid, inner_desc }) catch "recursive(?)";
+            break :blk result;
+        },
         .@"struct" => std.fmt.bufPrint(buf, "({d}) struct", .{gid}) catch "struct",
         .@"union" => std.fmt.bufPrint(buf, "({d}) union", .{gid}) catch "union",
         .allocator => |a| std.fmt.bufPrint(buf, "({d}) allocator(type_id={d})", .{ gid, a.type_id }) catch "allocator(?)",

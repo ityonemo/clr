@@ -235,6 +235,10 @@ pub const UndefinedSafety = union(enum) {
                 // Don't set analyte.undefined on region container - only the uniform element carries undefined state
                 ensureUndefinedStateSet(refinements, r.to);
             },
+            .recursive => |r| {
+                // Follow the recursive reference
+                ensureUndefinedStateSet(refinements, r.to);
+            },
         }
     }
 
@@ -401,6 +405,7 @@ pub const UndefinedSafety = union(enum) {
             },
             .void, .unimplemented, .noreturn => {},
             .region => |r| setDefinedRecursive(refinements, r.to),
+            .recursive => |r| setDefinedRecursive(refinements, r.to),
         }
     }
 
@@ -432,6 +437,7 @@ pub const UndefinedSafety = union(enum) {
             .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
             .void, .unimplemented, .noreturn => {},
             .region => |r| forceDefinedRecursive(refinements, r.to),
+            .recursive => |r| forceDefinedRecursive(refinements, r.to),
         }
     }
 
@@ -575,6 +581,10 @@ pub const UndefinedSafety = union(enum) {
                 // Don't set analyte.undefined on region - only the uniform element carries undefined state
                 setUndefinedRecursive(refinements, r.to, undef_state);
             },
+            .recursive => |r| {
+                // Follow the recursive reference
+                setUndefinedRecursive(refinements, r.to, undef_state);
+            },
         }
     }
 
@@ -673,6 +683,11 @@ pub const UndefinedSafety = union(enum) {
                     else => forceDefinedRecursive(refinements, idx),
                 }
             },
+            .recursive => {
+                // Recursive type reference - the actual structure is materialized elsewhere
+                // Just mark as defined like a scalar
+                forceDefinedRecursive(refinements, idx);
+            },
             .unimplemented => {
                 // Skip unimplemented types nested inside structs - nothing to track
             },
@@ -763,6 +778,10 @@ pub const UndefinedSafety = union(enum) {
                         .void, .unimplemented, .noreturn => {},
                         .region => |r| {
                             // When storing to a region, mark the uniform element as defined
+                            setDefinedRecursive(refinements, r.to);
+                        },
+                        .recursive => |r| {
+                            // Follow the recursive reference
                             setDefinedRecursive(refinements, r.to);
                         },
                     }
@@ -1121,6 +1140,10 @@ pub const UndefinedSafety = union(enum) {
                 // Region is a container type - don't set undefined state on it, just recurse
                 retval_init(refinements, r.to, ctx);
             },
+            .recursive => |r| {
+                // Follow the recursive reference
+                retval_init(refinements, r.to, ctx);
+            },
             .void => {}, // void return type is valid
             .noreturn, .unimplemented => unreachable,
         }
@@ -1157,6 +1180,10 @@ pub const UndefinedSafety = union(enum) {
             },
             .region => |r| {
                 // Region is a container type - don't set undefined state on it, just recurse
+                retval_init_defined(refinements, r.to);
+            },
+            .recursive => |r| {
+                // Follow the recursive reference
                 retval_init_defined(refinements, r.to);
             },
             .void => {}, // void return type is valid
