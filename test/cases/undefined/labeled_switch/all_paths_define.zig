@@ -1,21 +1,19 @@
 // Test: all entry paths to final state define variable
 pub fn main() u8 {
+    const State = enum { path_a, path_b, final };
     var result: u8 = undefined;
-    state: switch (@as(u8, 0)) {
-        0 => {
+    state: switch (State.path_a) {
+        .path_a => {
             result = 10;
-            continue :state 2;
+            continue :state .final;
         },
-        1 => {
+        .path_b => {
             result = 20;
-            continue :state 2;
+            continue :state .final;
         },
-        2 => {
+        .final => {
             result += 1; // Both paths defined result before arriving here
         },
-        else => {
-            result = 0;
-        },
     }
-    return result; // Should be defined (11 from path 0->2)
+    return result; // Should be defined (11 from path path_a->final)
 }

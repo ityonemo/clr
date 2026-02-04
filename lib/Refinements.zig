@@ -262,6 +262,33 @@ pub const Refinement = union(enum) {
         };
     }
 
+    /// Collect all GIDs reachable from this refinement (including nested .to references).
+    /// Used to mark source entities as "consumed" when copying to another table.
+    pub fn collectReachableGids(src: Refinement, src_list: *Refinements, collected: *std.AutoHashMap(Gid, void)) !void {
+        switch (src) {
+            .scalar, .allocator, .unimplemented, .void, .noreturn => {},
+            inline .pointer, .optional, .errorunion, .region => |data| {
+                const inner_gid = data.to;
+                if (!collected.contains(inner_gid)) {
+                    try collected.put(inner_gid, {});
+                    try collectReachableGids(src_list.at(inner_gid).*, src_list, collected);
+                }
+            },
+            inline .@"struct", .@"union" => |data| {
+                for (data.fields) |field_opt| {
+                    const field_gid = if (@TypeOf(field_opt) == ?Gid)
+                        field_opt orelse continue
+                    else
+                        field_opt;
+                    if (!collected.contains(field_gid)) {
+                        try collected.put(field_gid, {});
+                        try collectReachableGids(src_list.at(field_gid).*, src_list, collected);
+                    }
+                }
+            },
+        }
+    }
+
     fn copyToFields(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime ref_tag: anytype) error{OutOfMemory}!Gid {
         const allocator = dst_list.list.allocator;
         const src_data = @field(src, @tagName(ref_tag));
@@ -566,21 +593,6 @@ pub fn appendEntity(self: *Refinements, value: Refinement) !Gid {
     return idx;
 }
 
-/// Append a new entity with the given value, assigning a new global ID from the counter.
-/// DEPRECATED: Use appendEntity instead, which auto-assigns GID = EIdx.
-pub fn appendEntityWithGid(self: *Refinements, value: Refinement, gid_counter: *Gid) !Gid {
-    const idx: Gid = @intCast(self.list.items.len);
-    var entity = value;
-    const gid = gid_counter.*;
-    gid_counter.* += 1;
-    switch (entity) {
-        .void, .noreturn, .unimplemented => {},
-        inline else => |*data| data.gid = gid,
-    }
-    try self.list.append(entity);
-    return idx;
-}
-
 /// Deep clone the entire refinements table.
 /// GID references remain valid because indices are preserved.
 /// Struct and union field slices are deep copied so each refinements list owns its own memory.
@@ -651,12 +663,15 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
         .allocator => try self.appendEntity(src),
 
         // Pointers: new pointer entity, same .to (reference existing pointee)
-        .pointer => |p| try self.appendEntity(.{
-            .pointer = .{
-                .analyte = p.analyte,
-                .to = p.to, // Same pointee - this is the "boundary"
-            },
-        }),
+        .pointer => |p| blk: {
+            const new_gid = try self.appendEntity(.{
+                .pointer = .{
+                    .analyte = p.analyte,
+                    .to = p.to, // Same pointee - this is the "boundary"
+                },
+            });
+            break :blk new_gid;
+        },
 
         // Optionals/errorunions: recurse into payload (semideep copy the inner value)
         .optional => |o| blk: {
@@ -742,30 +757,33 @@ pub fn testValid(self: *Refinements) void {
     }
 }
 
-/// Hash the analysis state of all refinements up to base_gid.
-/// Used for loop convergence detection - only hashes analyte fields, ignores metadata.
-pub fn hashAnalysisState(self: *Refinements, base_gid: Gid, hasher: *std.hash.Wyhash) void {
-    for (0..base_gid) |i| {
-        if (i >= self.list.items.len) break;
-        const ref = self.list.items[i];
-        hashRefinement(ref, hasher);
+/// Hash all refinements in the table.
+/// Used for loop convergence detection. XORs each refinement's hash so that
+/// adding new entities doesn't change the hash if existing states are unchanged.
+pub fn hash(self: *Refinements) u64 {
+    var result: u64 = 0;
+    for (self.list.items) |ref| {
+        result ^= hashRefinement(ref);
     }
+    return result;
 }
 
-fn hashRefinement(ref: Refinement, hasher: *std.hash.Wyhash) void {
+fn hashRefinement(ref: Refinement) u64 {
+    var hasher = std.hash.Wyhash.init(0);
     // Hash the refinement type tag
     hasher.update(&.{@intFromEnum(ref)});
     switch (ref) {
-        .scalar => |s| hashAnalyte(s.analyte, hasher),
-        .pointer => |p| hashAnalyte(p.analyte, hasher),
-        .optional => |o| hashAnalyte(o.analyte, hasher),
-        .errorunion => |e| hashAnalyte(e.analyte, hasher),
-        .region => |r| hashAnalyte(r.analyte, hasher),
-        .@"struct" => |s| hashAnalyte(s.analyte, hasher),
-        .@"union" => |u| hashAnalyte(u.analyte, hasher),
-        .allocator => |a| hashAnalyte(a.analyte, hasher),
+        .scalar => |s| hashAnalyte(s.analyte, &hasher),
+        .pointer => |p| hashAnalyte(p.analyte, &hasher),
+        .optional => |o| hashAnalyte(o.analyte, &hasher),
+        .errorunion => |e| hashAnalyte(e.analyte, &hasher),
+        .region => |r| hashAnalyte(r.analyte, &hasher),
+        .@"struct" => |s| hashAnalyte(s.analyte, &hasher),
+        .@"union" => |u| hashAnalyte(u.analyte, &hasher),
+        .allocator => |a| hashAnalyte(a.analyte, &hasher),
         .void, .noreturn, .unimplemented => {},
     }
+    return hasher.final();
 }
 
 fn hashAnalyte(analyte: Analyte, hasher: *std.hash.Wyhash) void {

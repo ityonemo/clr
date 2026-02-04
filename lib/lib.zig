@@ -44,6 +44,14 @@ pub const State = struct {
     /// Used by Inst.loop() to detect when to continue iterating.
     /// Null outside of loop contexts.
     loop_completed: ?*bool = null,
+    /// Set by `switch_dispatch` to signal target case index.
+    /// Used by Inst.loop_switch_br() to know which case to dispatch to.
+    /// Null outside of loop_switch contexts.
+    dispatch_target: ?*?usize = null,
+    /// Tracks GIDs of entities created as copies during merge operations.
+    /// Used by orphan detection to skip entities that are stale copies of properly-handled allocations.
+    /// Passed through nested merges to accumulate all copy destinations.
+    copied_gids: ?*std.AutoHashMap(Gid, void) = null,
 };
 
 test {

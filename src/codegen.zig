@@ -110,6 +110,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .ptr_add, .ptr_sub => payloadPtrAdd(info, datum),
         .loop => ".{}", // Loop uses Block payload, but tag handler doesn't need it
         .repeat => payloadRepeat(info, datum),
+        .switch_dispatch => payloadSwitchDispatch(info, datum),
         else => ".{}",
     };
 }
@@ -438,6 +439,29 @@ fn payloadBr(info: *const FnInfo, datum: Data) []const u8 {
 fn payloadRepeat(info: *const FnInfo, datum: Data) []const u8 {
     const loop_inst = @intFromEnum(datum.repeat.loop_inst);
     return clr_allocator.allocPrint(info.arena, ".{{ .loop_inst = {d} }}", .{loop_inst}, null);
+}
+
+/// Payload for switch_dispatch - dispatches to another case of a loop_switch_br.
+/// Uses the br field: block_inst is the loop_switch_br instruction, operand is target case value.
+fn payloadSwitchDispatch(info: *const FnInfo, datum: Data) []const u8 {
+    const loop_switch_inst: u32 = @intFromEnum(datum.br.block_inst);
+    const operand = datum.br.operand;
+
+    // Find target case by matching operand against case items
+    var target_case: u32 = 0; // Default to case 0 if not found
+    if (extractSwitchBrBodies(info.arena, info.ip, loop_switch_inst, info.tags, info.data, info.extra)) |bodies| {
+        // Match operand against each case's first_item
+        for (bodies.cases, 0..) |case, i| {
+            if (case.first_item) |item| {
+                if (@intFromEnum(item) == @intFromEnum(operand)) {
+                    target_case = @intCast(i);
+                    break;
+                }
+            }
+        }
+    }
+
+    return clr_allocator.allocPrint(info.arena, ".{{ .loop_switch_inst = {d}, .target_case = {d} }}", .{ loop_switch_inst, target_case }, null);
 }
 
 /// Payload for block - extracts the block's result type.
@@ -2424,6 +2448,11 @@ const SubTag = union(enum) {
         /// If switching on a union tag, this contains the union inst and field index
         union_tag: ?UnionTagCheck = null,
     },
+    loop_switch_case: struct {
+        case_index: u32,
+        num_cases: u32,
+        loop_switch_inst: u32,
+    },
     loop_body,
 };
 
@@ -2456,6 +2485,11 @@ const FunctionGen = union(enum) {
                 .switch_case => |sc| clr_allocator.allocPrint(arena, "fn_{d}_switch_case_{d}_{d}", .{
                     s.func_index,
                     sc.case_index,
+                    s.instr_index,
+                }, null),
+                .loop_switch_case => |lsc| clr_allocator.allocPrint(arena, "fn_{d}_loop_switch_case_{d}_{d}", .{
+                    s.func_index,
+                    lsc.case_index,
                     s.instr_index,
                 }, null),
                 .loop_body => clr_allocator.allocPrint(arena, "fn_{d}_loop_body_{d}", .{
@@ -2503,6 +2537,10 @@ const FunctionGen = union(enum) {
                     \\fn fn_{d}_switch_case_{d}_{d}(state: State) anyerror!void {{
                     \\
                 , .{ s.func_index, sc.case_index, s.instr_index }, null),
+                .loop_switch_case => |lsc| clr_allocator.allocPrint(arena,
+                    \\fn fn_{d}_loop_switch_case_{d}_{d}(state: State) anyerror!void {{
+                    \\
+                , .{ s.func_index, lsc.case_index, s.instr_index }, null),
                 .loop_body => clr_allocator.allocPrint(arena,
                     \\fn fn_{d}_loop_body_{d}(state: State) anyerror!void {{
                     \\
@@ -2575,8 +2613,10 @@ fn extractCondBrBodies(cond_br_idx: usize, data: []const Data, extra: []const u3
 /// Switch case info for extraction
 const SwitchCaseInfo = struct {
     body: []const u32,
-    /// Field index if this case matches an enum tag (for union switch)
+    /// Field index if this case matches an enum tag (for union or enum switch)
     field_index: ?u32 = null,
+    /// First item Ref for this case (used to match switch_dispatch targets)
+    first_item: ?Ref = null,
 };
 
 /// Result of extracting switch bodies
@@ -2626,25 +2666,25 @@ fn extractSwitchBrBodies(arena: std.mem.Allocator, ip: *const InternPool, switch
         const body_len = extra[extra_index + 2];
         extra_index += 3;
 
-        // Extract field_index from first item if this is a union switch
+        // Extract field_index and first_item from first item (for any switch with items)
         var field_index: ?u32 = null;
-        if (union_operand != null and items_len > 0) {
+        var first_item: ?Ref = null;
+        if (items_len > 0) {
             // Items are Ref values stored as u32s
             const item_ref: Ref = @enumFromInt(extra[extra_index]);
+            first_item = item_ref;
             if (item_ref.toInterned()) |interned_idx| {
                 field_index = extractEnumTagFieldIndex(ip, interned_idx);
             }
         }
 
         // Skip items and ranges
-        const items_start = extra_index;
-        _ = items_start;
         extra_index += items_len;
         extra_index += ranges_len * 2; // ranges are pairs
 
         // Extract body
         if (extra_index + body_len > extra.len) return null;
-        cases[i] = .{ .body = extra[extra_index..][0..body_len], .field_index = field_index };
+        cases[i] = .{ .body = extra[extra_index..][0..body_len], .field_index = field_index, .first_item = first_item };
         extra_index += body_len;
     }
 
@@ -2982,6 +3022,40 @@ fn generateOneFunction(
                     }
                 }
 
+                // Check for loop_switch_br - add all cases to worklist (similar to switch_br)
+                if (tag == .loop_switch_br) {
+                    if (extractSwitchBrBodies(info.arena, info.ip, idx, info.tags, info.data, info.extra)) |bodies| {
+                        const has_else = bodies.else_body.len > 0;
+                        const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                        // Add each case
+                        for (bodies.cases, 0..) |case, case_idx| {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .loop_switch_case = .{
+                                    .case_index = @intCast(case_idx),
+                                    .num_cases = num_cases,
+                                    .loop_switch_inst = idx,
+                                } },
+                                .body_indices = case.body,
+                            } }) catch @panic("out of memory");
+                        }
+                        // Add else case
+                        if (has_else) {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .loop_switch_case = .{
+                                    .case_index = @intCast(bodies.cases.len),
+                                    .num_cases = num_cases,
+                                    .loop_switch_inst = idx,
+                                } },
+                                .body_indices = bodies.else_body,
+                            } }) catch @panic("out of memory");
+                        }
+                    }
+                }
+
                 // Check for loop - add loop body to worklist
                 // Loop uses the same Block payload structure as block
                 if (tag == .loop) {
@@ -3072,6 +3146,38 @@ fn generateOneFunction(
                     }
                 }
 
+                // Check for nested loop_switch_br
+                if (tag == .loop_switch_br) {
+                    if (extractSwitchBrBodies(info.arena, info.ip, idx, info.tags, info.data, info.extra)) |bodies| {
+                        const has_else = bodies.else_body.len > 0;
+                        const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                        for (bodies.cases, 0..) |case, case_idx| {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .loop_switch_case = .{
+                                    .case_index = @intCast(case_idx),
+                                    .num_cases = num_cases,
+                                    .loop_switch_inst = idx,
+                                } },
+                                .body_indices = case.body,
+                            } }) catch @panic("out of memory");
+                        }
+                        if (has_else) {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .loop_switch_case = .{
+                                    .case_index = @intCast(bodies.cases.len),
+                                    .num_cases = num_cases,
+                                    .loop_switch_inst = idx,
+                                } },
+                                .body_indices = bodies.else_body,
+                            } }) catch @panic("out of memory");
+                        }
+                    }
+                }
+
                 // Check for nested loop
                 if (tag == .loop) {
                     if (extractBlockBody(idx, info.data, info.extra)) |body| {
@@ -3120,6 +3226,12 @@ fn generateOneFunction(
                 lines.append(info.arena, switch_br_line) catch @panic("out of memory");
                 total_len += switch_br_line.len;
             },
+            .loop_switch_case => |lsc| {
+                // Inject LoopSwitchBr tag at the start of loop switch case
+                const loop_switch_br_line = generateLoopSwitchBrTagLine(info.arena, lsc.case_index, lsc.num_cases, lsc.loop_switch_inst);
+                lines.append(info.arena, loop_switch_br_line) catch @panic("out of memory");
+                total_len += loop_switch_br_line.len;
+            },
             .loop_body => {
                 // No special tag line needed for loop body - loop handling is done in Inst.loop()
             },
@@ -3143,6 +3255,16 @@ fn generateOneFunction(
                 const has_else = bodies.else_body.len > 0;
                 const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
                 line = generateSwitchBrLine(info.arena, instr.idx, func_index, num_cases);
+            } else {
+                // Fallback to noop if extraction fails
+                line = generateNoopLine(info.arena, instr.idx);
+            }
+        } else if (instr.tag == .loop_switch_br) {
+            // Generate Inst.loop_switch_br call with all case function references
+            if (extractSwitchBrBodies(info.arena, info.ip, instr.idx, info.tags, info.data, info.extra)) |bodies| {
+                const has_else = bodies.else_body.len > 0;
+                const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                line = generateLoopSwitchBrLine(info.arena, instr.idx, func_index, num_cases);
             } else {
                 // Fallback to noop if extraction fails
                 line = generateNoopLine(info.arena, instr.idx);
@@ -3276,6 +3398,44 @@ fn generateSwitchBrTagLine(arena: std.mem.Allocator, case_index: u32, num_cases:
             \\
         , .{ case_index, num_cases }, null);
     }
+}
+
+/// Generate Inst.loop_switch_br call with all case function references.
+/// Similar to generateSwitchBrLine but for loop_switch_br (labeled switch with continue).
+fn generateLoopSwitchBrLine(arena: std.mem.Allocator, switch_idx: u32, func_index: u32, num_cases: u32) []const u8 {
+    // Build the tuple of function pointers: .{ fn_X_loop_switch_case_0_Y, fn_X_loop_switch_case_1_Y, ... }
+    var case_fns: []const u8 = ".{";
+    for (0..num_cases) |i| {
+        if (i > 0) {
+            case_fns = clr_allocator.allocPrint(arena, "{s}, fn_{d}_loop_switch_case_{d}_{d}", .{
+                case_fns,
+                func_index,
+                i,
+                switch_idx,
+            }, null);
+        } else {
+            case_fns = clr_allocator.allocPrint(arena, "{s} fn_{d}_loop_switch_case_{d}_{d}", .{
+                case_fns,
+                func_index,
+                i,
+                switch_idx,
+            }, null);
+        }
+    }
+    case_fns = clr_allocator.allocPrint(arena, "{s} }}", .{case_fns}, null);
+
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.loop_switch_br(state, {d}, {s});
+        \\
+    , .{ switch_idx, case_fns }, null);
+}
+
+/// Generate LoopSwitchBr tag line at the start of loop switch case functions
+fn generateLoopSwitchBrTagLine(arena: std.mem.Allocator, case_index: u32, num_cases: u32, loop_switch_inst: u32) []const u8 {
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.apply(state, 0, .{{ .loop_switch_br = .{{ .case_index = {d}, .num_cases = {d}, .loop_switch_inst = {d} }} }});
+        \\
+    , .{ case_index, num_cases, loop_switch_inst }, null);
 }
 
 /// Generate the getName function that maps field IDs to field names.

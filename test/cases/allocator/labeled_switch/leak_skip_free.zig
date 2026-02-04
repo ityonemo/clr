@@ -2,23 +2,23 @@
 const std = @import("std");
 
 pub fn main() u8 {
+    const State = enum { alloc, free, end };
     const allocator = std.heap.page_allocator;
 
-    state: switch (@as(u8, 0)) {
-        0 => {
+    state: switch (State.alloc) {
+        .alloc => {
             const ptr = allocator.create(u8) catch return 1;
             ptr.* = 42;
-            // Skip state 1 which would free, go directly to 2
-            continue :state 2;
+            // Skip free state, go directly to end
+            continue :state .end;
         },
-        1 => {
+        .free => {
             // This state would free but is never reached
             // (Would need ptr passed somehow - simplified test)
         },
-        2 => {
-            // Leak! ptr allocated in state 0 was never freed
+        .end => {
+            // Leak! ptr allocated in alloc state was never freed
         },
-        else => {},
     }
     return 0;
 }

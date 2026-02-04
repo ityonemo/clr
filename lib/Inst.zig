@@ -98,6 +98,7 @@ pub fn cond_br(
     var false_early_returns = std.ArrayListUnmanaged(State){};
 
     // Build state for each branch - same ctx, cloned refinements
+    // Propagate dispatch_target and copied_gids so switch_dispatch works inside cond_br
     const true_state = State{
         .ctx = ctx,
         .results = true_results,
@@ -107,6 +108,8 @@ pub fn cond_br(
         .modified_gids = &true_modified,
         .branch_returns = &true_returns,
         .early_returns = &true_early_returns,
+        .dispatch_target = state.dispatch_target,
+        .copied_gids = state.copied_gids,
     };
     const false_state = State{
         .ctx = ctx,
@@ -117,6 +120,8 @@ pub fn cond_br(
         .modified_gids = &false_modified,
         .branch_returns = &false_returns,
         .early_returns = &false_early_returns,
+        .dispatch_target = state.dispatch_target,
+        .copied_gids = state.copied_gids,
     };
 
     // Save ctx.meta before branches execute (they modify it via dbg_stmt)
@@ -139,8 +144,9 @@ pub fn cond_br(
     // Merge: walk results and call analysis merge for each slot that has refinements
     // Pass null for merge_base_gid - regular branch merges should merge all entities
     // Pass branch_base_len so splatMerge knows which entities existed before branches
+    // Pass state.copied_gids to track copyTo destinations across nested merges
     const branches = [_]State{ true_state, false_state };
-    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches, null, branch_base_len);
+    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches, null, branch_base_len, state.copied_gids);
 
     // Propagate early_returns to parent if tracking (ownership transfer)
     if (state.early_returns) |parent_early| {
@@ -251,7 +257,8 @@ pub fn switch_br(
     // Merge all branches using splatMerge
     // Pass null for merge_base_gid - regular branch merges should merge all entities
     // Pass branch_base_len so splatMerge knows which entities existed before branches
-    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states, null, branch_base_len);
+    // Pass state.copied_gids to track copyTo destinations across nested merges
+    try tag.splatMerge(.switch_br, results, ctx, state.refinements, &branch_states, null, branch_base_len, state.copied_gids);
 
     // Propagate early_returns to parent if tracking (ownership transfer)
     if (state.early_returns) |parent_early| {
@@ -277,6 +284,230 @@ pub fn switch_br(
     if (state.modified_gids) |parent_modified| {
         inline for (0..num_cases) |i| {
             try parent_modified.appendSlice(ctx.allocator, branch_modified[i].items);
+        }
+    }
+}
+
+/// Execute a loop_switch_br (labeled switch with continue :state support).
+/// Uses worklist-based fixed-point iteration to properly track state across dispatches.
+pub fn loop_switch_br(
+    state: State,
+    comptime index: usize,
+    comptime case_fns: anytype,
+) !void {
+    const ctx = state.ctx;
+    const results = state.results;
+    const return_gid = state.return_gid;
+    const allocator = ctx.allocator;
+
+    const num_cases = case_fns.len;
+    const MAX_ITERATIONS = 10000;
+
+    // Worklist item: case index + heap-allocated refinements
+    const WorkItem = struct {
+        case_idx: usize,
+        refinements: *Refinements,
+        results: []Inst,
+    };
+
+    // Key for convergence tracking: (case_index, state_hash)
+    const SeenKey = struct { case: usize, hash: u64 };
+
+    // Track seen (case_index, state_hash) for convergence
+    var seen_hashes = std.AutoHashMap(SeenKey, void).init(allocator);
+    defer seen_hashes.deinit();
+
+    // Worklist of cases to execute
+    var worklist = std.ArrayListUnmanaged(WorkItem){};
+    defer {
+        // Clean up any remaining worklist items
+        for (worklist.items) |item| {
+            clear_results_list(item.results, allocator);
+            item.refinements.deinit();
+            allocator.destroy(item.refinements);
+        }
+        worklist.deinit(allocator);
+    }
+
+    // Terminal states for merge (cases that exited without dispatching)
+    var terminal_states = std.ArrayListUnmanaged(State){};
+    defer {
+        for (terminal_states.items) |s| {
+            clear_results_list(s.results, allocator);
+            s.refinements.deinit();
+            allocator.destroy(s.refinements);
+        }
+        terminal_states.deinit(allocator);
+    }
+
+    // Accumulated early returns from all case executions
+    var all_early_returns = std.ArrayListUnmanaged(State){};
+    defer all_early_returns.deinit(allocator);
+
+    // Track GIDs created by copyTo across nested merges (cond_br inside cases)
+    // This allows orphan detection to skip stale copies of allocations
+    var copied_gids = std.AutoHashMap(Refinements.Gid, void).init(allocator);
+    defer copied_gids.deinit();
+
+    // Save ctx.meta before execution
+    const saved_meta = ctx.meta;
+
+    // Start with entry case (case 0) and cloned state
+    const entry_refinements = try allocator.create(Refinements);
+    entry_refinements.* = try state.refinements.clone(allocator);
+    const entry_results = try clone_results_list(results, allocator);
+    try worklist.append(allocator, .{
+        .case_idx = 0,
+        .refinements = entry_refinements,
+        .results = entry_results,
+    });
+
+    // Fixed-point iteration
+    var iteration: usize = 0;
+    while (worklist.items.len > 0 and iteration < MAX_ITERATIONS) : (iteration += 1) {
+        const item = worklist.pop().?;
+        const case_idx = item.case_idx;
+
+        // Hash state for convergence detection
+        const state_hash = item.refinements.hash();
+
+        // Check if we've seen this (case, state) before
+        const key = SeenKey{ .case = case_idx, .hash = state_hash };
+        if (seen_hashes.contains(key)) {
+            // Already processed - clean up and skip
+            clear_results_list(item.results, allocator);
+            item.refinements.deinit();
+            allocator.destroy(item.refinements);
+            continue;
+        }
+        try seen_hashes.put(key, {});
+
+        // Set up dispatch tracking
+        var dispatch_target: ?usize = null;
+
+        // Create tracking lists for this execution
+        var case_created = std.ArrayListUnmanaged(Refinements.Gid){};
+        defer case_created.deinit(allocator);
+        var case_modified = std.ArrayListUnmanaged(Refinements.Gid){};
+        defer case_modified.deinit(allocator);
+        var case_returns: bool = false;
+        var case_early_returns = std.ArrayListUnmanaged(State){};
+
+        // Build state for this case execution
+        const case_state = State{
+            .ctx = ctx,
+            .results = item.results,
+            .refinements = item.refinements,
+            .return_gid = return_gid,
+            .base_gid = state.base_gid,
+            .created_gids = &case_created,
+            .modified_gids = &case_modified,
+            .branch_returns = &case_returns,
+            .early_returns = &case_early_returns,
+            .dispatch_target = &dispatch_target,
+            .copied_gids = &copied_gids,
+        };
+
+        // Execute the matching case using inline for
+        inline for (0..num_cases) |i| {
+            if (i == case_idx) {
+                try case_fns[i](case_state);
+            }
+        }
+
+        // Collect early returns
+        try all_early_returns.appendSlice(allocator, case_early_returns.items);
+        case_early_returns.deinit(allocator);
+
+        // Propagate created/modified GIDs to parent
+        if (state.created_gids) |parent_created| {
+            try parent_created.appendSlice(allocator, case_created.items);
+        }
+        if (state.modified_gids) |parent_modified| {
+            try parent_modified.appendSlice(allocator, case_modified.items);
+        }
+
+        if (dispatch_target) |target| {
+            // Case dispatched to another case - add to worklist with current state
+            // Clone the state for the next case
+            const next_refinements = try allocator.create(Refinements);
+            next_refinements.* = try item.refinements.clone(allocator);
+            const next_results = try clone_results_list(item.results, allocator);
+            try worklist.append(allocator, .{
+                .case_idx = target,
+                .refinements = next_refinements,
+                .results = next_results,
+            });
+            // Clean up current item (state transferred to worklist)
+            clear_results_list(item.results, allocator);
+            item.refinements.deinit();
+            allocator.destroy(item.refinements);
+        } else {
+            // Case terminated (br out or fell through) - save as terminal state
+            try terminal_states.append(allocator, State{
+                .ctx = ctx,
+                .results = item.results,
+                .refinements = item.refinements,
+                .return_gid = return_gid,
+                .base_gid = state.base_gid,
+            });
+        }
+    }
+
+    // Restore ctx.meta for the merge
+    ctx.meta = saved_meta;
+
+    // Record base_len BEFORE creating void
+    const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
+
+    // Mark the switch instruction as void
+    results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+
+    // Merge all terminal states
+    if (terminal_states.items.len > 0) {
+        try tag.splatMerge(.loop_switch_br, results, ctx, state.refinements, terminal_states.items, null, branch_base_len, &copied_gids);
+
+        // Also merge result slots that exist in terminal states but not in main results.
+        // This handles entities created inside switch cases (e.g., allocations).
+        for (results, 0..) |*result, result_idx| {
+            if (result.refinement != null) continue; // Already handled by splatMerge
+
+            // Check if any terminal state has a refinement for this slot
+            var any_has_refinement = false;
+            for (terminal_states.items) |ts| {
+                if (ts.results[result_idx].refinement != null) {
+                    any_has_refinement = true;
+                    break;
+                }
+            }
+            if (!any_has_refinement) continue;
+
+            // Copy refinement from first terminal state that has it, then merge all
+            for (terminal_states.items) |ts| {
+                if (ts.results[result_idx].refinement) |gid| {
+                    // Recursively copy the entire entity structure (including nested entities)
+                    const ref = ts.refinements.at(gid).*;
+                    result.refinement = try Refinements.Refinement.copyTo(
+                        ref,
+                        ts.refinements,
+                        state.refinements,
+                    );
+                    break;
+                }
+            }
+
+            // Now merge this slot across all terminal states
+            try tag.splatMergeByGid(.loop_switch_br, state.refinements, result.refinement.?, ctx, terminal_states.items, result_idx);
+        }
+    }
+
+    // Propagate early_returns to parent
+    if (state.early_returns) |parent_early| {
+        try parent_early.appendSlice(allocator, all_early_returns.items);
+    } else {
+        for (all_early_returns.items) |s| {
+            s.refinements.deinit();
+            allocator.destroy(s.refinements);
         }
     }
 }
@@ -387,10 +618,8 @@ pub fn loop(
             break;
         }
 
-        // Hash post-iteration analysis state (only up to base_gid for pre-loop entities)
-        var hasher = std.hash.Wyhash.init(0);
-        iter_refinements_ptr.hashAnalysisState(state.base_gid, &hasher);
-        const hash = hasher.final();
+        // Hash post-iteration analysis state for convergence detection
+        const hash = iter_refinements_ptr.hash();
 
         // Check for convergence or cycle
         if (seen_hashes.get(hash)) |_| {
@@ -496,7 +725,7 @@ pub fn loop(
 
     // Merge all states (iterations + exits)
     if (all_states.items.len > 0) {
-        try tag.splatMerge(.loop, results, ctx, state.refinements, all_states.items, null, branch_base_len);
+        try tag.splatMerge(.loop, results, ctx, state.refinements, all_states.items, null, branch_base_len, state.copied_gids);
     }
 }
 

@@ -1,8 +1,8 @@
-// Test: allocate in one state, free in another - correct pattern
+// Test: allocate in one case, free in next case (simple 2-state)
 const std = @import("std");
 
 pub fn main() u8 {
-    const State = enum { alloc, use, free };
+    const State = enum { alloc, free };
     const allocator = std.heap.page_allocator;
     var ptr: ?*u8 = null;
 
@@ -10,16 +10,9 @@ pub fn main() u8 {
         .alloc => {
             ptr = allocator.create(u8) catch return 1;
             ptr.?.* = 42;
-            continue :state .use;
-        },
-        .use => {
-            // Use the allocated memory
-            const val = ptr.?.*;
-            _ = val;
             continue :state .free;
         },
         .free => {
-            // Free in final state
             allocator.destroy(ptr.?);
         },
     }

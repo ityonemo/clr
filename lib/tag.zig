@@ -1342,6 +1342,42 @@ pub const SwitchBr = struct {
     }
 };
 
+/// Tag injected at the start of each loop_switch_br case body.
+/// Similar to SwitchBr but for labeled switches that support continue :state.
+pub const LoopSwitchBr = struct {
+    /// Which case this is (0-indexed). The else case is the last index.
+    case_index: usize,
+    /// Total number of cases including else (for analysis context).
+    num_cases: usize,
+    /// The instruction index of the loop_switch_br this case belongs to.
+    loop_switch_inst: usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = index;
+        try splat(.loop_switch_br, state, 0, self);
+    }
+};
+
+/// SwitchDispatch transfers control to another case of a loop_switch_br.
+/// Similar to Repeat but for loop_switch - continues to a specified case.
+/// Result type is always noreturn.
+pub const SwitchDispatch = struct {
+    /// The loop_switch_br instruction this dispatch belongs to.
+    loop_switch_inst: usize,
+    /// The target case index to dispatch to.
+    target_case: usize,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Switch dispatch is noreturn (control transfers to another case)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .noreturn = {} });
+        // Signal which case we're dispatching to
+        if (state.dispatch_target) |target_ptr| {
+            target_ptr.* = self.target_case;
+        }
+        try splat(.switch_dispatch, state, index, self);
+    }
+};
+
 /// Noop tag for unreferenced instructions with garbage data.
 /// These instructions exist in the AIR array but are not in any body.
 pub const Noop = struct {
@@ -1638,6 +1674,8 @@ pub const AnyTag = union(enum) {
     block: Block,
     cond_br: CondBr,
     switch_br: SwitchBr,
+    loop_switch_br: LoopSwitchBr,
+    switch_dispatch: SwitchDispatch,
     loop: Loop,
     repeat: Repeat,
     dbg_empty_stmt: Unimplemented(.{ .void = true }),
@@ -1789,7 +1827,7 @@ pub fn splatMergeEarlyReturns(
         };
     }
 
-    try splatMerge(.early_return, results, ctx, refinements, branches, base_gid, null);
+    try splatMerge(.early_return, results, ctx, refinements, branches, base_gid, null, null);
 
     // Also merge the return value from all early_returns.
     // The return_gid is not in the results table (ret_safe sets result to void),
@@ -1815,6 +1853,10 @@ pub fn splatMergeEarlyReturns(
         var merged = std.AutoHashMap(Gid, void).init(allocator);
         defer merged.deinit();
 
+        // Early returns don't need copy tracking (no orphan detection)
+        var copied_dummy = std.AutoHashMap(Gid, void).init(allocator);
+        defer copied_dummy.deinit();
+
         try mergeRefinementRecursive(
             .early_return,
             allocator,
@@ -1824,6 +1866,7 @@ pub fn splatMergeEarlyReturns(
             filtered,
             branch_gids,
             &merged,
+            &copied_dummy,
         );
     }
 }
@@ -1929,6 +1972,10 @@ pub fn splatMerge(
     branches: []const State,
     merge_base_gid: ?Gid,
     branch_base_len: ?Gid,
+    /// Optional hashmap to track GIDs created by copyTo across nested merges.
+    /// Pass the same hashmap through nested cond_br/switch_br calls to accumulate
+    /// all copyTo destinations. Used by orphan detection to skip stale copies.
+    parent_copied_gids: ?*std.AutoHashMap(Gid, void),
 ) !void {
     const allocator = ctx.allocator;
 
@@ -1950,6 +1997,11 @@ pub fn splatMerge(
     // Track merged GIDs to avoid re-merging the same entity
     var merged = std.AutoHashMap(Gid, void).init(allocator);
     defer merged.deinit();
+
+    // Track branch GIDs that were "consumed" by copying to parent
+    // These should not be treated as orphaned
+    var copied_from_branch = std.AutoHashMap(Gid, void).init(allocator);
+    defer copied_from_branch.deinit();
 
     // Reusable array for branch GID values
     const branch_gids = try allocator.alloc(?Gid, filtered.len);
@@ -2011,11 +2063,29 @@ pub fn splatMerge(
                         for (filtered) |branch_opt| {
                             const branch = branch_opt orelse continue;
                             const src_ref = branch.refinements.at(new_gid).*;
+
+                            // Track source GIDs that will be consumed by this copy
+                            // The source entity itself and all reachable nested entities
+                            try copied_from_branch.put(new_gid, {});
+                            try Refinement.collectReachableGids(src_ref, branch.refinements, &copied_from_branch);
+
+                            // Track destination GIDs for nested merge propagation
+                            const pre_copy_len = refinements.list.items.len;
+
                             const copied_gid = try Refinement.copyTo(
                                 src_ref,
                                 branch.refinements,
                                 refinements,
                             );
+
+                            // Record all destination GIDs created by copyTo
+                            // These are "merge products" that shouldn't be flagged as orphans in outer merges
+                            if (parent_copied_gids) |pcg| {
+                                for (pre_copy_len..refinements.list.items.len) |dest_gid| {
+                                    try pcg.put(@intCast(dest_gid), {});
+                                }
+                            }
+
                             result.refinement = copied_gid;
                             // Don't update branch_gids - they need to stay pointing to
                             // original branch entities for mergeRefinementRecursive to look them up
@@ -2040,6 +2110,7 @@ pub fn splatMerge(
             filtered,
             branch_gids,
             &merged,
+            &copied_from_branch,
         );
     }
 
@@ -2054,12 +2125,72 @@ pub fn splatMerge(
 
         for (base_len..branch_len) |gid_usize| {
             const gid: Gid = @intCast(gid_usize);
+            // Skip if this entity was copied to parent (not truly orphaned)
+            if (copied_from_branch.contains(gid)) continue;
+            // Skip if this entity was created by copyTo in a nested merge (stale copy)
+            // These are "merge products" that exist in the branch but represent already-handled allocations
+            if (parent_copied_gids) |pcg| {
+                if (pcg.contains(gid)) continue;
+            }
             // If not in merged set, it's orphaned (unreachable from results)
             if (!merged.contains(gid)) {
                 try splatOrphaned(ctx, refinements, branch.refinements, gid);
             }
         }
     }
+}
+
+/// Merge a specific GID across terminal states by result index.
+/// Used for entities created inside switch cases that don't exist in main results.
+pub fn splatMergeByGid(
+    comptime merge_tag: anytype,
+    refinements: *Refinements,
+    orig_gid: Gid,
+    ctx: *Context,
+    branches: []const State,
+    result_idx: usize,
+) !void {
+    const allocator = ctx.allocator;
+
+    // Build filtered branch array
+    const filtered = try allocator.alloc(?State, branches.len);
+    defer allocator.free(filtered);
+
+    for (branches, 0..) |branch, i| {
+        filtered[i] = if (branchIsUnreachable(branch)) null else branch;
+    }
+
+    // Build branch_gids array from result index
+    const branch_gids = try allocator.alloc(?Gid, branches.len);
+    defer allocator.free(branch_gids);
+
+    for (filtered, 0..) |branch_opt, i| {
+        if (branch_opt) |branch| {
+            branch_gids[i] = branch.results[result_idx].refinement;
+        } else {
+            branch_gids[i] = null;
+        }
+    }
+
+    // Merge recursively
+    var merged = std.AutoHashMap(Gid, void).init(allocator);
+    defer merged.deinit();
+
+    // splatMergeByGid doesn't do orphan detection, so use dummy
+    var copied_dummy = std.AutoHashMap(Gid, void).init(allocator);
+    defer copied_dummy.deinit();
+
+    try mergeRefinementRecursive(
+        merge_tag,
+        allocator,
+        ctx,
+        refinements,
+        orig_gid,
+        filtered,
+        branch_gids,
+        &merged,
+        &copied_dummy,
+    );
 }
 
 /// Follow .to field for each branch's gid, updating branch_gids in place.
@@ -2086,6 +2217,7 @@ fn mergeRefinementRecursive(
     branches: []const ?State,
     branch_gids: []?Gid,
     merged: *std.AutoHashMap(Gid, void),
+    copied_from_branch: *std.AutoHashMap(Gid, void),
 ) !void {
     // Skip if we've already merged this entity
     if (merged.contains(orig_gid)) return;
@@ -2109,17 +2241,99 @@ fn mergeRefinementRecursive(
     const orig_ref = refinements.at(orig_gid);
     switch (orig_ref.*) {
         // Pointer: check rejection logic before following and merging
-        .pointer => |p| {
+        .pointer => |*p| {
             // TODO: pointer rejection logic (all same original OR all new, not mixed)
             followBranchGids(.pointer, branches, branch_gids);
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, p.to, branches, branch_gids, merged);
+
+            // Check if branches have a consistent different .to than parent
+            // This happens when stores update the pointer's target reference
+            var consistent_inner: ?Gid = null;
+            var all_same = true;
+            var first_branch: ?*Refinements = null;
+            for (branches, branch_gids) |branch_opt, gid_opt| {
+                const gid = gid_opt orelse continue;
+                if (first_branch == null) {
+                    if (branch_opt) |b| first_branch = b.refinements;
+                }
+                if (consistent_inner) |prev| {
+                    if (prev != gid) {
+                        all_same = false;
+                        break;
+                    }
+                } else {
+                    consistent_inner = gid;
+                }
+            }
+
+            // If all branches point to a different target, copy to parent if needed and update
+            const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != p.to) blk: {
+                const branch_inner = consistent_inner.?;
+                // If the inner GID doesn't exist in parent, copy entire subtree from branch
+                if (branch_inner >= refinements.list.items.len) {
+                    const branch_ref = first_branch.?;
+                    const src_ref = branch_ref.at(branch_inner).*;
+                    // Track source entities as copied before copyTo
+                    try copied_from_branch.put(branch_inner, {});
+                    try Refinement.collectReachableGids(src_ref, branch_ref, copied_from_branch);
+                    const copied_gid = try Refinement.copyTo(src_ref, branch_ref, refinements);
+                    // Re-fetch the refinement after copyTo (may have reallocated)
+                    refinements.at(orig_gid).pointer.to = copied_gid;
+                    break :blk copied_gid;
+                } else {
+                    p.to = branch_inner;
+                    break :blk branch_inner;
+                }
+            } else p.to;
+
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
         },
         // For optional/errorunion: follow .to in all branches
         // Types always match when following the same structural path
         // If branch exists, gid exists (they're always in sync)
-        inline .optional, .errorunion => |data, tag| {
+        inline .optional, .errorunion => |*data, tag| {
             followBranchGids(tag, branches, branch_gids);
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, data.to, branches, branch_gids, merged);
+
+            // Check if branches have a consistent different .to than parent
+            // This happens when stores update the container's inner reference
+            var consistent_inner: ?Gid = null;
+            var all_same = true;
+            var first_branch: ?*Refinements = null;
+            for (branches, branch_gids) |branch_opt, gid_opt| {
+                const gid = gid_opt orelse continue;
+                if (first_branch == null) {
+                    if (branch_opt) |b| first_branch = b.refinements;
+                }
+                if (consistent_inner) |prev| {
+                    if (prev != gid) {
+                        all_same = false;
+                        break;
+                    }
+                } else {
+                    consistent_inner = gid;
+                }
+            }
+
+            // If all branches point to a different inner, copy to parent if needed and update
+            // Note: We always copy because branch GIDs are in a different refinements table
+            // and cannot be directly assigned to parent's .to
+            const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != data.to) blk: {
+                const branch_inner = consistent_inner.?;
+                const branch_ref = first_branch.?;
+                const src_ref = branch_ref.at(branch_inner).*;
+                // Track source entities as copied before copyTo
+                try copied_from_branch.put(branch_inner, {});
+                try Refinement.collectReachableGids(src_ref, branch_ref, copied_from_branch);
+                const copied_gid = try Refinement.copyTo(src_ref, branch_ref, refinements);
+                // Re-fetch the refinement after copyTo (may have reallocated)
+                switch (refinements.at(orig_gid).*) {
+                    .optional => |*o| o.to = copied_gid,
+                    .errorunion => |*e| e.to = copied_gid,
+                    else => unreachable,
+                }
+                break :blk copied_gid;
+            } else data.to;
+
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
         },
         .@"struct" => |s| {
             // Need separate array for struct fields since we recurse multiple times
@@ -2137,7 +2351,7 @@ fn mergeRefinementRecursive(
                     };
                     field_gids[i] = branch.refinements.at(branch_gid).@"struct".fields[field_i];
                 }
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged);
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch);
             }
         },
         .@"union" => |u| {
@@ -2166,9 +2380,12 @@ fn mergeRefinementRecursive(
                     for (branches, field_gids) |branch_opt, branch_field_gid_opt| {
                         const branch = branch_opt orelse continue;
                         const branch_field_gid = branch_field_gid_opt orelse continue;
+                        // Track source entities as copied before copyTo
+                        const branch_field_ref = branch.refinements.at(branch_field_gid).*;
+                        try copied_from_branch.put(branch_field_gid, {});
+                        try Refinement.collectReachableGids(branch_field_ref, branch.refinements, copied_from_branch);
                         // Cross-table copy: use Refinement.copyTo which properly handles
                         // pointer .to fields by recursively copying pointees
-                        const branch_field_ref = branch.refinements.at(branch_field_gid).*;
                         const new_idx = try Refinement.copyTo(branch_field_ref, branch.refinements, refinements);
                         // NOTE: copyTo may reallocate, so re-fetch the union's fields pointer
                         refinements.at(orig_gid).@"union".fields[field_i] = new_idx;
@@ -2178,7 +2395,7 @@ fn mergeRefinementRecursive(
                     continue;
                 };
 
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged);
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch);
             }
         },
         else => {},

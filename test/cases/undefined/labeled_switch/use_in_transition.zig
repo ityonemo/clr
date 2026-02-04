@@ -1,16 +1,16 @@
 // Test: use undefined value in state transition
 pub fn main() u8 {
+    const State = enum { start, end };
     var x: u8 = undefined;
     var counter: u8 = 0;
-    state: switch (@as(u8, 0)) {
-        0 => {
+    state: switch (State.start) {
+        .start => {
             counter = x; // ERROR: x is undefined
-            continue :state 1;
+            continue :state .end;
         },
-        1 => {
+        .end => {
             x = 42;
         },
-        else => {},
     }
     return counter;
 }

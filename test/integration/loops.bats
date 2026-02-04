@@ -49,8 +49,7 @@ load test_helper
 # =============================================================================
 
 @test "detects undefined array elements in for loop" {
-    # SKIP: add tag not implemented - for loops use add for index iteration
-    skip "add tag not implemented"
+    skip "add tag not implemented - for loops use add for index iteration"
     run compile_and_run "$TEST_CASES/undefined/loops/for_undefined_array.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in for_undefined_array.main" ]]
@@ -58,8 +57,7 @@ load test_helper
 }
 
 @test "for with index capture - both paths define variable" {
-    # SKIP: add tag not implemented - for loops use add for index iteration
-    skip "add tag not implemented"
+    skip "add tag not implemented - for loops use add for index iteration"
     run compile_and_run "$TEST_CASES/undefined/loops/for_else_with_index.zig"
     [ "$status" -eq 0 ]
 }
@@ -69,15 +67,13 @@ load test_helper
 # =============================================================================
 
 @test "for..else - variable defined in both break and else paths" {
-    # SKIP: add tag not implemented - for loops use add for index iteration
-    skip "add tag not implemented"
+    skip "add tag not implemented - for loops use add for index iteration"
     run compile_and_run "$TEST_CASES/undefined/loops/for_else_defines_var.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "for..else - detects undefined when only else defines variable" {
-    # SKIP: add tag not implemented - for loops use add for index iteration
-    skip "add tag not implemented"
+    skip "add tag not implemented - for loops use add for index iteration"
     run compile_and_run "$TEST_CASES/undefined/loops/for_else_only_else_defines.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "may be undefined" ]]
@@ -85,8 +81,7 @@ load test_helper
 }
 
 @test "while..else - detects leak when only else frees" {
-    # SKIP: Loop-else paths not tracked for memory safety - leak on break not detected
-    skip "Loop-else memory tracking not implemented"
+    skip "loop-else memory tracking: break vs else paths not differentiated"
     run compile_and_run "$TEST_CASES/allocator/loops/while_else_free.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
@@ -94,8 +89,6 @@ load test_helper
 }
 
 @test "while..else - no error when both paths free" {
-    # SKIP: Error path analysis not yet implemented - see better-error-analysis.md
-    skip "Error path analysis needed - see better-error-analysis.md"
     run compile_and_run "$TEST_CASES/allocator/loops/while_else_both_free.zig"
     [ "$status" -eq 0 ]
 }
@@ -150,10 +143,6 @@ load test_helper
 }
 
 @test "no error when allocating and freeing in same iteration" {
-    # SKIP: Error path analysis not yet implemented - see better-error-analysis.md
-    # The catch return 1 creates an early_return state with allocation metadata
-    # from alloc_create, even though the allocation didn't succeed on the error path
-    skip "Error path analysis needed - see better-error-analysis.md"
     run compile_and_run "$TEST_CASES/allocator/loops/alloc_free_each_iteration.zig"
     [ "$status" -eq 0 ]
 }
@@ -186,8 +175,7 @@ load test_helper
 }
 
 @test "no error with correct nested loop cleanup" {
-    # SKIP: Same issue as alloc_free_each_iteration - see better-error-analysis.md
-    skip "Error path analysis needed - see better-error-analysis.md"
+    skip "error path analysis: catch return creates false positive leak"
     run compile_and_run "$TEST_CASES/allocator/loops/nested_correct_cleanup.zig"
     [ "$status" -eq 0 ]
 }

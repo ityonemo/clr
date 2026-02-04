@@ -1,19 +1,19 @@
 // Test: state machine where skipping a state leaves variable undefined
 pub fn main() u8 {
+    const State = enum { start, define, final };
     var result: u8 = undefined;
-    state: switch (@as(u8, 0)) {
-        0 => {
-            // Skip state 1 where result would be defined
-            continue :state 2;
+    state: switch (State.start) {
+        .start => {
+            // Skip define state where result would be defined
+            continue :state .final;
         },
-        1 => {
+        .define => {
             result = 42;
-            continue :state 2;
+            continue :state .final;
         },
-        2 => {
-            // result is undefined if we came from state 0
+        .final => {
+            // result is undefined if we came from start
         },
-        else => {},
     }
-    return result; // ERROR: may be undefined (path 0->2 skips definition)
+    return result; // ERROR: may be undefined (path start->final skips definition)
 }
