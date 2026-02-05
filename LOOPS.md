@@ -127,3 +127,19 @@ pub const LoopFrame = struct {
 
 - `test/cases/allocator/loops/double_free_loop.zig` - Detects double-free (was incorrectly reporting leak)
 - `test/cases/allocator/loops/leak_in_loop.zig` - Still correctly detects leaks
+
+## Limitations
+
+### Undefined Array Elements in For Loops
+
+We cannot detect undefined elements when iterating over a partially-initialized array:
+
+```zig
+var arr: [3]u8 = undefined;
+arr[0] = 1; // Only element 0 is defined
+for (arr) |item| {
+    sum += item; // arr[1] and arr[2] are undefined - NOT DETECTED
+}
+```
+
+This is because region tracking uses uniform state for all elements. When `arr[0] = 1` is executed, the region's undefined state is cleared uniformly, even though only one element was assigned. Tracking per-element undefined state would require a different representation.

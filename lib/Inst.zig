@@ -645,14 +645,12 @@ pub fn loop(
         // Record hash and save iteration state
         try seen_hashes.put(hash, iteration);
 
-        // Propagate early_returns to parent (ownership transfer)
-        if (state.early_returns) |parent_early| {
-            try parent_early.appendSlice(allocator, iter_early_returns.items);
-        } else {
-            for (iter_early_returns.items) |s| {
-                s.refinements.deinit();
-                allocator.destroy(s.refinements);
-            }
+        // Discard early_returns from intermediate iterations - they have GIDs that
+        // are only valid for this iteration's refinements. Only propagate early_returns
+        // from the final iteration (when converged or loop exits).
+        for (iter_early_returns.items) |s| {
+            s.refinements.deinit();
+            allocator.destroy(s.refinements);
         }
         iter_early_returns.deinit(allocator);
 

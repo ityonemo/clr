@@ -48,13 +48,6 @@ load test_helper
 # For Loop Tests
 # =============================================================================
 
-@test "detects undefined array elements in for loop" {
-    run compile_and_run "$TEST_CASES/undefined/loops/for_undefined_array.zig"
-    [ "$status" -ne 0 ]
-    [[ "$output" =~ "use of undefined value found in for_undefined_array.main" ]]
-    [[ "$output" =~ "for_undefined_array.zig" ]]
-}
-
 @test "for with index capture - both paths define variable" {
     run compile_and_run "$TEST_CASES/undefined/loops/for_else_with_index.zig"
     [ "$status" -eq 0 ]
@@ -171,6 +164,18 @@ load test_helper
 
 @test "no error with correct nested loop cleanup" {
     run compile_and_run "$TEST_CASES/allocator/loops/nested_correct_cleanup.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects leak when inner allocation fails without cleanup" {
+    run compile_and_run "$TEST_CASES/allocator/loops/nested_inner_error_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+    [[ "$output" =~ "nested_inner_error_leak.zig" ]]
+}
+
+@test "no error with errdefer cleanup in nested loops" {
+    run compile_and_run "$TEST_CASES/allocator/loops/nested_errdefer_cleanup.zig"
     [ "$status" -eq 0 ]
 }
 

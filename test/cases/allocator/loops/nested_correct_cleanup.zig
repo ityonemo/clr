@@ -11,7 +11,10 @@ pub fn main() u8 {
 
         var j: u8 = 0;
         while (j < 3) : (j += 1) {
-            const inner_ptr = allocator.create(u8) catch return 1;
+            const inner_ptr = allocator.create(u8) catch {
+                allocator.destroy(outer_ptr); // Clean up outer before returning
+                return 1;
+            };
             inner_ptr.* = j;
             allocator.destroy(inner_ptr); // Clean up inner allocation
         }

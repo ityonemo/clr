@@ -668,6 +668,7 @@ pub const MemorySafety = union(enum) {
             // Get the pointee entity via ptr.to
             const pointee_idx = refinement.pointer.to;
             const pointee = refinements.at(pointee_idx);
+
             const pointee_analyte = getAnalytePtr(pointee);
 
             // Check pointee's memory_safety for allocation state
@@ -675,6 +676,7 @@ pub const MemorySafety = union(enum) {
             if (ms != .allocated) continue;
 
             const allocation = ms.allocated;
+
             // Skip if freed, returned to caller, or (in non-main) reachable from a global
             // In main, even global-reachable allocations must be freed before program exit
             const skip_global_reachable = !in_main and global_reachable.contains(pointee_idx);
@@ -1787,6 +1789,7 @@ pub const MemorySafety = union(enum) {
         if (ms != .allocated) return;
 
         const allocation = ms.allocated;
+
         // If allocation is not freed and not returned, it's a leak
         if (allocation.freed == null and !allocation.returned) {
             return reportMemoryLeak(ctx, allocation);
