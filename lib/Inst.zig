@@ -720,10 +720,12 @@ pub fn loop(
         }
     }
 
-    // Add iteration states SECOND (index 1+) - these represent loop body executions
-    try all_states.appendSlice(allocator, iteration_states.items);
+    // NOTE: iteration_states are NOT included in the merge.
+    // For undefined_safety: only exit paths (br_states) matter - iteration states are intermediate
+    // For memory_safety: exit paths reflect any state changes from loop body (frees, etc.)
+    // Iteration states represent "loop continues" not "loop exits" - merging them causes false positives
 
-    // Merge all states (iterations + exits)
+    // Merge exit states only (br_states)
     if (all_states.items.len > 0) {
         try tag.splatMerge(.loop, results, ctx, state.refinements, all_states.items, null, branch_base_len, state.copied_gids);
     }

@@ -1685,14 +1685,13 @@ pub const MemorySafety = union(enum) {
                 .allocated => |*orig_alloc| {
                     if (orig_alloc.freed == null) {
                         if (is_loop_merge) {
-                            // Loop merge: ignore index 0 (null case), check if ANY iteration freed
-                            // If any iteration freed, mark as freed (double-free detected at runtime)
-                            var any_iteration_freed = false;
+                            // Loop merge: check if ANY exit path freed the allocation.
+                            // If any exit path freed, mark as freed (double-free detected at runtime).
+                            // Note: we only receive br_states (exit paths), not iteration_states.
+                            var any_exit_freed = false;
                             var first_freed: ?Free = null;
 
-                            // Skip index 0 (null case), check iterations only
-                            const iteration_start: usize = if (branches.len > 0) 1 else 0;
-                            for (branches[iteration_start..], branch_gids[iteration_start..]) |branch_opt, branch_gid_opt| {
+                            for (branches, branch_gids) |branch_opt, branch_gid_opt| {
                                 const branch = branch_opt orelse continue;
                                 const branch_gid = branch_gid_opt orelse continue;
                                 const branch_ref = branch.refinements.at(branch_gid);
@@ -1703,15 +1702,15 @@ pub const MemorySafety = union(enum) {
                                 };
                                 const branch_ms = branch_analyte.memory_safety.?;
                                 if (branch_ms.allocated.freed) |freed| {
-                                    any_iteration_freed = true;
+                                    any_exit_freed = true;
                                     if (first_freed == null) {
                                         first_freed = freed;
                                     }
                                 }
                             }
 
-                            // If any iteration freed, propagate freed state
-                            if (any_iteration_freed and first_freed != null) {
+                            // If any exit path freed, propagate freed state
+                            if (any_exit_freed and first_freed != null) {
                                 orig_alloc.freed = first_freed;
                             }
                         } else {
