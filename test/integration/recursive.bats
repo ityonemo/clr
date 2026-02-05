@@ -47,3 +47,33 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
 }
+
+# Recursive union tests
+
+@test "no error when recursive union field is defined" {
+    run compile_and_run "$TEST_CASES/undefined/recursive/undefined_union_field.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined value via recursive union pointer" {
+    run compile_and_run "$TEST_CASES/undefined/recursive/undefined_union_recursive_field.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value" ]]
+}
+
+@test "no false positive for correct expression tree cleanup" {
+    run compile_and_run "$TEST_CASES/allocator/recursive/expr_tree_correct.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects memory leak in expression tree" {
+    run compile_and_run "$TEST_CASES/allocator/recursive/expr_tree_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+}
+
+@test "detects double free in expression tree" {
+    run compile_and_run "$TEST_CASES/allocator/recursive/expr_tree_double_free.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free" ]]
+}

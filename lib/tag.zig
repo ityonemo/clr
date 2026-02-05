@@ -1675,6 +1675,7 @@ pub const AnyTag = union(enum) {
     cmp_lte: Simple(.cmp_lte),
     ctz: Simple(.ctz),
     sub: Simple(.sub),
+    add: Simple(.add),
 
     // Unimplemented tags (no-op)
     add_with_overflow: OverflowOp(.add_with_overflow),
