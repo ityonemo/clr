@@ -63,6 +63,13 @@ Planned (see LIMITATIONS.md for details):
 
 Maybe:
 - Lazy Arena Allocator frees
+- dbg_var_val lookahead for better error messages (see below)
+
+### dbg_var_val and Variable Names in Errors
+
+When an undefined value flows from one variable to another (e.g., `const y = x` where x is undefined), the error currently shows the ORIGIN variable name ('x') rather than the CURRENT variable ('y'). This is because AIR sequences the `load` instruction before `dbg_var_val`, so the error is detected before the new name can be applied.
+
+The origin name is useful for debugging (shows where undefined came from), but showing the current variable would also be helpful. A future improvement could implement lookahead to find upcoming `dbg_var_val` instructions and apply their names before reporting errors. See `test/cases/undefined/basic/dbg_var_val.zig` for details.
 
 ## Prerequisites
 

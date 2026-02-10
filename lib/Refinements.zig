@@ -164,8 +164,18 @@ pub const Refinement = union(enum) {
 
     fn recurse_indirected(dst: *Refinement, dst_list: *Refinements, src: Refinement, src_list: *Refinements, comptime ref_tag: anytype) error{OutOfMemory}!void {
         if (src != ref_tag) std.debug.panic("clobber mismatch: src is .{s} and dst is .{s}", .{ @tagName(src), @tagName(ref_tag) });
-        // copy over analytes.
-        @field(dst, @tagName(ref_tag)).analyte = @field(src, @tagName(ref_tag)).analyte;
+
+        const allocator = dst_list.list.allocator;
+
+        // Free old analyte resources before overwriting
+        @field(dst, @tagName(ref_tag)).analyte.deinit(allocator);
+
+        // Always deep-copy analytes to prevent mutation through shared references.
+        // This is important for types like VariantSafety whose active_metas slice
+        // would otherwise be shared between entities.
+        const new_analyte = @field(src, @tagName(ref_tag)).analyte.copy(allocator) catch @panic("out of memory");
+        @field(dst, @tagName(ref_tag)).analyte = new_analyte;
+
         const new_dst = dst_list.at(@field(dst, @tagName(ref_tag)).to);
         const new_src = src_list.at(@field(src, @tagName(ref_tag)).to);
         try clobber_structured(new_dst, dst_list, new_src.*, src_list);
@@ -179,12 +189,10 @@ pub const Refinement = union(enum) {
         // Free old analyte resources before overwriting
         @field(dst, @tagName(ref_tag)).analyte.deinit(allocator);
 
-        // Copy analyte - deep copy only when crossing between different refinement tables
-        // Same table: shallow copy is fine - mutations should be visible
-        const new_analyte = if (src_list != dst_list)
-            @field(src, @tagName(ref_tag)).analyte.copy(allocator) catch @panic("out of memory")
-        else
-            @field(src, @tagName(ref_tag)).analyte;
+        // Always deep-copy analytes to prevent mutation through shared references.
+        // This is important for types like VariantSafety whose active_metas slice
+        // would otherwise be shared between entities.
+        const new_analyte = @field(src, @tagName(ref_tag)).analyte.copy(allocator) catch @panic("out of memory");
         @field(dst, @tagName(ref_tag)).analyte = new_analyte;
 
         // Recurse into each field

@@ -120,3 +120,26 @@ load test_helper
     run compile_and_run "$TEST_CASES/variant_safety/globals/switch_checked_access.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Cleanup issue tests
+# =============================================================================
+
+@test "switch_br preserves known variant state (detects access in dead branch)" {
+    run compile_and_run "$TEST_CASES/variant_safety/switch/switch_br_overwrites_known.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of inactive union variant" ]]
+    [[ "$output" =~ "switch_br_overwrites_known.zig" ]]
+}
+
+@test "detects ambiguous variant after shallow copy mutation" {
+    run compile_and_run "$TEST_CASES/variant_safety/shallow_copy_mutation.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "access of union with ambiguous active variant" ]]
+    [[ "$output" =~ "shallow_copy_mutation.zig" ]]
+}
+
+@test "br handler preserves variant state through labeled breaks" {
+    run compile_and_run "$TEST_CASES/variant_safety/br_state_tracking.zig"
+    [ "$status" -eq 0 ]
+}

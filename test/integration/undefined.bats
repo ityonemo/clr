@@ -419,3 +419,27 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/globals/mixed_struct_defined_field.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Cleanup issue tests
+# =============================================================================
+
+# NOTE: Original plan expected error to mention 'y', but AIR structure has load before
+# dbg_var_val, so error is detected before name can be updated. Error shows ORIGIN ('x')
+# which is actually more useful for debugging. See test file for full explanation.
+@test "dbg_var_val tracks variable name in error messages" {
+    run compile_and_run "$TEST_CASES/undefined/basic/dbg_var_val.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value found in dbg_var_val.main" ]]
+    [[ "$output" =~ "dbg_var_val.zig:21:" ]]
+    # Error shows origin variable 'x' since detection happens at load before dbg_var_val names 'y'
+    [[ "$output" =~ "undefined value assigned to 'x'" ]]
+    [[ "$output" =~ "dbg_var_val.zig:19:" ]]
+}
+
+@test "global variable name appears in error message" {
+    run compile_and_run "$TEST_CASES/undefined/globals/global_name.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value" ]]
+    [[ "$output" =~ "global_name.zig" ]]
+}

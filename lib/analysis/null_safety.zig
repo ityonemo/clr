@@ -19,6 +19,11 @@ pub const NullSafety = union(enum) {
         return self;
     }
 
+    /// Hash this analysis state for memoization.
+    pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
+        hasher.update(&.{@intFromEnum(self)});
+    }
+
     /// is_non_null marks the optional as checked (unknown state).
     /// cond_br will resolve to non_null or null based on the branch.
     pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {

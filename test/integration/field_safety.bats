@@ -60,3 +60,13 @@ load test_helper
     run compile_and_run "$TEST_CASES/field_safety/globals/valid_union_field.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Cleanup issue tests
+# =============================================================================
+
+@test "detects ambiguous fieldParentPtr after branch merge" {
+    run compile_and_run "$TEST_CASES/fieldparentptr/merge_conflict.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "fieldParentPtr" ]]
+}

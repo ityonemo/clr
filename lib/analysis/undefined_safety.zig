@@ -28,6 +28,11 @@ pub const UndefinedSafety = union(enum) {
         return self;
     }
 
+    /// Hash this analysis state for memoization.
+    pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
+        hasher.update(&.{@intFromEnum(self)});
+    }
+
     pub fn reportUseBeforeAssign(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of undefined value found in ", .{});
         switch (self) {
@@ -339,6 +344,8 @@ pub const UndefinedSafety = union(enum) {
     // Null checks produce defined boolean results
     pub const is_non_null = markResultDefined;
     pub const is_null = markResultDefined;
+    pub const is_non_null_ptr = markResultDefined;
+    pub const is_null_ptr = markResultDefined;
 
     // Overflow operations produce a struct with defined fields
     pub fn add_with_overflow(state: State, index: usize, params: anytype) !void {
@@ -472,6 +479,37 @@ pub const UndefinedSafety = union(enum) {
         }
     }
 
+    /// Force-set name_when_set on undefined states, overwriting any existing name.
+    /// Used by DbgVarVal when a value flows from one variable to another - the new
+    /// variable's name should be used in error messages, not the original source.
+    fn forceNameOnUndefined(refinements: *Refinements, idx: Gid, name: ?[]const u8) void {
+        switch (refinements.at(idx).*) {
+            .scalar => |*s| {
+                if (s.analyte.undefined_safety) |*undef| {
+                    if (undef.* == .undefined) {
+                        undef.undefined.name_when_set = name;
+                    }
+                }
+            },
+            .pointer => |*p| {
+                if (p.analyte.undefined_safety) |*undef| {
+                    if (undef.* == .undefined) {
+                        undef.undefined.name_when_set = name;
+                    }
+                }
+                forceNameOnUndefined(refinements, p.to, name);
+            },
+            .optional => |o| forceNameOnUndefined(refinements, o.to, name),
+            .errorunion => |e| forceNameOnUndefined(refinements, e.to, name),
+            .@"struct" => |s| {
+                for (s.fields) |field_idx| {
+                    forceNameOnUndefined(refinements, field_idx, name);
+                }
+            },
+            else => {},
+        }
+    }
+
     /// Retroactively set variable name on undefined states.
     /// The name is already set on the instruction by DbgVarPtr.apply().
     pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtrParams) !void {
@@ -485,6 +523,20 @@ pub const UndefinedSafety = union(enum) {
         setNameOnUndefined(state.refinements, pointee_idx, name);
     }
 
+    /// Retroactively set variable name on undefined states for value variables.
+    /// Unlike dbg_var_ptr which follows a pointer, this operates on the value directly.
+    /// Uses forceNameOnUndefined to overwrite any existing name since the value may have
+    /// flowed from another variable (e.g., `const y = x` - error should say 'y', not 'x').
+    pub fn dbg_var_val(state: State, index: usize, params: tag.DbgVarValParams) !void {
+        _ = index;
+        const inst = params.ptr orelse return;
+        const value_idx = state.results[inst].refinement orelse return;
+        // Use the name_id directly - don't use buildPathName which would follow
+        // the load back to its source pointer and get the wrong name
+        const name = state.ctx.getName(params.name_id);
+        forceNameOnUndefined(state.refinements, value_idx, name);
+    }
+
     pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
         _ = state;
         _ = index;
@@ -492,6 +544,22 @@ pub const UndefinedSafety = union(enum) {
         if (params.src == .int_const) {
             @panic("optional_payload: int_const source unimplemented");
         }
+    }
+
+    /// optional_payload_ptr creates a new pointer to the payload.
+    /// The pointer itself is defined; the payload keeps its existing state.
+    pub fn optional_payload_ptr(state: State, index: usize, params: tag.OptionalPayloadPtr) !void {
+        _ = params;
+        const ptr_idx = state.results[index].refinement orelse return;
+        state.refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
+    }
+
+    /// unwrap_errunion_payload_ptr creates a new pointer to the error union payload.
+    /// The pointer itself is defined; the payload keeps its existing state.
+    pub fn unwrap_errunion_payload_ptr(state: State, index: usize, params: tag.UnwrapErrunionPayloadPtr) !void {
+        _ = params;
+        const ptr_idx = state.results[index].refinement orelse return;
+        state.refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
     }
 
     /// For int_const (compile-time constant) args, set everything to defined.

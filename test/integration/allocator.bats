@@ -696,3 +696,22 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator/error_paths/loop_alloc_success.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Cleanup issue tests
+# =============================================================================
+
+@test "bitcast preserves memory_safety tracking" {
+    run compile_and_run "$TEST_CASES/allocator/bitcast/bitcast_memory.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "optional_payload preserves memory_safety tracking" {
+    run compile_and_run "$TEST_CASES/allocator/optional/optional_payload_memory.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "recursive type memory tracking" {
+    run compile_and_run "$TEST_CASES/allocator/recursive/recursive_type_memory.zig"
+    [ "$status" -eq 0 ]
+}

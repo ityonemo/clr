@@ -18,6 +18,12 @@ pub const FieldParentPtrSafety = struct {
         return self;
     }
 
+    /// Hash this analysis state for memoization.
+    pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
+        hasher.update(std.mem.asBytes(&self.field_index));
+        hasher.update(std.mem.asBytes(&self.container_type_id));
+    }
+
     /// Set fieldparentptr_safety on pointer created by struct_field_ptr.
     /// Records the container type and field index for later validation.
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
@@ -74,7 +80,8 @@ pub const FieldParentPtrSafety = struct {
     }
 
     /// Merge fieldparentptr_safety from branches to original.
-    /// Takes the first non-null value from branches if original is null.
+    /// If branches have conflicting origins (different field_index or container_type_id),
+    /// clear fieldparentptr_safety to indicate ambiguous origin (will error on @fieldParentPtr).
     pub fn merge(
         ctx: *Context,
         comptime merge_tag: anytype,
@@ -89,10 +96,10 @@ pub const FieldParentPtrSafety = struct {
         const orig_ref = refinements.at(orig_gid);
         if (orig_ref.* != .pointer) return;
 
-        // If original already has fieldparentptr_safety, keep it
-        if (orig_ref.pointer.analyte.fieldparentptr_safety != null) return;
+        // Gather fieldparentptr_safety from all branches and detect conflicts
+        var first_fps: ?FieldParentPtrSafety = null;
+        var has_conflict = false;
 
-        // Look for first branch that has fieldparentptr_safety set
         for (branches, branch_gids) |branch_opt, branch_gid_opt| {
             const branch = branch_opt orelse continue;
             const branch_gid = branch_gid_opt orelse continue;
@@ -101,8 +108,28 @@ pub const FieldParentPtrSafety = struct {
             if (branch_ref.* != .pointer) continue;
 
             if (branch_ref.pointer.analyte.fieldparentptr_safety) |fps| {
+                if (first_fps) |first| {
+                    // Check for conflict - different field or container type
+                    if (fps.field_index != first.field_index or
+                        fps.container_type_id != first.container_type_id)
+                    {
+                        has_conflict = true;
+                    }
+                } else {
+                    first_fps = fps;
+                }
+            }
+        }
+
+        if (has_conflict) {
+            // Clear fieldparentptr_safety to indicate ambiguous origin
+            // This will cause @fieldParentPtr to error with "non-field pointer"
+            orig_ref.pointer.analyte.fieldparentptr_safety = null;
+        } else if (first_fps) |fps| {
+            // All branches agree (or only one branch has it) - use that value
+            // Only update if original doesn't already have a value
+            if (orig_ref.pointer.analyte.fieldparentptr_safety == null) {
                 orig_ref.pointer.analyte.fieldparentptr_safety = fps;
-                return;
             }
         }
     }

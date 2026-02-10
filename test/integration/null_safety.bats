@@ -66,3 +66,12 @@ load test_helper
     run compile_and_run "$TEST_CASES/null_safety/globals/assigned_non_null.zig"
     [ "$status" -eq 0 ]
 }
+
+# =============================================================================
+# Cleanup issue tests
+# =============================================================================
+
+@test "optional_payload_ptr tracks through pointer modification" {
+    run compile_and_run "$TEST_CASES/null/optional_payload_ptr.zig"
+    [ "$status" -eq 0 ]
+}

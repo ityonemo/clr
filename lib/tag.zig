@@ -590,8 +590,19 @@ pub const DbgVarPtr = struct {
     }
 };
 
+/// Parameters for dbg_var_val handler (separate from struct for splat compatibility).
+pub const DbgVarValParams = struct {
+    ptr: ?usize,
+    name_id: u32,
+};
+
 /// DbgVarVal associates a variable name with a value (non-pointer) instruction.
 /// Sets the name on the instruction for use in error messages.
+///
+/// NOTE: We call splat() here because in AIR, dbg_var_val comes AFTER
+/// the load instruction. Analysis modules need to retroactively update
+/// their states with the variable name (e.g., undefined.setNameOnUndefined sets
+/// name_when_set on the loaded value's undefined state).
 pub const DbgVarVal = struct {
     /// Index into results[] array for the value. Null when the value is comptime.
     ptr: ?usize,
@@ -602,6 +613,7 @@ pub const DbgVarVal = struct {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
         const inst = self.ptr orelse return;
         state.results[inst].name_id = self.name_id;
+        try splat(.dbg_var_val, state, index, DbgVarValParams{ .ptr = self.ptr, .name_id = self.name_id });
     }
 };
 
@@ -832,6 +844,123 @@ pub const OptionalPayload = struct {
             },
         }
         try splat(.optional_payload, state, index, self);
+    }
+};
+
+/// OptionalPayloadPtr: *?T => *T
+/// Takes a pointer to optional and returns a pointer to its payload.
+/// The result points to the same payload as the optional, not a copy.
+pub const OptionalPayloadPtr = struct {
+    /// Source pointer to optional (*?T).
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        switch (self.src) {
+            .inst => |src| {
+                const src_ptr_gid = state.results[src].refinement orelse return;
+                const src_ptr_ref = state.refinements.at(src_ptr_gid);
+
+                // src is *?T (pointer to optional)
+                // pointer.to must be a pointer refinement
+                if (src_ptr_ref.* != .pointer) return;
+
+                const optional_gid = src_ptr_ref.pointer.to;
+                const optional_ref = state.refinements.at(optional_gid);
+
+                // Follow to the optional
+                if (optional_ref.* == .optional) {
+                    // Get the payload entity and create a pointer to it
+                    const payload_gid = optional_ref.optional.to;
+                    state.results[index].refinement = try state.refinements.appendEntity(.{ .pointer = .{
+                        .to = payload_gid,
+                    } });
+                } else {
+                    // Not an optional - pass through the pointer
+                    state.results[index].refinement = src_ptr_gid;
+                }
+            },
+            .int_const => {
+                @panic("optional_payload_ptr: unexpected int_const source");
+            },
+            .int_var => |ip_idx| {
+                const global_ptr_gid = state.refinements.getGlobal(ip_idx) orelse
+                    @panic("OptionalPayloadPtr: interned variable not registered");
+                const src_ptr_ref = state.refinements.at(global_ptr_gid);
+
+                if (src_ptr_ref.* != .pointer) return;
+
+                const optional_gid = src_ptr_ref.pointer.to;
+                const optional_ref = state.refinements.at(optional_gid);
+
+                if (optional_ref.* == .optional) {
+                    const payload_gid = optional_ref.optional.to;
+                    state.results[index].refinement = try state.refinements.appendEntity(.{ .pointer = .{
+                        .to = payload_gid,
+                    } });
+                } else {
+                    state.results[index].refinement = global_ptr_gid;
+                }
+            },
+        }
+        try splat(.optional_payload_ptr, state, index, self);
+    }
+};
+
+/// UnwrapErrunionPayloadPtr: *(E!T) => *T
+/// Takes a pointer to error union and returns a pointer to its payload.
+/// The result points to the same payload as the error union, not a copy.
+pub const UnwrapErrunionPayloadPtr = struct {
+    /// Source pointer to error union (*(E!T)).
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        switch (self.src) {
+            .inst => |src| {
+                const src_ptr_gid = state.results[src].refinement orelse return;
+                const src_ptr_ref = state.refinements.at(src_ptr_gid);
+
+                // src is *(E!T) (pointer to error union)
+                if (src_ptr_ref.* != .pointer) return;
+
+                const errunion_gid = src_ptr_ref.pointer.to;
+                const errunion_ref = state.refinements.at(errunion_gid);
+
+                // Follow to the error union
+                if (errunion_ref.* == .errorunion) {
+                    // Get the payload entity and create a pointer to it
+                    const payload_gid = errunion_ref.errorunion.to;
+                    state.results[index].refinement = try state.refinements.appendEntity(.{ .pointer = .{
+                        .to = payload_gid,
+                    } });
+                } else {
+                    // Not an errorunion - pass through the pointer
+                    state.results[index].refinement = src_ptr_gid;
+                }
+            },
+            .int_const => {
+                @panic("unwrap_errunion_payload_ptr: unexpected int_const source");
+            },
+            .int_var => |ip_idx| {
+                const global_ptr_gid = state.refinements.getGlobal(ip_idx) orelse
+                    @panic("UnwrapErrunionPayloadPtr: interned variable not registered");
+                const src_ptr_ref = state.refinements.at(global_ptr_gid);
+
+                if (src_ptr_ref.* != .pointer) return;
+
+                const errunion_gid = src_ptr_ref.pointer.to;
+                const errunion_ref = state.refinements.at(errunion_gid);
+
+                if (errunion_ref.* == .errorunion) {
+                    const payload_gid = errunion_ref.errorunion.to;
+                    state.results[index].refinement = try state.refinements.appendEntity(.{ .pointer = .{
+                        .to = payload_gid,
+                    } });
+                } else {
+                    state.results[index].refinement = global_ptr_gid;
+                }
+            },
+        }
+        try splat(.unwrap_errunion_payload_ptr, state, index, self);
     }
 };
 
@@ -1226,6 +1355,21 @@ pub fn Simple(comptime instr: anytype) type {
     };
 }
 
+/// NullCheck creates a null check struct (is_non_null, is_null, is_non_null_ptr, is_null_ptr).
+/// These all have a src field and produce a boolean scalar result.
+pub fn NullCheck(comptime instr: anytype) type {
+    return struct {
+        /// Source optional (or pointer to optional) being checked.
+        src: Src,
+
+        pub fn apply(self: @This(), state: State, index: usize) !void {
+            // Result is a boolean scalar (the result of the null check)
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            try splat(instr, state, index, self);
+        }
+    };
+}
+
 /// Overflow operations (add_with_overflow, sub_with_overflow, etc.) return a
 /// struct { result: T, overflow: u1 }. We create a two-field struct with both
 /// fields as scalars. The Undefined analysis marks them as defined via splat.
@@ -1271,31 +1415,11 @@ pub const Unreach = struct {
     }
 };
 
-/// IsNonNull checks if an optional is non-null.
-/// Sets the optional's null_safety to .unknown with check info.
-pub const IsNonNull = struct {
-    /// Source optional being checked.
-    src: Src,
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-        try splat(.is_non_null, state, index, self);
-    }
-};
-
-/// IsNull checks if an optional is null.
-/// Sets the optional's null_safety to .unknown with check info (inverted).
-pub const IsNull = struct {
-    /// Source optional being checked.
-    src: Src,
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Result is a boolean scalar (the result of the null check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-        try splat(.is_null, state, index, self);
-    }
-};
+// Null check types - use NullCheck helper for common pattern
+pub const IsNonNull = NullCheck(.is_non_null);
+pub const IsNull = NullCheck(.is_null);
+pub const IsNonNullPtr = NullCheck(.is_non_null_ptr);
+pub const IsNullPtr = NullCheck(.is_null_ptr);
 
 /// IsNonErr checks if an errorunion is not an error.
 /// Used by memory_safety to detect error paths for allocation-derived errorunions.
@@ -1751,6 +1875,7 @@ pub const AnyTag = union(enum) {
     dbg_arg_inline: DbgVarPtr, // Same structure as dbg_var_ptr
     load: Load,
     optional_payload: OptionalPayload,
+    optional_payload_ptr: OptionalPayloadPtr,
     field_parent_ptr: FieldParentPtr,
     ret_safe: RetSafe,
     store: Store,
@@ -1785,7 +1910,9 @@ pub const AnyTag = union(enum) {
     intcast: Intcast,
     is_non_err: IsNonErr,
     is_non_null: IsNonNull,
+    is_non_null_ptr: IsNonNullPtr,
     is_null: IsNull,
+    is_null_ptr: IsNullPtr,
     memset_safe: Void,
     noop_pruned_debug: Void,
     ptr_add: PtrAdd,
@@ -1807,6 +1934,7 @@ pub const AnyTag = union(enum) {
     @"try": UnwrapErrunionPayload, // try extracts payload from error union, same as unwrap_errunion_payload
     unreach: Unreach,
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
+    unwrap_errunion_payload_ptr: UnwrapErrunionPayloadPtr, // *(E!T) -> *T (pointer to payload)
     errunion_payload_ptr_set: ErrunionPayloadPtrSet, // *(E!T) -> *T
     wrap_errunion_err: WrapErrunionErr,
     wrap_errunion_payload: WrapErrunionPayload,

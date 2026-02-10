@@ -57,6 +57,18 @@ pub const MemorySafety = union(enum) {
         return self;
     }
 
+    /// Hash this analysis state for memoization.
+    pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
+        hasher.update(&.{@intFromEnum(self)});
+        switch (self) {
+            .allocated => |a| {
+                hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
+                hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
+            },
+            .stack, .global, .unset, .error_stub => {},
+        }
+    }
+
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
         // Inst contains .pointer = Indirected, set memory_safety on pointer and pointee
@@ -2052,9 +2064,35 @@ pub const MemorySafety = union(enum) {
         setResultUnset(state, index);
     }
 
+    pub fn is_non_null_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn is_null_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
     pub fn is_non_err(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultUnset(state, index);
+    }
+
+    /// optional_payload_ptr creates a pointer to the payload.
+    /// The pointer has no allocation tracking (.unset).
+    pub fn optional_payload_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const ptr_idx = state.results[index].refinement orelse return;
+        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .unset;
+    }
+
+    /// unwrap_errunion_payload_ptr creates a pointer to the error union payload.
+    /// The pointer has no allocation tracking (.unset).
+    pub fn unwrap_errunion_payload_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const ptr_idx = state.results[index].refinement orelse return;
+        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .unset;
     }
 
     pub fn alloc_resize(state: State, index: usize, params: anytype) !void {

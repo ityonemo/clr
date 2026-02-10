@@ -57,6 +57,13 @@ pub const VariantSafety = struct {
         allocator.free(self.active_metas);
     }
 
+    /// Hash this analysis state for memoization.
+    pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
+        for (self.active_metas) |am| {
+            hasher.update(&.{@as(u8, if (am != null) 1 else 0)});
+        }
+    }
+
     /// Validate that variant_safety state is consistent with the union refinement.
     /// - If active_metas[i] is non-null, fields[i] must also be non-null
     /// - active_metas[i] being null is always valid (either field is inactive or ambiguous after merge)
@@ -250,8 +257,34 @@ pub const VariantSafety = struct {
         if (union_ref.* != .@"union") return;
         const u = &union_ref.@"union";
 
-        // Clear all active variants and set only this one
         const vs = &(u.analyte.variant_safety orelse return);
+
+        // Check if the union came from loading a global. For globals, the variant state
+        // may have been set in a different function, so we should still update based on
+        // the switch case. Only preserve "known active" state for local set_union_tag.
+        const is_from_global = blk: {
+            const inst_tag = results[union_check.union_inst].inst_tag orelse break :blk false;
+            if (inst_tag != .load) break :blk false;
+            const load_src = inst_tag.load.ptr;
+            break :blk (load_src == .int_var);
+        };
+
+        // Only skip update if EXACTLY ONE variant is known as active AND it's not from a global.
+        // If set_union_tag was called earlier in THIS function, we already KNOW which variant
+        // is active and the switch_br is just a runtime safety check - don't override.
+        // But if the union came from a global or has ambiguous state, use switch_br to establish it.
+        if (!is_from_global) {
+            var active_count: usize = 0;
+            for (vs.active_metas) |m| {
+                if (m != null) {
+                    active_count += 1;
+                }
+            }
+            if (active_count == 1) return; // Exactly one known locally - don't override
+        }
+
+        // Global, no known active variant, or ambiguous state - use switch_br to establish it.
+        // Clear all active variants and set only this one
         for (vs.active_metas) |*meta| {
             meta.* = null;
         }

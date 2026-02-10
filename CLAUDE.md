@@ -197,14 +197,18 @@ Use `./clear.sh` to clean up generated `.air.zig` files when done.
 
 ## Architecture: Tag Handlers vs Analysis Modules
 
-**IMPORTANT**: Tag handlers in `lib/tag.zig` must NOT reach into analyte fields directly (e.g., `.analyte.undefined`, `.analyte.memory_safety`). Analyte manipulation is the responsibility of analysis modules in `lib/analysis/`.
+**IMPORTANT**: The following files must NEVER contain `.analyte.xxx_safety` patterns (except in tests):
+- `lib/tag.zig` - Tag handlers set up refinement STRUCTURE only
+- `lib/Refinements.zig` - Refinement table management only
+
+Analyte manipulation (`.analyte.undefined_safety`, `.analyte.memory_safety`, `.analyte.null_safety`, `.analyte.variant_safety`, `.analyte.fieldparentptr_safety`) is the EXCLUSIVE responsibility of analysis modules in `lib/analysis/`.
 
 Tag handlers should only:
-1. Set up refinement STRUCTURE (pointer, scalar, struct, etc.)
+1. Set up refinement STRUCTURE (pointer, scalar, struct, etc.) via `appendEntity`
 2. Call `splat()` to dispatch to analysis modules
 3. Use generic helpers like `copyAnalyteState()` that work on any analyte
 
-If you find yourself writing `.analyte.undefined = ...` or `.analyte.memory_safety = ...` in a tag handler, that logic belongs in an analysis module instead.
+If you find yourself writing `.analyte.undefined = ...` or `.analyte.memory_safety = ...` in tag.zig or Refinements.zig, STOP - that logic belongs in an analysis module in `lib/analysis/` instead.
 
 ## Zig Language Reminders
 

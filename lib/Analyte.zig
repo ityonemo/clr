@@ -38,54 +38,16 @@ pub fn deinit(self: Analyte, allocator: std.mem.Allocator) void {
 }
 
 /// Hash the analyte state for memoization.
+/// Calls .hash() on each analysis type that implements it.
 pub fn hash(self: Analyte, hasher: *std.hash.Wyhash) void {
-    // Hash undefined_safety
-    if (self.undefined_safety) |us| {
-        hasher.update(&.{1});
-        hasher.update(&.{@intFromEnum(us)});
-    } else {
-        hasher.update(&.{0});
-    }
-
-    // Hash memory_safety
-    if (self.memory_safety) |ms| {
-        hasher.update(&.{1});
-        hasher.update(&.{@intFromEnum(ms)});
-        switch (ms) {
-            .allocated => |a| {
-                hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
-                hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
-            },
-            .stack, .global, .unset, .error_stub => {},
+    inline for (@typeInfo(Analyte).@"struct".fields) |field| {
+        if (@field(self, field.name)) |value| {
+            hasher.update(&.{1}); // present
+            if (@hasDecl(@TypeOf(value), "hash")) {
+                value.hash(hasher);
+            }
+        } else {
+            hasher.update(&.{0}); // absent
         }
-    } else {
-        hasher.update(&.{0});
-    }
-
-    // Hash null_safety
-    if (self.null_safety) |ns| {
-        hasher.update(&.{1});
-        hasher.update(&.{@intFromEnum(ns)});
-    } else {
-        hasher.update(&.{0});
-    }
-
-    // Hash variant_safety
-    if (self.variant_safety) |vs| {
-        hasher.update(&.{1});
-        for (vs.active_metas) |am| {
-            hasher.update(&.{@as(u8, if (am != null) 1 else 0)});
-        }
-    } else {
-        hasher.update(&.{0});
-    }
-
-    // Hash fieldparentptr_safety
-    if (self.fieldparentptr_safety) |fps| {
-        hasher.update(&.{1});
-        hasher.update(std.mem.asBytes(&fps.field_index));
-        hasher.update(std.mem.asBytes(&fps.container_type_id));
-    } else {
-        hasher.update(&.{0});
     }
 }
