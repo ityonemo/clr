@@ -310,7 +310,7 @@ test "generateFunction produces complete function" {
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
-        \\    defer refinements.testValid();
+        \\    refinements.testValid();
         \\
         \\    const results = try Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -1131,7 +1131,7 @@ test "generateFunction with simple cond_br block" {
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
-        \\    defer refinements.testValid();
+        \\    refinements.testValid();
         \\
         \\    const results = try Inst.make_results_list(ctx.allocator, 10);
         \\    defer Inst.clear_results_list(results, ctx.allocator);

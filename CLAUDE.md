@@ -76,6 +76,13 @@ bats test/integration/allocator.bats -f "double-free"
 3. Don't run the same test multiple ways (run_one.sh, then bats, then run_one.sh again)
 4. Trust the first result unless you changed code between runs
 
+**Integration Test Efficiency**: The full test suite is expensive (~7 min). Follow these rules:
+1. Run `./run_integration.sh` only ONCE per feature, right before committing
+2. If the output shows all tests as "ok", they passed - don't re-run to "verify"
+3. Don't pipe to `tail` or `grep` then re-run to check exit codes - read the output the first time
+4. If you need to check a specific test, use `./run_one.sh` or `bats -f "pattern"` instead of the full suite
+5. NEVER run the full integration suite multiple times in a row for the same set of changes
+
 **Note**: Integration tests are expected to fail during development (the CLR runtime is incomplete). However, if the tests fail due to **compilation errors in the emitted .air.zig analyzer**, that indicates a real problem in codegen that needs to be fixed.
 
 **Important**: Always run BATS from the project root directory. The test helper uses relative paths from its location to find the compiler, libclr.so, and test cases.

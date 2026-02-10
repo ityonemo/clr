@@ -351,6 +351,14 @@ pub const MemorySafety = union(enum) {
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
         const refinements = state.refinements;
 
+        // Initialize memory_safety on the result first. typeToRefinement creates
+        // pointer -> struct -> fields, and even if we redirect the pointer to the
+        // original parent below, the orphaned struct/field entities need memory_safety
+        // set to pass testValid.
+        if (state.results[index].refinement) |ref_idx| {
+            initUnsetRecursive(refinements, ref_idx);
+        }
+
         const ptr_idx: Gid = switch (params.field_ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
@@ -918,6 +926,14 @@ pub const MemorySafety = union(enum) {
                 r.analyte.memory_safety = ms;
                 setStackRecursive(refinements, r.to, meta, child_root);
             },
+            .recursive => |*rec| {
+                rec.analyte.memory_safety = ms;
+                // Skip recursion if .to is 0 (placeholder from typeToRefinement)
+                // TODO: investigate placeholder from typeToRefinement
+                if (rec.to != 0) {
+                    setStackRecursive(refinements, rec.to, meta, child_root);
+                }
+            },
             else => {},
         }
     }
@@ -978,6 +994,14 @@ pub const MemorySafety = union(enum) {
             .region => |*r| {
                 r.analyte.memory_safety = ms;
                 setAllocatedRecursive(refinements, r.to, base, child_root, is_slice);
+            },
+            .recursive => |*rec| {
+                rec.analyte.memory_safety = ms;
+                // Skip recursion if .to is 0 (placeholder from typeToRefinement)
+                // TODO: investigate placeholder from typeToRefinement
+                if (rec.to != 0) {
+                    setAllocatedRecursive(refinements, rec.to, base, child_root, is_slice);
+                }
             },
             else => {},
         }
@@ -2191,6 +2215,14 @@ pub const MemorySafety = union(enum) {
         initUnsetRecursive(state.refinements, ref_idx);
     }
 
+    /// MkAllocator creates an allocator refinement - initialize memory_safety
+    pub fn mkallocator(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const ref_idx = state.results[index].refinement orelse return;
+        const ref = state.refinements.at(ref_idx);
+        ref.allocator.analyte.memory_safety = .{ .unset = {} };
+    }
+
     /// StructFieldVal may create refinement via typeToRefinement for interned/global
     /// structs or for inactive union fields - initialize memory_safety
     pub fn struct_field_val(state: State, index: usize, params: anytype) !void {
@@ -2288,7 +2320,10 @@ pub const MemorySafety = union(enum) {
             },
             .recursive => |r| {
                 ref.recursive.analyte.memory_safety = .{ .global = meta };
-                setGlobalRecursive(refinements, r.to, meta);
+                // Skip recursion if .to is 0 (placeholder from typeToRefinement)
+                if (r.to != 0) {
+                    setGlobalRecursive(refinements, r.to, meta);
+                }
             },
             .void, .noreturn, .unimplemented => {},
         }

@@ -2523,7 +2523,7 @@ const FunctionGen = union(enum) {
                 \\    ctx.base_line = {d};
                 \\    try ctx.push_fn("{s}");
                 \\    defer ctx.pop_fn();
-                \\    defer refinements.testValid();
+                \\    refinements.testValid();
                 \\
                 \\    const results = try Inst.make_results_list(ctx.allocator, {d});
                 \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -3672,6 +3672,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);
         \\    }};
+        \\    refinements.testValid();
         \\}}
         \\
     , .{ global_defs_str.items, init_call, return_slot_init, entrypoint_index }, null);

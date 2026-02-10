@@ -3,6 +3,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Clean up generated files from previous runs
+./clear.sh
+
 # Optimization level for libclr (must match vendored zig build)
 # Override with: OPTIMIZE=ReleaseSafe ./run_integration.sh
 # Use OPTIMIZE=Debug for debug builds (or leave empty)
