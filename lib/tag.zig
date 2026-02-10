@@ -48,6 +48,7 @@ const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
 const Gid = Refinements.Gid;
 const Context = @import("Context.zig");
+const Meta = @import("Meta.zig");
 const State = Inst.State;
 const UndefinedSafety = @import("analysis/undefined_safety.zig").UndefinedSafety;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
@@ -132,17 +133,10 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // .undefined wraps a type - recurse into inner type and mark as undefined.
             // This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
             var inner_ref = try typeToRefinement(child.*, refinements);
-            // Set undefined state on the inner refinement
-            // Note: Meta is empty here; source location will be set later by init_global
-            const empty_meta = @import("Meta.zig"){ .file = "", .line = 0, .function = "" };
-            switch (inner_ref) {
-                .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
-                .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
-                .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = empty_meta } },
-                // Containers don't track undefined on themselves
-                .optional, .errorunion, .@"struct", .@"union", .region, .recursive => {},
-                .void, .noreturn, .unimplemented => {},
-            }
+            // Dispatch to analysis modules to set undefined state on the inner refinement.
+            // Note: Meta is empty here; source location will be set later by init_global.
+            const empty_meta = Meta{ .file = "", .line = 0, .function = "" };
+            splatInitFromType(&inner_ref, true, empty_meta);
             return inner_ref;
         },
         .allocator => |alloc_type_id| {
@@ -1882,6 +1876,17 @@ pub const GlobalFieldInfo = struct {
     field_index: usize,
     container_type_id: Refinements.Tid,
 };
+
+/// Initialize a refinement created by typeToRefinement.
+/// Dispatches to init_from_type handlers to set up analysis state.
+/// Called when a Type (e.g., .undefined wrapper) needs to mark the resulting refinement.
+pub fn splatInitFromType(ref: *Refinement, is_undefined: bool, meta: Meta) void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "init_from_type")) {
+            Analysis.init_from_type(ref, is_undefined, meta);
+        }
+    }
+}
 
 /// Initialize a global variable refinement.
 /// Dispatches to init_global handlers to set up analysis state (e.g., undefined tracking, null state).

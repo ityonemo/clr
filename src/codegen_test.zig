@@ -378,6 +378,7 @@ test "epilogue generates correct output with typed return slot" {
         \\        file_writer.interface.flush() catch {};
         \\        std.process.exit(1);
         \\    };
+        \\    refinements.testValid();
         \\}
         \\
     ;
