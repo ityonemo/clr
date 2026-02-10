@@ -52,6 +52,11 @@ pub const VariantSafety = struct {
         return .{ .active_metas = new_active_metas };
     }
 
+    /// Free allocated resources.
+    pub fn deinit(self: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.active_metas);
+    }
+
     /// Validate that variant_safety state is consistent with the union refinement.
     /// - If active_metas[i] is non-null, fields[i] must also be non-null
     /// - active_metas[i] being null is always valid (either field is inactive or ambiguous after merge)

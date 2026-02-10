@@ -176,12 +176,8 @@ pub const Refinement = union(enum) {
 
         const allocator = dst_list.list.allocator;
 
-        // For unions, free old active_metas before overwriting
-        if (ref_tag == .@"union") {
-            if (@field(dst, @tagName(ref_tag)).analyte.variant_safety) |old_vs| {
-                allocator.free(old_vs.active_metas);
-            }
-        }
+        // Free old analyte resources before overwriting
+        @field(dst, @tagName(ref_tag)).analyte.deinit(allocator);
 
         // Copy analyte - deep copy only when crossing between different refinement tables
         // Same table: shallow copy is fine - mutations should be visible
@@ -195,21 +191,15 @@ pub const Refinement = union(enum) {
         const dst_fields = @field(dst, @tagName(ref_tag)).fields;
         const src_fields = @field(src, @tagName(ref_tag)).fields;
         const mutable_dst_fields = @constCast(dst_fields);
-        for (mutable_dst_fields, src_fields, 0..) |*dst_field, src_field, i| {
+        for (mutable_dst_fields, src_fields) |*dst_field, src_field| {
             // if we are in a union, we'll have to unwrap only fields that
             // are non-null, otherwise jump.  For structs no need to unwrap.
             const new_dst_idx, const new_src_idx = new: {
                 if (ref_tag == .@"union") {
-                    // If src has a field that dst doesn't, need to check if it's active
+                    // If src has a field that dst doesn't, copy it (non-null Gid = active)
                     if (src_field != null and dst_field.* == null) {
-                        // Check if this field is active in variant_safety
-                        if (new_analyte.variant_safety) |vs| {
-                            if (vs.active_metas[i] != null) {
-                                // Active field in src but not in dst - copy it
-                                const new_idx = copyTo(src_list.at(src_field.?).*, src_list, dst_list) catch @panic("out of memory");
-                                dst_field.* = new_idx;
-                            }
-                        }
+                        const new_idx = copyTo(src_list.at(src_field.?).*, src_list, dst_list) catch @panic("out of memory");
+                        dst_field.* = new_idx;
                         continue;
                     }
                     if (dst_field.* == null or src_field == null) continue;
@@ -381,15 +371,12 @@ fn createGlobalEntity(
     if (self.global_map.get(def.ip_idx)) |existing_gid| {
         // If we have field_info, we need to apply it even if the global was already created.
         // This happens when a field pointer is registered before its parent struct.
-        if (field_info) |finfo| {
-            const ptr_ref = self.at(existing_gid);
-            if (ptr_ref.* != .pointer) {
-                @panic("createGlobalEntity: existing global with field_info is not a pointer");
-            }
-            ptr_ref.pointer.analyte.fieldparentptr_safety = .{
-                .field_index = finfo.field_index,
-                .container_type_id = finfo.container_type_id,
-            };
+        // Call splatInitGlobal to let analysis modules handle it (no direct analyte access).
+        if (field_info != null) {
+            const pointee_gid = self.at(existing_gid).pointer.to;
+            const loc_info = def.loc orelse GlobalDef.SourceLoc{};
+            const loc = tag.GlobalLocation{ .file = loc_info.file, .line = loc_info.line, .column = loc_info.column };
+            tag.splatInitGlobal(self, existing_gid, pointee_gid, ctx, false, false, loc, field_info);
         }
         return existing_gid;
     }
@@ -534,19 +521,20 @@ pub fn getGlobal(self: *const Refinements, ip_idx: u32) ?Gid {
 
 pub fn deinit(self: *Refinements) void {
     const allocator = self.list.allocator;
-    // Free any struct and union field allocations
+    // Free any struct and union field allocations, plus analyte resources
     for (self.list.items) |item| {
         switch (item) {
-            inline .@"struct", .@"union" => |data, ref_tag| {
+            inline .@"struct", .@"union" => |data| {
                 allocator.free(data.fields);
-                // Free variant_safety.active_metas for unions
-                if (ref_tag == .@"union") {
-                    if (data.analyte.variant_safety) |vs| {
-                        allocator.free(vs.active_metas);
-                    }
-                }
+                data.analyte.deinit(allocator);
             },
-            else => {},
+            inline .scalar, .pointer, .optional, .region, .recursive, .allocator => |data| {
+                data.analyte.deinit(allocator);
+            },
+            .errorunion => |data| {
+                data.analyte.deinit(allocator);
+            },
+            .void, .noreturn, .unimplemented => {},
         }
     }
     self.list.deinit();
@@ -796,57 +784,7 @@ fn hashRefinement(ref: Refinement) u64 {
 }
 
 fn hashAnalyte(analyte: Analyte, hasher: *std.hash.Wyhash) void {
-    // Hash undefined_safety
-    if (analyte.undefined_safety) |us| {
-        hasher.update(&.{1}); // has undefined_safety
-        hasher.update(&.{@intFromEnum(us)});
-    } else {
-        hasher.update(&.{0}); // no undefined_safety
-    }
-
-    // Hash memory_safety
-    if (analyte.memory_safety) |ms| {
-        hasher.update(&.{1}); // has memory_safety
-        hasher.update(&.{@intFromEnum(ms)});
-        // Hash allocated state if present
-        switch (ms) {
-            .allocated => |a| {
-                hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
-                hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
-            },
-            .stack, .global, .unset, .error_stub => {},
-        }
-    } else {
-        hasher.update(&.{0}); // no memory_safety
-    }
-
-    // Hash null_safety
-    if (analyte.null_safety) |ns| {
-        hasher.update(&.{1}); // has null_safety
-        hasher.update(&.{@intFromEnum(ns)});
-    } else {
-        hasher.update(&.{0}); // no null_safety
-    }
-
-    // Hash variant_safety
-    if (analyte.variant_safety) |vs| {
-        hasher.update(&.{1}); // has variant_safety
-        // Hash active_metas - which fields are active matters for analysis
-        for (vs.active_metas) |am| {
-            hasher.update(&.{@as(u8, if (am != null) 1 else 0)});
-        }
-    } else {
-        hasher.update(&.{0}); // no variant_safety
-    }
-
-    // Hash fieldparentptr_safety
-    if (analyte.fieldparentptr_safety) |fps| {
-        hasher.update(&.{1}); // has fieldparentptr_safety
-        hasher.update(std.mem.asBytes(&fps.field_index));
-        hasher.update(std.mem.asBytes(&fps.container_type_id));
-    } else {
-        hasher.update(&.{0}); // no fieldparentptr_safety
-    }
+    analyte.hash(hasher);
 }
 
 test "initWithGlobals sets null_safety for null optional global" {
