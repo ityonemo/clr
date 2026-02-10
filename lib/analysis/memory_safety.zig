@@ -108,21 +108,28 @@ pub const MemorySafety = union(enum) {
                 }
             }
 
-            // Propagate stack memory_safety when storing a pointer into a struct/union field.
-            // This handles: union.ptr = &stack_var or struct.ptr = &stack_var
+            // Propagate memory_safety when storing a pointer
             if (src_refinement.pointer.analyte.memory_safety) |src_ms| {
-                if (src_ms == .stack) {
-                    // Get destination pointer and its pointee
-                    const ptr_refinement_idx = results[ptr].refinement orelse return;
-                    const ptr_refinement = refinements.at(ptr_refinement_idx);
-                    if (ptr_refinement.* == .pointer) {
-                        // Destination pointee should be a pointer (we're storing into ptr-to-ptr)
-                        const dest_pointee_idx = ptr_refinement.pointer.to;
-                        const dest_pointee = refinements.at(dest_pointee_idx);
-                        if (dest_pointee.* == .pointer) {
-                            // Propagate the stack memory_safety to the destination pointer
-                            dest_pointee.pointer.analyte.memory_safety = src_ms;
-                        }
+                // Get destination pointer and its pointee
+                const ptr_refinement_idx = results[ptr].refinement orelse return;
+                const ptr_refinement = refinements.at(ptr_refinement_idx);
+                if (ptr_refinement.* != .pointer) return;
+
+                const dest_pointee_idx = ptr_refinement.pointer.to;
+                const dest_pointee = refinements.at(dest_pointee_idx);
+
+                // Case 1: Storing into ptr-to-ptr (e.g., struct.ptr = &stack_var)
+                if (dest_pointee.* == .pointer and src_ms == .stack) {
+                    dest_pointee.pointer.analyte.memory_safety = src_ms;
+                }
+
+                // Case 2: Storing pointer into optional<pointer> (e.g., ?*T = ptr)
+                // The optional's .to is a pointer - copy memory_safety to it
+                if (dest_pointee.* == .optional) {
+                    const inner_idx = dest_pointee.optional.to;
+                    const inner = refinements.at(inner_idx);
+                    if (inner.* == .pointer) {
+                        inner.pointer.analyte.memory_safety = src_ms;
                     }
                 }
             }

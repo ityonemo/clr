@@ -1073,11 +1073,10 @@ pub const Store = struct {
                     } else if (src.* == .pointer) {
                         // Storing pointer into optional<pointer> slot (e.g., `?*T = ptr`)
                         // The optional's .to is a pointer - share the pointer's target
+                        // Note: memory_safety is copied by memory_safety.store handler
                         const inner = state.refinements.at(o.to);
                         if (inner.* == .pointer) {
                             inner.pointer.to = src.pointer.to;
-                            // Also copy the memory_safety analyte so allocation tracking works
-                            inner.pointer.analyte.memory_safety = src.pointer.analyte.memory_safety;
                         }
                     }
                 },
