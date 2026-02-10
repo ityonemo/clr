@@ -1411,13 +1411,13 @@ pub const Noop = struct {
 /// This is metadata for stack traces and doesn't need tracking.
 pub const RetAddr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
         // Return address is a pointer value, but we just track it as a scalar
         // since we don't dereference it for analysis purposes.
         // The value is always defined (it's the instruction address).
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
             .analyte = .{ .undefined_safety = .{ .defined = {} } },
         } });
+        try splat(.ret_addr, state, index, self);
     }
 };
 
@@ -1426,12 +1426,12 @@ pub const RetAddr = struct {
 /// Produces a scalar that inherits undefined state from source (via splat).
 pub const Intcast = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
         // Integer cast produces a new scalar value
         // The value is defined (it's a type conversion of an existing value)
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
             .analyte = .{ .undefined_safety = .{ .defined = {} } },
         } });
+        try splat(.intcast, state, index, self);
     }
 };
 
@@ -1440,12 +1440,12 @@ pub const Intcast = struct {
 /// For now, produces a scalar since we don't track element sources yet.
 pub const AggregateInit = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
         // Aggregate init creates a new composite value
         // For now, just create a defined scalar until we have proper element tracking
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
             .analyte = .{ .undefined_safety = .{ .defined = {} } },
         } });
+        try splat(.aggregate_init, state, index, self);
     }
 };
 
@@ -1476,7 +1476,6 @@ pub const Void = struct {
 /// Creates an errorunion in the error state (no valid payload).
 pub const WrapErrunionErr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
         // Create a placeholder payload entity - it won't be accessed since
         // the errorunion is in the error state. We still need a valid GID
         // for the .to field since the errorunion structure requires it.
@@ -1490,6 +1489,7 @@ pub const WrapErrunionErr = struct {
         } });
 
         state.results[index].refinement = errunion_gid;
+        try splat(.wrap_errunion_err, state, index, self);
     }
 };
 
@@ -1498,7 +1498,6 @@ pub const WrapErrunionErr = struct {
 /// For now, produces a simple region until we have full slice tracking.
 pub const Slice = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
         // Create a region entity for the slice
         // The element type defaults to scalar for now
         const elem_gid = try state.refinements.appendEntity(.{ .scalar = .{
@@ -1507,6 +1506,7 @@ pub const Slice = struct {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .region = .{
             .to = elem_gid,
         } });
+        try splat(.slice, state, index, self);
     }
 };
 
@@ -1516,12 +1516,12 @@ pub const Slice = struct {
 /// to emit the inlined function body.
 pub const DbgInlineBlock = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
         // Inlined function body would be executed here if codegen supported it.
         // For now, produce a defined scalar as placeholder.
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
             .analyte = .{ .undefined_safety = .{ .defined = {} } },
         } });
+        try splat(.dbg_inline_block, state, index, self);
     }
 };
 

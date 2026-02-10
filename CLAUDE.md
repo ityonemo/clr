@@ -129,6 +129,26 @@ zig/zig-out/bin/zig build-exe -fair-out=zig-out/lib/libclr.so -ofmt=air foo.zig
 
 Output goes to stderr.
 
+### Debugging Generated Analyzers
+
+When `./run_one.sh` or integration tests run, they drop `.air.zig` files in the project root (e.g., `array_uniform_defined.air.zig`). These are standalone Zig programs that can be:
+
+1. **Directly executed** to reproduce failures without re-running compilation:
+   ```sh
+   zig run --dep clr -Mroot=array_uniform_defined.air.zig -Mclr=lib/lib.zig
+   ```
+
+2. **Read and inspected** to understand what AIR instructions were generated and how the analyzer processes them.
+
+This is much faster than re-running `./run_integration.sh` or even `./run_one.sh` repeatedly. When debugging a test failure:
+1. Run `./run_one.sh` once to generate the `.air.zig` file
+2. Read the generated file to understand the instruction sequence
+3. Fix the bug in `lib/` code
+4. Run `zig build -Doptimize=ReleaseFast` to rebuild libclr
+5. Directly execute the `.air.zig` file to test the fix
+
+Use `./clear.sh` to clean up generated `.air.zig` files when done.
+
 ## Development Guidelines
 
 - **Test-Driven Development (STRICT)** - Tests MUST exist and fail BEFORE writing implementation code:

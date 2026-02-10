@@ -6,6 +6,7 @@ const Context = @import("../Context.zig");
 const tag = @import("../tag.zig");
 const Meta = @import("../Meta.zig");
 const State = @import("../lib.zig").State;
+const memory_safety = @import("memory_safety.zig");
 
 /// Validate that variant_safety state is consistent with the refinement.
 /// Called by Refinements.testValid for each refinement.
@@ -429,7 +430,11 @@ pub const VariantSafety = struct {
                         if (branch_u.fields[i]) |branch_field_gid| {
                             // Cross-table copy: properly copies pointer .to fields
                             const branch_field_ref = branch.refinements.at(branch_field_gid).*;
-                            u.fields[i] = Refinements.Refinement.copyTo(branch_field_ref, branch.refinements, refinements) catch @panic("out of memory");
+                            const copied_gid = Refinements.Refinement.copyTo(branch_field_ref, branch.refinements, refinements) catch @panic("out of memory");
+                            u.fields[i] = copied_gid;
+                            // Ensure memory_safety is set on the copied entity
+                            // (branch may have created it via typeToRefinement without memory_safety)
+                            memory_safety.MemorySafety.initUnsetRecursive(refinements, copied_gid);
                         }
                     }
                 }
