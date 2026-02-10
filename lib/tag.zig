@@ -1405,58 +1405,43 @@ pub const Noop = struct {
     }
 };
 
-/// Entity operation: CREATE
-/// RetAddr produces a scalar value representing the return address.
-/// This is metadata for stack traces and doesn't need tracking.
+/// Entity operation: UNIMPLEMENTED
+/// RetAddr produces the return address - metadata for stack traces.
+/// Unlikely to be needed: we compile without debug symbols and don't touch debug functions.
 pub const RetAddr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Return address is a pointer value, but we just track it as a scalar
-        // since we don't dereference it for analysis purposes.
-        // The value is always defined (it's the instruction address).
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
-        try splat(.ret_addr, state, index, self);
+        _ = self;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
     }
 };
 
-/// Entity operation: CREATE
+/// Entity operation: UNIMPLEMENTED
 /// Intcast converts between integer types.
-/// Produces a scalar that inherits undefined state from source (via splat).
+/// TODO: Should inherit undefined state from source operand.
 pub const Intcast = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Integer cast produces a new scalar value
-        // The value is defined (it's a type conversion of an existing value)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
-        try splat(.intcast, state, index, self);
+        _ = self;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
     }
 };
 
-/// Entity operation: CREATE
+/// Entity operation: UNIMPLEMENTED
 /// AggregateInit creates a struct/array/tuple from element values.
-/// For now, produces a scalar since we don't track element sources yet.
+/// TODO: Should create proper composite type from element values.
 pub const AggregateInit = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Aggregate init creates a new composite value
-        // For now, just create a defined scalar until we have proper element tracking
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
-        try splat(.aggregate_init, state, index, self);
+        _ = self;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
     }
 };
 
-/// Entity operation: CREATE
+/// Entity operation: UNIMPLEMENTED
 /// StackTraceFrames produces stack trace metadata.
+/// Unlikely to be needed: we compile without debug symbols and don't touch debug functions.
 pub const StackTraceFrames = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = self;
-        // Stack trace frames is metadata, produces a defined scalar
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
     }
 };
 
@@ -1478,9 +1463,8 @@ pub const WrapErrunionErr = struct {
         // Create a placeholder payload entity - it won't be accessed since
         // the errorunion is in the error state. We still need a valid GID
         // for the .to field since the errorunion structure requires it.
-        const payload_gid = try state.refinements.appendEntity(.{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
+        // Use .unimplemented since accessing this would be a bug.
+        const payload_gid = try state.refinements.appendEntity(.unimplemented);
 
         // Create the errorunion pointing to the placeholder payload
         const errunion_gid = try state.refinements.appendEntity(.{ .errorunion = .{
@@ -1492,35 +1476,23 @@ pub const WrapErrunionErr = struct {
     }
 };
 
-/// Entity operation: CREATE
+/// Entity operation: UNIMPLEMENTED
 /// Slice creates a slice (ptr + len) from an array or pointer.
-/// For now, produces a simple region until we have full slice tracking.
+/// TODO: Needs codegen support to get element type from ty_op.ty.
 pub const Slice = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create a region entity for the slice
-        // The element type defaults to scalar for now
-        const elem_gid = try state.refinements.appendEntity(.{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .region = .{
-            .to = elem_gid,
-        } });
-        try splat(.slice, state, index, self);
+        _ = self;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
     }
 };
 
-/// Entity operation: NO-OP / METADATA
+/// Entity operation: UNIMPLEMENTED
 /// DbgInlineBlock represents an inlined function call.
-/// For now, produces a defined scalar. Full support would require codegen
-/// to emit the inlined function body.
+/// TODO: Full support requires codegen to emit the inlined function body.
 pub const DbgInlineBlock = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Inlined function body would be executed here if codegen supported it.
-        // For now, produce a defined scalar as placeholder.
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
-            .analyte = .{ .undefined_safety = .{ .defined = {} } },
-        } });
-        try splat(.dbg_inline_block, state, index, self);
+        _ = self;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
     }
 };
 
