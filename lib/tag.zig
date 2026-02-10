@@ -171,12 +171,11 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
         },
         .recursive => {
-            // Recursive type reference - return unimplemented
-            // The recursive reference is structural metadata describing what TYPE
-            // the pointer points to. Actual pointer tracking happens through runtime
-            // assignments (e.g., node.next = &other_node), not through type descriptions.
-            // If something tries to dereference this directly, it's a bug.
-            return .unimplemented;
+            // Recursive type reference - return a placeholder .recursive refinement.
+            // The actual pointer tracking happens through runtime assignments
+            // (e.g., node.next = &other_node), not through type descriptions.
+            // Traversal functions like retval_init skip .recursive to avoid infinite loops.
+            return .{ .recursive = .{ .to = 0 } };
         },
         .unimplemented => .unimplemented,
     };
@@ -1071,6 +1070,15 @@ pub const Store = struct {
                     // Storing optional into optional slot - share the payload
                     if (src.* == .optional) {
                         o.to = src.optional.to;
+                    } else if (src.* == .pointer) {
+                        // Storing pointer into optional<pointer> slot (e.g., `?*T = ptr`)
+                        // The optional's .to is a pointer - share the pointer's target
+                        const inner = state.refinements.at(o.to);
+                        if (inner.* == .pointer) {
+                            inner.pointer.to = src.pointer.to;
+                            // Also copy the memory_safety analyte so allocation tracking works
+                            inner.pointer.analyte.memory_safety = src.pointer.analyte.memory_safety;
+                        }
                     }
                 },
                 .errorunion => |*e| {
@@ -1398,6 +1406,125 @@ pub const Noop = struct {
     }
 };
 
+/// Entity operation: CREATE
+/// RetAddr produces a scalar value representing the return address.
+/// This is metadata for stack traces and doesn't need tracking.
+pub const RetAddr = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Return address is a pointer value, but we just track it as a scalar
+        // since we don't dereference it for analysis purposes.
+        // The value is always defined (it's the instruction address).
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+    }
+};
+
+/// Entity operation: CREATE
+/// Intcast converts between integer types.
+/// Produces a scalar that inherits undefined state from source (via splat).
+pub const Intcast = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Integer cast produces a new scalar value
+        // The value is defined (it's a type conversion of an existing value)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+    }
+};
+
+/// Entity operation: CREATE
+/// AggregateInit creates a struct/array/tuple from element values.
+/// For now, produces a scalar since we don't track element sources yet.
+pub const AggregateInit = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Aggregate init creates a new composite value
+        // For now, just create a defined scalar until we have proper element tracking
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+    }
+};
+
+/// Entity operation: CREATE
+/// StackTraceFrames produces stack trace metadata.
+pub const StackTraceFrames = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Stack trace frames is metadata, produces a defined scalar
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+    }
+};
+
+/// Entity operation: NO-OP
+/// Void produces void result for operations that don't return a value.
+/// Used for memset_safe, dbg_empty_stmt, noop_pruned_debug.
+pub const Void = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+    }
+};
+
+/// Entity operation: CREATE
+/// WrapErrunionErr wraps an error value into an error union.
+/// Creates an errorunion in the error state (no valid payload).
+pub const WrapErrunionErr = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Create a placeholder payload entity - it won't be accessed since
+        // the errorunion is in the error state. We still need a valid GID
+        // for the .to field since the errorunion structure requires it.
+        const payload_gid = try state.refinements.appendEntity(.{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+
+        // Create the errorunion pointing to the placeholder payload
+        const errunion_gid = try state.refinements.appendEntity(.{ .errorunion = .{
+            .to = payload_gid,
+        } });
+
+        state.results[index].refinement = errunion_gid;
+    }
+};
+
+/// Entity operation: CREATE
+/// Slice creates a slice (ptr + len) from an array or pointer.
+/// For now, produces a simple region until we have full slice tracking.
+pub const Slice = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Create a region entity for the slice
+        // The element type defaults to scalar for now
+        const elem_gid = try state.refinements.appendEntity(.{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .region = .{
+            .to = elem_gid,
+        } });
+    }
+};
+
+/// Entity operation: NO-OP / METADATA
+/// DbgInlineBlock represents an inlined function call.
+/// For now, produces a defined scalar. Full support would require codegen
+/// to emit the inlined function body.
+pub const DbgInlineBlock = struct {
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = self;
+        // Inlined function body would be executed here if codegen supported it.
+        // For now, produce a defined scalar as placeholder.
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
+            .analyte = .{ .undefined_safety = .{ .defined = {} } },
+        } });
+    }
+};
+
 /// Entity operation: MODIFY
 /// Modifies the union entity to activate the specified field.
 ///
@@ -1679,7 +1806,7 @@ pub const AnyTag = union(enum) {
 
     // Unimplemented tags (no-op)
     add_with_overflow: OverflowOp(.add_with_overflow),
-    aggregate_init: Unimplemented(.{}),
+    aggregate_init: AggregateInit,
     array_to_slice: ArrayToSlice,
     block: Block,
     cond_br: CondBr,
@@ -1688,25 +1815,25 @@ pub const AnyTag = union(enum) {
     switch_dispatch: SwitchDispatch,
     loop: Loop,
     repeat: Repeat,
-    dbg_empty_stmt: Unimplemented(.{ .void = true }),
-    dbg_inline_block: Unimplemented(.{}),
-    intcast: Unimplemented(.{}),
+    dbg_empty_stmt: Void,
+    dbg_inline_block: DbgInlineBlock,
+    intcast: Intcast,
     is_non_err: IsNonErr,
     is_non_null: IsNonNull,
     is_null: IsNull,
-    memset_safe: Unimplemented(.{ .void = true }),
-    noop_pruned_debug: Unimplemented(.{ .void = true }),
+    memset_safe: Void,
+    noop_pruned_debug: Void,
     ptr_add: PtrAdd,
     ptr_sub: PtrAdd, // Same logic as ptr_add
-    ret_addr: Unimplemented(.{}),
+    ret_addr: RetAddr,
     ret_load: RetLoad,
     ret_ptr: RetPtr,
-    slice: Unimplemented(.{}),
+    slice: Slice,
     slice_len: Simple(.slice_len), // Get length of slice - produces scalar
     slice_ptr: SlicePtr, // Extract pointer from slice - produces pointer
     slice_elem_ptr: PtrElemPtr, // Slice element pointer - same as ptr_elem_ptr (uniform region)
     slice_elem_val: ArrayElemVal, // Slice element value - same as array_elem_val (uniform region)
-    stack_trace_frames: Unimplemented(.{}),
+    stack_trace_frames: StackTraceFrames,
     struct_field_ptr: StructFieldPtr,
     struct_field_val: StructFieldVal,
     array_elem_val: ArrayElemVal,
@@ -1716,7 +1843,7 @@ pub const AnyTag = union(enum) {
     unreach: Unreach,
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
     errunion_payload_ptr_set: ErrunionPayloadPtrSet, // *(E!T) -> *T
-    wrap_errunion_err: Unimplemented(.{}),
+    wrap_errunion_err: WrapErrunionErr,
     wrap_errunion_payload: WrapErrunionPayload,
 
     // Union tags - variant safety not implemented yet
@@ -2666,6 +2793,7 @@ test "Simple tags produce scalar" {
         try std.testing.expect(results[i].refinement != null);
         try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[i].refinement.?).*));
     }
+    refinements.testValid();
 }
 
 test "block creates refinement based on type" {

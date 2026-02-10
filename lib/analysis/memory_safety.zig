@@ -262,8 +262,15 @@ pub const MemorySafety = union(enum) {
         const region = refinements.at(region_idx);
         if (region.* != .region) return;
 
-        // Get the region's memory_safety
-        const region_ms = region.region.analyte.memory_safety orelse return;
+        // Get the region's memory_safety - if none, set .unset on all (interned/static data)
+        const region_ms = region.region.analyte.memory_safety orelse {
+            // Interned slice (string literal, etc.) - set .unset on scalar, region, pointer
+            const element_idx = region.region.to;
+            refinements.at(element_idx).scalar.analyte.memory_safety = .{ .unset = {} };
+            refinements.at(region_idx).region.analyte.memory_safety = .{ .unset = {} };
+            ptr.analyte.memory_safety = .{ .unset = {} };
+            return;
+        };
 
         // Create memory_safety for the pointer with root_gid pointing to the region
         const region_gid = region.getGid();
@@ -873,9 +880,12 @@ pub const MemorySafety = union(enum) {
                 setStackRecursive(refinements, e.to, meta, child_root);
             },
             .pointer => |*p| {
-                // Set memory_safety on the pointer field itself (it's part of the struct)
-                // but don't recurse into what it points to (that's separate memory)
+                // Set memory_safety on the pointer and recurse into its .to
+                // For stack allocations from typeToRefinement, .to is a placeholder
+                // that may become orphaned when store updates it to the actual target.
+                // We still need to set memory_safety on placeholders for testValid.
                 p.analyte.memory_safety = ms;
+                setStackRecursive(refinements, p.to, meta, child_root);
             },
             .region => |*r| {
                 r.analyte.memory_safety = ms;
@@ -931,9 +941,12 @@ pub const MemorySafety = union(enum) {
                 setAllocatedRecursive(refinements, e.to, base, child_root, is_slice);
             },
             .pointer => |*p| {
-                // Set memory_safety on the pointer field itself (it's part of the struct)
-                // but don't recurse into what it points to (that's separate memory)
+                // Set memory_safety on the pointer and recurse into its .to
+                // For allocations from typeToRefinement, .to is a placeholder
+                // that may become orphaned when store updates it to the actual target.
+                // We still need to set memory_safety on placeholders for testValid.
                 p.analyte.memory_safety = ms;
+                setAllocatedRecursive(refinements, p.to, base, child_root, is_slice);
             },
             .region => |*r| {
                 r.analyte.memory_safety = ms;
@@ -1831,6 +1844,136 @@ pub const MemorySafety = union(enum) {
             .noreturn, .unimplemented => unreachable,
         }
     }
+
+    // =========================================================================
+    // Simple operation handlers - set memory_safety to .unset for computed values
+    // =========================================================================
+
+    /// Helper to set memory_safety = .unset on a scalar result
+    fn setResultUnset(state: State, index: usize) void {
+        const ref_idx = state.results[index].refinement orelse return;
+        state.refinements.at(ref_idx).scalar.analyte.memory_safety = .{ .unset = {} };
+    }
+
+    /// Helper to set memory_safety = .unset on a struct and its fields
+    fn setStructUnset(state: State, index: usize) void {
+        const ref_idx = state.results[index].refinement orelse return;
+        const ref = state.refinements.at(ref_idx);
+        ref.@"struct".analyte.memory_safety = .{ .unset = {} };
+        for (ref.@"struct".fields) |field_gid| {
+            state.refinements.at(field_gid).scalar.analyte.memory_safety = .{ .unset = {} };
+        }
+    }
+
+    // Simple arithmetic/comparison operations - produce computed scalars
+    pub fn bit_and(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn cmp_eq(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn cmp_gt(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn cmp_gte(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn cmp_lt(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn cmp_lte(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn ctz(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn sub(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn add(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn slice_len(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn get_union_tag(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn is_non_null(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn is_null(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn is_non_err(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    pub fn alloc_resize(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultUnset(state, index);
+    }
+
+    // Overflow operations produce struct { result, overflow_flag }
+    pub fn add_with_overflow(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setStructUnset(state, index);
+    }
+
+    pub fn sub_with_overflow(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setStructUnset(state, index);
+    }
+
+    /// array_to_slice converts array/many-pointer to slice.
+    /// If the source has no memory_safety, set .unset on the created refinements.
+    pub fn array_to_slice(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const refinements = state.refinements;
+
+        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr = &refinements.at(ptr_idx).pointer;
+
+        // If pointer already has memory_safety, nothing to do (shared from source)
+        if (ptr.analyte.memory_safety != null) return;
+
+        // Source had no memory_safety - set .unset on the fresh structure
+        const region_idx = ptr.to;
+        const region = refinements.at(region_idx);
+        if (region.* != .region) return;
+
+        const element_idx = region.region.to;
+        refinements.at(element_idx).scalar.analyte.memory_safety = .{ .unset = {} };
+        refinements.at(region_idx).region.analyte.memory_safety = .{ .unset = {} };
+        ptr.analyte.memory_safety = .{ .unset = {} };
+    }
 };
 
 // =========================================================================
@@ -1840,14 +1983,43 @@ pub const MemorySafety = union(enum) {
 const debug = @import("builtin").mode == .Debug;
 
 /// Validate that a refinement conforms to memory_safety tracking rules.
-/// TODO: Re-enable strict checking once all handlers set memory_safety.
-/// With the new architecture:
-/// - Non-trivial types (scalar, struct, union, optional, region) SHOULD have memory_safety set
-/// - errorunion can ONLY have ErrorStub set.
-/// - Trivial types (void, unimplemented, noreturn): no memory_safety
+/// - Non-trivial types (scalar, pointer, struct, union, optional, region, recursive, allocator)
+///   MUST have memory_safety set
+/// - errorunion can ONLY have error_stub set (or null)
+/// - Trivial types (void, unimplemented, noreturn): no analyte, no memory_safety
 pub fn testValid(refinement: Refinements.Refinement) void {
-    // Temporarily disabled - not all handlers set memory_safety yet
-    _ = refinement;
+    if (!debug) return;
+    switch (refinement) {
+        .scalar => |s| {
+            if (s.analyte.memory_safety == null) {
+                std.debug.panic("memory_safety must be set on scalars", .{});
+            }
+        },
+        inline .pointer, .optional, .region, .recursive => |data, t| {
+            if (data.analyte.memory_safety == null) {
+                std.debug.panic("memory_safety must be set on {s}", .{@tagName(t)});
+            }
+        },
+        inline .@"struct", .@"union" => |data, t| {
+            if (data.analyte.memory_safety == null) {
+                std.debug.panic("memory_safety must be set on {s}", .{@tagName(t)});
+            }
+        },
+        .errorunion => |e| {
+            if (e.analyte.memory_safety) |ms| {
+                if (ms != .error_stub) {
+                    std.debug.panic("errorunion can only have error_stub memory_safety, got {s}", .{@tagName(ms)});
+                }
+            }
+        },
+        .allocator => |a| {
+            if (a.analyte.memory_safety == null) {
+                std.debug.panic("memory_safety must be set on allocators", .{});
+            }
+        },
+        // Trivial types - no analyte, no memory_safety tracking
+        .void, .noreturn, .unimplemented => {},
+    }
 }
 
 // =========================================================================

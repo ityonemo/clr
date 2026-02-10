@@ -1059,12 +1059,6 @@ fn typeToStringInner(name_map: ?*std.AutoHashMapUnmanaged(u32, []const u8), fiel
 
 /// Look up a non-well-known type without name registration (for callers without name_map).
 fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
-    if (visited.contains(ty)) {
-        // Cycle detected - emit recursive type reference with the type_id
-        return clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
-    }
-    visited.put(arena, ty, {}) catch @panic("out of memory");
-
     const type_key = ip.indexToKey(ty);
     return switch (type_key) {
         .simple_type => |simple| switch (simple) {
@@ -1092,9 +1086,21 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             const child_str = typeToStringInner(null, null, arena, ip, arr.child, visited);
             break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .region = &{s} }} }}", .{child_str}, null);
         },
-        // Handle struct/union types without name registration (for globals)
-        .struct_type => structTypeToStringSimple(arena, ip, ty, visited),
-        .union_type => unionTypeToStringSimple(arena, ip, ty, visited),
+        // Only struct/union types can cause cycles - check visited only for these
+        .struct_type => blk: {
+            if (visited.contains(ty)) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
+            }
+            visited.put(arena, ty, {}) catch @panic("out of memory");
+            break :blk structTypeToStringSimple(arena, ip, ty, visited);
+        },
+        .union_type => blk: {
+            if (visited.contains(ty)) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
+            }
+            visited.put(arena, ty, {}) catch @panic("out of memory");
+            break :blk unionTypeToStringSimple(arena, ip, ty, visited);
+        },
         // Enums, ints, and function types are scalars (we don't track them)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
         .enum_type, .int_type, .func_type => ".{ .ty = .{ .scalar = {} } }",
@@ -1235,13 +1241,6 @@ fn structTypeToStringSimpleNoVisited(arena: std.mem.Allocator, ip: *const Intern
 
 /// Look up a non-well-known type in the InternPool.
 fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field_map: ?*clr.FieldHashMap, arena: std.mem.Allocator, ip: *const InternPool, ty: InternPool.Index, visited: *VisitedTypes) []const u8 {
-    // Check for cycles in recursive types (e.g., struct { next: ?*@This() })
-    if (visited.contains(ty)) {
-        // Cycle detected - emit recursive type reference with the type_id
-        return clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
-    }
-    visited.put(arena, ty, {}) catch @panic("out of memory");
-
     const type_key = ip.indexToKey(ty);
     return switch (type_key) {
         .simple_type => |simple| switch (simple) {
@@ -1271,8 +1270,21 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             const child_str = typeToStringInner(name_map, field_map, arena, ip, arr.child, visited);
             break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .region = &{s} }} }}", .{child_str}, null);
         },
-        .struct_type => structTypeToString(name_map, field_map, arena, ip, ty, visited),
-        .union_type => unionTypeToString(name_map, field_map, arena, ip, ty, visited),
+        // Only struct/union types can cause cycles - check visited only for these
+        .struct_type => blk: {
+            if (visited.contains(ty)) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
+            }
+            visited.put(arena, ty, {}) catch @panic("out of memory");
+            break :blk structTypeToString(name_map, field_map, arena, ip, ty, visited);
+        },
+        .union_type => blk: {
+            if (visited.contains(ty)) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .recursive = {d} }} }}", .{@intFromEnum(ty)}, null);
+            }
+            visited.put(arena, ty, {}) catch @panic("out of memory");
+            break :blk unionTypeToString(name_map, field_map, arena, ip, ty, visited);
+        },
         // Enums, ints, and function types are scalars (we don't track them)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
         .enum_type, .int_type, .func_type => ".{ .ty = .{ .scalar = {} } }",
@@ -3680,10 +3692,9 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\fn fn_{d}({s}) anyerror!Gid {{
         \\    _ = refinements;
-        \\    _ = return_gid;
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    return 0;
+        \\    return return_gid;
         \\}}
         \\
     , .{ func_index, params, func_index }, null);

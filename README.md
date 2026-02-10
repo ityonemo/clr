@@ -48,15 +48,16 @@ Currently implemented:
 - Slice tracking (alloc/free with regions, subslice derivation)
 - Error union support (try expressions, wrap/unwrap payload)
 - Switch statement support (n-way merging with variant tracking)
+- Labeled switch/Duff's device support
 - Source location and variable name tracking for error messages
 - Branching/control flow with state merging
-- Loop analysis (fixed-point iteration with convergence detection)
+- Loop analysis (for, while, for-else, while-else with fixed-point iteration)
 - Global variable tracking (undefined, variant, and memory safety)
+- Recursive datatypes (linked lists, trees, recursive unions)
 
 Planned (see LIMITATIONS.md for details):
 - Interned constants (int_const values like string literals, comptime pointers)
 - Moving provenance
-- Recursive datatypes
 - Recursive functions
 - async/await
 

@@ -77,3 +77,24 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double free" ]]
 }
+
+# =============================================================================
+# Intrusive Linked List Tests (std.SinglyLinkedList wrapper)
+# =============================================================================
+
+@test "intrusive linked list - detects memory leak" {
+    run compile_and_run "$TEST_CASES/allocator/intrusive_linked_list/leak_linked_list.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "memory leak" ]]
+}
+
+@test "intrusive linked list - detects double free" {
+    run compile_and_run "$TEST_CASES/allocator/intrusive_linked_list/double_free_list.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "double free" ]]
+}
+
+@test "intrusive linked list - correct cleanup" {
+    run compile_and_run "$TEST_CASES/allocator/intrusive_linked_list/correct_list_cleanup.zig"
+    [ "$status" -eq 0 ]
+}

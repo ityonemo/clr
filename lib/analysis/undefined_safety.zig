@@ -1140,9 +1140,9 @@ pub const UndefinedSafety = union(enum) {
                 // Region is a container type - don't set undefined state on it, just recurse
                 retval_init(refinements, r.to, ctx);
             },
-            .recursive => |r| {
-                // Follow the recursive reference
-                retval_init(refinements, r.to, ctx);
+            .recursive => {
+                // Don't follow recursive references - they point back to an ancestor struct
+                // that is already being processed. Following would cause infinite recursion.
             },
             .void => {}, // void return type is valid
             .noreturn, .unimplemented => unreachable,
@@ -1182,9 +1182,9 @@ pub const UndefinedSafety = union(enum) {
                 // Region is a container type - don't set undefined state on it, just recurse
                 retval_init_defined(refinements, r.to);
             },
-            .recursive => |r| {
-                // Follow the recursive reference
-                retval_init_defined(refinements, r.to);
+            .recursive => {
+                // Don't follow recursive references - they point back to an ancestor struct
+                // that is already being processed. Following would cause infinite recursion.
             },
             .void => {}, // void return type is valid
             .noreturn, .unimplemented => unreachable,
@@ -1388,9 +1388,6 @@ test "store with .null to optional sets inner to defined" {
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(inner_idx).*));
     try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(inner_idx).scalar.analyte.undefined_safety.?));
 }
-
-// TODO: Interprocedural tests disabled during entity system refactoring.
-// test "store_safe propagates defined through arg_ptr" { ... }
 
 test "load from undefined inst returns error" {
     const allocator = std.testing.allocator;

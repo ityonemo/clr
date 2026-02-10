@@ -505,23 +505,6 @@ We won't prevent failures due to union tag field being set to an invalid value. 
 
 ## Known Limitations
 
-### Load creates fresh scalar (breaks `**T` tracking)
-
-The `Load` tag currently always creates a fresh scalar entity for its result. This is incorrect for pointer-to-pointer types like `**u8`. When loading from a `**u8`, we should get the inner pointer entity, not a fresh scalar.
-
-**Impact**: Multi-level pointer dereferences lose tracking. For example:
-```zig
-var x: u8 = undefined;
-var ptr: *u8 = &x;
-var ptr_ptr: **u8 = &ptr;
-var inner = ptr_ptr.*;  // Load here creates fresh scalar, loses pointer tracking
-inner.* = 5;  // This store won't be tracked back to x
-```
-
-**Fix**: Load should follow the pointer and share the pointee's entity instead of creating a fresh scalar.
-
-**Test needed**: `test/cases/undefined/double_pointer.zig`
-
 ### Setting a pointer to undefined
 
 Need to investigate what happens when a pointer itself is set to undefined (e.g., `var ptr: *u8 = undefined;`). Currently we set `pointer.analyte.undefined = undef_state`, but this needs testing and verification.

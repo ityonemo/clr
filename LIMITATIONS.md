@@ -2,16 +2,6 @@
 
 ## Currently Not Implemented, But Planned
 
-### Recursive Type Tracking
-
-Self-referential types like linked lists (`struct { next: ?*@This(), data: T }`) currently have their recursive fields replaced with `.{ .unknown = {} }` during type extraction. This prevents infinite recursion but loses type information for the recursive field.
-
-**Impact**: Analysis of linked list nodes, tree nodes, or other recursive data structures may have incomplete type information for the recursive pointer fields.
-
-**Future improvement**: Track type names and emit proper forward references instead of unknown placeholders. This would allow full type information to be preserved for recursive types.
-
-**Test plan**: Will be tested alongside ownership tracking for linked lists.
-
 ### Complex Type Extraction
 
 Some codegen paths emit `.{ .ty = .{ .unknown = {} } }` when type extraction fails, but the runtime `Type` union doesn't support the `unknown` variant. This causes compile errors in the generated analyzer.
