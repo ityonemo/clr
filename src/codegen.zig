@@ -283,6 +283,41 @@ pub fn extractFunctionReturnType(
     return typeToString(name_map, field_map, arena, ip, return_type_idx);
 }
 
+/// Extract the actual function InternPool index from a function pointer constant.
+/// When we have `const fp = &myFunction`, the interned value is a pointer to the function.
+/// This extracts the underlying function's IP index if possible.
+/// Returns null if the value is not a function pointer constant.
+fn extractFunctionFromPointer(ip: *const InternPool, ip_idx: InternPool.Index) ?InternPool.Index {
+    const val_key = ip.indexToKey(ip_idx);
+
+    // Check if it's already a function (not a pointer)
+    switch (val_key) {
+        .func => return ip_idx, // Already a function, return as-is
+        .ptr => |ptr| {
+            // It's a pointer - check if it points to a function via nav
+            switch (ptr.base_addr) {
+                .nav => |nav_idx| {
+                    // Get the nav to access its function value if fully resolved
+                    const nav = ip.getNav(nav_idx);
+                    // Only fully_resolved status has the actual value
+                    const func_index = switch (nav.status) {
+                        .fully_resolved => |r| r.val,
+                        else => return null,
+                    };
+                    // Verify the resolved value is actually a function
+                    const func_key = ip.indexToKey(func_index);
+                    if (func_key == .func) {
+                        return func_index;
+                    }
+                    return null;
+                },
+                else => return null,
+            }
+        },
+        else => return null,
+    }
+}
+
 /// Extract type info for AllocCreate payload.
 /// allocator.create(T) returns Allocator.Error!*T, so we unwrap error union then pointer.
 /// NOTE: Returns ".{ .unknown = {} }" when type cannot be determined, which will cause
@@ -1716,9 +1751,11 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
         _ = callee_tag;
         break :blk .{ "null", ".{ .ty = .{ .unimplemented = {} } }" }; // TODO: handle indirect calls
     } else if (callee_ref.toInterned()) |ip_idx| blk: {
+        // Check if this is a function pointer constant (&function_name)
+        const resolved_func_idx = extractFunctionFromPointer(info.ip, ip_idx) orelse ip_idx;
         // Direct call to known function - use InternPool index as func_index
-        const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
-        const ret_type = extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, ip_idx);
+        const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(resolved_func_idx)}, null);
+        const ret_type = extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, resolved_func_idx);
         break :blk .{ called, ret_type };
     } else .{ "null", ".{ .ty = .{ .unimplemented = {} } }" };
 
@@ -3721,8 +3758,10 @@ pub fn extractCallTargets(allocator: std.mem.Allocator, ip: *const InternPool, t
                 const payload_index = datum.pl_op.payload;
                 const args_len = extra[payload_index];
                 if (callee_ref.toInterned()) |ip_idx| {
+                    // Resolve function pointers to get the actual function
+                    const resolved_idx = extractFunctionFromPointer(ip, ip_idx) orelse ip_idx;
                     targets.append(allocator, .{
-                        .index = @intFromEnum(ip_idx),
+                        .index = @intFromEnum(resolved_idx),
                         .arity = args_len,
                     }) catch continue;
                 }

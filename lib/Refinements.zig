@@ -91,6 +91,16 @@ pub const Refinement = union(enum) {
         type_id: Tid,
     };
 
+    /// FunctionPtr refinement tracks which functions could be called through a function pointer.
+    /// The choices field contains InternPool indices of possible function implementations.
+    /// When calling through a fnptr, analysis explores ALL possible function targets.
+    pub const FunctionPtr = struct {
+        gid: Gid = INVALID_GID,
+        analyte: Analyte = .{},
+        /// IP indices of possible function implementations
+        choices: []const u32,
+    };
+
     /// AllocatorRef refinement tracks allocator identity for mismatch detection.
     /// The type_id uniquely identifies the allocator type (e.g., PageAllocator vs GPA).
     pub const AllocatorRef = struct {
@@ -107,6 +117,7 @@ pub const Refinement = union(enum) {
     recursive: Indirected,
     @"struct": Struct,
     @"union": Union,
+    fnptr: FunctionPtr,
     allocator: AllocatorRef, // tracks allocator identity for mismatch detection
     noreturn: void, // specific return value for error paths.
     unimplemented: void, // this is the result of an operation that is unimplemented but does carry a value.
@@ -124,6 +135,15 @@ pub const Refinement = union(enum) {
                 if (src != .allocator) std.debug.panic("clobber mismatch: src is .{s} and dst is .allocator", .{@tagName(src)});
                 dst.allocator = src.allocator;
             },
+            .fnptr => {
+                if (src != .fnptr) std.debug.panic("clobber mismatch: src is .{s} and dst is .fnptr", .{@tagName(src)});
+                // For fnptr, we merge choices from both branches
+                const allocator = dst_list.list.allocator;
+                dst.fnptr.analyte.deinit(allocator);
+                dst.fnptr.analyte = src.fnptr.analyte.copy(allocator) catch @panic("out of memory");
+                // Merge choices: union of both sets
+                dst.fnptr.choices = mergeChoices(allocator, dst.fnptr.choices, src.fnptr.choices) catch @panic("out of memory");
+            },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
@@ -137,6 +157,25 @@ pub const Refinement = union(enum) {
         }
     }
 
+    /// Merge two choice arrays into a single deduplicated array
+    fn mergeChoices(allocator: Allocator, a: []const u32, b: []const u32) ![]const u32 {
+        // Use a hash set to deduplicate
+        var set = std.AutoHashMap(u32, void).init(allocator);
+        defer set.deinit();
+
+        for (a) |choice| try set.put(choice, {});
+        for (b) |choice| try set.put(choice, {});
+
+        var result = try allocator.alloc(u32, set.count());
+        var i: usize = 0;
+        var it = set.keyIterator();
+        while (it.next()) |key| {
+            result[i] = key.*;
+            i += 1;
+        }
+        return result;
+    }
+
     /// clobbers one refinement over another, using GID for destination.
     pub fn clobber_structured_idx(dst_gid: Gid, dst_list: *Refinements, src: Refinement, src_list: *Refinements) error{OutOfMemory}!void {
         const dst = dst_list.at(dst_gid);
@@ -148,6 +187,13 @@ pub const Refinement = union(enum) {
             .allocator => {
                 if (src != .allocator) std.debug.panic("clobber mismatch: src is .{s} and dst is .allocator", .{@tagName(src)});
                 dst.allocator = src.allocator;
+            },
+            .fnptr => {
+                if (src != .fnptr) std.debug.panic("clobber mismatch: src is .{s} and dst is .fnptr", .{@tagName(src)});
+                const allocator = dst_list.list.allocator;
+                dst.fnptr.analyte.deinit(allocator);
+                dst.fnptr.analyte = src.fnptr.analyte.copy(allocator) catch @panic("out of memory");
+                dst.fnptr.choices = mergeChoices(allocator, dst.fnptr.choices, src.fnptr.choices) catch @panic("out of memory");
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
@@ -230,6 +276,17 @@ pub const Refinement = union(enum) {
         return switch (src) {
             .scalar => try dst_list.appendEntity(src),
             .allocator => try dst_list.appendEntity(src),
+            .fnptr => |f| blk: {
+                // Deep copy choices array
+                const allocator = dst_list.list.allocator;
+                const new_choices = try allocator.alloc(u32, f.choices.len);
+                @memcpy(new_choices, f.choices);
+                const new_analyte = try f.analyte.copy(allocator);
+                break :blk try dst_list.appendEntity(.{ .fnptr = .{
+                    .analyte = new_analyte,
+                    .choices = new_choices,
+                } });
+            },
             .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
             .optional => try src.copyToIndirected(src_list, dst_list, .optional),
             .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
@@ -266,7 +323,8 @@ pub const Refinement = union(enum) {
     /// Used to mark source entities as "consumed" when copying to another table.
     pub fn collectReachableGids(src: Refinement, src_list: *Refinements, collected: *std.AutoHashMap(Gid, void)) !void {
         switch (src) {
-            .scalar, .allocator, .unimplemented, .void, .noreturn => {},
+            // fnptr has no nested GIDs - choices are IP indices, not GIDs
+            .scalar, .allocator, .fnptr, .unimplemented, .void, .noreturn => {},
             inline .pointer, .optional, .errorunion, .region, .recursive => |data| {
                 const inner_gid = data.to;
                 if (!collected.contains(inner_gid)) {
@@ -536,6 +594,10 @@ pub fn deinit(self: *Refinements) void {
                 allocator.free(data.fields);
                 data.analyte.deinit(allocator);
             },
+            .fnptr => |data| {
+                allocator.free(@constCast(data.choices));
+                data.analyte.deinit(allocator);
+            },
             inline .scalar, .pointer, .optional, .region, .recursive, .allocator => |data| {
                 data.analyte.deinit(allocator);
             },
@@ -611,6 +673,17 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                     .type_id = data.type_id,
                 }));
             },
+            .fnptr => |data| {
+                // Deep copy choices array
+                const new_choices = try allocator.alloc(u32, data.choices.len);
+                @memcpy(new_choices, data.choices);
+                const new_analyte = try data.analyte.copy(allocator);
+                try new.list.append(.{ .fnptr = .{
+                    .gid = data.gid,
+                    .analyte = new_analyte,
+                    .choices = new_choices,
+                } });
+            },
             else => try new.list.append(item),
         }
     }
@@ -641,6 +714,17 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
                 .type_id = data.type_id,
             });
         },
+        .fnptr => |data| blk: {
+            // Deep copy choices array
+            const new_choices = try allocator.alloc(u32, data.choices.len);
+            @memcpy(new_choices, data.choices);
+            const new_analyte = try data.analyte.copy(allocator);
+            break :blk .{ .fnptr = .{
+                .gid = data.gid,
+                .analyte = new_analyte,
+                .choices = new_choices,
+            } };
+        },
         else => src, // Non-container types can be shallow copied
     };
 }
@@ -659,6 +743,17 @@ fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory
         // Scalars and allocators: copy to new entity
         .scalar => try self.appendEntity(src),
         .allocator => try self.appendEntity(src),
+
+        // Function pointers: deep copy choices array
+        .fnptr => |f| blk: {
+            const new_choices = try allocator.alloc(u32, f.choices.len);
+            @memcpy(new_choices, f.choices);
+            const new_analyte = try f.analyte.copy(allocator);
+            break :blk try self.appendEntity(.{ .fnptr = .{
+                .analyte = new_analyte,
+                .choices = new_choices,
+            } });
+        },
 
         // Pointers: new pointer entity, same .to (reference existing pointee)
         .pointer => |p| blk: {
@@ -786,6 +881,13 @@ fn hashRefinement(ref: Refinement) u64 {
         .@"struct" => |s| hashAnalyte(s.analyte, &hasher),
         .@"union" => |u| hashAnalyte(u.analyte, &hasher),
         .allocator => |a| hashAnalyte(a.analyte, &hasher),
+        .fnptr => |f| {
+            hashAnalyte(f.analyte, &hasher);
+            // Also hash the choices array
+            for (f.choices) |choice| {
+                hasher.update(std.mem.asBytes(&choice));
+            }
+        },
         .void, .noreturn, .unimplemented => {},
     }
     return hasher.final();

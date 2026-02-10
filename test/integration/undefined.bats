@@ -443,3 +443,36 @@ load test_helper
     [[ "$output" =~ "use of undefined value" ]]
     [[ "$output" =~ "global_name.zig" ]]
 }
+
+# =============================================================================
+# Function pointer tests
+# =============================================================================
+
+@test "detects undefined passed through function pointer" {
+    run compile_and_run "$TEST_CASES/undefined/fnptr/undefined_callback.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+}
+
+@test "detects undefined in conditional fnptr branch" {
+    run compile_and_run "$TEST_CASES/undefined/fnptr/conditional_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+}
+
+@test "detects undefined in switch-selected fnptr" {
+    run compile_and_run "$TEST_CASES/undefined/fnptr/switch_fn_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+}
+
+@test "no error for correct fnptr usage" {
+    run compile_and_run "$TEST_CASES/undefined/fnptr/correct_fnptr.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "detects undefined through vtable function pointer" {
+    run compile_and_run "$TEST_CASES/undefined/fnptr/vtable_undefined.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+}

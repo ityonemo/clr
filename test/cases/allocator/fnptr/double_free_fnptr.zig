@@ -1,17 +1,16 @@
-// Test: Function pointer callback performs double free
 const std = @import("std");
 
-fn do_free(allocator: std.mem.Allocator, ptr: *u8) void {
-    allocator.destroy(ptr); // Double free should be detected
+fn does_free(allocator: std.mem.Allocator, ptr: *u8) void {
+    allocator.destroy(ptr);  // Double free
 }
 
 pub fn main() u8 {
     const allocator = std.heap.page_allocator;
     const ptr = allocator.create(u8) catch return 1;
-    ptr.* = 42;
-    allocator.destroy(ptr); // First free
+    allocator.destroy(ptr);
 
-    const fp: *const fn (std.mem.Allocator, *u8) void = &do_free;
-    fp(allocator, ptr); // Double free through function pointer
+    const callback: *const fn (std.mem.Allocator, *u8) void = &does_free;
+    callback(allocator, ptr);  // Passing freed pointer to be freed again
+
     return 0;
 }

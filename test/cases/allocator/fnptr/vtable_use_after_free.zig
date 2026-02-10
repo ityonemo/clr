@@ -1,11 +1,15 @@
 const std = @import("std");
 
+const VTable = struct {
+    process: *const fn (*u8) void,
+};
+
 fn uses_ptr(ptr: *u8) void {
-    _ = ptr.*;  // Use after free in this branch
+    _ = ptr.*;  // Use after free
 }
 
 fn ignores_ptr(ptr: *u8) void {
-    _ = ptr;  // Does nothing with ptr
+    _ = ptr;
 }
 
 pub fn main() u8 {
@@ -15,8 +19,8 @@ pub fn main() u8 {
     allocator.destroy(ptr);
 
     const cond = true;
-    const callback: *const fn (*u8) void = if (cond) &uses_ptr else &ignores_ptr;
-    callback(ptr);  // One possible branch uses freed ptr
+    const vtable: VTable = if (cond) .{ .process = &uses_ptr } else .{ .process = &ignores_ptr };
+    vtable.process(ptr);  // Fnptr inside struct - one branch uses freed ptr
 
     return 0;
 }

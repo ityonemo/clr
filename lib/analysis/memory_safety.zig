@@ -488,7 +488,7 @@ pub const MemorySafety = union(enum) {
             },
             .region => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
             .recursive => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
-            .scalar, .allocator, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -531,7 +531,7 @@ pub const MemorySafety = union(enum) {
             },
             .region => |r| clearAllocationsReturned(refinements, r.to),
             .recursive => |r| clearAllocationsReturned(refinements, r.to),
-            .scalar, .void, .noreturn, .unimplemented, .allocator => {},
+            .scalar, .fnptr, .void, .noreturn, .unimplemented, .allocator => {},
         }
     }
 
@@ -589,7 +589,7 @@ pub const MemorySafety = union(enum) {
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
             .region => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
             .recursive => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
-            .scalar, .allocator, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -667,6 +667,7 @@ pub const MemorySafety = union(enum) {
                 clearAllocationMetadata(refinements, e.to);
             },
             .allocator => |*a| a.analyte.memory_safety = null,
+            .fnptr => |*f| f.analyte.memory_safety = null,
             .recursive => |*r| {
                 r.analyte.memory_safety = null;
                 clearAllocationMetadata(refinements, r.to);
@@ -889,6 +890,7 @@ pub const MemorySafety = union(enum) {
             .region => |*r| &r.analyte,
             .recursive => |*r| &r.analyte,
             .allocator => |*a| &a.analyte,
+            .fnptr => |*f| &f.analyte,
             .void, .noreturn, .unimplemented => @panic("refinement type does not have analyte"),
         };
     }
@@ -1965,6 +1967,9 @@ pub const MemorySafety = union(enum) {
             .allocator => {
                 ref.allocator.analyte.memory_safety = .{ .unset = {} };
             },
+            .fnptr => {
+                ref.fnptr.analyte.memory_safety = .{ .unset = {} };
+            },
             .void => {},
             .region => |r| {
                 ref.region.analyte.memory_safety = .{ .unset = {} };
@@ -2229,6 +2234,11 @@ pub const MemorySafety = union(enum) {
                     ref.allocator.analyte.memory_safety = .{ .unset = {} };
                 }
             },
+            .fnptr => {
+                if (ref.fnptr.analyte.memory_safety == null) {
+                    ref.fnptr.analyte.memory_safety = .{ .unset = {} };
+                }
+            },
             .region => |r| {
                 if (ref.region.analyte.memory_safety == null) {
                     ref.region.analyte.memory_safety = .{ .unset = {} };
@@ -2359,6 +2369,9 @@ pub const MemorySafety = union(enum) {
             .allocator => {
                 ref.allocator.analyte.memory_safety = .{ .global = meta };
             },
+            .fnptr => {
+                ref.fnptr.analyte.memory_safety = .{ .global = meta };
+            },
             .region => |r| {
                 ref.region.analyte.memory_safety = .{ .global = meta };
                 setGlobalRecursive(refinements, r.to, meta);
@@ -2448,6 +2461,11 @@ pub fn testValid(refinement: Refinements.Refinement) void {
         .allocator => |a| {
             if (a.analyte.memory_safety == null) {
                 std.debug.panic("memory_safety must be set on allocators", .{});
+            }
+        },
+        .fnptr => |f| {
+            if (f.analyte.memory_safety == null) {
+                std.debug.panic("memory_safety must be set on fnptrs", .{});
             }
         },
         // Trivial types - no analyte, no memory_safety tracking

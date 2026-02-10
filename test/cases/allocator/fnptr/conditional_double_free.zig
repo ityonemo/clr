@@ -1,23 +1,22 @@
-// Test: Conditional fnptr - one callback frees (double free), one doesn't
 const std = @import("std");
 
 fn does_free(allocator: std.mem.Allocator, ptr: *u8) void {
-    allocator.destroy(ptr); // Double free - error expected
+    allocator.destroy(ptr);  // Double free in this branch
 }
 
-fn no_free(_: std.mem.Allocator, _: *u8) void {
-    // Does nothing - no error
+fn no_free(allocator: std.mem.Allocator, ptr: *u8) void {
+    _ = allocator;
+    _ = ptr;
 }
 
 pub fn main() u8 {
     const allocator = std.heap.page_allocator;
     const ptr = allocator.create(u8) catch return 1;
-    ptr.* = 42;
-    allocator.destroy(ptr); // First free
+    allocator.destroy(ptr);
 
-    var condition: bool = true;
-    _ = &condition;
-    const fp: *const fn (std.mem.Allocator, *u8) void = if (condition) &does_free else &no_free;
-    fp(allocator, ptr); // Only does_free branch will fail
+    const cond = true;
+    const callback: *const fn (std.mem.Allocator, *u8) void = if (cond) &does_free else &no_free;
+    callback(allocator, ptr);  // One possible branch double-frees
+
     return 0;
 }

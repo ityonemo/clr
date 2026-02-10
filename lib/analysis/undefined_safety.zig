@@ -244,6 +244,7 @@ pub const UndefinedSafety = union(enum) {
                 // Follow the recursive reference
                 ensureUndefinedStateSet(refinements, r.to);
             },
+            .fnptr => {}, // fnptr doesn't track undefined state
         }
     }
 
@@ -413,6 +414,7 @@ pub const UndefinedSafety = union(enum) {
             .void, .unimplemented, .noreturn => {},
             .region => |r| setDefinedRecursive(refinements, r.to),
             .recursive => |r| setDefinedRecursive(refinements, r.to),
+            .fnptr => {}, // fnptr doesn't track undefined state
         }
     }
 
@@ -442,6 +444,7 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
+            .fnptr => {}, // fnptr doesn't track undefined state
             .void, .unimplemented, .noreturn => {},
             .region => |r| forceDefinedRecursive(refinements, r.to),
             .recursive => |r| forceDefinedRecursive(refinements, r.to),
@@ -653,6 +656,7 @@ pub const UndefinedSafety = union(enum) {
                 // Follow the recursive reference
                 setUndefinedRecursive(refinements, r.to, undef_state);
             },
+            .fnptr => {}, // fnptr doesn't track undefined state
         }
     }
 
@@ -843,6 +847,7 @@ pub const UndefinedSafety = union(enum) {
                             }
                         },
                         .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
+                        .fnptr => {}, // fnptr doesn't track undefined state
                         .void, .unimplemented, .noreturn => {},
                         .region => |r| {
                             // When storing to a region, mark the uniform element as defined
@@ -1204,6 +1209,9 @@ pub const UndefinedSafety = union(enum) {
             .allocator => {
                 ref.allocator.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
             },
+            .fnptr => {
+                // fnptr doesn't track undefined state on itself - it has choices instead
+            },
             .region => |r| {
                 // Region is a container type - don't set undefined state on it, just recurse
                 retval_init(refinements, r.to, ctx);
@@ -1246,6 +1254,9 @@ pub const UndefinedSafety = union(enum) {
             .allocator => {
                 ref.allocator.analyte.undefined_safety = .{ .defined = {} };
             },
+            .fnptr => {
+                // fnptr doesn't track undefined state on itself - it has choices instead
+            },
             .region => |r| {
                 // Region is a container type - don't set undefined state on it, just recurse
                 retval_init_defined(refinements, r.to);
@@ -1268,8 +1279,8 @@ pub const UndefinedSafety = union(enum) {
             .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
-            // Containers don't track undefined on themselves
-            .optional, .errorunion, .@"struct", .@"union", .region, .recursive => {},
+            // Containers and fnptrs don't track undefined on themselves
+            .optional, .errorunion, .@"struct", .@"union", .region, .recursive, .fnptr => {},
             .void, .noreturn, .unimplemented => {},
         }
     }
@@ -1316,7 +1327,7 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
                 std.debug.panic("undefined state must be set on pointers", .{});
             }
         },
-        inline .optional, .errorunion, .@"struct", .region => |data, t| {
+        inline .optional, .errorunion, .@"struct", .region, .fnptr => |data, t| {
             // Note: .@"union" is intentionally not included here - unions use analyte.undefined
             // for tracking state when activating inactive fields
             if (data.analyte.undefined_safety != null) {
