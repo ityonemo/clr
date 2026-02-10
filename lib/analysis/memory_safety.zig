@@ -2170,7 +2170,15 @@ pub const MemorySafety = union(enum) {
                 if (ref.recursive.analyte.memory_safety == null) {
                     ref.recursive.analyte.memory_safety = .{ .unset = {} };
                 }
-                initUnsetRecursive(refinements, r.to);
+                // Skip recursion if .to is 0 (placeholder from typeToRefinement)
+                // TODO: Investigate why .recursive refinements with .to=0 placeholder are
+                // not getting memory_safety set properly. The placeholder is created in
+                // typeToRefinement for recursive type references, but something in the
+                // type creation path for complex nested structs (like GeneralPurposeAllocator)
+                // is leaving these without memory_safety initialized. See test 92-95 failures.
+                if (r.to != 0) {
+                    initUnsetRecursive(refinements, r.to);
+                }
             },
             .void, .noreturn, .unimplemented => {},
         }
@@ -2222,6 +2230,20 @@ pub const MemorySafety = union(enum) {
 
     /// WrapErrunionPayload may create payload via typeToRefinement
     pub fn wrap_errunion_payload(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const ref_idx = state.results[index].refinement orelse return;
+        initUnsetRecursive(state.refinements, ref_idx);
+    }
+
+    /// RetPtr creates a return value entity via typeToRefinement for struct/union returns
+    pub fn ret_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const ref_idx = state.results[index].refinement orelse return;
+        initUnsetRecursive(state.refinements, ref_idx);
+    }
+
+    /// ErrunionPayloadPtrSet creates a new pointer to the payload - initialize memory_safety
+    pub fn errunion_payload_ptr_set(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         initUnsetRecursive(state.refinements, ref_idx);
