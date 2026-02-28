@@ -749,3 +749,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use after free" ]]
 }
+
+@test "no false positive for conditional optional allocation with destroy" {
+    run compile_and_run "$TEST_CASES/allocator/conditional/optional_alloc_destroy.zig"
+    [ "$status" -eq 0 ]
+}

@@ -2572,7 +2572,29 @@ fn mergeRefinementRecursive(
                     else => unreachable,
                 }
                 break :blk copied_gid;
-            } else data.to;
+            } else blk: {
+                // Branches disagree - find one that differs from parent and copy it.
+                // This handles the case where one branch has a new value (e.g., allocation)
+                // while another keeps the parent's original (e.g., null branch).
+                for (branches, branch_gids) |branch_opt, gid_opt| {
+                    const branch = branch_opt orelse continue;
+                    const gid = gid_opt orelse continue;
+                    if (gid == data.to) continue; // Same as parent's original, skip
+                    // This branch has a different inner - copy it to parent
+                    const src_ref = branch.refinements.at(gid).*;
+                    try copied_from_branch.put(gid, {});
+                    try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
+                    const copied_gid = try Refinement.copyTo(src_ref, branch.refinements, refinements);
+                    switch (refinements.at(orig_gid).*) {
+                        .optional => |*o| o.to = copied_gid,
+                        .errorunion => |*e| e.to = copied_gid,
+                        else => unreachable,
+                    }
+                    break :blk copied_gid;
+                }
+                // All branches same as parent - use parent's original
+                break :blk data.to;
+            };
 
             try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
         },

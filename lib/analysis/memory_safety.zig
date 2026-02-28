@@ -1838,8 +1838,16 @@ pub const MemorySafety = union(enum) {
                                 .scalar => |*s| &s.analyte,
                                 else => unreachable,
                             };
-                            // Original has memory_safety with allocation, branch copy must too
-                            const branch_ms = branch_analyte.memory_safety.?;
+                            // Branch may have different memory_safety state (e.g., null branch has .unset)
+                            // Only check freed state if branch also has .allocated
+                            const branch_ms = branch_analyte.memory_safety orelse {
+                                all_freed = false;
+                                continue;
+                            };
+                            if (branch_ms != .allocated) {
+                                all_freed = false;
+                                continue;
+                            }
                             if (branch_ms.allocated.freed) |freed| {
                                 if (first_freed == null) {
                                     first_freed = freed;
