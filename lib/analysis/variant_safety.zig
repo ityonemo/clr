@@ -259,31 +259,11 @@ pub const VariantSafety = struct {
 
         const vs = &(u.analyte.variant_safety orelse return);
 
-        // Check if the union came from loading a global. For globals, the variant state
-        // may have been set in a different function, so we should still update based on
-        // the switch case. Only preserve "known active" state for local set_union_tag.
-        const is_from_global = blk: {
-            const inst_tag = results[union_check.union_inst].inst_tag orelse break :blk false;
-            if (inst_tag != .load) break :blk false;
-            const load_src = inst_tag.load.ptr;
-            break :blk (load_src == .int_var);
-        };
-
-        // Only skip update if EXACTLY ONE variant is known as active AND it's not from a global.
-        // If set_union_tag was called earlier in THIS function, we already KNOW which variant
-        // is active and the switch_br is just a runtime safety check - don't override.
-        // But if the union came from a global or has ambiguous state, use switch_br to establish it.
-        if (!is_from_global) {
-            var active_count: usize = 0;
-            for (vs.active_metas) |m| {
-                if (m != null) {
-                    active_count += 1;
-                }
-            }
-            if (active_count == 1) return; // Exactly one known locally - don't override
-        }
-
-        // Global, no known active variant, or ambiguous state - use switch_br to establish it.
+        // In a switch case, we have definitive knowledge of which variant is active.
+        // ALWAYS update the variant_safety - each switch case runs in its own cloned state,
+        // so we need to mark the correct field as active for THIS branch.
+        // (The original set_union_tag state is preserved in OTHER branches.)
+        //
         // Clear all active variants and set only this one
         for (vs.active_metas) |*meta| {
             meta.* = null;
