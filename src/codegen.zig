@@ -619,6 +619,40 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             const call_parts = payloadCallParts(info, datum);
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
         },
+        .store, .store_safe => blk: {
+            // Check if storing a function pointer constant
+            // Only check for fnptr if the source is an interned value (not a well-known type)
+            if (datum.bin_op.rhs.toInterned()) |interned_idx| {
+                // Skip well-known types like .undef, .void_type etc. which don't have valid IP entries in tests
+                if (!isWellKnownIndex(interned_idx)) {
+                    const ty = info.ip.typeOf(interned_idx);
+                    if (!isWellKnownType(ty)) {
+                        const type_key = info.ip.indexToKey(ty);
+                        if (type_key == .ptr_type and info.ip.indexToKey(type_key.ptr_type.child) == .func_type) {
+                            // Function pointer constant - use storeFnptr
+                            if (extractFunctionFromPointer(info.ip, interned_idx)) |func_idx| {
+                                // Get ptr string
+                                const ptr_str: []const u8 = if (datum.bin_op.lhs.toIndex()) |idx|
+                                    clr_allocator.allocPrint(info.arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null)
+                                else if (datum.bin_op.lhs.toInterned()) |ptr_interned_idx|
+                                    if (tryFieldPtrRef(info, ptr_interned_idx)) |ip_idx_str|
+                                        clr_allocator.allocPrint(info.arena, ".{{ .int_var = {s} }}", .{ip_idx_str}, null)
+                                    else if (tryGlobalRef(info, ptr_interned_idx)) |nav_idx_str|
+                                        clr_allocator.allocPrint(info.arena, ".{{ .int_var = {s} }}", .{nav_idx_str}, null)
+                                    else
+                                        ".{ .int_const = .{ .ty = .{ .unimplemented = {} } } }"
+                                else
+                                    ".{ .int_const = .{ .ty = .{ .unimplemented = {} } } }";
+                                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.storeFnptr(state, {d}, {s}, fn_{d});\n", .{ inst_index, ptr_str, @intFromEnum(func_idx) }, null);
+                            }
+                        }
+                    }
+                }
+            }
+            // Regular store - use standard apply
+            const tag_payload = payload(info, tag, datum, arg_counter);
+            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
+        },
         else => blk: {
             const tag_payload = payload(info, tag, datum, arg_counter);
             const result = clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
@@ -649,7 +683,8 @@ fn payloadArg(info: *const FnInfo, datum: Data, arg_counter: ?*u32) []const u8 {
         counter.* += 1;
         break :blk idx;
     } else zir_param_index;
-    return clr_allocator.allocPrint(info.arena, ".{{ .value = arg{d}, .name_id = {d} }}", .{ arg_index, name_id }, null);
+    // Use args[N] to access the argument from the unified args slice
+    return clr_allocator.allocPrint(info.arena, ".{{ .value = args[{d}], .name_id = {d} }}", .{ arg_index, name_id }, null);
 }
 
 fn payloadDbgStmt(info: *const FnInfo, datum: Data) []const u8 {
@@ -712,6 +747,10 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
                     const struct_str = aggregateValueToString(arena, ip, ty, agg);
                     return clr_allocator.allocPrint(arena, ".{{ .int_const = {s} }}", .{struct_str}, null);
                 }
+            }
+            // Function pointer constant - use fnptr type (choices set by Inst.storeFnptr)
+            if (type_key == .ptr_type and ip.indexToKey(type_key.ptr_type.child) == .func_type) {
+                return ".{ .int_const = .{ .ty = .{ .fnptr = {} } } }";
             }
         }
         const type_str = typeToString(null, null, arena, ip, ty);
@@ -1057,6 +1096,17 @@ fn isWellKnownType(ty: InternPool.Index) bool {
         .manyptr_u8_type, .manyptr_const_u8_type, .manyptr_const_u8_sentinel_0_type => true,
         .slice_const_u8_type, .slice_const_u8_sentinel_0_type => true,
         else => false,
+    };
+}
+
+/// Check if an InternPool index is a well-known VALUE (not type) that shouldn't be looked up in IP.
+/// These are values like .undef, .void_value, etc. that may not have valid IP entries in test contexts.
+fn isWellKnownIndex(idx: InternPool.Index) bool {
+    return switch (idx) {
+        .none, .undef, .void_value, .unreachable_value, .null_value => true,
+        .zero, .one, .negative_one, .zero_usize, .one_usize => true,
+        .zero_u8, .bool_true, .bool_false => true,
+        else => isWellKnownType(idx),
     };
 }
 
@@ -1780,9 +1830,9 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
         break :blk .{ called, ret_type };
     } else .{ "null", ".{ .ty = .{ .unimplemented = {} } }" };
 
-    // Build args tuple string: .{ Arg, Arg, ... }
-    // Args are tagged unions: .{ .inst = N } or .{ .interned = Type }
-    var args_str: []const u8 = ".{";
+    // Build args slice string: &[_]Src{ Arg, Arg, ... }
+    // Args are tagged unions: .{ .inst = N } or .{ .int_const = Type }
+    var args_str: []const u8 = "&[_]Src{";
     var first = true;
 
     var i: u32 = 0;
@@ -2018,16 +2068,13 @@ fn countArgs(tags: []const Tag) u32 {
     return count;
 }
 
-/// Generate parameter list string like "arg0: Src, arg1: Src"
+/// Generate parameter list string - unified signature with args slice
 fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
-    if (arg_count == 0) return "";
-
-    var result: []const u8 = clr_allocator.allocPrint(arena, "arg0: Src", .{}, null);
-    var i: u32 = 1;
-    while (i < arg_count) : (i += 1) {
-        result = clr_allocator.allocPrint(arena, "{s}, arg{d}: Src", .{ result, i }, null);
-    }
-    return result;
+    _ = arena;
+    // Unified FnInterpreter signature: all functions take args: []const Src
+    // Use named parameter if function has args, anonymous if not
+    if (arg_count == 0) return ", _: []const Src";
+    return ", args: []const Src";
 }
 
 /// Check if an interned function reference is a debug.* function that should be pruned
@@ -2655,8 +2702,11 @@ const FunctionGen = union(enum) {
     fn header(self: FunctionGen, arena: std.mem.Allocator, params: []const u8, fqn: []const u8, file_path: []const u8, base_line: u32, num_insts: usize, discard_caller_params: bool) []const u8 {
         _ = discard_caller_params;
         return switch (self) {
+            // FnInterpreter signature: uses *anyopaque to break import cycles
             .full => |f| clr_allocator.allocPrint(arena,
-                \\fn fn_{d}(ctx: *Context, refinements: *Refinements, return_gid: Gid{s}) anyerror!Gid {{
+                \\fn fn_{d}(ctx_opaque: *anyopaque, refinements_opaque: *anyopaque, return_gid: Gid{s}) anyerror!Gid {{
+                \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
+                \\    const refinements: *Refinements = @ptrCast(@alignCast(refinements_opaque));
                 \\    ctx.meta.file = "{s}";
                 \\    ctx.base_line = {d};
                 \\    try ctx.push_fn("{s}");
@@ -2963,12 +3013,9 @@ pub fn generateFunction(func_index: u32, fqn: []const u8, info: *const FnInfo, b
     if (info.tags.len == 0) @panic("function with no instructions encountered");
 
     // Count args and build parameter list (only for full functions)
+    // buildParamList returns ", _: []const Src" or ", args: []const Src"
     const arg_count = countArgs(info.tags);
-    const param_list = buildParamList(info.arena, arg_count);
-    const params: []const u8 = if (arg_count > 0)
-        clr_allocator.allocPrint(info.arena, ", {s}", .{param_list}, null)
-    else
-        "";
+    const params = buildParamList(info.arena, arg_count);
 
     // Worklist of functions to generate
     var worklist: std.ArrayListUnmanaged(FunctionGen) = .empty;
@@ -3806,7 +3853,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
         \\    defer refinements.deinit();
         \\{s}
         \\
-        \\    _ = fn_{d}(&ctx, &refinements, return_gid) catch {{
+        \\    _ = fn_{d}(&ctx, &refinements, return_gid, &.{{}}) catch {{
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);
         \\    }};
@@ -3818,25 +3865,18 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
 
 /// Generate a stub function for a missing call target
 pub fn generateStub(func_index: u32, arity: u32) []u8 {
-    var arena = clr_allocator.newArena();
-    defer arena.deinit();
+    _ = arity; // Unified signature always uses args slice
 
-    // Build parameter list: ctx + refinements + return_gid + arity Src args
-    var params: []const u8 = "ctx: *Context, refinements: *Refinements, return_gid: Gid";
-    var i: u32 = 0;
-    while (i < arity) : (i += 1) {
-        params = clr_allocator.allocPrint(arena.allocator(), "{s}, _: Src", .{params}, null);
-    }
-
+    // FnInterpreter signature: uses *anyopaque for ctx and refinements
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}({s}) anyerror!Gid {{
-        \\    _ = refinements;
+        \\fn fn_{d}(ctx_opaque: *anyopaque, _: *anyopaque, return_gid: Gid, _: []const Src) anyerror!Gid {{
+        \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
         \\    return return_gid;
         \\}}
         \\
-    , .{ func_index, params, func_index }, null);
+    , .{ func_index, func_index }, null);
 }
 
 const CallTarget = @import("clr.zig").CallTarget;

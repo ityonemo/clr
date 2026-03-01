@@ -121,7 +121,8 @@ test "instLine for arg" {
     const result = codegen._instLine(&info, .arg, datum, 0, null);
 
     // Name "test_param" gets registered with a hash-based ID
-    try std.testing.expect(std.mem.startsWith(u8, result, "    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = "));
+    // Now uses args[N] for unified slice signature
+    try std.testing.expect(std.mem.startsWith(u8, result, "    try Inst.apply(state, 0, .{ .arg = .{ .value = args[0], .name_id = "));
     try std.testing.expect(nameMapContains(&name_map, "test_param"));
 }
 
@@ -141,20 +142,20 @@ test "instLine for arg with sequential zir_param_index uses arg counter" {
 
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, param_names);
 
-    // First arg: zir_param_index=0, should become arg0
+    // First arg: zir_param_index=0, should become args[0]
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._instLine(&info, .arg, datum0, 0, &arg_counter);
-    try std.testing.expect(std.mem.startsWith(u8, result0, "    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = "));
+    try std.testing.expect(std.mem.startsWith(u8, result0, "    try Inst.apply(state, 0, .{ .arg = .{ .value = args[0], .name_id = "));
 
-    // Second arg: zir_param_index=1, should become arg1
+    // Second arg: zir_param_index=1, should become args[1]
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 1 } };
     const result1 = codegen._instLine(&info, .arg, datum1, 1, &arg_counter);
-    try std.testing.expect(std.mem.startsWith(u8, result1, "    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name_id = "));
+    try std.testing.expect(std.mem.startsWith(u8, result1, "    try Inst.apply(state, 1, .{ .arg = .{ .value = args[1], .name_id = "));
 
-    // Third arg: zir_param_index=2, should become arg2
+    // Third arg: zir_param_index=2, should become args[2]
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result2 = codegen._instLine(&info, .arg, datum2, 2, &arg_counter);
-    try std.testing.expect(std.mem.startsWith(u8, result2, "    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name_id = "));
+    try std.testing.expect(std.mem.startsWith(u8, result2, "    try Inst.apply(state, 2, .{ .arg = .{ .value = args[2], .name_id = "));
 
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
 
@@ -182,20 +183,20 @@ test "instLine for arg with non-sequential zir_param_index uses sequential arg c
 
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, param_names);
 
-    // First arg: zir_param_index=0, should become arg0
+    // First arg: zir_param_index=0, should become args[0]
     const datum0: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 0 } };
     const result0 = codegen._instLine(&info, .arg, datum0, 0, &arg_counter);
-    try std.testing.expect(std.mem.startsWith(u8, result0, "    try Inst.apply(state, 0, .{ .arg = .{ .value = arg0, .name_id = "));
+    try std.testing.expect(std.mem.startsWith(u8, result0, "    try Inst.apply(state, 0, .{ .arg = .{ .value = args[0], .name_id = "));
 
-    // Second arg: zir_param_index=2 (skipped 1), should become arg1
+    // Second arg: zir_param_index=2 (skipped 1), should become args[1]
     const datum1: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 2 } };
     const result1 = codegen._instLine(&info, .arg, datum1, 1, &arg_counter);
-    try std.testing.expect(std.mem.startsWith(u8, result1, "    try Inst.apply(state, 1, .{ .arg = .{ .value = arg1, .name_id = "));
+    try std.testing.expect(std.mem.startsWith(u8, result1, "    try Inst.apply(state, 1, .{ .arg = .{ .value = args[1], .name_id = "));
 
-    // Third arg: zir_param_index=3, should become arg2
+    // Third arg: zir_param_index=3, should become args[2]
     const datum2: Data = .{ .arg = .{ .ty = .none, .zir_param_index = 3 } };
     const result2 = codegen._instLine(&info, .arg, datum2, 2, &arg_counter);
-    try std.testing.expect(std.mem.startsWith(u8, result2, "    try Inst.apply(state, 2, .{ .arg = .{ .value = arg2, .name_id = "));
+    try std.testing.expect(std.mem.startsWith(u8, result2, "    try Inst.apply(state, 2, .{ .arg = .{ .value = args[2], .name_id = "));
 
     // Counter should be at 3 after processing 3 args
     try std.testing.expectEqual(@as(u32, 3), arg_counter);
@@ -305,7 +306,9 @@ test "generateFunction produces complete function" {
     const result = codegen.generateFunction(42, "test.main", &info, 10, "test.zig");
 
     const expected =
-        \\fn fn_42(ctx: *Context, refinements: *Refinements, return_gid: Gid) anyerror!Gid {
+        \\fn fn_42(ctx_opaque: *anyopaque, refinements_opaque: *anyopaque, return_gid: Gid, _: []const Src) anyerror!Gid {
+        \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
+        \\    const refinements: *Refinements = @ptrCast(@alignCast(refinements_opaque));
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
@@ -1127,7 +1130,9 @@ test "generateFunction with simple cond_br block" {
         \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .int_const = .{ .ty = .{ .void = {} } } } } });
         \\}
         \\
-        \\fn fn_42(ctx: *Context, refinements: *Refinements, return_gid: Gid) anyerror!Gid {
+        \\fn fn_42(ctx_opaque: *anyopaque, refinements_opaque: *anyopaque, return_gid: Gid, _: []const Src) anyerror!Gid {
+        \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
+        \\    const refinements: *Refinements = @ptrCast(@alignCast(refinements_opaque));
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");

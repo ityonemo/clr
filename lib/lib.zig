@@ -5,6 +5,7 @@ pub const Refinements = @import("Refinements.zig");
 pub const GlobalDef = Refinements.GlobalDef;
 pub const Src = @import("tag.zig").Src;
 pub const Type = @import("tag.zig").Type;
+pub const FnInterpreter = @import("tag.zig").FnInterpreter;
 pub const typeToRefinement = @import("tag.zig").typeToRefinement;
 pub const splatInit = @import("tag.zig").splatInit;
 pub const splatInitGlobal = @import("tag.zig").splatInitGlobal;

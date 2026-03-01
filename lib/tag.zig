@@ -46,9 +46,9 @@ const std = @import("std");
 const Inst = @import("Inst.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
-const Gid = Refinements.Gid;
 const Context = @import("Context.zig");
-const Meta = @import("Meta.zig");
+const core = @import("core.zig");
+const Gid = core.Gid;
 const State = Inst.State;
 const UndefinedSafety = @import("analysis/undefined_safety.zig").UndefinedSafety;
 const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
@@ -57,47 +57,13 @@ const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
 const FieldParentPtrSafety = @import("analysis/fieldparentptr_safety.zig").FieldParentPtrSafety;
 pub const analyses = .{ UndefinedSafety, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety };
 
-// Type
-
-pub const Name = u32;
-
-/// Represents a struct or union field with type and optional name.
-///
-/// This struct exists to propagate information from the AIR generator into
-/// the parameters of a instruction.  Some operations are expected to set
-/// the type based on interned information; in those cases, the type will be used.
-pub const Type = struct {
-    id: ?Name = null,
-    ty: union(enum) {
-        scalar: void,
-        pointer: *const Type,
-        optional: *const Type,
-        errorunion: *const Type, // error union payload type
-        null: *const Type, // used to signal that an optional is being set to null.  Inner type must be optional.
-        undefined: *const Type, // used to signal that the type is undefined, must be scalar, pointer, optional
-        region: *const Type, // unused, for now, will represent slices (maybe)
-        @"struct": []const Type, // field types for struct
-        @"union": []const Type, // field types for union
-        allocator: Name, // allocator type identified by type_id (vtable FQN hash)
-        fnptr: void, // function pointer - tracked for undefined-ness
-        recursive: Name, // reference to the refinement that is being recurred.
-        void: void,
-        unimplemented: void, // placeholder for unhandled types - will crash if accessed
-    },
-};
-
-/// Source reference for instructions - indicates where a value comes from.
-/// Used by store, br, ret_safe, load, and other tags that reference source values.
-pub const Src = union(enum) {
-    /// Runtime value from a result in the results table (index into results[])
-    inst: usize,
-    /// Interned variable by IP index - look up in refinements.getGlobal()
-    /// If found, it's a tracked user global; if not, it's a non-user interned var
-    /// This includes both direct globals and field pointers (which have their own IP index)
-    int_var: u32,
-    /// Interned constant - reify refinement from embedded type
-    int_const: Type,
-};
+// Re-export core types
+pub const Meta = core.Meta;
+pub const Name = core.Name;
+pub const Type = core.Type;
+pub const Src = core.Src;
+pub const FnInterpreter = core.FnInterpreter;
+pub const INVALID_GID = core.INVALID_GID;
 
 /// Convert a Type (from codegen) to a Refinement.
 /// Used when storing interned values to determine the refinement structure.
@@ -166,8 +132,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
         },
         .fnptr => {
-            // Function pointer - tracked for undefined-ness
-            // choices is empty initially - filled in when we know which functions can be called
+            // Function pointer - choices are set later when the value is stored
             return .{ .fnptr = .{ .choices = &.{} } };
         },
         .recursive => {

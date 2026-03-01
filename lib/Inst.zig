@@ -38,16 +38,31 @@ pub const IndirectCall = struct {
     inst: usize,
 };
 
-pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: anytype) !void {
+pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src) !void {
     // Handle indirect calls through function pointers
     if (@TypeOf(called) == IndirectCall) {
-        // The fnptr's undefined-ness was already checked at load time.
-        // Here we just create the return value based on the return type.
-        // (We can't actually call the function since we don't know which one at analysis time)
+        // Get the fnptr refinement to access possible function targets
+        const fnptr_gid = state.results[called.inst].refinement orelse return;
+        const fnptr_ref = state.refinements.at(fnptr_gid);
+
+        // Create typed return slot
         const return_ref = try tag.typeToRefinement(return_type, state.refinements);
         const return_slot = try state.refinements.appendEntity(return_ref);
-        // Use splatInitDefined to mark return as defined (assumes callee returns defined value)
-        tag.splatInitDefined(state.refinements, return_slot, state.ctx);
+        tag.splatInit(state.refinements, return_slot, state.ctx);
+
+        // Call ALL possible target functions to get conservative analysis
+        const saved_base_line = state.ctx.base_line;
+        for (fnptr_ref.fnptr.choices) |func| {
+            // FnInterpreter uses *anyopaque for Context and Refinements to break import cycles
+            _ = try func(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, args);
+        }
+        state.ctx.base_line = saved_base_line;
+
+        // If no choices, fall back to defined return value (conservative)
+        if (fnptr_ref.fnptr.choices.len == 0) {
+            tag.splatInitDefined(state.refinements, return_slot, state.ctx);
+        }
+
         state.results[index].refinement = return_slot;
         return;
     }
@@ -62,14 +77,65 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     const return_ref = try tag.typeToRefinement(return_type, state.refinements);
     const return_slot = try state.refinements.appendEntity(return_ref);
     tag.splatInit(state.refinements, return_slot, state.ctx);
-    // Call function with ctx, refinements, and return_slot
-    const return_gid = try @call(.auto, called, .{ state.ctx, state.refinements, return_slot } ++ args);
+    // Call function with ctx, refinements, return_slot, and args slice
+    // FnInterpreter uses *anyopaque for Context and Refinements to break import cycles
+    const return_gid = try called(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, args);
     // Restore caller's base_line
     state.ctx.base_line = saved_base_line;
     // Dispatch to analyses for post-call processing (e.g., clear "returned" flags)
     tag.splatCallReturn(state.refinements, return_gid);
     // Deposit returned entity GID into caller's instruction
     state.results[index].refinement = return_gid;
+}
+
+/// Store a function pointer constant with its specific function as a choice.
+/// This creates an fnptr refinement with the given function in its choices array.
+/// Called when storing a function pointer constant like `fp = &some_func`.
+pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpreter) !void {
+    // Get pointer GID following the same pattern as Store.apply
+    const ptr_gid: ?Gid = switch (ptr) {
+        .inst => |p| state.results[p].refinement,
+        .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
+        .int_const => null,
+    };
+
+    const effective_ptr_gid = ptr_gid orelse {
+        // Fallback: just mark as void and return
+        state.results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+        return;
+    };
+
+    const ptr_ref = state.refinements.at(effective_ptr_gid);
+    if (ptr_ref.* != .pointer) {
+        state.results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+        return;
+    }
+
+    // The pointer should point to an fnptr
+    const pointee_gid = ptr_ref.pointer.to;
+    const pointee_ref = state.refinements.at(pointee_gid);
+
+    // Verify it's an fnptr and set choices to include this function
+    if (pointee_ref.* == .fnptr) {
+        // Create new choices array with this function
+        const allocator = state.refinements.list.allocator;
+        const core = @import("core.zig");
+        const new_choices = try allocator.alloc(core.FnInterpreter, 1);
+        new_choices[0] = func;
+
+        // Free old choices if allocated
+        if (pointee_ref.fnptr.choices.len > 0) {
+            allocator.free(@constCast(pointee_ref.fnptr.choices));
+        }
+        pointee_ref.fnptr.choices = new_choices;
+    }
+
+    // Mark as defined via analysis dispatch - use store tag
+    const store_payload = tag.Store{ .ptr = ptr, .src = .{ .int_const = .{ .ty = .{ .fnptr = {} } } } };
+    try tag.splat(.store_safe, state, index, store_payload);
+
+    // The store instruction itself gets void refinement
+    state.results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
 }
 
 /// Execute both branches of a conditional, then merge results.

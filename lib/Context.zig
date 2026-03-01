@@ -2,10 +2,11 @@ const std = @import("std");
 const tag = @import("tag.zig");
 const Refinements = @import("Refinements.zig");
 const Inst = @import("Inst.zig");
+const core = @import("core.zig");
 
 allocator: std.mem.Allocator,
 stacktrace: std.ArrayListUnmanaged([]const u8),
-meta: @import("Meta.zig"),
+meta: core.Meta,
 base_line: u32 = 0,
 writer: *std.Io.Writer = undefined,
 
