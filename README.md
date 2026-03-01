@@ -39,11 +39,17 @@ Currently implemented:
   - `dupe`/`dupeZ` - slice duplication
   - Allocator mismatch detection (freeing with wrong allocator, create/destroy vs alloc/free)
   - Complex allocator types (GPA, ArenaAllocator, FixedBufferAllocator)
+- ArenaAllocator lifecycle tracking:
+  - `init`/`deinit`/`allocator` - full arena lifecycle
+  - Arena allocations freed on deinit (no false leak positives)
+  - Use-after-deinit, double-deinit, allocation-after-deinit detection
+  - Cross-allocator mismatch (arena vs page_allocator)
 - Derived pointer tracking (cannot free field pointers, subslices - only root allocations)
 - Pointer arithmetic safety (blocks ptr_add/ptr_sub on single-item pointers)
 - Null safety (unchecked optional unwrap detection)
 - Variant safety (accessing inactive union fields, ambiguous variant after branches)
 - Interprocedural analysis (tracking values across function calls via pointer arguments)
+- Function pointer tracking (indirect calls dispatch to possible targets)
 - Struct and union field tracking (pointer fields, nested types)
 - Slice tracking (alloc/free with regions, subslice derivation)
 - Error union support (try expressions, wrap/unwrap payload)
@@ -62,7 +68,6 @@ Planned (see LIMITATIONS.md for details):
 - async/await
 
 Maybe:
-- Lazy Arena Allocator frees
 - dbg_var_val lookahead for better error messages (see below)
 
 ### dbg_var_val and Variable Names in Errors

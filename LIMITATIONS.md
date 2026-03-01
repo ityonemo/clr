@@ -58,11 +58,19 @@ pub fn main() void {
 
 ### Arena-Style Allocators
 
-Arena-style memory management (allocating from a region, freeing the entire arena at once) is not tracked beyond basic allocator mismatch detection.
+Arena-style memory management is fully tracked:
 
-**Current behavior**: ArenaAllocator is recognized as a distinct allocator type for mismatch detection, but the "free everything at once" pattern is not specially handled.
+**What works**:
+- `ArenaAllocator.init()` - Creates arena, checks child allocator isn't deinited
+- `ArenaAllocator.deinit()` - Marks all arena allocations as freed
+- `ArenaAllocator.allocator()` - Returns allocator linked to arena instance
+- Allocations from arena don't report as leaks when arena is deinited
+- Use-after-deinit detection (allocating from deinited arena)
+- Double-deinit detection
+- Cross-allocator mismatch (arena alloc freed with page_allocator)
+- Arenas returned from functions are properly tracked
 
-**Planned**: Track arena lifetimes so that allocations from an arena don't report as leaks when the arena itself is freed/deinitialized.
+**Limitation**: Nested arenas (arena backed by another arena) - the child allocator deinit check only works for runtime allocators, not nested arena scenarios.
 
 ### Global Union Initial Values
 
@@ -251,7 +259,20 @@ Detection of race conditions, data races, or other concurrency-related memory sa
 
 ### Indirect Function Calls
 
-Function pointers and virtual method dispatch are not tracked. Allocator operations performed through indirect calls may not be detected.
+Function pointers are tracked with limited support:
+
+**What works**:
+- Function pointer refinement type (`.fnptr`) tracks possible target functions
+- Storing function pointer constants (e.g., `var fp = &myFunction`)
+- Indirect calls dispatch to all possible target functions for analysis
+- Memory safety and undefined tracking through function pointer calls
+
+**What doesn't work**:
+- Virtual method dispatch (vtables) - vtable function pointers are not resolved
+- Dynamic function pointer assignment (runtime-computed targets)
+- Function pointers loaded from complex data structures
+
+**Limitation**: The analysis is conservative - if multiple functions could be called, all are analyzed and states merged. This may produce false positives when branches would never both execute in practice.
 
 ### Custom Allocator Protocols
 
