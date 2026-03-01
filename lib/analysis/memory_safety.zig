@@ -384,7 +384,8 @@ pub const MemorySafety = union(enum) {
             .int_const => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
-        if (ptr_ref.* != .pointer) return;
+        // field_parent_ptr should only receive pointers from codegen
+        if (ptr_ref.* != .pointer) std.debug.panic("field_parent_ptr: expected pointer, got {s}", .{@tagName(ptr_ref.*)});
 
         // Get parent GID from the field pointer's memory_safety.root_gid
         const ms = ptr_ref.pointer.analyte.memory_safety orelse return;
@@ -393,7 +394,7 @@ pub const MemorySafety = union(enum) {
             .allocated => |a| a.root_gid,
             .global => return, // Global pointer, no parent tracking
             .unset => return, // Unset pointer, can't recover parent
-            .error_stub => return, // error_stub shouldn't be on pointers
+            .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on pointers")
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
         const parent_eidx = refinements.findByGid(root_gid) orelse return;
@@ -417,7 +418,7 @@ pub const MemorySafety = union(enum) {
             } },
             .global => |g| .{ .global = g },
             .unset => .{ .unset = {} },
-            .error_stub => return, // error_stub shouldn't be on parent containers
+            .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on parent containers"),
         };
     }
 
@@ -1273,13 +1274,8 @@ pub const MemorySafety = union(enum) {
         });
 
         switch (ms_ptr.*) {
-            .stack => |sp| {
-                // Check if this is a field pointer (root_gid != null means it's a field)
-                if (sp.root_gid != null) {
-                    return reportFreeFieldPointerStack(ctx, sp);
-                }
-                return reportFreeStackMemory(ctx, sp);
-            },
+            // Stack/global checks don't need root_gid - pointer check already caught derived pointers
+            .stack => |sp| return reportFreeStackMemory(ctx, sp),
             .global => return reportFreeGlobalMemory(ctx),
             .unset => @panic("alloc_free: region memory_safety is unset"),
             .error_stub => @panic("alloc_free: region has error_stub (should only be on errorunion)"),
@@ -1287,11 +1283,7 @@ pub const MemorySafety = union(enum) {
         }
 
         const a = ms_ptr.allocated;
-
-        // Check if this is a field pointer (root_gid != null means it's a field, can't free directly)
-        if (a.root_gid != null) {
-            return reportFreeFieldPointer(ctx, a);
-        }
+        // Pointer check (lines 1236-1252) already handles derived pointers via root_gid
 
         if (a.freed) |previous_free| {
             return reportDoubleFree(ctx, a, previous_free);
