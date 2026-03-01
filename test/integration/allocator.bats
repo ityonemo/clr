@@ -815,3 +815,8 @@ load test_helper
     [[ "$output" =~ "allocator mismatch" ]]
     [[ "$output" =~ "cross_allocator_create.main" ]]
 }
+
+@test "arena: no false positive for arena returned from function" {
+    run compile_and_run "$TEST_CASES/allocator/arena/laundered_arena.zig"
+    [ "$status" -eq 0 ]
+}
