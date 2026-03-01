@@ -823,8 +823,8 @@ pub const OptionalPayload = struct {
                     // the AIR uses optional_payload but the refinement is errorunion
                     state.results[index].refinement = src_ref.errorunion.to;
                 } else {
-                    // Not an optional or errorunion - direct pass-through
-                    state.results[index].refinement = src_ref_gid;
+                    // optional_payload should only receive optionals or errorunions
+                    std.debug.panic("optional_payload: expected optional or errorunion, got {s}", .{@tagName(src_ref.*)});
                 }
             },
             .int_const => {
@@ -838,8 +838,10 @@ pub const OptionalPayload = struct {
                 const src_ref = state.refinements.at(global_gid);
                 if (src_ref.* == .optional) {
                     state.results[index].refinement = src_ref.optional.to;
+                } else if (src_ref.* == .errorunion) {
+                    state.results[index].refinement = src_ref.errorunion.to;
                 } else {
-                    state.results[index].refinement = global_gid;
+                    std.debug.panic("optional_payload: expected optional or errorunion for global, got {s}", .{@tagName(src_ref.*)});
                 }
             },
         }
@@ -860,10 +862,8 @@ pub const OptionalPayloadPtr = struct {
                 const src_ptr_gid = state.results[src].refinement orelse return;
                 const src_ptr_ref = state.refinements.at(src_ptr_gid);
 
-                // src is *?T (pointer to optional)
-                // pointer.to must be a pointer refinement
-                if (src_ptr_ref.* != .pointer) return;
-
+                // src is *?T (pointer to optional) - must be a pointer
+                // pointer.to points to the optional
                 const optional_gid = src_ptr_ref.pointer.to;
                 const optional_ref = state.refinements.at(optional_gid);
 
@@ -875,8 +875,7 @@ pub const OptionalPayloadPtr = struct {
                         .to = payload_gid,
                     } });
                 } else {
-                    // Not an optional - pass through the pointer
-                    state.results[index].refinement = src_ptr_gid;
+                    std.debug.panic("optional_payload_ptr: expected pointer to optional, got pointer to {s}", .{@tagName(optional_ref.*)});
                 }
             },
             .int_const => {
@@ -887,8 +886,7 @@ pub const OptionalPayloadPtr = struct {
                     @panic("OptionalPayloadPtr: interned variable not registered");
                 const src_ptr_ref = state.refinements.at(global_ptr_gid);
 
-                if (src_ptr_ref.* != .pointer) return;
-
+                // Must be a pointer to optional
                 const optional_gid = src_ptr_ref.pointer.to;
                 const optional_ref = state.refinements.at(optional_gid);
 
@@ -898,7 +896,7 @@ pub const OptionalPayloadPtr = struct {
                         .to = payload_gid,
                     } });
                 } else {
-                    state.results[index].refinement = global_ptr_gid;
+                    std.debug.panic("optional_payload_ptr: expected global pointer to optional, got pointer to {s}", .{@tagName(optional_ref.*)});
                 }
             },
         }
@@ -919,9 +917,7 @@ pub const UnwrapErrunionPayloadPtr = struct {
                 const src_ptr_gid = state.results[src].refinement orelse return;
                 const src_ptr_ref = state.refinements.at(src_ptr_gid);
 
-                // src is *(E!T) (pointer to error union)
-                if (src_ptr_ref.* != .pointer) return;
-
+                // src is *(E!T) (pointer to error union) - must be a pointer
                 const errunion_gid = src_ptr_ref.pointer.to;
                 const errunion_ref = state.refinements.at(errunion_gid);
 
@@ -933,8 +929,7 @@ pub const UnwrapErrunionPayloadPtr = struct {
                         .to = payload_gid,
                     } });
                 } else {
-                    // Not an errorunion - pass through the pointer
-                    state.results[index].refinement = src_ptr_gid;
+                    std.debug.panic("unwrap_errunion_payload_ptr: expected pointer to errorunion, got pointer to {s}", .{@tagName(errunion_ref.*)});
                 }
             },
             .int_const => {
@@ -945,8 +940,7 @@ pub const UnwrapErrunionPayloadPtr = struct {
                     @panic("UnwrapErrunionPayloadPtr: interned variable not registered");
                 const src_ptr_ref = state.refinements.at(global_ptr_gid);
 
-                if (src_ptr_ref.* != .pointer) return;
-
+                // Must be a pointer to errorunion
                 const errunion_gid = src_ptr_ref.pointer.to;
                 const errunion_ref = state.refinements.at(errunion_gid);
 
@@ -956,7 +950,7 @@ pub const UnwrapErrunionPayloadPtr = struct {
                         .to = payload_gid,
                     } });
                 } else {
-                    state.results[index].refinement = global_ptr_gid;
+                    std.debug.panic("unwrap_errunion_payload_ptr: expected global pointer to errorunion, got pointer to {s}", .{@tagName(errunion_ref.*)});
                 }
             },
         }
