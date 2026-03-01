@@ -748,9 +748,24 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
                     return clr_allocator.allocPrint(arena, ".{{ .int_const = {s} }}", .{struct_str}, null);
                 }
             }
-            // Function pointer constant - use fnptr type (choices set by Inst.storeFnptr)
+            // Function pointer constant - use int_fnptr variant with function reference
             if (type_key == .ptr_type and ip.indexToKey(type_key.ptr_type.child) == .func_type) {
-                return ".{ .int_const = .{ .ty = .{ .fnptr = {} } } }";
+                if (extractFunctionFromPointer(ip, interned_idx)) |func_idx| {
+                    // Add to call targets so the function is included in tree shaking
+                    const func_type = ip.indexToKey(func_idx).func;
+                    const func_type_key = ip.indexToKey(func_type.ty);
+                    const arity: u32 = if (func_type_key == .func_type)
+                        @intCast(func_type_key.func_type.param_types.len)
+                    else
+                        0;
+                    info.call_targets.append(clr_allocator.allocator(), .{
+                        .index = @intFromEnum(func_idx),
+                        .arity = arity,
+                    }) catch {};
+                    return clr_allocator.allocPrint(arena, ".{{ .int_fnptr = &.{{ &fn_{d} }} }}", .{@intFromEnum(func_idx)}, null);
+                }
+                // Couldn't extract function - return empty fnptr
+                return ".{ .int_fnptr = &.{} }";
             }
         }
         const type_str = typeToString(null, null, arena, ip, ty);
@@ -766,9 +781,13 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
     const ip = info.ip;
     const val_key = ip.indexToKey(interned_idx);
 
-    // Check if this is a pointer
-    if (val_key != .ptr) return null;
-    const ptr = val_key.ptr;
+    // The value can be stored as .ptr (with nav metadata) or as .int (raw address)
+    // For .int values, we can't determine the nav - these are comptime-computed addresses
+    // that will be handled as int_const (and marked as global memory at runtime)
+    const ptr: InternPool.Key.Ptr = switch (val_key) {
+        .ptr => |p| p,
+        else => return null,
+    };
 
     // Check if the pointer has a nav base address (i.e., it's a global variable)
     if (ptr.base_addr != .nav) return null;
@@ -786,7 +805,7 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
     const is_const = switch (nav.status) {
         .fully_resolved => |fr| fr.is_const,
         .type_resolved => |tr| tr.is_const,
-        .unresolved => return null, // Skip unresolved navs
+        .unresolved => return null,
     };
     if (is_const) return null; // Skip constants
 
@@ -1824,6 +1843,11 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     } else if (callee_ref.toInterned()) |ip_idx| blk: {
         // Check if this is a function pointer constant (&function_name)
         const resolved_func_idx = extractFunctionFromPointer(info.ip, ip_idx) orelse ip_idx;
+        // Add to call targets so the function is included in tree shaking
+        info.call_targets.append(clr_allocator.allocator(), .{
+            .index = @intFromEnum(resolved_func_idx),
+            .arity = args_len,
+        }) catch {};
         // Direct call to known function - use InternPool index as func_index
         const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(resolved_func_idx)}, null);
         const ret_type = extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, resolved_func_idx);
@@ -1839,25 +1863,28 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     while (i < args_len) : (i += 1) {
         const arg_ref: Ref = @enumFromInt(info.extra[payload_index + 1 + i]);
         if (arg_ref.toIndex()) |idx| {
-            // Runtime value from local instruction - look up entity index from results
+            // Runtime value from local instruction - pass instruction index
+            // srcSliceToGidSlice will look up results[idx].refinement at runtime
             const inst_idx = @intFromEnum(idx);
             if (first) {
-                args_str = clr_allocator.allocPrint(info.arena, "{s} Src{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Src{{ .inst = {d} }}", .{ args_str, inst_idx }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(info.arena, "{s}, Src{{ .inst = state.results[{d}].refinement.? }}", .{ args_str, inst_idx }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Src{{ .inst = {d} }}", .{ args_str, inst_idx }, null);
             }
         } else if (arg_ref.toInterned()) |interned_idx| {
             // Skip zero-sized types - they have no runtime representation
             const val_type = info.ip.typeOf(interned_idx);
             if (isZeroSizedType(info.ip, val_type)) continue;
-            // Interned constant - pass type info so runtime can create entity
-            const type_str = typeToString(null, null, info.arena, info.ip, val_type);
+            // Use srcString to properly handle globals, function pointers, etc.
+            // srcString returns ".{ .xxx = ... }" - strip leading "." for struct init
+            const src_str = srcString(info, arg_ref);
+            const inner_str = if (src_str.len > 0 and src_str[0] == '.') src_str[1..] else src_str;
             if (first) {
-                args_str = clr_allocator.allocPrint(info.arena, "{s} Src{{ .int_const = {s} }}", .{ args_str, type_str }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s} Src{s}", .{ args_str, inner_str }, null);
                 first = false;
             } else {
-                args_str = clr_allocator.allocPrint(info.arena, "{s}, Src{{ .int_const = {s} }}", .{ args_str, type_str }, null);
+                args_str = clr_allocator.allocPrint(info.arena, "{s}, Src{s}", .{ args_str, inner_str }, null);
             }
         }
     }
@@ -1935,6 +1962,8 @@ fn getInstResultType(_: *const InternPool, tags: []const Tag, data: []const Data
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
         => datum.ty_op.ty.toInterned(),
+        // Block stores result type in ty_pl.ty
+        .block => datum.ty_pl.ty.toInterned(),
         else => null,
     };
 }
@@ -2071,10 +2100,11 @@ fn countArgs(tags: []const Tag) u32 {
 /// Generate parameter list string - unified signature with args slice
 fn buildParamList(arena: std.mem.Allocator, arg_count: u32) []const u8 {
     _ = arena;
-    // Unified FnInterpreter signature: all functions take args: []const Src
+    // Unified FnInterpreter signature: all functions take args: []const Gid
+    // Inst.call converts Src slice to Gid slice before calling
     // Use named parameter if function has args, anonymous if not
-    if (arg_count == 0) return ", _: []const Src";
-    return ", args: []const Src";
+    if (arg_count == 0) return ", _: []const Gid";
+    return ", args: []const Gid";
 }
 
 /// Check if an interned function reference is a debug.* function that should be pruned
@@ -2702,11 +2732,9 @@ const FunctionGen = union(enum) {
     fn header(self: FunctionGen, arena: std.mem.Allocator, params: []const u8, fqn: []const u8, file_path: []const u8, base_line: u32, num_insts: usize, discard_caller_params: bool) []const u8 {
         _ = discard_caller_params;
         return switch (self) {
-            // FnInterpreter signature: uses *anyopaque to break import cycles
+            // FnInterpreter signature: *Context, *Refinements, Gid, []const Gid
             .full => |f| clr_allocator.allocPrint(arena,
-                \\fn fn_{d}(ctx_opaque: *anyopaque, refinements_opaque: *anyopaque, return_gid: Gid{s}) anyerror!Gid {{
-                \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
-                \\    const refinements: *Refinements = @ptrCast(@alignCast(refinements_opaque));
+                \\fn fn_{d}(ctx: *Context, refinements: *Refinements, return_gid: Gid{s}) anyerror!Gid {{
                 \\    ctx.meta.file = "{s}";
                 \\    ctx.base_line = {d};
                 \\    try ctx.push_fn("{s}");
@@ -3867,10 +3895,9 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
 pub fn generateStub(func_index: u32, arity: u32) []u8 {
     _ = arity; // Unified signature always uses args slice
 
-    // FnInterpreter signature: uses *anyopaque for ctx and refinements
+    // FnInterpreter signature: *Context, *Refinements, Gid, []const Gid
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}(ctx_opaque: *anyopaque, _: *anyopaque, return_gid: Gid, _: []const Src) anyerror!Gid {{
-        \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
+        \\fn fn_{d}(ctx: *Context, _: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
         \\    return return_gid;
@@ -3880,39 +3907,6 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
 }
 
 const CallTarget = @import("clr.zig").CallTarget;
-
-/// Extract all call targets (InternPool indices and arities) from AIR instructions
-/// Skips calls to debug.* functions since they are pruned
-pub fn extractCallTargets(allocator: std.mem.Allocator, ip: *const InternPool, tags: []const Tag, data: []const Data, extra: []const u32) []CallTarget {
-    var targets = std.ArrayListUnmanaged(CallTarget){};
-
-    for (tags, data) |tag, datum| {
-        switch (tag) {
-            .call, .call_always_tail, .call_never_tail, .call_never_inline => {
-                // Skip debug.* calls - they are pruned
-                if (isDebugCall(ip, datum)) continue;
-                // Skip allocator create/destroy calls - they are transformed, not called
-                if (isAllocatorCreate(ip, datum)) continue;
-                if (isAllocatorDestroy(ip, datum)) continue;
-
-                const callee_ref = datum.pl_op.operand;
-                const payload_index = datum.pl_op.payload;
-                const args_len = extra[payload_index];
-                if (callee_ref.toInterned()) |ip_idx| {
-                    // Resolve function pointers to get the actual function
-                    const resolved_idx = extractFunctionFromPointer(ip, ip_idx) orelse ip_idx;
-                    targets.append(allocator, .{
-                        .index = @intFromEnum(resolved_idx),
-                        .arity = args_len,
-                    }) catch continue;
-                }
-            },
-            else => {},
-        }
-    }
-
-    return targets.toOwnedSlice(allocator) catch &.{};
-}
 
 test {
     @import("std").testing.refAllDecls(@import("codegen_test.zig"));

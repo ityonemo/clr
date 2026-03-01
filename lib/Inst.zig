@@ -1,5 +1,6 @@
 const std = @import("std");
 const tag = @import("tag.zig");
+const core = @import("core.zig");
 const Context = @import("Context.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
@@ -38,7 +39,49 @@ pub const IndirectCall = struct {
     inst: usize,
 };
 
+/// Convert a slice of Src to a slice of Gid for function arguments.
+/// This is needed because FnInterpreter uses []const Gid for args.
+/// Uses ctx.allocator which is cleaned up after analysis completes.
+fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
+    const allocator = state.ctx.allocator;
+    const gids = allocator.alloc(Gid, args.len) catch @panic("out of memory");
+
+    for (args, 0..) |arg, i| {
+        gids[i] = switch (arg) {
+            .inst => |idx| state.results[idx].refinement orelse blk: {
+                // No refinement - create a scalar placeholder
+                break :blk try state.refinements.appendEntity(.{ .scalar = .{} });
+            },
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx) orelse blk: {
+                // Global not found - create a scalar placeholder
+                break :blk try state.refinements.appendEntity(.{ .scalar = .{} });
+            },
+            .int_const => |ty| blk: {
+                // Create refinement from type and mark as defined (compile-time constants are always defined)
+                // splatInitDefined handles marking pointer pointees as global memory
+                const ref = try tag.typeToRefinement(ty, state.refinements);
+                const gid = try state.refinements.appendEntity(ref);
+                tag.splatInitDefined(state.refinements, gid, state.ctx);
+                break :blk gid;
+            },
+            .int_fnptr => |choices| blk: {
+                // Deep copy choices since int_fnptr provides compile-time slice
+                const owned_choices = try allocator.dupe(tag.FnInterpreter, choices);
+                const gid = try state.refinements.appendEntity(.{ .fnptr = .{ .choices = owned_choices } });
+                tag.splatInitDefined(state.refinements, gid, state.ctx);
+                break :blk gid;
+            },
+        };
+    }
+
+    return gids;
+}
+
 pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src) !void {
+    // Convert args from Src to Gid (FnInterpreter uses []const Gid)
+    const arg_gids = try srcSliceToGidSlice(state, args);
+    defer state.ctx.allocator.free(arg_gids);
+
     // Handle indirect calls through function pointers
     if (@TypeOf(called) == IndirectCall) {
         // Get the fnptr refinement to access possible function targets
@@ -53,8 +96,7 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
         // Call ALL possible target functions to get conservative analysis
         const saved_base_line = state.ctx.base_line;
         for (fnptr_ref.fnptr.choices) |func| {
-            // FnInterpreter uses *anyopaque for Context and Refinements to break import cycles
-            _ = try func(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, args);
+            _ = try func(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, arg_gids);
         }
         state.ctx.base_line = saved_base_line;
 
@@ -79,7 +121,7 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     tag.splatInit(state.refinements, return_slot, state.ctx);
     // Call function with ctx, refinements, return_slot, and args slice
     // FnInterpreter uses *anyopaque for Context and Refinements to break import cycles
-    const return_gid = try called(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, args);
+    const return_gid = try called(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, arg_gids);
     // Restore caller's base_line
     state.ctx.base_line = saved_base_line;
     // Dispatch to analyses for post-call processing (e.g., clear "returned" flags)
@@ -97,6 +139,7 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
         .inst => |p| state.results[p].refinement,
         .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
         .int_const => null,
+        .int_fnptr => null,
     };
 
     const effective_ptr_gid = ptr_gid orelse {
@@ -119,13 +162,12 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
     if (pointee_ref.* == .fnptr) {
         // Create new choices array with this function
         const allocator = state.refinements.list.allocator;
-        const core = @import("core.zig");
         const new_choices = try allocator.alloc(core.FnInterpreter, 1);
         new_choices[0] = func;
 
         // Free old choices if allocated
         if (pointee_ref.fnptr.choices.len > 0) {
-            allocator.free(@constCast(pointee_ref.fnptr.choices));
+            allocator.free(pointee_ref.fnptr.choices);
         }
         pointee_ref.fnptr.choices = new_choices;
     }

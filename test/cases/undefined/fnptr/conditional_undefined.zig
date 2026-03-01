@@ -11,7 +11,8 @@ pub fn main() u8 {
     var x: u8 = undefined;
     _ = &x;
 
-    const cond = true;
+    var cond = true;
+    _ = &cond;
     const callback: *const fn (u8) u8 = if (cond) &uses_value else &ignores_value;
     return callback(x);  // One possible branch uses undefined
 }

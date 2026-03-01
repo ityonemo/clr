@@ -1,4 +1,5 @@
 const std = @import("std");
+pub const FnInterpreter = @import("lib.zig").FnInterpreter;
 
 // =============================================================================
 // Core types used across multiple modules.
@@ -72,7 +73,7 @@ pub const Type = struct {
         @"struct": []const Type, // field types for struct
         @"union": []const Type, // field types for union
         allocator: Name, // allocator type identified by type_id (vtable FQN hash)
-        fnptr: void, // function pointer - choices are set at refinement creation time
+        fnptr: void, // function pointer type marker - choices stored separately in Src
         recursive: Name, // reference to the refinement that is being recurred.
         void: void,
         unimplemented: void, // placeholder for unhandled types - will crash if accessed
@@ -90,11 +91,8 @@ pub const Src = union(enum) {
     int_var: u32,
     /// Interned constant - reify refinement from embedded type
     int_const: Type,
+    /// Function pointer constant - array of possible target functions
+    int_fnptr: []const FnInterpreter,
 };
 
-/// Unified wrapper function signature for interprocedural analysis.
-/// All generated wrapper functions have this signature, allowing them to be
-/// stored in fnptr choices and called uniformly at indirect call sites.
-/// Note: Uses *anyopaque for Context and Refinements to break import cycles.
-/// At call sites, cast to the concrete types.
-pub const FnInterpreter = *const fn (*anyopaque, *anyopaque, Gid, []const Src) anyerror!Gid;
+

@@ -97,12 +97,12 @@ pub const MemorySafety = union(enum) {
         // Get ptr instruction index - skip for globals/constants (no memory safety tracking needed)
         const ptr = switch (params.ptr) {
             .inst => |idx| idx,
-            .int_var, .int_const => return, // globals/constants - no memory safety tracking
+            .int_var, .int_const, .int_fnptr => return, // globals/constants - no memory safety tracking
         };
         const src = switch (params.src) {
             .inst => |idx| idx,
             // comptime/interned values don't have memory safety tracking - skip
-            .int_const, .int_var => return,
+            .int_const, .int_var, .int_fnptr => return,
         };
 
         const src_refinement_idx = results[src].refinement orelse return;
@@ -209,28 +209,15 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// For inst args, memory safety state was already copied from caller.
-    /// For int_const args, set memory_safety on the created refinement.
+    /// With unified args, memory safety state is already set up by srcSliceToGidSlice.
+    /// For inst args, state was copied from caller. For int_const args, splatInitDefined
+    /// sets the initial state. Global pointer tracking for int_const pointers would
+    /// need to be added to srcSliceToGidSlice if needed.
     pub fn arg(state: State, index: usize, params: tag.Arg) !void {
-        // Only handle int_const values - inst args already have memory_safety from caller
-        if (params.value != .int_const) return;
-
-        // Get the refinement created by the Arg tag handler
-        const ref_idx = state.results[index].refinement orelse return;
-        const ty = params.value.int_const;
-
-        // For pointer args, set .global on pointer and pointee
-        if (ty.ty == .pointer) {
-            const ptr_ref = state.refinements.at(ref_idx);
-            if (ptr_ref.* != .pointer) return;
-
-            ptr_ref.pointer.analyte.memory_safety = .{ .global = state.ctx.meta };
-            const pointee_idx = ptr_ref.pointer.to;
-            setGlobalRecursive(state.refinements, pointee_idx, state.ctx.meta);
-        } else {
-            // Non-pointer int_const (scalar, etc) - set .unset
-            initUnsetRecursive(state.refinements, ref_idx);
-        }
+        _ = state;
+        _ = index;
+        _ = params;
+        // Nothing to do - state was already set by srcSliceToGidSlice
     }
 
     /// struct_field_ptr creates a pointer to a field of a struct/union.
@@ -252,7 +239,7 @@ pub const MemorySafety = union(enum) {
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 // Constant base - set .unset on result and nested refinements
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
@@ -351,7 +338,7 @@ pub const MemorySafety = union(enum) {
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // interned constant, can't track
+            .int_const, .int_fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
@@ -384,7 +371,7 @@ pub const MemorySafety = union(enum) {
         const ptr_idx: Gid = switch (params.field_ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // interned constant, can't track
+            .int_const, .int_fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
         // field_parent_ptr should only receive pointers from codegen
@@ -434,7 +421,7 @@ pub const MemorySafety = union(enum) {
         const src_idx: Gid = switch (params.src) {
             .inst => |idx| results[idx].refinement orelse return,
             // comptime/interned values don't have memory safety tracking - skip
-            .int_const, .int_var => return,
+            .int_const, .int_var, .int_fnptr => return,
         };
 
         // Recursively check for allocations to mark as returned
@@ -677,7 +664,7 @@ pub const MemorySafety = union(enum) {
                 clearAllocationMetadata(refinements, e.to);
             },
             .allocator => |*a| a.analyte.memory_safety = null,
-            .fnptr => |*f| f.analyte.memory_safety = null,
+            .fnptr => |*f| f.analyte.memory_safety = .{ .unset = {} },
             .recursive => |*r| {
                 r.analyte.memory_safety = null;
                 clearAllocationMetadata(refinements, r.to);
@@ -1126,7 +1113,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to free a pointer to a global variable
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 // Trying to free an interned constant pointer (e.g., pointer to global)
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1293,7 +1280,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to free a global slice
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 // Trying to free an interned constant slice
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1407,7 +1394,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to realloc a global slice
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 // Trying to realloc an interned constant slice
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1555,7 +1542,7 @@ pub const MemorySafety = union(enum) {
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // No memory safety tracking for interned constants
+            .int_const, .int_fnptr => return, // No memory safety tracking for interned constants
         };
         const ptr_refinement = refinements.at(ptr_idx);
 
@@ -1602,7 +1589,7 @@ pub const MemorySafety = union(enum) {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
@@ -1670,7 +1657,7 @@ pub const MemorySafety = union(enum) {
         const base_ref: Gid = switch (params.base) {
             .inst => |idx| results[idx].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // interned constant, can't track
+            .int_const, .int_fnptr => return, // interned constant, can't track
         };
         const base_refinement = refinements.at(base_ref).*;
 
@@ -2062,6 +2049,74 @@ pub const MemorySafety = union(enum) {
             .noreturn, .unimplemented => unreachable,
         }
     }
+
+    /// Initialize memory_safety for comptime DEFINED values (constants, not undefined).
+    /// For TOP-LEVEL pointers only, marks the pointee as .global since comptime pointers
+    /// always point to global/static memory (never heap allocations).
+    /// Nested pointers (inside optionals, structs, etc.) are NOT marked as global.
+    pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
+        retval_init_defined_inner(refinements, gid, true);
+    }
+
+    fn retval_init_defined_inner(refinements: *Refinements, gid: Gid, is_top_level: bool) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |p| {
+                ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                // Only mark pointee as global for TOP-LEVEL pointers
+                // (actual comptime pointer constants like &global_var)
+                // Nested pointers (e.g., inside optionals) should not be marked
+                if (is_top_level) {
+                    setGlobalRecursive(refinements, p.to, comptime_global_meta);
+                } else {
+                    retval_init_defined_inner(refinements, p.to, false);
+                }
+            },
+            .scalar => ref.scalar.analyte.memory_safety = .{ .unset = {} },
+            .optional => |o| {
+                ref.optional.analyte.memory_safety = .{ .unset = {} };
+                // Inner types of optionals are not top-level
+                retval_init_defined_inner(refinements, o.to, false);
+            },
+            .errorunion => |e| {
+                ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
+                retval_init_defined_inner(refinements, e.to, false);
+            },
+            .@"struct" => |s| {
+                ref.@"struct".analyte.memory_safety = .{ .unset = {} };
+                for (s.fields) |field_gid| {
+                    retval_init_defined_inner(refinements, field_gid, false);
+                }
+            },
+            .@"union" => |u| {
+                ref.@"union".analyte.memory_safety = .{ .unset = {} };
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        retval_init_defined_inner(refinements, field_gid, false);
+                    }
+                }
+            },
+            .allocator => ref.allocator.analyte.memory_safety = .{ .unset = {} },
+            .fnptr => ref.fnptr.analyte.memory_safety = .{ .unset = {} },
+            .region => |r| {
+                ref.region.analyte.memory_safety = .{ .unset = {} };
+                retval_init_defined_inner(refinements, r.to, false);
+            },
+            .recursive => |r| {
+                ref.recursive.analyte.memory_safety = .{ .unset = {} };
+                retval_init_defined_inner(refinements, r.to, false);
+            },
+            .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    /// Dummy Meta for comptime pointer constants (no real source location)
+    const comptime_global_meta = Meta{
+        .function = "",
+        .file = "<comptime>",
+        .line = 0,
+        .column = null,
+    };
 
     // =========================================================================
     // Simple operation handlers - set memory_safety to .unset for computed values
@@ -2502,7 +2557,7 @@ pub const MemorySafety = union(enum) {
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |inst| state.results[inst].refinement orelse return,
             .int_var => |ip_idx| state.refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return,
+            .int_const, .int_fnptr => return,
         };
         const union_gid = state.refinements.at(ptr_gid).pointer.to;
         const field_gid = state.refinements.at(union_gid).@"union".fields[field_index] orelse return;
@@ -2530,7 +2585,7 @@ pub const MemorySafety = union(enum) {
         initUnsetRecursive(state.refinements, ref_idx);
     }
 
-    /// Helper to recursively set memory_safety = .global on a refinement
+    /// Helper to recursively set memory_safety = .global on a refinement.
     fn setGlobalRecursive(refinements: *Refinements, gid: Gid, meta: Meta) void {
         const ref = refinements.at(gid);
         switch (ref.*) {

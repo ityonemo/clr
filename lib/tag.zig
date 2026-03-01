@@ -132,7 +132,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
         },
         .fnptr => {
-            // Function pointer - choices are set later when the value is stored
+            // Function pointer type marker - choices come from Src.int_fnptr at store time
             return .{ .fnptr = .{ .choices = &.{} } };
         },
         .recursive => {
@@ -321,30 +321,14 @@ pub const ArenaDeinit = struct {
 /// - store_safe(ptr=0) follows P1 to S1, marks S1 as defined (direct modification)
 pub const Arg = struct {
     name_id: u32, // Parameter name ID, resolved via ctx.getName()
-    /// Source of the argument value - either runtime (.gid) or compile-time (.interned)
-    value: Src,
+    /// GID of the argument value from the caller's refinements.
+    /// With unified args slice, caller passes Gids directly.
+    value: Gid,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        switch (self.value) {
-            .inst => |src_gid| {
-                // Global refinements: caller's GID is the same table, use directly
-                state.results[index].refinement = @intCast(src_gid);
-                // name_id is in inst_tag (stored by Inst.apply)
-            },
-            .int_const => |ty| {
-                // Compile-time constant - create entity from type info in global table
-                const ref = try typeToRefinement(ty, state.refinements);
-                const local_idx = try state.refinements.appendEntity(ref);
-                state.results[index].refinement = local_idx;
-                // name_id is in inst_tag (stored by Inst.apply)
-            },
-            .int_var => |nav_idx| {
-                // Interned variable - look up its GID from the global_map
-                const global_gid = state.refinements.getGlobal(nav_idx) orelse
-                    @panic("Arg: interned variable not registered");
-                state.results[index].refinement = global_gid;
-            },
-        }
+        // Direct GID assignment - caller already created the refinement
+        state.results[index].refinement = self.value;
+        // name_id is in inst_tag (stored by Inst.apply)
         try splat(.arg, state, index, self);
     }
 };
@@ -385,7 +369,7 @@ pub const Bitcast = struct {
                     @panic("Bitcast: interned variable not registered");
                 state.results[index].refinement = global_gid;
             },
-            .int_const => {},
+            .int_const, .int_fnptr => {},
         }
 
         try splat(.bitcast, state, index, self);
@@ -458,6 +442,16 @@ pub const Br = struct {
             },
             // Interned constants are handled by analysis modules (e.g., undefined.br marks as defined)
             .int_const => {},
+            // Function pointer constant - create fnptr refinement with choices
+            .int_fnptr => |choices| {
+                // Deep copy choices since int_fnptr provides compile-time slice
+                const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
+                const fnptr_ref = Refinement{ .fnptr = .{ .choices = owned_choices } };
+                const fnptr_gid = try state.refinements.appendEntity(fnptr_ref);
+                // Initialize analytes (fnptrs are always defined)
+                splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                state.results[self.block].refinement = fnptr_gid;
+            },
         }
 
         // Check if this br targets a loop's exit block - if so, capture state
@@ -629,6 +623,7 @@ pub const Load = struct {
                 try splat(.load, state, index, self);
                 return;
             },
+            .int_fnptr => return, // Can't load from function pointer
         };
 
         const effective_ptr_gid = ptr_gid orelse {
@@ -668,7 +663,7 @@ pub const StructFieldPtr = struct {
         const base_ref: ?Gid = switch (self.base) {
             .inst => |inst| state.results[inst].refinement,
             .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
-            .int_const => {
+            .int_const, .int_fnptr => {
                 // Interned constant base - use type info to create proper structure
                 _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
                 try splat(.struct_field_ptr, state, index, self);
@@ -818,7 +813,7 @@ pub const OptionalPayload = struct {
                     std.debug.panic("optional_payload: expected optional or errorunion, got {s}", .{@tagName(src_ref.*)});
                 }
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 // optional_payload shouldn't receive interned constants
                 @panic("optional_payload: unexpected int_const source");
             },
@@ -869,7 +864,7 @@ pub const OptionalPayloadPtr = struct {
                     std.debug.panic("optional_payload_ptr: expected pointer to optional, got pointer to {s}", .{@tagName(optional_ref.*)});
                 }
             },
-            .int_const => {
+            .int_const, .int_fnptr => {
                 @panic("optional_payload_ptr: unexpected int_const source");
             },
             .int_var => |ip_idx| {
@@ -923,8 +918,8 @@ pub const UnwrapErrunionPayloadPtr = struct {
                     std.debug.panic("unwrap_errunion_payload_ptr: expected pointer to errorunion, got pointer to {s}", .{@tagName(errunion_ref.*)});
                 }
             },
-            .int_const => {
-                @panic("unwrap_errunion_payload_ptr: unexpected int_const source");
+            .int_const, .int_fnptr => {
+                @panic("unwrap_errunion_payload_ptr: unexpected int_const/int_fnptr source");
             },
             .int_var => |ip_idx| {
                 const global_ptr_gid = state.refinements.getGlobal(ip_idx) orelse
@@ -1006,6 +1001,13 @@ pub const RetSafe = struct {
                 const global_gid = cloned.getGlobal(ip_idx) orelse
                     @panic("RetSafe: interned variable not registered");
                 cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(global_gid).*);
+            },
+            .int_fnptr => |choices| {
+                // Return a function pointer constant - deep copy choices
+                const owned_choices = try allocator.dupe(FnInterpreter, choices);
+                cloned.at(return_gid).* = .{ .fnptr = .{ .choices = owned_choices } };
+                // Initialize analytes (fnptrs are always defined)
+                splatInitDefined(cloned, return_gid, state.ctx);
             },
         }
 
@@ -1142,7 +1144,7 @@ pub const Store = struct {
         const ptr_gid: ?Gid = switch (self.ptr) {
             .inst => |ptr| state.results[ptr].refinement,
             .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
-            .int_const => null,
+            .int_const, .int_fnptr => null,
         };
         const effective_ptr_gid = ptr_gid orelse {
             try splat(.store, state, index, self);
@@ -1160,7 +1162,7 @@ pub const Store = struct {
         const src_gid: ?Gid = switch (self.src) {
             .inst => |src| state.results[src].refinement,
             .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
-            .int_const => null,
+            .int_const, .int_fnptr => null,
         };
 
         // Update structural .to fields when storing compatible types
@@ -1241,8 +1243,8 @@ pub const UnwrapErrunionPayload = struct {
                 const payload_gid = src_ref.errorunion.to;
                 state.results[index].refinement = payload_gid;
             },
-            .int_const => {
-                std.debug.panic("unwrap_errunion_payload: int_const sources not supported", .{});
+            .int_const, .int_fnptr => {
+                std.debug.panic("unwrap_errunion_payload: int_const/int_fnptr sources not supported", .{});
             },
         }
         try splat(.unwrap_errunion_payload, state, index, self);
@@ -1290,6 +1292,16 @@ pub const WrapErrunionPayload = struct {
                 // Create from type
                 const ref = try typeToRefinement(ty, state.refinements);
                 break :blk try state.refinements.appendEntity(ref);
+            },
+            .int_fnptr => |choices| blk: {
+                // Create fnptr refinement with choices - deep copy
+                const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
+                const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
+                    .choices = owned_choices,
+                } });
+                // Initialize analytes (fnptrs are always defined)
+                splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                break :blk fnptr_gid;
             },
         };
 
@@ -1628,7 +1640,7 @@ pub const SetUnionTag = struct {
         const ptr_eidx: Gid = switch (self.ptr) {
             .inst => |inst| state.results[inst].refinement.?,
             .int_var => |ip_idx| state.refinements.getGlobal(ip_idx).?,
-            .int_const => return, // comptime constant - no tracking needed
+            .int_const, .int_fnptr => return, // comptime constant - no tracking needed
         };
 
         // Follow the pointer to get the union refinement
@@ -1699,6 +1711,16 @@ pub const UnionInit = struct {
                         fields[i] = state.refinements.getGlobal(ip_idx) orelse
                             @panic("UnionInit: interned variable not registered");
                     },
+                    .int_fnptr => |choices| {
+                        // Function pointer - create fnptr entity with choices (deep copy)
+                        const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
+                        const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
+                            .choices = owned_choices,
+                        } });
+                        // Initialize analytes (fnptrs are always defined)
+                        splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                        fields[i] = fnptr_gid;
+                    },
                 }
             } else {
                 // Inactive field
@@ -1721,7 +1743,7 @@ pub const ArrayElemVal = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const base = switch (self.base) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented"),
+            .int_const, .int_var, .int_fnptr => @panic("global/interned source not implemented"),
         };
         // base must have a refinement - it's the slice/array value
         const base_ref = state.results[base].refinement.?;
@@ -1755,7 +1777,7 @@ pub const PtrAdd = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const ptr_idx = switch (self.ptr) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented"),
+            .int_const, .int_var, .int_fnptr => @panic("global/interned source not implemented"),
         };
         // Share the pointer's refinement - result points to same allocation
         if (state.results[ptr_idx].refinement) |src_gid| {
@@ -1775,7 +1797,7 @@ pub const ArrayToSlice = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const src_idx = switch (self.source) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented"),
+            .int_const, .int_var, .int_fnptr => @panic("global/interned source not implemented"),
         };
         // Share the source refinement - both many-pointer and slice are pointer→region
         if (state.results[src_idx].refinement) |src_gid| {
@@ -1833,7 +1855,7 @@ pub const PtrElemPtr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const base = switch (self.base) {
             .inst => |idx| idx,
-            .int_const, .int_var => @panic("global/interned source not implemented"),
+            .int_const, .int_var, .int_fnptr => @panic("global/interned source not implemented"),
         };
         // base must have a refinement - it's the slice value
         const base_ref = state.results[base].refinement.?;
@@ -2785,7 +2807,8 @@ test "arg shares eidx from caller (global refinements)" {
     const state = testState(&ctx, &results, &refinements);
 
     // arg should share the entity (same gid), not copy
-    try Inst.apply(state, 0, .{ .arg = .{ .value = .{ .inst = arg_gid }, .name_id = 3 } });
+    // With unified args, Arg.value is now a Gid directly
+    try Inst.apply(state, 0, .{ .arg = .{ .value = arg_gid, .name_id = 3 } });
 
     // Should have the same gid as the caller's entity
     try std.testing.expectEqual(arg_gid, results[0].refinement.?);

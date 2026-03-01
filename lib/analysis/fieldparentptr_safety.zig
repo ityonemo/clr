@@ -38,7 +38,7 @@ pub const FieldParentPtrSafety = struct {
         const base_ref: Gid = switch (params.base) {
             .inst => |inst| results[inst].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // interned constant, can't track
+            .int_const, .int_fnptr => return, // interned constant, can't track
         };
         const base_refinement = refinements.at(base_ref);
         if (base_refinement.* != .pointer) return;
@@ -145,7 +145,7 @@ pub const FieldParentPtrSafety = struct {
         const ptr_idx: Gid = switch (params.field_ptr) {
             .inst => |idx| results[idx].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // interned constant, can't track
+            .int_const, .int_fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
 

@@ -93,12 +93,11 @@ pub const Refinement = union(enum) {
     /// The choices field contains function pointers to possible implementations.
     /// When calling through a fnptr, analysis explores ALL possible function targets.
     /// FunctionPtr refinement stores possible function implementations.
-    /// Uses core.FnInterpreter which has unified signature for all wrapper functions.
     pub const FunctionPtr = struct {
         gid: Gid = INVALID_GID,
         analyte: Analyte = .{},
         /// Function pointers to possible implementations
-        choices: []const core.FnInterpreter,
+        choices: []const @import("lib.zig").FnInterpreter,
     };
 
     /// AllocatorRef refinement tracks allocator identity for mismatch detection.
@@ -161,15 +160,15 @@ pub const Refinement = union(enum) {
     }
 
     /// Merge two choice arrays into a single deduplicated array
-    fn mergeChoices(allocator: Allocator, a: []const core.FnInterpreter, b: []const core.FnInterpreter) ![]const core.FnInterpreter {
+    fn mergeChoices(allocator: Allocator, a: []const @import("lib.zig").FnInterpreter, b: []const @import("lib.zig").FnInterpreter) ![]const @import("lib.zig").FnInterpreter {
         // Use a hash set to deduplicate (hash by function pointer address)
-        var set = std.AutoHashMap(core.FnInterpreter, void).init(allocator);
+        var set = std.AutoHashMap(@import("lib.zig").FnInterpreter, void).init(allocator);
         defer set.deinit();
 
         for (a) |choice| try set.put(choice, {});
         for (b) |choice| try set.put(choice, {});
 
-        var result = try allocator.alloc(core.FnInterpreter, set.count());
+        var result = try allocator.alloc(@import("lib.zig").FnInterpreter, set.count());
         var i: usize = 0;
         var it = set.keyIterator();
         while (it.next()) |key| {
@@ -282,7 +281,7 @@ pub const Refinement = union(enum) {
             .fnptr => |f| blk: {
                 // Deep copy choices array
                 const allocator = dst_list.list.allocator;
-                const new_choices = try allocator.alloc(core.FnInterpreter, f.choices.len);
+                const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, f.choices.len);
                 @memcpy(new_choices, f.choices);
                 const new_analyte = try f.analyte.copy(allocator);
                 break :blk try dst_list.appendEntity(.{ .fnptr = .{
@@ -677,7 +676,7 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
             },
             .fnptr => |data| {
                 // Deep copy choices array
-                const new_choices = try allocator.alloc(core.FnInterpreter, data.choices.len);
+                const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, data.choices.len);
                 @memcpy(new_choices, data.choices);
                 const new_analyte = try data.analyte.copy(allocator);
                 try new.list.append(.{ .fnptr = .{
@@ -718,7 +717,7 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
         },
         .fnptr => |data| blk: {
             // Deep copy choices array
-            const new_choices = try allocator.alloc(core.FnInterpreter, data.choices.len);
+            const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, data.choices.len);
             @memcpy(new_choices, data.choices);
             const new_analyte = try data.analyte.copy(allocator);
             break :blk .{ .fnptr = .{
@@ -767,7 +766,7 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
 
         // Function pointers: deep copy choices array
         .fnptr => |f| blk: {
-            const new_choices = try allocator.alloc(core.FnInterpreter, f.choices.len);
+            const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, f.choices.len);
             @memcpy(new_choices, f.choices);
             const new_analyte = try f.analyte.copy(allocator);
             break :blk try self.appendEntity(.{ .fnptr = .{

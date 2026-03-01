@@ -14,7 +14,8 @@ pub fn main() u8 {
     const ptr = allocator.create(u8) catch return 1;
     allocator.destroy(ptr);
 
-    const cond = true;
+    var cond = true;
+    _ = &cond;
     const callback: *const fn (std.mem.Allocator, *u8) void = if (cond) &does_free else &no_free;
     callback(allocator, ptr);  // One possible branch double-frees
 

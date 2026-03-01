@@ -306,9 +306,7 @@ test "generateFunction produces complete function" {
     const result = codegen.generateFunction(42, "test.main", &info, 10, "test.zig");
 
     const expected =
-        \\fn fn_42(ctx_opaque: *anyopaque, refinements_opaque: *anyopaque, return_gid: Gid, _: []const Src) anyerror!Gid {
-        \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
-        \\    const refinements: *Refinements = @ptrCast(@alignCast(refinements_opaque));
+        \\fn fn_42(ctx: *Context, refinements: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
@@ -377,7 +375,7 @@ test "epilogue generates correct output with typed return slot" {
         \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
         \\    clr.splatInit(&refinements, return_gid, &ctx);
         \\
-        \\    _ = fn_123(&ctx, &refinements, return_gid) catch {
+        \\    _ = fn_123(&ctx, &refinements, return_gid, &.{}) catch {
         \\        file_writer.interface.flush() catch {};
         \\        std.process.exit(1);
         \\    };
@@ -1130,9 +1128,7 @@ test "generateFunction with simple cond_br block" {
         \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .int_const = .{ .ty = .{ .void = {} } } } } });
         \\}
         \\
-        \\fn fn_42(ctx_opaque: *anyopaque, refinements_opaque: *anyopaque, return_gid: Gid, _: []const Src) anyerror!Gid {
-        \\    const ctx: *Context = @ptrCast(@alignCast(ctx_opaque));
-        \\    const refinements: *Refinements = @ptrCast(@alignCast(refinements_opaque));
+        \\fn fn_42(ctx: *Context, refinements: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {
         \\    ctx.meta.file = "test.zig";
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");

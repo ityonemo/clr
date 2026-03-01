@@ -5,7 +5,6 @@ pub const Refinements = @import("Refinements.zig");
 pub const GlobalDef = Refinements.GlobalDef;
 pub const Src = @import("tag.zig").Src;
 pub const Type = @import("tag.zig").Type;
-pub const FnInterpreter = @import("tag.zig").FnInterpreter;
 pub const typeToRefinement = @import("tag.zig").typeToRefinement;
 pub const splatInit = @import("tag.zig").splatInit;
 pub const splatInitGlobal = @import("tag.zig").splatInitGlobal;
@@ -54,6 +53,11 @@ pub const State = struct {
     /// Passed through nested merges to accumulate all copy destinations.
     copied_gids: ?*std.AutoHashMap(Gid, void) = null,
 };
+
+/// Unified wrapper function signature for interprocedural analysis.
+/// All generated wrapper functions have this signature, allowing them to be
+/// stored in fnptr choices and called uniformly at indirect call sites.
+pub const FnInterpreter = *const fn (*Context, *Refinements, Gid, []const Gid) anyerror!Gid;
 
 test {
     @import("std").testing.refAllDecls(@This());

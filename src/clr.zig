@@ -69,6 +69,8 @@ pub const FnInfo = struct {
     param_names: []const []const u8,
     /// Root module name for filtering user code from stdlib
     root_name: []const u8 = "",
+    /// Accumulated call targets (direct calls + function pointer references)
+    call_targets: *std.ArrayListUnmanaged(CallTarget) = undefined,
 };
 
 pub const FuncMir = struct {
@@ -311,8 +313,11 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     // Create per-function field map for {type_id, field_index} -> name_id
     var field_map = FieldHashMap{};
 
+    // Create per-function call targets list (accumulated during generation)
+    var call_targets_list = std.ArrayListUnmanaged(CallTarget){};
+
     // Create FnInfo struct to pass to generateFunction
-    const info = FnInfo{
+    var info = FnInfo{
         .arena = arena.allocator(),
         .name_map = &name_map,
         .field_map = &field_map,
@@ -322,6 +327,7 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
         .extra = extra,
         .param_names = param_names,
         .root_name = root_name,
+        .call_targets = &call_targets_list,
     };
 
     // Generate Zig source for this function
@@ -334,8 +340,8 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const name_mappings = convertNameMapToSlice(&name_map);
     const field_mappings = convertFieldMapToSlice(&field_map);
 
-    // Extract call targets from AIR (skips debug.* calls)
-    const call_targets = clr_codegen.extractCallTargets(clr_allocator.allocator(), ip, tags, data, extra);
+    // Get accumulated call targets (populated during generation)
+    const call_targets = call_targets_list.toOwnedSlice(clr_allocator.allocator()) catch &.{};
 
     // Extract return type for entrypoints (to initialize return slot with proper type)
     const return_type: ?[]const u8 = if (is_entrypoint) blk: {

@@ -133,7 +133,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
         .struct_field_ptr => |sfp| {
             const base = switch (sfp.base) {
                 .inst => |inst_idx| inst_idx,
-                .int_var, .int_const => return null, // global/constant base - no path name
+                .int_var, .int_const, .int_fnptr => return null, // global/constant base - no path name
             };
             const base_path = self.buildPathName(results, refinements, base);
 
@@ -184,7 +184,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
             // Load inherits name from its pointer source
             const ptr = switch (l.ptr) {
                 .inst => |idx| idx,
-                .int_var, .int_const => return null,
+                .int_var, .int_const, .int_fnptr => return null,
             };
             return self.buildPathName(results, refinements, ptr);
         },
@@ -196,7 +196,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
             // Optional unwrap: base.?
             const src_idx = switch (op.src) {
                 .inst => |idx| idx,
-                .int_const, .int_var => return null,
+                .int_const, .int_var, .int_fnptr => return null,
             };
             const base_path = self.buildPathName(results, refinements, src_idx) orelse return null;
             const arena_alloc = self.error_name_arena.allocator();
@@ -347,7 +347,8 @@ test "buildPathName returns name from arg tag" {
     defer refinements.deinit();
 
     // Inst with arg tag containing name_id
-    var results = [_]Inst{.{ .inst_tag = .{ .arg = .{ .value = .{ .int_const = .{ .ty = .{ .scalar = {} } } }, .name_id = 2 } } }};
+    // Arg.value is now a Gid - use 0 as placeholder since we just need the name_id
+    var results = [_]Inst{.{ .inst_tag = .{ .arg = .{ .value = 0, .name_id = 2 } } }};
 
     const path = ctx.buildPathName(&results, &refinements, 0);
     try std.testing.expectEqualStrings("bar", path.?);

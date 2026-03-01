@@ -14,7 +14,8 @@ pub fn main() u8 {
     ptr.* = 42; // Initialize to avoid undefined value error
     allocator.destroy(ptr);
 
-    const cond = true;
+    var cond = true;
+    _ = &cond;
     const callback: *const fn (*u8) void = if (cond) &uses_ptr else &ignores_ptr;
     callback(ptr);  // One possible branch uses freed ptr
 

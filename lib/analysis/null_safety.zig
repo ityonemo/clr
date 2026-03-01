@@ -175,7 +175,7 @@ pub const NullSafety = union(enum) {
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
             .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const => return, // constant pointers - no null tracking
+            .int_const, .int_fnptr => return, // constant pointers - no null tracking
         };
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
@@ -193,7 +193,7 @@ pub const NullSafety = union(enum) {
                     pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
                 }
             },
-            .inst, .int_var => {
+            .inst, .int_var, .int_fnptr => {
                 // Runtime value or interned var - mark as non_null
                 pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
             },
