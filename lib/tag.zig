@@ -300,6 +300,24 @@ pub const ArenaDeinit = struct {
     }
 };
 
+/// Entity operation: CREATE
+/// Creates an ArenaAllocator struct. The child_allocator_inst tracks the runtime
+/// allocator instance used to back the arena (null if comptime like page_allocator).
+/// The handler checks if the child allocator is from a deinited arena.
+pub const ArenaInit = struct {
+    child_allocator_inst: ?usize, // Instruction index of child allocator (null if comptime)
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create the ArenaAllocator struct refinement from the type
+        const ref = try typeToRefinement(self.ty, state.refinements);
+        const gid = try state.refinements.appendEntity(ref);
+        state.results[index].refinement = gid;
+        splatInit(state.refinements, gid, state.ctx);
+        try splat(.arena_init, state, index, self);
+    }
+};
+
 /// Entity operation: SHARE (global refinements) or CREATE (interned)
 /// For runtime args: shares the caller's entity directly via global GID.
 /// For compile-time args: creates entity in global refinements.
@@ -1885,6 +1903,7 @@ pub const AnyTag = union(enum) {
     alloc_realloc: AllocRealloc, // Slice reallocation: allocator.realloc()/remap()
     mkallocator: MkAllocator,
     arena_deinit: ArenaDeinit, // ArenaAllocator.deinit() - frees all arena allocations
+    arena_init: ArenaInit, // ArenaAllocator.init() - creates an ArenaAllocator
     arg: Arg,
     bitcast: Bitcast,
     br: Br,

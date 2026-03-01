@@ -609,6 +609,13 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const arena_inst = extractArenaInstFromDeinit(info, datum);
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .arena_deinit = .{{ .arena_inst = {?d} }} }});\n", .{ inst_index, arena_inst }, null);
             }
+            // Check for ArenaAllocator.init() - emit arena_init tag
+            if (isArenaInit(info.ip, datum)) {
+                const return_type = getCallReturnType(info, datum);
+                // First argument is child_allocator - extract it like we do for other allocator ops
+                const child_allocator_inst = extractAllocatorInst(datum, info.extra);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .arena_init = .{{ .child_allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, child_allocator_inst, return_type }, null);
+            }
             // Check if call returns std.mem.Allocator - emit mkallocator tag
             if (getCallAllocatorReturnInfo(info.ip, datum)) |allocator_info| {
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
@@ -2185,6 +2192,12 @@ fn isArenaAllocator(ip: *const InternPool, datum: Data) bool {
     return isArenaAllocatorFqn(fqn);
 }
 
+/// Check if an interned function reference is an ArenaAllocator.init call
+fn isArenaInit(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isArenaInitFqn(fqn);
+}
+
 /// Extract FQN from a call instruction's callee reference
 fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
     const callee_ref = datum.pl_op.operand;
@@ -2524,6 +2537,19 @@ pub fn isArenaDeinitFqn(fqn: []const u8) bool {
 /// Check if FQN is an ArenaAllocator.allocator call (testable without InternPool)
 pub fn isArenaAllocatorFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "ArenaAllocator.allocator") != null;
+}
+
+/// Check if FQN is an ArenaAllocator.init call (testable without InternPool)
+pub fn isArenaInitFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "ArenaAllocator.init") != null;
+}
+
+/// Get the return type string for a call instruction's callee.
+fn getCallReturnType(info: *const FnInfo, datum: Data) []const u8 {
+    const callee_ref = datum.pl_op.operand;
+    const ip_idx = callee_ref.toInterned() orelse return ".{ .ty = .{ .unimplemented = {} } }";
+    const resolved_func_idx = extractFunctionFromPointer(info.ip, ip_idx) orelse ip_idx;
+    return extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, resolved_func_idx);
 }
 
 /// Check if a type (by InternPool index) is std.mem.Allocator.

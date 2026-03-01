@@ -2240,6 +2240,32 @@ pub const MemorySafety = union(enum) {
         setResultUnset(state, index);
     }
 
+    /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
+    /// Checks if the child allocator is from a deinited arena.
+    pub fn arena_init(state: State, index: usize, params: tag.ArenaInit) !void {
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // Check if child allocator is from a deinited arena
+        if (params.child_allocator_inst) |child_inst| {
+            if (state.results[child_inst].refinement) |child_gid| {
+                const child_ref = refinements.at(child_gid);
+                // The child allocator could be an .allocator refinement
+                if (child_ref.* == .allocator) {
+                    // Check if this allocator was deinited
+                    if (child_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(ctx, deinit_meta);
+                    }
+                }
+            }
+        }
+
+        // Initialize memory_safety on the result (ArenaAllocator struct)
+        if (state.results[index].refinement) |gid| {
+            initUnsetRecursive(refinements, gid);
+        }
+    }
+
     /// Handle ArenaAllocator.deinit() - marks the arena as deinited.
     /// All allocations made via this arena will be considered freed during leak check.
     pub fn arena_deinit(state: State, index: usize, params: tag.ArenaDeinit) !void {
