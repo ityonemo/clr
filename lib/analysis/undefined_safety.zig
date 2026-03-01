@@ -248,6 +248,20 @@ pub const UndefinedSafety = union(enum) {
         }
     }
 
+    /// Get the pointee GID from a source reference by following the pointer.
+    /// Returns null if the source is an interned constant, has no refinement, or isn't a pointer.
+    fn getPointeeFromSrc(src: tag.Src, results: []const Inst, refinements: *Refinements) ?Gid {
+        const ptr_gid: Gid = switch (src) {
+            .inst => |ptr| results[ptr].refinement orelse return null,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return null,
+            .int_const => return null,
+        };
+        return switch (refinements.at(ptr_gid).*) {
+            .pointer => |p| p.to,
+            else => null,
+        };
+    }
+
     pub fn ret_ptr(state: State, index: usize, params: tag.RetPtr) !void {
         _ = params;
         const results = state.results;
@@ -895,32 +909,13 @@ pub const UndefinedSafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // Get pointer GID based on source type
-        const ptr_idx: ?Gid = switch (params.ptr) {
-            .inst => |ptr| results[ptr].refinement,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx),
-            .int_const => {
-                // Interned constant - tag handler created new entity, set undefined state
-                const result_idx = results[index].refinement.?;
-                ensureUndefinedStateSet(refinements, result_idx);
-                return;
-            },
-        };
-        const effective_ptr_idx = ptr_idx orelse {
-            // No refinement on pointer - tag handler created new entity, set undefined state
+        // Get pointee GID by following the pointer chain.
+        // If we can't follow (interned constant, missing refinement, or not a pointer),
+        // the tag handler created a new entity - ensure its undefined state is set.
+        const pointee_idx = getPointeeFromSrc(params.ptr, results, refinements) orelse {
             const result_idx = results[index].refinement.?;
             ensureUndefinedStateSet(refinements, result_idx);
             return;
-        };
-        // Follow pointer to get to pointee
-        const pointee_idx = switch (refinements.at(effective_ptr_idx).*) {
-            .pointer => |p| p.to,
-            else => {
-                // Not a pointer - tag handler created new entity, set undefined state
-                const result_idx = results[index].refinement.?;
-                ensureUndefinedStateSet(refinements, result_idx);
-                return;
-            },
         };
         switch (refinements.at(pointee_idx).*) {
             .scalar => |s| {
