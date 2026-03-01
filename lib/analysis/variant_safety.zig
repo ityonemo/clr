@@ -7,6 +7,7 @@ const tag = @import("../tag.zig");
 const Meta = @import("../Meta.zig");
 const State = @import("../lib.zig").State;
 const memory_safety = @import("memory_safety.zig");
+const UndefinedSafety = @import("undefined_safety.zig").UndefinedSafety;
 
 /// Validate that variant_safety state is consistent with the refinement.
 /// Called by Refinements.testValid for each refinement.
@@ -166,15 +167,19 @@ pub const VariantSafety = struct {
         const union_ref = refinements.at(union_eidx);
         if (union_ref.* != .@"union") return;
 
+        const field_index = union_check.field_index;
+
+        // Only update variant_safety if no variant is currently known as active.
+        // If set_union_tag was called earlier (in this or another function), we already
+        // have variant state and the cond_br is just a runtime safety check.
+        // Unlike switch_br (user's explicit control flow), cond_br is a compiler-generated
+        // safety check that should NOT override known state.
         const u = &union_ref.@"union";
         const vs = &(u.analyte.variant_safety orelse return);
 
         // Check field index bounds
-        if (union_check.field_index >= u.fields.len) return;
+        if (field_index >= u.fields.len) return;
 
-        // Only update variant_safety if no variant is currently known as active.
-        // If set_union_tag was called earlier, we already KNOW which variant is active
-        // and the cond_br is just a runtime safety check - don't override that knowledge.
         var has_known_active = false;
         for (vs.active_metas) |m| {
             if (m != null) {
@@ -185,20 +190,25 @@ pub const VariantSafety = struct {
 
         if (!has_known_active) {
             // No known active variant - use the cond_br check to establish it.
-            // If the local field entity is null, create it.
-            if (u.fields[union_check.field_index] == null) {
-                // Inherit undefined_safety from the union itself - if the union is undefined,
-                // the field should also be undefined.
-                u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined_safety = u.analyte.undefined_safety orelse .{ .defined = {} } },
+            // Create field entity if it doesn't exist
+            // NOTE: We must re-fetch the union after appendEntity since it may reallocate the list
+            if (u.fields[field_index] == null) {
+                // Save undefined_safety before appendEntity (which may invalidate u)
+                const undef_safety: UndefinedSafety = u.analyte.undefined_safety orelse .{ .defined = {} };
+                const new_gid = refinements.appendEntity(.{ .scalar = .{
+                    .analyte = .{ .undefined_safety = undef_safety },
                 } }) catch return;
+                // Re-fetch after potential reallocation
+                refinements.at(union_eidx).@"union".fields[field_index] = new_gid;
             }
 
-            // Update local copy's variant_safety
-            for (vs.active_metas) |*meta| {
+            // Re-fetch union and update local copy's variant_safety
+            const u_ref = &refinements.at(union_eidx).@"union";
+            const vs_ref = &(u_ref.analyte.variant_safety orelse return);
+            for (vs_ref.active_metas) |*meta| {
                 meta.* = null;
             }
-            vs.active_metas[union_check.field_index] = ctx.meta;
+            vs_ref.active_metas[field_index] = ctx.meta;
         }
 
         // For globals: also update the global's variant_safety so subsequent loads see it
@@ -214,32 +224,40 @@ pub const VariantSafety = struct {
         if (global_union_ref.* != .@"union") return;
 
         const global_u = &global_union_ref.@"union";
-        const global_vs = &(global_u.analyte.variant_safety orelse return);
 
         // Check field index bounds
-        if (union_check.field_index >= global_u.fields.len) return;
+        if (field_index >= global_u.fields.len) return;
 
         // For globals, we always update based on the cond_br check.
         // Unlike locals where set_union_tag in the same function gives us accurate info,
         // globals may have been modified by other functions. The cond_br check is our
         // only source of truth in this function's analysis context.
-        // If the global's field entity is null, create it.
-        if (global_u.fields[union_check.field_index] == null) {
-            // Inherit undefined_safety from the global union itself - if the union is undefined,
-            // the field should also be undefined.
-            global_u.fields[union_check.field_index] = refinements.appendEntity(.{ .scalar = .{
-                .analyte = .{ .undefined_safety = global_u.analyte.undefined_safety orelse .{ .defined = {} } },
+        // Create field entity if it doesn't exist
+        // NOTE: We must re-fetch the union after appendEntity since it may reallocate the list
+        if (global_u.fields[field_index] == null) {
+            // Save undefined_safety before appendEntity (which may invalidate global_u)
+            const undef_safety: UndefinedSafety = global_u.analyte.undefined_safety orelse .{ .defined = {} };
+            const new_gid = refinements.appendEntity(.{ .scalar = .{
+                .analyte = .{ .undefined_safety = undef_safety },
             } }) catch return;
+            // Re-fetch after potential reallocation
+            refinements.at(global_pointee_gid).@"union".fields[field_index] = new_gid;
         }
 
-        for (global_vs.active_metas) |*meta| {
+        // Re-fetch union and clear all active variants, set only this one
+        const global_u_ref = &refinements.at(global_pointee_gid).@"union";
+        const global_vs_ref = &(global_u_ref.analyte.variant_safety orelse return);
+        for (global_vs_ref.active_metas) |*meta| {
             meta.* = null;
         }
-        global_vs.active_metas[union_check.field_index] = ctx.meta;
+        global_vs_ref.active_metas[field_index] = ctx.meta;
     }
 
     /// Handle switch_br - when switching on a union tag, update the active variant.
     /// In each switch case, we know which variant is active based on the case's items.
+    ///
+    /// We update BOTH the loaded value AND the source pointer's pointee (if any).
+    /// This ensures subsequent loads from the same pointer get the updated variant state.
     pub fn switch_br(state: State, index: usize, params: tag.SwitchBr) !void {
         _ = index;
         const results = state.results;
@@ -255,34 +273,64 @@ pub const VariantSafety = struct {
 
         // Only update for union refinements
         if (union_ref.* != .@"union") return;
-        const u = &union_ref.@"union";
 
+        const field_index = union_check.field_index;
+
+        // Update the loaded value's variant_safety
+        try updateVariantForUnion(refinements, union_eidx, field_index, ctx);
+
+        // Also update the source pointer's pointee, so subsequent loads get the updated state
+        const inst_tag = results[union_check.union_inst].inst_tag orelse return;
+        if (inst_tag != .load) return;
+        const load_src = inst_tag.load.ptr;
+
+        const ptr_gid: ?Gid = switch (load_src) {
+            .inst => |inst| results[inst].refinement,
+            .int_var => |ip_idx| refinements.getGlobal(ip_idx),
+            .int_const => null,
+        };
+        const ptr_ref = ptr_gid orelse return;
+        const pointee_gid = refinements.at(ptr_ref).pointer.to;
+
+        // Only update if pointee is a union (it should be)
+        if (refinements.at(pointee_gid).* != .@"union") return;
+
+        try updateVariantForUnion(refinements, pointee_gid, field_index, ctx);
+    }
+
+    /// Helper to update variant_safety for a union at the given gid.
+    /// Creates field entity if needed, clears all active variants, sets the specified one.
+    fn updateVariantForUnion(refinements: *Refinements, union_gid: Gid, field_index: usize, ctx: *Context) !void {
+        const union_ref = refinements.at(union_gid);
+        if (union_ref.* != .@"union") return;
+
+        const u = &union_ref.@"union";
         const vs = &(u.analyte.variant_safety orelse return);
 
-        // In a switch case, we have definitive knowledge of which variant is active.
-        // ALWAYS update the variant_safety - each switch case runs in its own cloned state,
-        // so we need to mark the correct field as active for THIS branch.
-        // (The original set_union_tag state is preserved in OTHER branches.)
-        //
-        // Clear all active variants and set only this one
-        for (vs.active_metas) |*meta| {
-            meta.* = null;
+        // Check field index bounds
+        if (field_index >= vs.active_metas.len) return;
+
+        // Create field entity if it doesn't exist
+        // NOTE: We must re-fetch the union after appendEntity since it may reallocate the list
+        if (field_index < u.fields.len and u.fields[field_index] == null) {
+            // Save undefined_safety before appendEntity (which may invalidate u)
+            const undef_safety: UndefinedSafety = u.analyte.undefined_safety orelse .{ .defined = {} };
+            const new_gid = refinements.appendEntity(.{ .scalar = .{
+                .analyte = .{ .undefined_safety = undef_safety },
+            } }) catch return;
+            // Re-fetch after potential reallocation
+            refinements.at(union_gid).@"union".fields[field_index] = new_gid;
         }
 
-        // Set this variant as active
-        const field_index = union_check.field_index;
-        if (field_index < vs.active_metas.len) {
-            // Create field entity if it doesn't exist (needed for global unions
-            // where set_union_tag may have nulled the field)
-            if (field_index < u.fields.len and u.fields[field_index] == null) {
-                // Inherit undefined_safety from the union itself - if the union is undefined,
-                // the field should also be undefined.
-                u.fields[field_index] = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined_safety = u.analyte.undefined_safety orelse .{ .defined = {} } },
-                } }) catch return;
-            }
-            vs.active_metas[field_index] = ctx.meta;
+        // Re-fetch union and update variant_safety
+        const u_ref = &refinements.at(union_gid).@"union";
+        const vs_ref = &(u_ref.analyte.variant_safety orelse return);
+
+        // Clear all active variants and set only this one
+        for (vs_ref.active_metas) |*meta| {
+            meta.* = null;
         }
+        vs_ref.active_metas[field_index] = ctx.meta;
     }
 
     /// Check struct_field_val access on unions - report error if accessing inactive variant
@@ -427,7 +475,6 @@ pub const VariantSafety = struct {
             for (active_metas) |*m| m.* = null;
             u.analyte.variant_safety = .{ .active_metas = active_metas };
         }
-        const orig_vs = &u.analyte.variant_safety.?;
 
         // Merge: mark as active any variant that was active in ANY reachable branch
         for (branches, branch_gids) |branch_opt, branch_gid_opt| {
@@ -437,19 +484,24 @@ pub const VariantSafety = struct {
             if (branch_ref.* != .@"union") continue;
 
             const branch_vs = branch_ref.@"union".analyte.variant_safety orelse continue;
+            // Re-fetch orig_vs each iteration since copyTo below may reallocate
+            const current_orig_vs = &refinements.at(orig_gid).@"union".analyte.variant_safety.?;
             // Skip if different lengths (shouldn't happen for same union type)
-            if (orig_vs.active_metas.len != branch_vs.active_metas.len) continue;
-            for (orig_vs.active_metas, branch_vs.active_metas, 0..) |*orig_m, branch_m, i| {
+            if (current_orig_vs.active_metas.len != branch_vs.active_metas.len) continue;
+            for (current_orig_vs.active_metas, branch_vs.active_metas, 0..) |*orig_m, branch_m, i| {
                 if (branch_m != null) {
                     orig_m.* = branch_m;
                     // Ensure field entity exists - copy from branch if original is null
-                    if (u.fields[i] == null) {
+                    // NOTE: We must re-fetch the union after copyTo since it may reallocate the list
+                    const current_u = &refinements.at(orig_gid).@"union";
+                    if (current_u.fields[i] == null) {
                         const branch_u = branch_ref.@"union";
                         if (branch_u.fields[i]) |branch_field_gid| {
                             // Cross-table copy: properly copies pointer .to fields
                             const branch_field_ref = branch.refinements.at(branch_field_gid).*;
                             const copied_gid = Refinements.Refinement.copyTo(branch_field_ref, branch.refinements, refinements) catch @panic("out of memory");
-                            u.fields[i] = copied_gid;
+                            // Re-fetch after potential reallocation from copyTo
+                            refinements.at(orig_gid).@"union".fields[i] = copied_gid;
                             // Ensure memory_safety is set on the copied entity
                             // (branch may have created it via typeToRefinement without memory_safety)
                             memory_safety.MemorySafety.initUnsetRecursive(refinements, copied_gid);
