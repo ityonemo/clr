@@ -33,9 +33,29 @@ pub fn apply(state: State, index: usize, any_tag: tag.AnyTag) !void {
     }
 }
 
+/// Indirect call reference - contains the instruction index of the fnptr
+pub const IndirectCall = struct {
+    inst: usize,
+};
+
 pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: anytype) !void {
-    // Skip if called is null (indirect call through function pointer - TODO: handle these)
+    // Handle indirect calls through function pointers
+    if (@TypeOf(called) == IndirectCall) {
+        // The fnptr's undefined-ness was already checked at load time.
+        // Here we just create the return value based on the return type.
+        // (We can't actually call the function since we don't know which one at analysis time)
+        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+        const return_slot = try state.refinements.appendEntity(return_ref);
+        // Use splatInitDefined to mark return as defined (assumes callee returns defined value)
+        tag.splatInitDefined(state.refinements, return_slot, state.ctx);
+        state.results[index].refinement = return_slot;
+        return;
+    }
+
+    // Skip if called is null (shouldn't happen anymore, but keep for safety)
     if (@TypeOf(called) == @TypeOf(null)) return;
+
+    // Direct call to known function
     // Save caller's base_line - callee will set its own
     const saved_base_line = state.ctx.base_line;
     // Create typed return slot in global refinements table
@@ -46,11 +66,8 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     const return_gid = try @call(.auto, called, .{ state.ctx, state.refinements, return_slot } ++ args);
     // Restore caller's base_line
     state.ctx.base_line = saved_base_line;
-    // Clear "returned" flag on any allocations in the return value.
-    // The callee marked them as "returned" (its responsibility ends),
-    // but the caller now owns them and must either free or return them.
-    const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
-    MemorySafety.clearAllocationsReturned(state.refinements, return_gid);
+    // Dispatch to analyses for post-call processing (e.g., clear "returned" flags)
+    tag.splatCallReturn(state.refinements, return_gid);
     // Deposit returned entity GID into caller's instruction
     state.results[index].refinement = return_gid;
 }

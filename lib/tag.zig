@@ -79,6 +79,7 @@ pub const Type = struct {
         @"struct": []const Type, // field types for struct
         @"union": []const Type, // field types for union
         allocator: Name, // allocator type identified by type_id (vtable FQN hash)
+        fnptr: void, // function pointer - tracked for undefined-ness
         recursive: Name, // reference to the refinement that is being recurred.
         void: void,
         unimplemented: void, // placeholder for unhandled types - will crash if accessed
@@ -163,6 +164,11 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
                     try refinements.appendEntity(try typeToRefinement(field_type, refinements));
             }
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
+        },
+        .fnptr => {
+            // Function pointer - tracked for undefined-ness
+            // choices is empty initially - filled in when we know which functions can be called
+            return .{ .fnptr = .{ .choices = &.{} } };
         },
         .recursive => {
             // Recursive type reference - return a placeholder .recursive refinement.
@@ -1981,6 +1987,17 @@ pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void
             Analysis.retval_init_defined(refinements, gid);
         } else if (@hasDecl(Analysis, "retval_init")) {
             Analysis.retval_init(refinements, gid, ctx);
+        }
+    }
+}
+
+/// Called after receiving a return value from a function call.
+/// Allows analyses to process the returned value (e.g., clear "returned" flags
+/// on allocations to transfer ownership from callee to caller).
+pub fn splatCallReturn(refinements: *Refinements, return_gid: Gid) void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "call_return")) {
+            Analysis.call_return(refinements, return_gid);
         }
     }
 }

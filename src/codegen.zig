@@ -1102,6 +1102,10 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             else => ".{ .ty = .{ .scalar = {} } }",
         },
         .ptr_type => |ptr| blk: {
+            // Function pointers get their own refinement type
+            if (ip.indexToKey(ptr.child) == .func_type) {
+                break :blk ".{ .ty = .{ .fnptr = {} } }";
+            }
             const child_str = typeToStringInner(null, null, arena, ip, ptr.child, visited);
             // Slices and many-pointers are pointer → region → element
             if (ptr.flags.size == .slice or ptr.flags.size == .many) {
@@ -1136,9 +1140,11 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             visited.put(arena, ty, {}) catch @panic("out of memory");
             break :blk unionTypeToStringSimple(arena, ip, ty, visited);
         },
-        // Enums, ints, and function types are scalars (we don't track them)
+        // Enums and ints are scalars (we don't track them)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type, .func_type => ".{ .ty = .{ .scalar = {} } }",
+        .enum_type, .int_type => ".{ .ty = .{ .scalar = {} } }",
+        // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
+        .func_type => ".{ .ty = .{ .unimplemented = {} } }",
         else => ".{ .ty = .{ .unimplemented = {} } }",
     };
 }
@@ -1284,6 +1290,10 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             else => ".{ .ty = .{ .scalar = {} } }",
         },
         .ptr_type => |ptr| blk: {
+            // Function pointers get their own refinement type
+            if (ip.indexToKey(ptr.child) == .func_type) {
+                break :blk ".{ .ty = .{ .fnptr = {} } }";
+            }
             const child_str = typeToStringInner(name_map, field_map, arena, ip, ptr.child, visited);
             // Slices and many-pointers are pointer → region → element
             if (ptr.flags.size == .slice or ptr.flags.size == .many) {
@@ -1320,9 +1330,11 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             visited.put(arena, ty, {}) catch @panic("out of memory");
             break :blk unionTypeToString(name_map, field_map, arena, ip, ty, visited);
         },
-        // Enums, ints, and function types are scalars (we don't track them)
+        // Enums and ints are scalars (we don't track them)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type, .func_type => ".{ .ty = .{ .scalar = {} } }",
+        .enum_type, .int_type => ".{ .ty = .{ .scalar = {} } }",
+        // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
+        .func_type => ".{ .ty = .{ .unimplemented = {} } }",
         else => ".{ .ty = .{ .unimplemented = {} } }",
     };
 }
@@ -1747,9 +1759,11 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
     const called_str, const return_type_str = if (callee_ref.toIndex()) |idx| blk: {
         // Indirect call through function pointer (load, slice_elem_val, etc.)
         const callee_idx = @intFromEnum(idx);
-        const callee_tag = info.tags[callee_idx];
-        _ = callee_tag;
-        break :blk .{ "null", ".{ .ty = .{ .unimplemented = {} } }" }; // TODO: handle indirect calls
+        // Format as IndirectCall struct so Inst.call can identify indirect calls
+        const called = clr_allocator.allocPrint(info.arena, "Inst.IndirectCall{{ .inst = {d} }}", .{callee_idx}, null);
+        // Get the fnptr's type to extract return type
+        const ret_type = getIndirectCallReturnType(info, callee_idx);
+        break :blk .{ called, ret_type };
     } else if (callee_ref.toInterned()) |ip_idx| blk: {
         // Check if this is a function pointer constant (&function_name)
         const resolved_func_idx = extractFunctionFromPointer(info.ip, ip_idx) orelse ip_idx;
@@ -1866,6 +1880,33 @@ fn getInstResultType(_: *const InternPool, tags: []const Tag, data: []const Data
         => datum.ty_op.ty.toInterned(),
         else => null,
     };
+}
+
+/// Get the return type string for an indirect call through a function pointer.
+/// The callee_idx is the instruction that produces the function pointer value.
+fn getIndirectCallReturnType(info: *const FnInfo, callee_idx: usize) []const u8 {
+    // Get the type of the instruction that produces the fnptr
+    const fnptr_type = getInstResultType(info.ip, info.tags, info.data, callee_idx) orelse {
+        return ".{ .ty = .{ .unimplemented = {} } }";
+    };
+
+    // The type should be a pointer to a function
+    const type_key = info.ip.indexToKey(fnptr_type);
+    const func_type_idx = switch (type_key) {
+        .ptr_type => |pt| pt.child, // Dereference pointer to get function type
+        .func_type => fnptr_type, // Already a function type (shouldn't happen but handle it)
+        else => return ".{ .ty = .{ .unimplemented = {} } }",
+    };
+
+    // Get the function type to access return_type
+    const func_type_key = info.ip.indexToKey(func_type_idx);
+    const return_type_idx = switch (func_type_key) {
+        .func_type => |ft| ft.return_type,
+        else => return ".{ .ty = .{ .unimplemented = {} } }",
+    };
+
+    // Convert return type to string
+    return typeToString(info.name_map, info.field_map, info.arena, info.ip, return_type_idx);
 }
 
 /// Get the container type for a struct/union field access operation.

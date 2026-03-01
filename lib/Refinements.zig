@@ -552,10 +552,9 @@ fn createGlobalEntity(
         },
     }
 
-    // Create the global address pointer (always defined - it's a valid global address)
+    // Create the global address pointer (undefined state set by splatInitGlobal)
     const ptr_gid = self.appendEntity(.{ .pointer = .{
         .to = pointee_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
     } }) catch @panic("appendEntity failed for global pointer");
 
     // Register in global_map

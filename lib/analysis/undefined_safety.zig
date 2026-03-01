@@ -390,7 +390,7 @@ pub const UndefinedSafety = union(enum) {
     /// Helper to recursively set all scalars/pointers in a refinement tree to defined.
     /// Preserves existing undefined states (only sets to defined if currently null).
     /// This allows per-field undefined tracking for structs like .{ .x = 42, .y = undefined }.
-    fn setDefinedRecursive(refinements: *Refinements, idx: Gid) void {
+    pub fn setDefinedRecursive(refinements: *Refinements, idx: Gid) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| {
                 // Only set to defined if not already set (preserve existing undefined state)
@@ -670,7 +670,7 @@ pub const UndefinedSafety = union(enum) {
                 // Follow the recursive reference
                 setUndefinedRecursive(refinements, r.to, undef_state);
             },
-            .fnptr => {}, // fnptr doesn't track undefined state
+            .fnptr => |*f| f.analyte.undefined_safety = undef_state,
         }
     }
 
@@ -773,6 +773,13 @@ pub const UndefinedSafety = union(enum) {
                 // Recursive type reference - the actual structure is materialized elsewhere
                 // Just mark as defined like a scalar
                 forceDefinedRecursive(refinements, idx);
+            },
+            .fnptr => {
+                // Function pointer - mark as defined
+                switch (refinements.at(idx).*) {
+                    .fnptr => |*f| f.analyte.undefined_safety = .{ .defined = {} },
+                    else => forceDefinedRecursive(refinements, idx),
+                }
             },
             .unimplemented => {
                 // Skip unimplemented types nested inside structs - nothing to track
@@ -999,6 +1006,15 @@ pub const UndefinedSafety = union(enum) {
                         }
                     },
                     else => {}, // Other element types - recurse or skip
+                }
+            },
+            .fnptr => |f| {
+                // Function pointer - check for undefined
+                const undef = f.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
+                    .defined => {},
                 }
             },
             .unimplemented => @panic("load: pointee refinement is unimplemented"),
@@ -1281,13 +1297,22 @@ pub const UndefinedSafety = union(enum) {
     }
 
     /// Initialize the undefined state on a global variable refinement.
-    /// If is_undefined is true, marks as undefined; otherwise marks as defined.
+    /// The pointer to the global is always defined (it's a valid address).
+    /// If is_undefined is true, marks the pointee as undefined; otherwise marks as defined.
     pub fn init_global(refinements: *Refinements, ptr_gid: Gid, pointee_gid: Gid, ctx: *Context, is_undefined: bool, is_null_opt: bool, loc: tag.GlobalLocation, field_info: ?tag.GlobalFieldInfo) void {
-        _ = ptr_gid; // Unused by undefined_safety
         _ = ctx;
         _ = is_null_opt; // Handled by null_safety.init_global
         _ = field_info; // Handled by fieldparentptr_safety.init_global
-        const gid = pointee_gid;
+
+        // The pointer itself is always defined - it's a valid global address
+        if (ptr_gid != 0) {
+            const ptr_ref = refinements.at(ptr_gid);
+            if (ptr_ref.* == .pointer) {
+                ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
+            }
+        }
+
+        // Handle the pointee's undefined state
         if (is_undefined) {
             // Construct Meta from the global's source location
             // Function name is empty for globals (they're not in a function)
@@ -1297,9 +1322,9 @@ pub const UndefinedSafety = union(enum) {
                 .line = loc.line,
                 .column = loc.column,
             };
-            setUndefinedRecursive(refinements, gid, .{ .undefined = .{ .meta = meta } });
+            setUndefinedRecursive(refinements, pointee_gid, .{ .undefined = .{ .meta = meta } });
         } else {
-            setDefinedRecursive(refinements, gid);
+            setDefinedRecursive(refinements, pointee_gid);
         }
     }
 };

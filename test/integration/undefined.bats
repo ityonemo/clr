@@ -476,3 +476,10 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined" ]]
 }
+
+@test "detects calling undefined function pointer" {
+    run compile_and_run "$TEST_CASES/undefined/fnptr/call_undefined_fnptr.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+    [[ "$output" =~ "call_undefined_fnptr.zig" ]]
+}

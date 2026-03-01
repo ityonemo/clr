@@ -536,6 +536,12 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Called after receiving a return value from a function call.
+    /// Clears the "returned" flag on allocations to transfer ownership from callee to caller.
+    pub fn call_return(refinements: *Refinements, return_gid: Gid) void {
+        clearAllocationsReturned(refinements, return_gid);
+    }
+
     /// Check ret_load for stack pointer escapes and mark allocations as returned.
     /// ret_load returns a value through ret_ptr storage - used for large returns (structs, unions).
     pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
