@@ -604,10 +604,17 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const allocator_inst = extractAllocatorInst(datum, info.extra);
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
             }
+            // Check for ArenaAllocator.deinit() - emit arena_deinit tag
+            if (isArenaDeinit(info.ip, datum)) {
+                const arena_inst = extractArenaInstFromDeinit(info, datum);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .arena_deinit = .{{ .arena_inst = {?d} }} }});\n", .{ inst_index, arena_inst }, null);
+            }
             // Check if call returns std.mem.Allocator - emit mkallocator tag
             if (getCallAllocatorReturnInfo(info.ip, datum)) |allocator_info| {
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .mkallocator = .{{ .type_id = {d} }} }});\n", .{ inst_index, allocator_info.id }, null);
+                // Check if this is ArenaAllocator.allocator() - include arena_inst
+                const arena_inst = if (isArenaAllocator(info.ip, datum)) extractAllocatorInst(datum, info.extra) else null;
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .mkallocator = .{{ .type_id = {d}, .arena_inst = {?d} }} }});\n", .{ inst_index, allocator_info.id, arena_inst }, null);
             }
             const call_parts = payloadCallParts(info, datum);
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
@@ -2089,6 +2096,18 @@ fn isAllocatorDupeZ(ip: *const InternPool, datum: Data) bool {
     return isAllocatorDupeZFqn(fqn);
 }
 
+/// Check if an interned function reference is an ArenaAllocator.deinit call
+fn isArenaDeinit(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isArenaDeinitFqn(fqn);
+}
+
+/// Check if an interned function reference is an ArenaAllocator.allocator call
+fn isArenaAllocator(ip: *const InternPool, datum: Data) bool {
+    const fqn = getCallFqn(ip, datum) orelse return false;
+    return isArenaAllocatorFqn(fqn);
+}
+
 /// Extract FQN from a call instruction's callee reference
 fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
     const callee_ref = datum.pl_op.operand;
@@ -2189,6 +2208,37 @@ fn extractAllocatorInst(datum: Data, extra: []const u32) ?usize {
     // It's an inst_ref - return the instruction index
     if (arg_ref.toIndex()) |inst_idx| {
         return @intFromEnum(inst_idx);
+    }
+
+    return null;
+}
+
+/// Extract the arena alloc instruction from arena.deinit() call.
+/// The first argument is the loaded arena value - trace back through the load
+/// to find the source pointer (the arena alloc instruction).
+fn extractArenaInstFromDeinit(info: *const FnInfo, datum: Data) ?usize {
+    const payload_index = datum.pl_op.payload;
+    const args_len = info.extra[payload_index];
+    if (args_len == 0) return null;
+
+    // First argument is the loaded arena value
+    const arg_ref: Ref = @enumFromInt(info.extra[payload_index + 1]);
+
+    // Get the instruction index of the load
+    const load_inst_idx = arg_ref.toIndex() orelse return null;
+    const load_idx: usize = @intFromEnum(load_inst_idx);
+
+    // Check if it's a load instruction
+    if (info.tags[load_idx] != .load) return null;
+
+    // Extract the source pointer from the load instruction
+    // Load has ty_op data: .ty is the type, .operand is the source pointer
+    const load_datum = info.data[load_idx];
+    const src_ref = load_datum.ty_op.operand;
+
+    // Get the instruction index of the source pointer (the arena alloc)
+    if (src_ref.toIndex()) |src_idx| {
+        return @intFromEnum(src_idx);
     }
 
     return null;
@@ -2387,6 +2437,16 @@ pub fn isAllocatorDupeFqn(fqn: []const u8) bool {
 /// dupeZ returns Error![:0]T - allocates copy with null terminator
 pub fn isAllocatorDupeZFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.Allocator.dupeZ") != null;
+}
+
+/// Check if FQN is an ArenaAllocator.deinit call (testable without InternPool)
+pub fn isArenaDeinitFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "ArenaAllocator.deinit") != null;
+}
+
+/// Check if FQN is an ArenaAllocator.allocator call (testable without InternPool)
+pub fn isArenaAllocatorFqn(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "ArenaAllocator.allocator") != null;
 }
 
 /// Check if a type (by InternPool index) is std.mem.Allocator.

@@ -244,7 +244,12 @@ pub const UndefinedSafety = union(enum) {
                 // Follow the recursive reference
                 ensureUndefinedStateSet(refinements, r.to);
             },
-            .fnptr => {}, // fnptr doesn't track undefined state
+            .fnptr => |*f| {
+                // fnptr is a value type that tracks undefined state
+                if (f.analyte.undefined_safety == null) {
+                    f.analyte.undefined_safety = .{ .defined = {} };
+                }
+            },
         }
     }
 
@@ -428,7 +433,12 @@ pub const UndefinedSafety = union(enum) {
             .void, .unimplemented, .noreturn => {},
             .region => |r| setDefinedRecursive(refinements, r.to),
             .recursive => |r| setDefinedRecursive(refinements, r.to),
-            .fnptr => {}, // fnptr doesn't track undefined state
+            .fnptr => |*f| {
+                // Only set to defined if not already set (preserve existing undefined state)
+                if (f.analyte.undefined_safety == null) {
+                    f.analyte.undefined_safety = .{ .defined = {} };
+                }
+            },
         }
     }
 
@@ -458,7 +468,7 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
-            .fnptr => {}, // fnptr doesn't track undefined state
+            .fnptr => |*f| f.analyte.undefined_safety = .{ .defined = {} },
             .void, .unimplemented, .noreturn => {},
             .region => |r| forceDefinedRecursive(refinements, r.to),
             .recursive => |r| forceDefinedRecursive(refinements, r.to),
@@ -868,7 +878,7 @@ pub const UndefinedSafety = union(enum) {
                             }
                         },
                         .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
-                        .fnptr => {}, // fnptr doesn't track undefined state
+                        .fnptr => |*f| f.analyte.undefined_safety = .{ .defined = {} },
                         .void, .unimplemented, .noreturn => {},
                         .region => |r| {
                             // When storing to a region, mark the uniform element as defined
@@ -1011,6 +1021,15 @@ pub const UndefinedSafety = union(enum) {
             .fnptr => |f| {
                 // Function pointer - check for undefined
                 const undef = f.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
+                    .defined => {},
+                }
+            },
+            .allocator => |a| {
+                // Allocator - check for undefined
+                const undef = a.analyte.undefined_safety orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -1221,7 +1240,7 @@ pub const UndefinedSafety = union(enum) {
                 ref.allocator.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
             },
             .fnptr => {
-                // fnptr doesn't track undefined state on itself - it has choices instead
+                ref.fnptr.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
             },
             .region => |r| {
                 // Region is a container type - don't set undefined state on it, just recurse
@@ -1266,7 +1285,7 @@ pub const UndefinedSafety = union(enum) {
                 ref.allocator.analyte.undefined_safety = .{ .defined = {} };
             },
             .fnptr => {
-                // fnptr doesn't track undefined state on itself - it has choices instead
+                ref.fnptr.analyte.undefined_safety = .{ .defined = {} };
             },
             .region => |r| {
                 // Region is a container type - don't set undefined state on it, just recurse
@@ -1290,8 +1309,9 @@ pub const UndefinedSafety = union(enum) {
             .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
-            // Containers and fnptrs don't track undefined on themselves
-            .optional, .errorunion, .@"struct", .@"union", .region, .recursive, .fnptr => {},
+            .fnptr => |*f| f.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
+            // Containers don't track undefined on themselves
+            .optional, .errorunion, .@"struct", .@"union", .region, .recursive => {},
             .void, .noreturn, .unimplemented => {},
         }
     }
@@ -1347,7 +1367,13 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
                 std.debug.panic("undefined state must be set on pointers", .{});
             }
         },
-        inline .optional, .errorunion, .@"struct", .region, .fnptr => |data, t| {
+        .fnptr => |f| {
+            // Function pointers are values that can be undefined (like scalars/pointers)
+            if (f.analyte.undefined_safety == null) {
+                std.debug.panic("undefined state must be set on fnptrs", .{});
+            }
+        },
+        inline .optional, .errorunion, .@"struct", .region => |data, t| {
             // Note: .@"union" is intentionally not included here - unions use analyte.undefined
             // for tracking state when activating inactive fields
             if (data.analyte.undefined_safety != null) {

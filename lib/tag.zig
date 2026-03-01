@@ -303,15 +303,35 @@ pub const AllocRealloc = struct {
 /// Entity operation: CREATE
 /// Creates an .allocator refinement from a call to .allocator() method.
 /// The type_id uniquely identifies the allocator type (e.g., GPA vs PageAllocator).
+/// If arena_inst is set, this allocator comes from ArenaAllocator.allocator().
 pub const MkAllocator = struct {
     type_id: u32, // Allocator type ID (FQN hash of .allocator() method)
+    arena_inst: ?usize = null, // If from arena, the instruction index of the arena alloc
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create an allocator refinement with the type_id
+        // Get the arena's GID if this is from an arena
+        const arena_gid: ?Refinements.Gid = if (self.arena_inst) |arena_idx| blk: {
+            const arena_ref_gid = state.results[arena_idx].refinement orelse break :blk null;
+            break :blk arena_ref_gid;
+        } else null;
+
+        // Create an allocator refinement with the type_id and arena_gid
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{
-            .allocator = .{ .type_id = self.type_id },
+            .allocator = .{ .type_id = self.type_id, .arena_gid = arena_gid },
         });
+
         try splat(.mkallocator, state, index, self);
+    }
+};
+
+/// Entity operation: NONE
+/// Marks an ArenaAllocator as deinited. All allocations made via this arena
+/// are considered freed. Tracks arena_inst to identify which arena was deinited.
+pub const ArenaDeinit = struct {
+    arena_inst: ?usize, // Instruction index of the arena alloc
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        try splat(.arena_deinit, state, index, self);
     }
 };
 
@@ -1182,6 +1202,17 @@ pub const Store = struct {
         // This ensures that loads through the destination reach the correct target
         if (src_gid) |src_ref| {
             const src = state.refinements.at(src_ref);
+
+            // ALLOCATOR IDENTITY: When storing an allocator, make the pointer
+            // point directly to the source allocator refinement. This preserves
+            // allocator identity through store/load cycles. The Zig Allocator type
+            // is a struct, but we track it as .allocator refinement for analysis.
+            if (src.* == .allocator) {
+                ptr_ref.pointer.to = src_ref;
+                try splat(.store, state, index, self);
+                return;
+            }
+
             switch (pointee.*) {
                 .pointer => |*p| {
                     // Storing pointer into pointer slot - share the target
@@ -1866,6 +1897,7 @@ pub const AnyTag = union(enum) {
     alloc_resize: AllocResize, // Slice resize: allocator.resize() - returns bool
     alloc_realloc: AllocRealloc, // Slice reallocation: allocator.realloc()/remap()
     mkallocator: MkAllocator,
+    arena_deinit: ArenaDeinit, // ArenaAllocator.deinit() - frees all arena allocations
     arg: Arg,
     bitcast: Bitcast,
     br: Br,

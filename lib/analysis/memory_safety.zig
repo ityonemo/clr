@@ -12,6 +12,11 @@ const State = @import("../lib.zig").State;
 // State types
 // =========================================================================
 
+pub const Free = struct {
+    meta: Meta,
+    name_at_free: ?[]const u8 = null, // Full path name (arena-allocated at store time)
+};
+
 pub const Stack = struct {
     meta: Meta,
     root_gid: ?Gid, // null = root, else parent container gid
@@ -24,15 +29,12 @@ pub const Stack = struct {
     };
 };
 
-pub const Free = struct {
-    meta: Meta,
-    name_at_free: ?[]const u8 = null, // Full path name (arena-allocated at store time)
-};
-
 pub const Allocated = struct {
     meta: Meta,
     root_gid: ?Gid, // null = root, else parent container gid
     freed: ?Free = null, // null = still allocated, has value = freed
+    arena: ?Gid = null, // if allocated via arena, the arena's GID
+
     type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
     name_at_alloc: ?[]const u8 = null, // Full path name when allocated (e.g., "container.ptr")
     returned: bool = false, // true if this allocation was returned to caller (not a local leak)
@@ -394,7 +396,7 @@ pub const MemorySafety = union(enum) {
             .allocated => |a| a.root_gid,
             .global => return, // Global pointer, no parent tracking
             .unset => return, // Unset pointer, can't recover parent
-            .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on pointers")
+            .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on pointers"),
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
         const parent_eidx = refinements.findByGid(root_gid) orelse return;
@@ -749,8 +751,20 @@ pub const MemorySafety = union(enum) {
             // Skip if freed, returned to caller, or (in non-main) reachable from a global
             // In main, even global-reachable allocations must be freed before program exit
             const skip_global_reachable = !in_main and global_reachable.contains(pointee_idx);
-            if (allocation.freed == null and !allocation.returned and !skip_global_reachable) {
-                return reportMemoryLeak(ctx, allocation);
+
+            // Check arena allocations
+            if (allocation.arena) |arena_ptr_gid| {
+                // Skip if the arena was deinited - arena frees all allocations
+                if (isArenaDeinited(refinements, arena_ptr_gid)) continue;
+                // Arena not deinited - report arena leak
+                if (allocation.freed == null and !allocation.returned and !skip_global_reachable) {
+                    return reportArenaLeak(ctx, allocation);
+                }
+            } else {
+                // Non-arena allocation - normal leak check
+                if (allocation.freed == null and !allocation.returned and !skip_global_reachable) {
+                    return reportMemoryLeak(ctx, allocation);
+                }
             }
         }
 
@@ -846,24 +860,39 @@ pub const MemorySafety = union(enum) {
         const ptr = &state.refinements.at(ptr_ref).pointer;
         const pointee_ref = ptr.to;
 
-        // Determine type_id: prefer refinement-based if available (runtime allocators)
-        const type_id = blk: {
-            if (params.allocator_inst) |alloc_inst| {
-                if (state.results[alloc_inst].refinement) |alloc_gid| {
-                    const alloc_ref = state.refinements.at(alloc_gid);
-                    if (alloc_ref.* == .allocator) {
-                        break :blk alloc_ref.allocator.type_id;
+        // Determine type_id and arena_gid: prefer refinement-based if available (runtime allocators)
+        var type_id: u32 = params.type_id;
+        var arena_gid: ?Gid = null;
+        if (params.allocator_inst) |alloc_inst| {
+            // First try direct refinement lookup (allocator used directly without store/load)
+            if (state.results[alloc_inst].refinement) |alloc_ref_gid| {
+                const alloc_ref = state.refinements.at(alloc_ref_gid);
+                if (alloc_ref.* == .allocator) {
+                    // Check if allocating from a deinited allocator
+                    if (alloc_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
                     }
+                    type_id = alloc_ref.allocator.type_id;
+                    arena_gid = alloc_ref.allocator.arena_gid;
                 }
             }
-            // Fall back to codegen-extracted type_id (comptime allocators)
-            break :blk params.type_id;
-        };
+        }
+
+        // Check if allocating from a deinited arena (handles case where arena.allocator()
+        // is called again after deinit, creating a new AllocatorRef without .deinit set)
+        if (arena_gid) |agid| {
+            if (findAllocatorForArena(state.refinements, agid)) |alloc_ref| {
+                if (alloc_ref.deinit) |deinit_meta| {
+                    return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                }
+            }
+        }
 
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
             .type_id = type_id,
             .root_gid = null, // This is the root allocation
+            .arena = arena_gid, // Track if allocated via arena
         };
 
         // Set error_stub on errorunion to mark this as allocation-derived errorunion
@@ -876,6 +905,7 @@ pub const MemorySafety = union(enum) {
                 .meta = alloc_base.meta,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
+                .arena = arena_gid, // Track if allocated via arena
                 .is_slice = false, // create allocates single item
             },
         };
@@ -961,6 +991,12 @@ pub const MemorySafety = union(enum) {
                     setStackRecursive(refinements, rec.to, meta, child_root);
                 }
             },
+            .fnptr => |*f| {
+                f.analyte.memory_safety = ms;
+            },
+            .allocator => |*a| {
+                a.analyte.memory_safety = ms;
+            },
             else => {},
         }
     }
@@ -970,6 +1006,7 @@ pub const MemorySafety = union(enum) {
         meta: Meta,
         type_id: u32,
         root_gid: ?Gid, // Initial root_gid for the root node
+        arena: ?Gid = null, // If allocated via arena, the arena's GID
     };
 
     /// Recursively set .allocated memory_safety on all members of a refinement.
@@ -981,6 +1018,7 @@ pub const MemorySafety = union(enum) {
             .meta = base.meta,
             .type_id = base.type_id,
             .root_gid = root_gid,
+            .arena = base.arena,
             .is_slice = is_slice,
         } };
         // Children point to actual root (null for root, else the root's gid)
@@ -1028,6 +1066,12 @@ pub const MemorySafety = union(enum) {
                 if (rec.to != 0) {
                     setAllocatedRecursive(refinements, rec.to, base, child_root, is_slice);
                 }
+            },
+            .fnptr => |*f| {
+                f.analyte.memory_safety = ms;
+            },
+            .allocator => |*a| {
+                a.analyte.memory_safety = ms;
             },
             else => {},
         }
@@ -1168,24 +1212,39 @@ pub const MemorySafety = union(enum) {
         const region = &state.refinements.at(region_ref).region;
         const element_ref = region.to;
 
-        // Determine type_id: prefer refinement-based if available (runtime allocators)
-        const type_id = blk: {
-            if (params.allocator_inst) |alloc_inst| {
-                if (state.results[alloc_inst].refinement) |alloc_gid| {
-                    const alloc_ref = state.refinements.at(alloc_gid);
-                    if (alloc_ref.* == .allocator) {
-                        break :blk alloc_ref.allocator.type_id;
+        // Determine type_id and arena_gid: prefer refinement-based if available (runtime allocators)
+        var type_id: u32 = params.type_id;
+        var arena_gid: ?Gid = null;
+        if (params.allocator_inst) |alloc_inst| {
+            // First try direct refinement lookup (allocator used directly without store/load)
+            if (state.results[alloc_inst].refinement) |alloc_ref_gid| {
+                const alloc_ref = state.refinements.at(alloc_ref_gid);
+                if (alloc_ref.* == .allocator) {
+                    // Check if allocating from a deinited allocator
+                    if (alloc_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
                     }
+                    type_id = alloc_ref.allocator.type_id;
+                    arena_gid = alloc_ref.allocator.arena_gid;
                 }
             }
-            // Fall back to codegen-extracted type_id (comptime allocators)
-            break :blk params.type_id;
-        };
+        }
+
+        // Check if allocating from a deinited arena (handles case where arena.allocator()
+        // is called again after deinit, creating a new AllocatorRef without .deinit set)
+        if (arena_gid) |agid| {
+            if (findAllocatorForArena(state.refinements, agid)) |alloc_ref| {
+                if (alloc_ref.deinit) |deinit_meta| {
+                    return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                }
+            }
+        }
 
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
             .type_id = type_id,
             .root_gid = null, // This is the root allocation
+            .arena = arena_gid, // Track if allocated via arena
         };
 
         // Set error_stub on errorunion to mark this as allocation-derived errorunion
@@ -1198,6 +1257,7 @@ pub const MemorySafety = union(enum) {
                 .meta = alloc_base.meta,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
+                .arena = arena_gid, // Track if allocated via arena
                 .is_slice = true, // alloc allocates a slice
             },
         };
@@ -1208,6 +1268,7 @@ pub const MemorySafety = union(enum) {
                 .meta = alloc_base.meta,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
+                .arena = arena_gid, // Track if allocated via arena
                 .is_slice = true, // alloc allocates a slice
             },
         };
@@ -1567,12 +1628,14 @@ pub const MemorySafety = union(enum) {
         // Copy memory_safety from region to result pointer with root_gid set
         switch (ms) {
             .allocated => |a| {
-                result_ref.pointer.analyte.memory_safety = .{ .allocated = .{
-                    .meta = a.meta,
-                    .type_id = a.type_id,
-                    .freed = a.freed,
-                    .root_gid = region_idx, // derived pointer - can't be freed directly
-                } };
+                result_ref.pointer.analyte.memory_safety = .{
+                    .allocated = .{
+                        .meta = a.meta,
+                        .type_id = a.type_id,
+                        .freed = a.freed,
+                        .root_gid = region_idx, // derived pointer - can't be freed directly
+                    },
+                };
                 if (a.freed) |free_site| {
                     return reportUseAfterFree(ctx, a, free_site);
                 }
@@ -1713,6 +1776,18 @@ pub const MemorySafety = union(enum) {
             try allocation.meta.print(ctx.writer, "allocated in ", .{});
         }
         return error.MemoryLeak;
+    }
+
+    fn reportArenaLeak(ctx: *Context, allocation: Allocated) anyerror {
+        try ctx.meta.print(ctx.writer, "arena leak in ", .{});
+        var buf: [256]u8 = undefined;
+        const name_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
+        if (name_prefix.len > 0) {
+            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{name_prefix});
+        } else {
+            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+        }
+        return error.ArenaLeak;
     }
 
     fn reportMismatchedAllocator(ctx: *Context, allocation: Allocated, destroy_type_id: u32) anyerror {
@@ -2107,6 +2182,123 @@ pub const MemorySafety = union(enum) {
     pub fn alloc_resize(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultUnset(state, index);
+    }
+
+    /// Handle ArenaAllocator.deinit() - marks the arena as deinited.
+    /// All allocations made via this arena will be considered freed during leak check.
+    pub fn arena_deinit(state: State, index: usize, params: tag.ArenaDeinit) !void {
+        _ = index;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // Get the arena pointer's GID
+        const arena_ptr_gid = blk: {
+            if (params.arena_inst) |arena_idx| {
+                if (state.results[arena_idx].refinement) |gid| {
+                    break :blk gid;
+                }
+            }
+            return;
+        };
+
+        // Find the AllocatorRef that references this arena and check/set deinit
+        const allocator_ref = findAllocatorForArena(refinements, arena_ptr_gid) orelse return;
+        if (allocator_ref.deinit) |first_deinit| {
+            return reportDoubleDeinit(ctx, first_deinit);
+        }
+        allocator_ref.deinit = ctx.meta;
+
+        // Mark all allocations with this arena's pointer GID as freed
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = null,
+        };
+
+        for (state.results) |inst| {
+            const gid = inst.refinement orelse continue;
+            markArenaAllocationFreed(refinements, gid, arena_ptr_gid, free_meta);
+        }
+    }
+
+    /// Find the AllocatorRef refinement that references the given arena.
+    fn findAllocatorForArena(refinements: *Refinements, arena_ptr_gid: Gid) ?*Refinements.Refinement.AllocatorRef {
+        for (refinements.list.items) |*ref| {
+            if (ref.* == .allocator) {
+                if (ref.allocator.arena_gid) |agid| {
+                    if (agid == arena_ptr_gid) {
+                        return &ref.allocator;
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    fn reportDoubleDeinit(ctx: *Context, first_deinit: Meta) anyerror {
+        try ctx.meta.print(ctx.writer, "double arena deinit in ", .{});
+        try first_deinit.print(ctx.writer, "previously deinited in ", .{});
+        return error.DoubleDeinit;
+    }
+
+    fn reportAllocAfterDeinit(ctx: *Context, deinit_meta: Meta) anyerror {
+        try ctx.meta.print(ctx.writer, "allocation from deinited allocator in ", .{});
+        try deinit_meta.print(ctx.writer, "allocator deinited in ", .{});
+        return error.AllocAfterDeinit;
+    }
+
+    /// Check if an arena has been deinited by looking at AllocatorRef.deinit.
+    /// arena_ptr_gid is the GID of the pointer to the ArenaAllocator struct.
+    fn isArenaDeinited(refinements: *Refinements, arena_ptr_gid: Gid) bool {
+        const allocator_ref = findAllocatorForArena(refinements, arena_ptr_gid) orelse return false;
+        return allocator_ref.deinit != null;
+    }
+
+    /// Mark an allocation as freed if it belongs to the given arena.
+    /// Recursively handles struct/union fields and pointees.
+    fn markArenaAllocationFreed(refinements: *Refinements, idx: Gid, arena_gid: Gid, free_meta: Free) void {
+        const ref = refinements.at(idx);
+        switch (ref.*) {
+            .scalar => |*s| {
+                if (s.analyte.memory_safety) |*ms| {
+                    if (ms.* == .allocated) {
+                        if (ms.allocated.arena) |alloc_arena| {
+                            if (alloc_arena == arena_gid) {
+                                ms.allocated.freed = free_meta;
+                            }
+                        }
+                    }
+                }
+            },
+            .pointer => |*p| {
+                if (p.analyte.memory_safety) |*ms| {
+                    if (ms.* == .allocated) {
+                        if (ms.allocated.arena) |alloc_arena| {
+                            if (alloc_arena == arena_gid) {
+                                ms.allocated.freed = free_meta;
+                            }
+                        }
+                    }
+                }
+                // Also check the pointee (what the pointer points to)
+                markArenaAllocationFreed(refinements, p.to, arena_gid, free_meta);
+            },
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    markArenaAllocationFreed(refinements, field_gid, arena_gid, free_meta);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |field_gid_opt| {
+                    if (field_gid_opt) |field_gid| {
+                        markArenaAllocationFreed(refinements, field_gid, arena_gid, free_meta);
+                    }
+                }
+            },
+            .optional => |o| markArenaAllocationFreed(refinements, o.to, arena_gid, free_meta),
+            .errorunion => |e| markArenaAllocationFreed(refinements, e.to, arena_gid, free_meta),
+            .region => |r| markArenaAllocationFreed(refinements, r.to, arena_gid, free_meta),
+            .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
+        }
     }
 
     // Overflow operations produce struct { result, overflow_flag }

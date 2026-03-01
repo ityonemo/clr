@@ -103,10 +103,13 @@ pub const Refinement = union(enum) {
 
     /// AllocatorRef refinement tracks allocator identity for mismatch detection.
     /// The type_id uniquely identifies the allocator type (e.g., PageAllocator vs GPA).
+    /// The arena_gid is set when the allocator comes from ArenaAllocator.allocator().
     pub const AllocatorRef = struct {
         gid: Gid = INVALID_GID,
         analyte: Analyte = .{},
         type_id: Tid,
+        arena_gid: ?Gid = null, // if from arena, the arena's GID
+        deinit: ?Meta = null,
     };
 
     scalar: Scalar,
@@ -733,15 +736,34 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
 /// Deep copies analyte via analyte.copy().
 pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
     const src = self.at(src_gid).*;
-    return self.semideepCopyRefinement(src);
-}
-
-fn semideepCopyRefinement(self: *Refinements, src: Refinement) error{OutOfMemory}!Gid {
     const allocator = self.list.allocator;
+
     return switch (src) {
-        // Scalars and allocators: copy to new entity
+        // Scalars: copy to new entity
         .scalar => try self.appendEntity(src),
-        .allocator => try self.appendEntity(src),
+
+        // ALLOCATOR IDENTITY SEMANTICS:
+        // An std.mem.Allocator is a struct containing {ptr, vtable} - essentially two pointers.
+        // When you copy an Allocator value, both copies reference the SAME underlying allocator
+        // state (e.g., the same ArenaAllocator instance). This means allocators have IDENTITY
+        // semantics, not value semantics.
+        //
+        // We must preserve this identity through store/load cycles so that:
+        // 1. Setting .deinit on an allocator affects ALL uses of that allocator
+        // 2. arena_deinit can find and update the allocator regardless of how many times
+        //    it was stored/loaded
+        //
+        // By returning the same GID instead of creating a copy, all references to this
+        // allocator share the same AllocatorRef entity, and mutations (like setting .deinit)
+        // are visible everywhere.
+        //
+        // WARNING: This approach assumes the AllocatorRef entity itself is the source of truth.
+        // An alternative design would be to store an "original_gid" or "identity_gid" field
+        // on AllocatorRef, allowing copies to exist but still share identity for lookups.
+        // If we encounter issues with this approach (e.g., branch merging creates conflicting
+        // copies), we may need to switch to tracking identity explicitly rather than
+        // preventing copies entirely.
+        .allocator => src_gid,
 
         // Function pointers: deep copy choices array
         .fnptr => |f| blk: {
