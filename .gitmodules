@@ -1,3 +1,6 @@
 [submodule "zig"]
        path = zig
        url = https://codeberg.org/ityonemo/zig.git
+[submodule "vendor/validate"]
+	path = vendor/validate
+	url = https://github.com/ityonemo/validate

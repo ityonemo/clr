@@ -48,13 +48,11 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
 
     for (args, 0..) |arg, i| {
         gids[i] = switch (arg) {
-            .inst => |idx| state.results[idx].refinement orelse blk: {
-                // No refinement - create a scalar placeholder
-                break :blk try state.refinements.appendEntity(.{ .scalar = .{} });
+            .inst => |idx| state.results[idx].refinement orelse {
+                std.debug.panic("srcSliceToGidSlice: instruction {} has no refinement", .{idx});
             },
-            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx) orelse blk: {
-                // Global not found - create a scalar placeholder
-                break :blk try state.refinements.appendEntity(.{ .scalar = .{} });
+            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx) orelse {
+                std.debug.panic("srcSliceToGidSlice: global {} not found", .{ip_idx});
             },
             .int_const => |ty| blk: {
                 // Create refinement from type and mark as defined (compile-time constants are always defined)
@@ -77,7 +75,20 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
     return gids;
 }
 
-pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src) !void {
+pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src, comptime fqn: []const u8) !void {
+    // Check if this FQN has a shim - if so, dispatch to shims instead of running the function
+    if (comptime fqn.len > 0) {
+        // Create typed return slot
+        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+        const return_slot = try state.refinements.appendEntity(return_ref);
+        // Initialize as defined (shims override if needed)
+        tag.splatInitDefined(state.refinements, return_slot, state.ctx);
+        state.results[index].refinement = return_slot;
+        // Dispatch to analysis shims
+        try splatShim(fqn, state, index, return_type, args);
+        return;
+    }
+
     // Convert args from Src to Gid (FnInterpreter uses []const Gid)
     const arg_gids = try srcSliceToGidSlice(state, args);
     defer state.ctx.allocator.free(arg_gids);
@@ -128,6 +139,18 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     tag.splatCallReturn(state.refinements, return_gid);
     // Deposit returned entity GID into caller's instruction
     state.results[index].refinement = return_gid;
+}
+
+/// Dispatch to all analysis shims for a given FQN.
+/// Called by Inst.call when a shimmed stdlib function is invoked.
+/// Shim functions are named with @"fqn" syntax in analysis modules.
+/// If no shim exists for the FQN, this is a no-op.
+pub fn splatShim(comptime fqn: []const u8, state: State, index: usize, return_type: tag.Type, args: []const tag.Src) !void {
+    inline for (tag.analyses) |Analysis| {
+        if (@hasDecl(Analysis, fqn)) {
+            try @field(Analysis, fqn)(state, index, return_type, args);
+        }
+    }
 }
 
 /// Store a function pointer constant with its specific function as a choice.

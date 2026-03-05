@@ -353,13 +353,16 @@ pub const UndefinedSafety = union(enum) {
     pub const bit_and = markResultDefined;
     pub const cmp_eq = markResultDefined;
     pub const cmp_gt = markResultDefined;
+    pub const cmp_gte = markResultDefined;
     pub const cmp_lt = markResultDefined;
     pub const cmp_lte = markResultDefined;
     pub const ctz = markResultDefined;
     pub const slice_len = markResultDefined;
     pub const sub = markResultDefined;
+    pub const add = markResultDefined;
     pub const is_non_err = markResultDefined;
     pub const unwrap_errunion_err = markResultDefined;
+    pub const is_named_enum_value = markResultDefined;
     pub const alloc_resize = markResultDefined; // resize returns a defined bool
 
     // Null checks produce defined boolean results
@@ -1349,6 +1352,117 @@ pub const UndefinedSafety = union(enum) {
         } else {
             setDefinedRecursive(refinements, pointee_gid);
         }
+    }
+
+    // =========================================================================
+    // Stdlib Function Shims
+    // =========================================================================
+    //
+    // Shims for stdlib functions that should not be executed during analysis.
+    // These functions match the shim signature: (State, usize, Type, []const Src) -> anyerror!void
+    // The FQN in the function name (e.g., @"debug.print") is used for dispatch.
+    //
+    // For undefined safety, most shims are no-ops since the return slot is already
+    // initialized as defined by Inst.call before dispatch.
+    // =========================================================================
+
+    /// Shim for std.debug.print - void return, no tracking needed
+    pub fn @"debug.print"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: debug.print returns void, nothing to track
+    }
+
+    /// Shim for std.fmt.format - writes to writer, returns void
+    pub fn @"fmt.format"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: fmt.format returns void, nothing to track
+    }
+
+    /// Shim for std.fmt.allocPrint - returns defined string
+    pub fn @"fmt.allocPrint"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: return slot is already marked defined by Inst.call
+    }
+
+    /// Shim for std.fmt.bufPrint - returns defined string
+    pub fn @"fmt.bufPrint"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: return slot is already marked defined by Inst.call
+    }
+
+    /// Shim for std.mem.eql - pure comparison, returns defined bool
+    pub fn @"mem.eql"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: return slot is already marked defined by Inst.call
+    }
+
+    /// Shim for std.mem.startsWith - pure comparison, returns defined bool
+    pub fn @"mem.startsWith"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: return slot is already marked defined by Inst.call
+    }
+
+    /// Shim for std.mem.endsWith - pure comparison, returns defined bool
+    pub fn @"mem.endsWith"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: return slot is already marked defined by Inst.call
+    }
+
+    /// Shim for std.log.debug - void return, no tracking needed
+    pub fn @"log.debug"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: log functions return void
+    }
+
+    /// Shim for std.log.info - void return, no tracking needed
+    pub fn @"log.info"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: log functions return void
+    }
+
+    /// Shim for std.log.warn - void return, no tracking needed
+    pub fn @"log.warn"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: log functions return void
+    }
+
+    /// Shim for std.log.err - void return, no tracking needed
+    pub fn @"log.err"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        // No-op: log functions return void
     }
 };
 

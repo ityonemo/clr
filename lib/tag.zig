@@ -36,7 +36,7 @@
 //         alloc_destroy, memset_safe
 //
 // NO-OP / METADATA - No entity impact
-//   Tags: noop, noop_pruned_debug, dbg_stmt, dbg_var_ptr, dbg_var_val,
+//   Tags: noop, noop_debug, dbg_stmt, dbg_var_ptr, dbg_var_val,
 //         dbg_arg_inline, dbg_inline_block, unreach, ret_addr,
 //         stack_trace_frames, @"try" (TODO)
 //
@@ -1591,7 +1591,7 @@ pub const StackTraceFrames = struct {
 
 /// Entity operation: NO-OP
 /// Void produces void result for operations that don't return a value.
-/// Used for memset_safe, dbg_empty_stmt, noop_pruned_debug.
+/// Used for memset_safe, dbg_empty_stmt, noop_debug.
 pub const Void = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = self;
@@ -1952,7 +1952,7 @@ pub const AnyTag = union(enum) {
     is_null: IsNull,
     is_null_ptr: IsNullPtr,
     memset_safe: Void,
-    noop_pruned_debug: Void,
+    noop_debug: Void,
     ptr_add: PtrAdd,
     ptr_sub: PtrAdd, // Same logic as ptr_add
     ret_addr: RetAddr,

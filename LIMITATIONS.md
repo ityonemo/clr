@@ -160,7 +160,7 @@ The following AIR instruction tags are not yet implemented and produce `.unimple
 - `memset_safe` - Memory set
 - `ret_addr` - Return address for stack traces
 - `stack_trace_frames` - Stack trace frame info
-- `noop_pruned_debug` - Pruned debug instruction
+- `noop_debug` - Pruned debug instruction
 
 ## Needs Investigation
 

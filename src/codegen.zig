@@ -529,7 +529,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
     return switch (tag) {
         .call, .call_always_tail, .call_never_tail, .call_never_inline => blk: {
             if (isDebugCall(info.ip, datum)) {
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .noop_pruned_debug = .{{}} }});\n", .{inst_index}, null);
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .noop_debug = .{{}} }});\n", .{inst_index}, null);
             }
             if (isAllocatorCreate(info.ip, datum)) {
                 // Prune allocator.create() - emit special tag for tracking
@@ -544,7 +544,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const ptr_src = extractDestroyPtrSrc(info, datum) orelse {
                     // Can't determine ptr source, fall through to regular call
                     const call_parts = payloadCallParts(info, datum);
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
+                    const fqn = getCallFqn(info.ip, datum) orelse "";
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
@@ -565,7 +566,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const slice_src = extractDestroyPtrSrc(info, datum) orelse {
                     // Can't determine slice source, fall through to regular call
                     const call_parts = payloadCallParts(info, datum);
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
+                    const fqn = getCallFqn(info.ip, datum) orelse "";
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
@@ -588,7 +590,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             if (isAllocatorRealloc(info.ip, datum) or isAllocatorRemap(info.ip, datum)) {
                 const slice_src = extractDestroyPtrSrc(info, datum) orelse {
                     const call_parts = payloadCallParts(info, datum);
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
+                    const fqn = getCallFqn(info.ip, datum) orelse "";
+                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
                 };
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
@@ -624,7 +627,8 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .mkallocator = .{{ .type_id = {d}, .arena_inst = {?d} }} }});\n", .{ inst_index, allocator_info.id, arena_inst }, null);
             }
             const call_parts = payloadCallParts(info, datum);
-            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s});\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args }, null);
+            const fqn = getCallFqn(info.ip, datum) orelse "";
+            break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
         },
         .store, .store_safe => blk: {
             // Check if storing a function pointer constant
@@ -2198,7 +2202,8 @@ fn isArenaInit(ip: *const InternPool, datum: Data) bool {
     return isArenaInitFqn(fqn);
 }
 
-/// Extract FQN from a call instruction's callee reference
+/// Extract FQN from a call instruction's callee reference.
+/// Strips __anon_XXXX suffix from generic instantiations so shims can match base names.
 fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
     const callee_ref = datum.pl_op.operand;
     const ip_idx = callee_ref.toInterned() orelse return null;
@@ -2207,10 +2212,23 @@ fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
     switch (key) {
         .func => |func_key| {
             const nav = ip.getNav(func_key.owner_nav);
-            return nav.fqn.toSlice(ip);
+            const fqn = nav.fqn.toSlice(ip);
+            return stripAnonSuffix(fqn);
         },
         else => return null,
     }
+}
+
+/// Strip __anon_XXXX suffix from an FQN.
+/// Generic instantiations get suffixes like "mem.eql__anon_4163".
+/// We strip these so shims can match the base name "mem.eql".
+fn stripAnonSuffix(fqn: []const u8) []const u8 {
+    // Look for "__anon_" pattern
+    const anon_marker = "__anon_";
+    if (std.mem.indexOf(u8, fqn, anon_marker)) |idx| {
+        return fqn[0..idx];
+    }
+    return fqn;
 }
 
 /// Info about an allocator type: both the ID (for unique tracking) and display name (for errors)
