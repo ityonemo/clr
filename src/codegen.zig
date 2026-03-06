@@ -531,49 +531,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             if (isDebugCall(info.ip, datum)) {
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .noop_debug = .{{}} }});\n", .{inst_index}, null);
             }
-            if (isAllocatorCreate(info.ip, datum)) {
-                // Prune allocator.create() - emit special tag for tracking
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const created_type = extractAllocCreateType(info, datum);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_create = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, created_type }, null);
-            }
-            if (isAllocatorDestroy(info.ip, datum)) {
-                // Prune allocator.destroy() - emit special tag with pointer src
-                const ptr_src = extractDestroyPtrSrc(info, datum) orelse {
-                    // Can't determine ptr source, fall through to regular call
-                    const call_parts = payloadCallParts(info, datum);
-                    const fqn = getCallFqn(info.ip, datum) orelse "";
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
-                };
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_destroy = .{{ .ptr = {s}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, ptr_src, allocator_info.id, allocator_inst }, null);
-            }
-            if (isAllocatorAlloc(info.ip, datum)) {
-                // Prune allocator.alloc() - emit special tag for slice tracking
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const element_type = extractAllocAllocType(info, datum);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
-            }
-            if (isAllocatorFree(info.ip, datum)) {
-                // Prune allocator.free() - emit special tag with slice src
-                // free has 2 args: (self, slice) - we want arg index 1 (same as destroy)
-                const slice_src = extractDestroyPtrSrc(info, datum) orelse {
-                    // Can't determine slice source, fall through to regular call
-                    const call_parts = payloadCallParts(info, datum);
-                    const fqn = getCallFqn(info.ip, datum) orelse "";
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
-                };
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_free = .{{ .slice = {s}, .type_id = {d}, .allocator_inst = {?d} }} }});\n", .{ inst_index, slice_src, allocator_info.id, allocator_inst }, null);
-            }
+            // AllocCreate, AllocDestroy, AllocAlloc, AllocFree migrated to runtime call filter
             // alignedAlloc is like alloc but FQN doesn't match "mem.Allocator.alloc" pattern
             if (isAllocatorAlignedAlloc(info.ip, datum)) {
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);

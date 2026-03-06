@@ -5,6 +5,7 @@ const Gid = Refinements.Gid;
 const core = @import("../core.zig");
 const Meta = core.Meta;
 const tag = @import("../tag.zig");
+const gates = @import("gates.zig");
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 
@@ -1477,6 +1478,8 @@ pub const UndefinedSafety = union(enum) {
     /// Runtime call filter for undefined safety.
     /// Checks FQN patterns to intercept stdlib functions that need special handling.
     /// Returns true if intercepted (handled), false to continue with normal execution.
+    /// Note: For allocator calls, memory_safety.call() returns true (intercepts) so we
+    /// don't need to return true here - we just set the undefined state and return false.
     pub fn call(
         state: State,
         index: usize,
@@ -1484,13 +1487,49 @@ pub const UndefinedSafety = union(enum) {
         args: []const tag.Src,
         fqn: []const u8,
     ) anyerror!bool {
-        _ = state;
-        _ = index;
         _ = return_type;
         _ = args;
-        _ = fqn;
-        // TODO: Migrate FQN-based shims to runtime pattern matching here
-        // For now, return false (no intercept) - existing shim dispatch still works
+        const results = state.results;
+        const refinements = state.refinements;
+
+        // Handle mem.Allocator.create - mark pointee as undefined
+        if (gates.isAllocatorCreate(fqn)) {
+            // Result is errorunion -> ptr -> pointee
+            const eu_idx = results[index].refinement orelse return false;
+            const eu_ref = refinements.at(eu_idx);
+            if (eu_ref.* != .errorunion) return false;
+            const ptr_idx = eu_ref.errorunion.to;
+            const ptr_ref = refinements.at(ptr_idx);
+            if (ptr_ref.* != .pointer) return false;
+            // The pointer itself is defined (it exists)
+            ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
+            // The pointee starts as undefined (must be set by store before use)
+            const pointee_idx = ptr_ref.pointer.to;
+            setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+            return false; // memory_safety.call() intercepts
+        }
+
+        // Handle mem.Allocator.alloc/dupe/dupeZ - mark elements as undefined
+        if (gates.isAllocatorAlloc(fqn)) {
+            // Result is errorunion -> pointer -> region -> element
+            const eu_idx = results[index].refinement orelse return false;
+            const eu_ref = refinements.at(eu_idx);
+            if (eu_ref.* != .errorunion) return false;
+            const ptr_idx = eu_ref.errorunion.to;
+            const ptr_ref = refinements.at(ptr_idx);
+            if (ptr_ref.* != .pointer) return false;
+            // The pointer itself is defined (the slice exists)
+            ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
+            // The region is a container type - don't set undefined state on it
+            const region_idx = ptr_ref.pointer.to;
+            const region_ref = refinements.at(region_idx);
+            if (region_ref.* != .region) return false;
+            // The elements start as undefined (must be set before use)
+            const element_idx = region_ref.region.to;
+            setUndefinedRecursive(refinements, element_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+            return false; // memory_safety.call() intercepts
+        }
+
         return false;
     }
 };

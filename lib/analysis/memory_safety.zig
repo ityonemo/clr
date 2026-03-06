@@ -6,6 +6,7 @@ const Gid = Refinements.Gid;
 const core = @import("../core.zig");
 const Meta = core.Meta;
 const tag = @import("../tag.zig");
+const gates = @import("gates.zig");
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 
@@ -2749,19 +2750,405 @@ pub const MemorySafety = union(enum) {
         args: []const tag.Src,
         fqn: []const u8,
     ) anyerror!bool {
-        _ = state;
-        _ = index;
         _ = return_type;
-        _ = args;
-        _ = fqn;
-        // TODO: Migrate allocator/arena pseudo-opcodes to runtime pattern matching here
-        // Patterns to handle:
+
+        if (gates.isAllocatorCreate(fqn)) {
+            try handleAllocCreate(state, index, args);
+            return true;
+        }
+
+        if (gates.isAllocatorDestroy(fqn)) {
+            try handleAllocDestroy(state, index, args);
+            return true;
+        }
+
+        if (gates.isAllocatorAlloc(fqn)) {
+            try handleAllocAlloc(state, index, args);
+            return true;
+        }
+
+        if (gates.isAllocatorFree(fqn)) {
+            try handleAllocFree(state, index, args);
+            return true;
+        }
+
+        // TODO: Migrate remaining allocator/arena pseudo-opcodes:
+        // - mem.Allocator.alignedAlloc (still uses opcode for now)
+        // - mem.Allocator.resize
+        // - mem.Allocator.realloc / remap
         // - ArenaAllocator.init
         // - ArenaAllocator.deinit
-        // - mem.Allocator.create / destroy / alloc / free
         // - MkAllocator (by return type)
-        // For now, return false (no intercept) - existing pseudo-opcode dispatch still works
+
         return false;
+    }
+
+    /// Handle mem.Allocator.create calls.
+    /// The return structure (errorunion→ptr→pointee) is already created by Inst.call.
+    /// We set memory_safety on the structure to track the allocation.
+    fn handleAllocCreate(state: State, index: usize, args: []const tag.Src) !void {
+        // Result is errorunion -> ptr -> pointee (created by Inst.call via typeToRefinement)
+        const eu_idx = state.results[index].refinement orelse return;
+        const eu_ref = state.refinements.at(eu_idx);
+        if (eu_ref.* != .errorunion) return; // Safety check
+        const eu = &eu_ref.errorunion;
+        const ptr_ref = eu.to;
+        const ptr = &state.refinements.at(ptr_ref).pointer;
+        const pointee_ref = ptr.to;
+
+        // Determine type_id and arena_gid from the allocator argument
+        // Default type_id = 0 means "unknown comptime allocator" - mismatched allocator
+        // detection won't work for these until we migrate all allocator opcodes together
+        var type_id: u32 = 0;
+        var arena_gid: ?Gid = null;
+
+        // Try to get allocator info from args[0] (the allocator)
+        if (args.len > 0) {
+            const alloc_gid: ?Gid = switch (args[0]) {
+                .inst => |inst| state.results[inst].refinement,
+                .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
+                .int_const, .int_fnptr => null,
+            };
+            if (alloc_gid) |agid| {
+                const alloc_ref = state.refinements.at(agid);
+                if (alloc_ref.* == .allocator) {
+                    // Check if allocating from a deinited allocator
+                    if (alloc_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                    }
+                    type_id = alloc_ref.allocator.type_id;
+                    arena_gid = alloc_ref.allocator.arena_gid;
+                }
+            }
+        }
+
+        // Check if allocating from a deinited arena
+        if (arena_gid) |agid| {
+            if (findAllocatorForArena(state.refinements, agid)) |alloc_ref| {
+                if (alloc_ref.deinit) |deinit_meta| {
+                    return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                }
+            }
+        }
+
+        const alloc_base: AllocatedBase = .{
+            .meta = state.ctx.meta,
+            .type_id = type_id,
+            .root_gid = null, // This is the root allocation
+            .arena = arena_gid, // Track if allocated via arena
+        };
+
+        // Set error_stub on errorunion to mark this as allocation-derived errorunion
+        eu.analyte.memory_safety = .{ .error_stub = {} };
+
+        // Set memory_safety on pointer
+        ptr.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .arena = arena_gid,
+                .is_slice = false, // create allocates single item
+            },
+        };
+
+        // Set allocation state recursively on the pointee
+        setAllocatedRecursive(state.refinements, pointee_ref, alloc_base, null, false);
+    }
+
+    /// Handle mem.Allocator.destroy calls.
+    /// Marks the pointed-to memory as freed after checking for errors.
+    fn handleAllocDestroy(state: State, index: usize, args: []const tag.Src) !void {
+        _ = index; // destroy returns void, no need to set result
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // destroy signature: destroy(self, ptr) -> args[0]=allocator, args[1]=ptr
+        if (args.len < 2) return;
+
+        // Resolve ptr source to get the pointer's refinement index
+        const ptr_idx: Gid = switch (args[1]) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+                // Trying to free a pointer to a global variable
+                return reportFreeGlobalMemory(ctx);
+            },
+            .int_const, .int_fnptr => {
+                // Trying to free an interned constant pointer (e.g., pointer to global)
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
+        const ptr_refinement = refinements.at(ptr_idx);
+        if (ptr_refinement.* != .pointer) return; // Safety check
+
+        // Get the pointee entity via ptr.to
+        const pointee_idx = ptr_refinement.pointer.to;
+        const pointee = refinements.at(pointee_idx);
+        const pointee_analyte = getAnalytePtr(pointee);
+
+        // Get memory_safety from pointee
+        const ms = &(pointee_analyte.memory_safety orelse return);
+
+        switch (ms.*) {
+            .stack => |sp| {
+                // Check if this is a field pointer (root_gid != null means it's a field)
+                if (sp.root_gid != null) {
+                    return reportFreeFieldPointerStack(ctx, sp);
+                }
+                return reportFreeStackMemory(ctx, sp);
+            },
+            .global => return reportFreeGlobalMemory(ctx),
+            .unset => return,
+            .error_stub => return,
+            .allocated => {},
+        }
+
+        const a = ms.allocated;
+
+        // Check if this is a field pointer (root_gid != null means it's a field, can't free directly)
+        if (a.root_gid != null) {
+            return reportFreeFieldPointer(ctx, a);
+        }
+
+        if (a.freed) |previous_free| {
+            return reportDoubleFree(ctx, a, previous_free);
+        }
+
+        // Determine type_id: prefer refinement-based if available (runtime allocators)
+        var destroy_type_id: u32 = 0; // default: unknown comptime allocator
+        if (args.len > 0) {
+            const alloc_gid: ?Gid = switch (args[0]) {
+                .inst => |inst| results[inst].refinement,
+                .int_var => |ip_idx| refinements.getGlobal(ip_idx),
+                .int_const, .int_fnptr => null,
+            };
+            if (alloc_gid) |agid| {
+                const alloc_ref = refinements.at(agid);
+                if (alloc_ref.* == .allocator) {
+                    destroy_type_id = alloc_ref.allocator.type_id;
+                }
+            }
+        }
+
+        // Only check for mismatch if both type_ids are known (non-zero)
+        if (a.type_id != 0 and destroy_type_id != 0 and a.type_id != destroy_type_id) {
+            return reportMismatchedAllocator(ctx, a, destroy_type_id);
+        }
+
+        // destroy expects single item (create), not slice (alloc)
+        if (a.is_slice) {
+            return reportMethodMismatch(ctx, a, true, false);
+        }
+
+        // Mark as freed using setFreedRecursive to propagate to all fields
+        // Get the inst for path building (if available)
+        const ptr_inst: ?usize = switch (args[1]) {
+            .inst => |inst| inst,
+            else => null,
+        };
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = if (ptr_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
+        };
+        setFreedRecursive(refinements, pointee_idx, free_meta);
+    }
+
+    /// Handle mem.Allocator.alloc/dupe/dupeZ calls.
+    /// The return structure (errorunion→ptr→region→element) is already created by Inst.call.
+    /// We set memory_safety on the structure to track the slice allocation.
+    fn handleAllocAlloc(state: State, index: usize, args: []const tag.Src) !void {
+        // Result is errorunion -> pointer -> region -> element (created by Inst.call via typeToRefinement)
+        const eu_idx = state.results[index].refinement orelse return;
+        const eu_ref = state.refinements.at(eu_idx);
+        if (eu_ref.* != .errorunion) return; // Safety check
+        const eu = &eu_ref.errorunion;
+        const ptr_ref = eu.to;
+        const ptr_refinement = state.refinements.at(ptr_ref);
+        if (ptr_refinement.* != .pointer) return; // Safety check
+        const ptr = &ptr_refinement.pointer;
+        const region_ref = ptr.to;
+        const region_refinement = state.refinements.at(region_ref);
+        if (region_refinement.* != .region) return; // Safety check
+        const region = &region_refinement.region;
+        const element_ref = region.to;
+
+        // Determine type_id and arena_gid from the allocator argument
+        var type_id: u32 = 0;
+        var arena_gid: ?Gid = null;
+
+        // Try to get allocator info from args[0] (the allocator)
+        if (args.len > 0) {
+            const alloc_gid: ?Gid = switch (args[0]) {
+                .inst => |inst| state.results[inst].refinement,
+                .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
+                .int_const, .int_fnptr => null,
+            };
+            if (alloc_gid) |agid| {
+                const alloc_ref = state.refinements.at(agid);
+                if (alloc_ref.* == .allocator) {
+                    // Check if allocating from a deinited allocator
+                    if (alloc_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                    }
+                    type_id = alloc_ref.allocator.type_id;
+                    arena_gid = alloc_ref.allocator.arena_gid;
+                }
+            }
+        }
+
+        // Check if allocating from a deinited arena
+        if (arena_gid) |agid| {
+            if (findAllocatorForArena(state.refinements, agid)) |alloc_ref| {
+                if (alloc_ref.deinit) |deinit_meta| {
+                    return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                }
+            }
+        }
+
+        const alloc_base: AllocatedBase = .{
+            .meta = state.ctx.meta,
+            .type_id = type_id,
+            .root_gid = null,
+            .arena = arena_gid,
+        };
+
+        // Set error_stub on errorunion
+        eu.analyte.memory_safety = .{ .error_stub = {} };
+
+        // Set memory_safety on pointer
+        ptr.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .arena = arena_gid,
+                .is_slice = true, // alloc allocates a slice
+            },
+        };
+
+        // Set memory_safety on region
+        region.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .type_id = alloc_base.type_id,
+                .root_gid = null,
+                .arena = arena_gid,
+                .is_slice = true,
+            },
+        };
+
+        // Set allocation state recursively on the element
+        setAllocatedRecursive(state.refinements, element_ref, alloc_base, null, true);
+    }
+
+    /// Handle mem.Allocator.free calls.
+    /// Marks the slice memory as freed after checking for errors.
+    fn handleAllocFree(state: State, index: usize, args: []const tag.Src) !void {
+        _ = index; // free returns void
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // free signature: free(self, slice) -> args[0]=allocator, args[1]=slice
+        if (args.len < 2) return;
+
+        // Resolve slice source to get the pointer's refinement index
+        const ptr_idx: Gid = switch (args[1]) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+                return reportFreeGlobalMemory(ctx);
+            },
+            .int_const, .int_fnptr => {
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
+        const ptr_refinement = refinements.at(ptr_idx);
+        if (ptr_refinement.* != .pointer) return;
+
+        // Check the POINTER's memory_safety first - derived pointers have root_gid set
+        if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
+            switch (ptr_ms) {
+                .allocated => |a| {
+                    if (a.root_gid != null) {
+                        return reportFreeFieldPointer(ctx, a);
+                    }
+                },
+                .stack => |s| {
+                    if (s.root_gid != null) {
+                        return reportFreeFieldPointerStack(ctx, s);
+                    }
+                },
+                .global => return reportFreeGlobalMemory(ctx),
+                .unset => {},
+                .error_stub => return,
+            }
+        }
+
+        // Get the pointee entity
+        const pointee_idx = ptr_refinement.pointer.to;
+        const pointee_ref = refinements.at(pointee_idx);
+
+        const pointee_analyte: *Analyte = switch (pointee_ref.*) {
+            .region => |*r| &r.analyte,
+            .scalar => |*s| &s.analyte,
+            else => return,
+        };
+
+        const ms_ptr = &(pointee_analyte.memory_safety orelse {
+            return reportFreeGlobalMemory(ctx);
+        });
+
+        switch (ms_ptr.*) {
+            .stack => |sp| return reportFreeStackMemory(ctx, sp),
+            .global => return reportFreeGlobalMemory(ctx),
+            .unset => return,
+            .error_stub => return,
+            .allocated => {},
+        }
+
+        const a = ms_ptr.allocated;
+
+        if (a.freed) |previous_free| {
+            return reportDoubleFree(ctx, a, previous_free);
+        }
+
+        // Determine type_id from allocator
+        var free_type_id: u32 = 0;
+        if (args.len > 0) {
+            const alloc_gid: ?Gid = switch (args[0]) {
+                .inst => |inst| results[inst].refinement,
+                .int_var => |ip_idx| refinements.getGlobal(ip_idx),
+                .int_const, .int_fnptr => null,
+            };
+            if (alloc_gid) |agid| {
+                const alloc_ref = refinements.at(agid);
+                if (alloc_ref.* == .allocator) {
+                    free_type_id = alloc_ref.allocator.type_id;
+                }
+            }
+        }
+
+        // Only check mismatch if both type_ids are known (non-zero)
+        if (a.type_id != 0 and free_type_id != 0 and a.type_id != free_type_id) {
+            return reportMismatchedAllocator(ctx, a, free_type_id);
+        }
+
+        // free expects slice (alloc), not single item (create)
+        if (!a.is_slice) {
+            return reportMethodMismatch(ctx, a, false, true);
+        }
+
+        // Mark as freed
+        const slice_inst: ?usize = switch (args[1]) {
+            .inst => |inst| inst,
+            else => null,
+        };
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
+        };
+        setFreedRecursive(refinements, pointee_idx, free_meta);
     }
 };
 
