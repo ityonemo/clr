@@ -4,7 +4,7 @@ const core = @import("core.zig");
 const Context = @import("Context.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
-const Analyte = Refinements.Analyte;
+const Analyte = @import("Analyte.zig");
 pub const Gid = Refinements.Gid;
 pub const State = @import("lib.zig").State;
 
@@ -77,7 +77,8 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
 
 pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src, comptime fqn: []const u8) !void {
     // Check if this FQN has a shim - if so, dispatch to shims instead of running the function
-    if (comptime fqn.len > 0) {
+    // Only skip normal execution if at least one analysis module has a shim for this FQN
+    if (comptime Analyte.hasShim(fqn)) {
         // Create typed return slot
         const return_ref = try tag.typeToRefinement(return_type, state.refinements);
         const return_slot = try state.refinements.appendEntity(return_ref);
