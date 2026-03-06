@@ -274,10 +274,15 @@ pub const MkAllocator = struct {
     arena_inst: ?usize = null, // If from arena, the instruction index of the arena alloc
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Get the arena's GID if this is from an arena
+        // Get the arena's POINTEE GID if this is from an arena.
+        // We follow the pointer to get the pointee GID so that shims
+        // (which receive the loaded arena value) can use the same GID.
         const arena_gid: ?Refinements.Gid = if (self.arena_inst) |arena_idx| blk: {
-            const arena_ref_gid = state.results[arena_idx].refinement orelse break :blk null;
-            break :blk arena_ref_gid;
+            const arena_ptr_gid = state.results[arena_idx].refinement orelse break :blk null;
+            // Follow pointer to get pointee GID
+            const ptr_ref = state.refinements.at(arena_ptr_gid);
+            if (ptr_ref.* != .pointer) break :blk null;
+            break :blk ptr_ref.pointer.to;
         } else null;
 
         // Create an allocator refinement with the type_id and arena_gid

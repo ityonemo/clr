@@ -2305,24 +2305,26 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // Get the arena pointer's GID
-        const arena_ptr_gid = blk: {
+        // Get the arena POINTEE's GID (follow pointer to match MkAllocator tracking)
+        const arena_gid = blk: {
             if (params.arena_inst) |arena_idx| {
-                if (state.results[arena_idx].refinement) |gid| {
-                    break :blk gid;
-                }
+                const ptr_gid = state.results[arena_idx].refinement orelse break :blk null;
+                // Follow pointer to get pointee GID
+                const ptr_ref = refinements.at(ptr_gid);
+                if (ptr_ref.* != .pointer) break :blk null;
+                break :blk ptr_ref.pointer.to;
             }
-            return;
-        };
+            break :blk null;
+        } orelse return;
 
         // Find the AllocatorRef that references this arena and check/set deinit
-        const allocator_ref = findAllocatorForArena(refinements, arena_ptr_gid) orelse return;
+        const allocator_ref = findAllocatorForArena(refinements, arena_gid) orelse return;
         if (allocator_ref.deinit) |first_deinit| {
             return reportDoubleDeinit(ctx, first_deinit);
         }
         allocator_ref.deinit = ctx.meta;
 
-        // Mark all allocations with this arena's pointer GID as freed
+        // Mark all allocations with this arena's GID as freed
         const free_meta: Free = .{
             .meta = ctx.meta,
             .name_at_free = null,
@@ -2330,7 +2332,7 @@ pub const MemorySafety = union(enum) {
 
         for (state.results) |inst| {
             const gid = inst.refinement orelse continue;
-            markArenaAllocationFreed(refinements, gid, arena_ptr_gid, free_meta);
+            markArenaAllocationFreed(refinements, gid, arena_gid, free_meta);
         }
     }
 
