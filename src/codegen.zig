@@ -2258,10 +2258,10 @@ fn extractAllocatorType(ip: *const InternPool, datum: Data, extra: []const u32, 
                                         switch (ptr.base_addr) {
                                             .nav => |nav_idx| {
                                                 const nav = ip.getNav(nav_idx);
-                                                // Use InternPool index of fqn as globally unique ID
-                                                const fqn_id = @intFromEnum(nav.fqn);
                                                 const fqn = nav.fqn.toSlice(ip);
                                                 // FQN is like "heap.PageAllocator.vtable"
+                                                // Use FQN hash as type_id for shim compatibility
+                                                const fqn_id = fqnTypeId(fqn);
                                                 // Extract "PageAllocator" for display
                                                 return .{ .id = fqn_id, .name = extractAllocatorName(fqn) };
                                             },
@@ -2541,6 +2541,13 @@ pub fn isAllocatorDupeZFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.Allocator.dupeZ") != null;
 }
 
+/// Compute a type_id from an FQN string.
+/// Uses a hash to ensure consistent IDs between codegen and runtime shims.
+/// The hash is truncated to u32 for compatibility with existing type_id fields.
+pub fn fqnTypeId(fqn: []const u8) u32 {
+    return @truncate(std.hash.Wyhash.hash(0, fqn));
+}
+
 /// Check if FQN is an ArenaAllocator.deinit call (testable without InternPool)
 pub fn isArenaDeinitFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "ArenaAllocator.deinit") != null;
@@ -2612,8 +2619,8 @@ fn getCallAllocatorReturnInfo(ip: *const InternPool, datum: Data) ?AllocatorType
     const fqn = nav.fqn.toSlice(ip);
 
     // FQN is like "heap.GeneralPurposeAllocator(...).allocator" or similar
-    // Extract the allocator type name and use the FQN as unique ID
-    const fqn_id = @intFromEnum(nav.fqn);
+    // Use FQN hash as type_id for shim compatibility
+    const fqn_id = fqnTypeId(fqn);
     const type_name = extractTypeFromAllocatorMethod(fqn);
 
     return .{ .id = fqn_id, .name = type_name };
@@ -2637,10 +2644,10 @@ fn extractAllocatorTypeFromInterned(ip: *const InternPool, interned_idx: InternP
                                     switch (ptr.base_addr) {
                                         .nav => |nav_idx| {
                                             const nav = ip.getNav(nav_idx);
-                                            // Use InternPool index of fqn as globally unique ID
-                                            const fqn_id = @intFromEnum(nav.fqn);
                                             const fqn = nav.fqn.toSlice(ip);
                                             // FQN is like "heap.PageAllocator.vtable"
+                                            // Use FQN hash as type_id for shim compatibility
+                                            const fqn_id = fqnTypeId(fqn);
                                             // Extract "PageAllocator" for display
                                             return .{ .id = fqn_id, .name = extractAllocatorName(fqn) };
                                         },
