@@ -2266,6 +2266,38 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Shim for heap.arena_allocator.ArenaAllocator.init()
+    /// Creates an ArenaAllocator. Checks if the child allocator is from a deinited arena.
+    pub fn @"heap.arena_allocator.ArenaAllocator.init"(state: State, index: usize, return_type: tag.Type, args: []const tag.Src) anyerror!void {
+        _ = return_type;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // Check if child allocator is from a deinited arena
+        // args[0] is the child allocator
+        if (args.len > 0) {
+            const child_gid: ?Gid = switch (args[0]) {
+                .inst => |idx| state.results[idx].refinement,
+                .int_const, .int_var, .int_fnptr => null, // compile-time allocators
+            };
+
+            if (child_gid) |gid| {
+                const child_ref = refinements.at(gid);
+                if (child_ref.* == .allocator) {
+                    if (child_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(ctx, deinit_meta);
+                    }
+                }
+            }
+        }
+
+        // Initialize memory_safety on the result (ArenaAllocator struct)
+        // Inst.call already created the refinement, we just re-initialize it
+        if (state.results[index].refinement) |gid| {
+            initUnsetRecursive(refinements, gid);
+        }
+    }
+
     /// Handle ArenaAllocator.deinit() - marks the arena as deinited.
     /// All allocations made via this arena will be considered freed during leak check.
     pub fn arena_deinit(state: State, index: usize, params: tag.ArenaDeinit) !void {

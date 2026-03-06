@@ -612,13 +612,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 const arena_inst = extractArenaInstFromDeinit(info, datum);
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .arena_deinit = .{{ .arena_inst = {?d} }} }});\n", .{ inst_index, arena_inst }, null);
             }
-            // Check for ArenaAllocator.init() - emit arena_init tag
-            if (isArenaInit(info.ip, datum)) {
-                const return_type = getCallReturnType(info, datum);
-                // First argument is child_allocator - extract it like we do for other allocator ops
-                const child_allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .arena_init = .{{ .child_allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, child_allocator_inst, return_type }, null);
-            }
+            // ArenaAllocator.init() is handled by a shim in memory_safety.zig
             // Check if call returns std.mem.Allocator - emit mkallocator tag
             if (getCallAllocatorReturnInfo(info.ip, datum)) |allocator_info| {
                 registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
