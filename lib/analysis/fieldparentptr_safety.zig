@@ -215,6 +215,28 @@ pub const FieldParentPtrSafety = struct {
         });
         return error.FieldParentPtrFieldMismatch;
     }
+
+    // =========================================================================
+    // Runtime Call Filter
+    // =========================================================================
+
+    /// Runtime call filter for fieldparentptr safety.
+    /// Returns true if intercepted (handled), false to continue with normal execution.
+    pub fn call(
+        state: State,
+        index: usize,
+        return_type: tag.Type,
+        args: []const tag.Src,
+        fqn: []const u8,
+    ) anyerror!bool {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        _ = fqn;
+        // No fieldparentptr_safety-specific call intercepts currently needed
+        return false;
+    }
 };
 
 // =============================================================================

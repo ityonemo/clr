@@ -2729,6 +2729,40 @@ pub const MemorySafety = union(enum) {
         // Set .global recursively on the pointee
         setGlobalRecursive(refinements, pointee_gid, meta);
     }
+
+    // =========================================================================
+    // Runtime Call Filter
+    // =========================================================================
+    //
+    // Called for every function call to determine if this module should intercept.
+    // Returns true if the call was handled (skip normal execution), false otherwise.
+    // This replaces compile-time FQN shim dispatch with runtime pattern matching.
+    // =========================================================================
+
+    /// Runtime call filter for memory safety.
+    /// Checks FQN patterns to intercept allocator/arena operations.
+    /// Returns true if intercepted (handled), false to continue with normal execution.
+    pub fn call(
+        state: State,
+        index: usize,
+        return_type: tag.Type,
+        args: []const tag.Src,
+        fqn: []const u8,
+    ) anyerror!bool {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        _ = fqn;
+        // TODO: Migrate allocator/arena pseudo-opcodes to runtime pattern matching here
+        // Patterns to handle:
+        // - ArenaAllocator.init
+        // - ArenaAllocator.deinit
+        // - mem.Allocator.create / destroy / alloc / free
+        // - MkAllocator (by return type)
+        // For now, return false (no intercept) - existing pseudo-opcode dispatch still works
+        return false;
+    }
 };
 
 // =========================================================================

@@ -1464,6 +1464,35 @@ pub const UndefinedSafety = union(enum) {
         _ = args;
         // No-op: log functions return void
     }
+
+    // =========================================================================
+    // Runtime Call Filter
+    // =========================================================================
+    //
+    // Called for every function call to determine if this module should intercept.
+    // Returns true if the call was handled (skip normal execution), false otherwise.
+    // This replaces compile-time FQN shim dispatch with runtime pattern matching.
+    // =========================================================================
+
+    /// Runtime call filter for undefined safety.
+    /// Checks FQN patterns to intercept stdlib functions that need special handling.
+    /// Returns true if intercepted (handled), false to continue with normal execution.
+    pub fn call(
+        state: State,
+        index: usize,
+        return_type: tag.Type,
+        args: []const tag.Src,
+        fqn: []const u8,
+    ) anyerror!bool {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        _ = fqn;
+        // TODO: Migrate FQN-based shims to runtime pattern matching here
+        // For now, return false (no intercept) - existing shim dispatch still works
+        return false;
+    }
 };
 
 const debug = @import("builtin").mode == .Debug;

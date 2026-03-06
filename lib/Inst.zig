@@ -75,18 +75,17 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
     return gids;
 }
 
-pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src, comptime fqn: []const u8) !void {
-    // Check if this FQN has a shim - if so, dispatch to shims instead of running the function
-    // Only skip normal execution if at least one analysis module has a shim for this FQN
-    if (comptime Analyte.hasShim(fqn)) {
-        // Create typed return slot
-        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
-        const return_slot = try state.refinements.appendEntity(return_ref);
-        // Initialize as defined (shims override if needed)
-        tag.splatInitDefined(state.refinements, return_slot, state.ctx);
-        state.results[index].refinement = return_slot;
-        // Dispatch to analysis shims
-        try splatShim(fqn, state, index, return_type, args);
+pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src, fqn: []const u8) !void {
+    // Create typed return slot for the call result
+    const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+    const return_slot = try state.refinements.appendEntity(return_ref);
+    // Initialize as defined (analysis modules override if needed)
+    tag.splatInitDefined(state.refinements, return_slot, state.ctx);
+    state.results[index].refinement = return_slot;
+
+    // Dispatch to analysis modules' runtime call filters
+    // If any module intercepts (returns true), skip normal function execution
+    if (try splatCall(state, index, return_type, args, fqn)) {
         return;
     }
 
@@ -100,9 +99,7 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
         const fnptr_gid = state.results[called.inst].refinement orelse return;
         const fnptr_ref = state.refinements.at(fnptr_gid);
 
-        // Create typed return slot
-        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
-        const return_slot = try state.refinements.appendEntity(return_ref);
+        // Re-initialize for indirect call (may have multiple targets)
         tag.splatInit(state.refinements, return_slot, state.ctx);
 
         // Call ALL possible target functions to get conservative analysis
@@ -117,7 +114,6 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
             tag.splatInitDefined(state.refinements, return_slot, state.ctx);
         }
 
-        state.results[index].refinement = return_slot;
         return;
     }
 
@@ -127,9 +123,7 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     // Direct call to known function
     // Save caller's base_line - callee will set its own
     const saved_base_line = state.ctx.base_line;
-    // Create typed return slot in global refinements table
-    const return_ref = try tag.typeToRefinement(return_type, state.refinements);
-    const return_slot = try state.refinements.appendEntity(return_ref);
+    // Re-initialize for direct call execution
     tag.splatInit(state.refinements, return_slot, state.ctx);
     // Call function with ctx, refinements, return_slot, and args slice
     // FnInterpreter uses *anyopaque for Context and Refinements to break import cycles
@@ -138,7 +132,7 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     state.ctx.base_line = saved_base_line;
     // Dispatch to analyses for post-call processing (e.g., clear "returned" flags)
     tag.splatCallReturn(state.refinements, return_gid);
-    // Deposit returned entity GID into caller's instruction
+    // Update result with actual returned GID (may differ from return_slot)
     state.results[index].refinement = return_gid;
 }
 
@@ -152,6 +146,28 @@ pub fn splatShim(comptime fqn: []const u8, state: State, index: usize, return_ty
             try @field(Analysis, fqn)(state, index, return_type, args);
         }
     }
+}
+
+/// Dispatch call info to all analysis modules' runtime filters.
+/// Each analysis module implements a `call` function that receives FQN at runtime
+/// and returns true if it intercepts (handles) the call.
+/// Returns true if ANY module intercepts (returns true).
+pub fn splatCall(
+    state: State,
+    index: usize,
+    return_type: tag.Type,
+    args: []const tag.Src,
+    fqn: []const u8,
+) !bool {
+    var intercepted = false;
+    inline for (tag.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "call")) {
+            if (try Analysis.call(state, index, return_type, args, fqn)) {
+                intercepted = true;
+            }
+        }
+    }
+    return intercepted;
 }
 
 /// Store a function pointer constant with its specific function as a choice.

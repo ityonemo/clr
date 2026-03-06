@@ -269,6 +269,28 @@ pub const NullSafety = union(enum) {
             .column = loc.column,
         } };
     }
+
+    // =========================================================================
+    // Runtime Call Filter
+    // =========================================================================
+
+    /// Runtime call filter for null safety.
+    /// Returns true if intercepted (handled), false to continue with normal execution.
+    pub fn call(
+        state: State,
+        index: usize,
+        return_type: tag.Type,
+        args: []const tag.Src,
+        fqn: []const u8,
+    ) anyerror!bool {
+        _ = state;
+        _ = index;
+        _ = return_type;
+        _ = args;
+        _ = fqn;
+        // No null_safety-specific call intercepts currently needed
+        return false;
+    }
 };
 
 pub fn testValid(refinement: Refinements.Refinement) void {
