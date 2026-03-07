@@ -550,34 +550,12 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             if (isDebugCall(info.ip, datum)) {
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .noop_debug = .{{}} }});\n", .{inst_index}, null);
             }
-            // AllocCreate, AllocDestroy, AllocAlloc, AllocFree migrated to runtime call filter
-            // alignedAlloc is like alloc but FQN doesn't match "mem.Allocator.alloc" pattern
-            if (isAllocatorAlignedAlloc(info.ip, datum)) {
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const element_type = extractAllocAllocType(info, datum);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
-            }
-            // resize returns bool - emit alloc_resize tag (produces scalar)
-            if (isAllocatorResize(info.ip, datum)) {
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_resize = .{{}} }});\n", .{inst_index}, null);
-            }
-            // realloc/remap: handled by runtime call filter in memory_safety.call()
-            // dupe/dupeZ allocate a copy - treat like alloc
-            if (isAllocatorDupe(info.ip, datum) or isAllocatorDupeZ(info.ip, datum)) {
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const element_type = extractAllocAllocType(info, datum);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_alloc = .{{ .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, allocator_info.id, allocator_inst, element_type }, null);
-            }
-            // Check for ArenaAllocator.deinit() - emit arena_deinit tag
-            if (isArenaDeinit(info.ip, datum)) {
-                const arena_inst = extractArenaInstFromDeinit(info, datum);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .arena_deinit = .{{ .arena_inst = {?d} }} }});\n", .{ inst_index, arena_inst }, null);
-            }
-            // MkAllocator is now handled by extractFunctionReturnType emitting .allocator type
+            // All allocator operations handled by runtime call filter in memory_safety.call():
+            // - AllocCreate, AllocDestroy, AllocAlloc, AllocFree
+            // - alignedAlloc, resize, realloc, remap
+            // - dupe, dupeZ
+            // - ArenaAllocator.init, ArenaAllocator.deinit
+            // MkAllocator is handled by extractFunctionReturnType emitting .allocator type
             // when the return type is std.mem.Allocator. Arena linking is done in memory_safety.call().
             const call_parts = payloadCallParts(info, datum);
             const fqn = getCallFqn(info.ip, datum) orelse "";
