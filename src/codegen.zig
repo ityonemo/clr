@@ -563,19 +563,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             if (isAllocatorResize(info.ip, datum)) {
                 break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_resize = .{{}} }});\n", .{inst_index}, null);
             }
-            // realloc/remap frees old slice and returns new slice
-            if (isAllocatorRealloc(info.ip, datum) or isAllocatorRemap(info.ip, datum)) {
-                const slice_src = extractDestroyPtrSrc(info, datum) orelse {
-                    const call_parts = payloadCallParts(info, datum);
-                    const fqn = getCallFqn(info.ip, datum) orelse "";
-                    break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
-                };
-                const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
-                registerNameWithId(info.name_map, allocator_info.id, allocator_info.name);
-                const element_type = extractAllocAllocType(info, datum);
-                const allocator_inst = extractAllocatorInst(datum, info.extra);
-                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .alloc_realloc = .{{ .slice = {s}, .type_id = {d}, .allocator_inst = {?d}, .ty = {s} }} }});\n", .{ inst_index, slice_src, allocator_info.id, allocator_inst, element_type }, null);
-            }
+            // realloc/remap: handled by runtime call filter in memory_safety.call()
             // dupe/dupeZ allocate a copy - treat like alloc
             if (isAllocatorDupe(info.ip, datum) or isAllocatorDupeZ(info.ip, datum)) {
                 const allocator_info = extractAllocatorType(info.ip, datum, info.extra, info.tags, info.data);
