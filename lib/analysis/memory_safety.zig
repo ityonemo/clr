@@ -74,6 +74,29 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Info about an allocator, following pointer indirection if needed.
+    /// Allocators are wrapped in pointers to preserve identity across loads.
+    const AllocatorInfo = struct {
+        gid: Gid, // The actual allocator's GID (not the wrapper pointer)
+        ref: *Refinements.Refinement.AllocatorRef,
+    };
+
+    /// Get allocator info from a GID, following pointer indirection.
+    /// Returns null if the GID doesn't point to an allocator (directly or via pointer).
+    fn getAllocatorInfo(refinements: *Refinements, gid: Gid) ?AllocatorInfo {
+        const ref = refinements.at(gid);
+        if (ref.* == .pointer) {
+            const target_gid = ref.pointer.to;
+            const target = refinements.at(target_gid);
+            if (target.* == .allocator) {
+                return .{ .gid = target_gid, .ref = &target.allocator };
+            }
+        } else if (ref.* == .allocator) {
+            return .{ .gid = gid, .ref = &ref.allocator };
+        }
+        return null;
+    }
+
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
         // Inst contains .pointer = Indirected, set memory_safety on pointer and pointee
@@ -2863,30 +2886,27 @@ pub const MemorySafety = union(enum) {
         if (args.len > 0) {
             switch (args[0]) {
                 .inst => |inst| {
-                    allocator_gid = state.results[inst].refinement;
-                    if (allocator_gid) |agid| {
-                        const alloc_ref = state.refinements.at(agid);
-                        if (alloc_ref.* == .allocator) {
-                            type_id = alloc_ref.allocator.type_id;
-                            // Check if allocating from a deinited allocator
-                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                    if (state.results[inst].refinement) |gid| {
+                        if (getAllocatorInfo(state.refinements, gid)) |info| {
+                            allocator_gid = info.gid;
+                            type_id = info.ref.type_id;
+                            if (info.ref.deinit) |deinit_meta| {
                                 return reportAllocAfterDeinit(state.ctx, deinit_meta);
                             }
-                            arena_gid = alloc_ref.allocator.arena_gid;
+                            arena_gid = info.ref.arena_gid;
                         }
                     }
                 },
                 .interned => |interned| {
                     // Try to look up as a tracked global first
-                    allocator_gid = state.refinements.getGlobal(interned.ip_idx);
-                    if (allocator_gid) |agid| {
-                        const alloc_ref = state.refinements.at(agid);
-                        if (alloc_ref.* == .allocator) {
-                            type_id = alloc_ref.allocator.type_id;
-                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                    if (state.refinements.getGlobal(interned.ip_idx)) |gid| {
+                        if (getAllocatorInfo(state.refinements, gid)) |info| {
+                            allocator_gid = info.gid;
+                            type_id = info.ref.type_id;
+                            if (info.ref.deinit) |deinit_meta| {
                                 return reportAllocAfterDeinit(state.ctx, deinit_meta);
                             }
-                            arena_gid = alloc_ref.allocator.arena_gid;
+                            arena_gid = info.ref.arena_gid;
                         }
                     } else {
                         // Not a tracked global - comptime allocator, type_id is embedded
@@ -3000,20 +3020,18 @@ pub const MemorySafety = union(enum) {
         if (args.len > 0) {
             switch (args[0]) {
                 .inst => |inst| {
-                    destroy_allocator_gid = results[inst].refinement;
-                    if (destroy_allocator_gid) |agid| {
-                        const alloc_ref = refinements.at(agid);
-                        if (alloc_ref.* == .allocator) {
-                            destroy_type_id = alloc_ref.allocator.type_id;
+                    if (results[inst].refinement) |gid| {
+                        if (getAllocatorInfo(refinements, gid)) |info| {
+                            destroy_allocator_gid = info.gid;
+                            destroy_type_id = info.ref.type_id;
                         }
                     }
                 },
                 .interned => |interned| {
-                    destroy_allocator_gid = refinements.getGlobal(interned.ip_idx);
-                    if (destroy_allocator_gid) |agid| {
-                        const alloc_ref = refinements.at(agid);
-                        if (alloc_ref.* == .allocator) {
-                            destroy_type_id = alloc_ref.allocator.type_id;
+                    if (refinements.getGlobal(interned.ip_idx)) |gid| {
+                        if (getAllocatorInfo(refinements, gid)) |info| {
+                            destroy_allocator_gid = info.gid;
+                            destroy_type_id = info.ref.type_id;
                         }
                     } else {
                         // Comptime allocator - type_id is embedded in the type
@@ -3079,29 +3097,27 @@ pub const MemorySafety = union(enum) {
         if (args.len > 0) {
             switch (args[0]) {
                 .inst => |inst| {
-                    allocator_gid = state.results[inst].refinement;
-                    if (allocator_gid) |agid| {
-                        const alloc_ref = state.refinements.at(agid);
-                        if (alloc_ref.* == .allocator) {
-                            type_id = alloc_ref.allocator.type_id;
-                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                    if (state.results[inst].refinement) |gid| {
+                        if (getAllocatorInfo(state.refinements, gid)) |info| {
+                            allocator_gid = info.gid;
+                            type_id = info.ref.type_id;
+                            if (info.ref.deinit) |deinit_meta| {
                                 return reportAllocAfterDeinit(state.ctx, deinit_meta);
                             }
-                            arena_gid = alloc_ref.allocator.arena_gid;
+                            arena_gid = info.ref.arena_gid;
                         }
                     }
                 },
                 .interned => |interned| {
                     // Try to look up as a tracked global first
-                    allocator_gid = state.refinements.getGlobal(interned.ip_idx);
-                    if (allocator_gid) |agid| {
-                        const alloc_ref = state.refinements.at(agid);
-                        if (alloc_ref.* == .allocator) {
-                            type_id = alloc_ref.allocator.type_id;
-                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                    if (state.refinements.getGlobal(interned.ip_idx)) |gid| {
+                        if (getAllocatorInfo(state.refinements, gid)) |info| {
+                            allocator_gid = info.gid;
+                            type_id = info.ref.type_id;
+                            if (info.ref.deinit) |deinit_meta| {
                                 return reportAllocAfterDeinit(state.ctx, deinit_meta);
                             }
-                            arena_gid = alloc_ref.allocator.arena_gid;
+                            arena_gid = info.ref.arena_gid;
                         }
                     } else {
                         // Not a tracked global - comptime allocator, type_id is embedded
@@ -3238,21 +3254,19 @@ pub const MemorySafety = union(enum) {
         var free_type_id: u32 = 0;
         switch (args[0]) {
             .inst => |inst| {
-                free_allocator_gid = results[inst].refinement;
-                if (free_allocator_gid) |agid| {
-                    const alloc_ref = refinements.at(agid);
-                    if (alloc_ref.* == .allocator) {
-                        free_type_id = alloc_ref.allocator.type_id;
+                if (results[inst].refinement) |gid| {
+                    if (getAllocatorInfo(refinements, gid)) |info| {
+                        free_allocator_gid = info.gid;
+                        free_type_id = info.ref.type_id;
                     }
                 }
             },
             .interned => |interned| {
                 // Try to look up as a tracked global first
-                free_allocator_gid = refinements.getGlobal(interned.ip_idx);
-                if (free_allocator_gid) |agid| {
-                    const alloc_ref = refinements.at(agid);
-                    if (alloc_ref.* == .allocator) {
-                        free_type_id = alloc_ref.allocator.type_id;
+                if (refinements.getGlobal(interned.ip_idx)) |gid| {
+                    if (getAllocatorInfo(refinements, gid)) |info| {
+                        free_allocator_gid = info.gid;
+                        free_type_id = info.ref.type_id;
                     }
                 } else {
                     // Not a tracked global - comptime allocator, type_id is embedded
@@ -3354,23 +3368,24 @@ pub const MemorySafety = union(enum) {
         // Get allocator GID and type_id for mismatch detection
         var realloc_allocator_gid: ?Gid = null;
         var realloc_type_id: u32 = 0;
+        var arena_gid: ?Gid = null;
         switch (args[0]) {
             .inst => |inst| {
-                realloc_allocator_gid = results[inst].refinement;
-                if (realloc_allocator_gid) |agid| {
-                    const alloc_ref = refinements.at(agid);
-                    if (alloc_ref.* == .allocator) {
-                        realloc_type_id = alloc_ref.allocator.type_id;
+                if (results[inst].refinement) |gid| {
+                    if (getAllocatorInfo(refinements, gid)) |info| {
+                        realloc_allocator_gid = info.gid;
+                        realloc_type_id = info.ref.type_id;
+                        arena_gid = info.ref.arena_gid;
                     }
                 }
             },
             .interned => |interned| {
                 // Try to look up as a tracked global first
-                realloc_allocator_gid = refinements.getGlobal(interned.ip_idx);
-                if (realloc_allocator_gid) |agid| {
-                    const alloc_ref = refinements.at(agid);
-                    if (alloc_ref.* == .allocator) {
-                        realloc_type_id = alloc_ref.allocator.type_id;
+                if (refinements.getGlobal(interned.ip_idx)) |gid| {
+                    if (getAllocatorInfo(refinements, gid)) |info| {
+                        realloc_allocator_gid = info.gid;
+                        realloc_type_id = info.ref.type_id;
+                        arena_gid = info.ref.arena_gid;
                     }
                 } else {
                     // Not a tracked global - comptime allocator, type_id is embedded
@@ -3416,15 +3431,6 @@ pub const MemorySafety = union(enum) {
         if (new_region_ref.* != .region) return;
         const new_region = &new_region_ref.region;
         const new_element_ref = new_region.to;
-
-        // Get arena_gid if allocator is from arena
-        var arena_gid: ?Gid = null;
-        if (realloc_allocator_gid) |agid| {
-            const alloc_ref = refinements.at(agid);
-            if (alloc_ref.* == .allocator) {
-                arena_gid = alloc_ref.allocator.arena_gid;
-            }
-        }
 
         const alloc_base: AllocatedBase = .{
             .meta = ctx.meta,
@@ -3501,25 +3507,70 @@ pub const MemorySafety = union(enum) {
     /// All allocations made via this arena will be considered freed during leak check.
     fn handleArenaDeinit(state: State, index: usize, args: []const tag.Src) !void {
         _ = index;
+        const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
 
         // ArenaAllocator.deinit signature: deinit(self: *ArenaAllocator) -> args[0]=arena_ptr
+        // In AIR, the arena might be passed as:
+        // - A pointer (if called as ptr.deinit())
+        // - A loaded value (if called as arena.deinit() where arena is loaded first)
+        //
+        // When the arena is loaded first, the load creates a semideepCopy with a new GID.
+        // To get the ORIGINAL arena GID (which matches the allocator's arena_gid), we need
+        // to trace back through the load instruction to find the original pointer's pointee.
         if (args.len < 1) return;
 
-        // Get the arena POINTEE's GID (follow pointer to match MkAllocator tracking)
+        // Get the arena's GID - trace back through loads to find original
         const arena_gid = blk: {
-            const ptr_gid: ?Gid = switch (args[0]) {
-                .inst => |idx| state.results[idx].refinement,
-                .interned => |interned| refinements.getGlobal(interned.ip_idx),
-                .fnptr => null,
-            };
-            if (ptr_gid) |pgid| {
-                const ptr_ref = refinements.at(pgid);
-                if (ptr_ref.* != .pointer) break :blk null;
-                break :blk ptr_ref.pointer.to;
+            switch (args[0]) {
+                .inst => |inst_idx| {
+                    // Check if this instruction is a load - if so, trace to the source pointer
+                    const inst_tag = results[inst_idx].inst_tag orelse {
+                        // No tag, fall back to refinement
+                        if (results[inst_idx].refinement) |gid| {
+                            const ref = refinements.at(gid);
+                            if (ref.* == .pointer) break :blk ref.pointer.to;
+                        }
+                        break :blk null;
+                    };
+                    if (inst_tag == .load) {
+                        // This is a load instruction - get the source pointer from the tag
+                        const load_tag = inst_tag.load;
+                        switch (load_tag.ptr) {
+                            .inst => |ptr_inst| {
+                                const ptr_gid = results[ptr_inst].refinement orelse break :blk null;
+                                const ptr_ref = refinements.at(ptr_gid);
+                                if (ptr_ref.* == .pointer) {
+                                    // Return the ORIGINAL pointee GID (not the loaded copy)
+                                    break :blk ptr_ref.pointer.to;
+                                }
+                            },
+                            .interned => |interned| {
+                                if (refinements.getGlobal(interned.ip_idx)) |gid| {
+                                    const ref = refinements.at(gid);
+                                    if (ref.* == .pointer) break :blk ref.pointer.to;
+                                }
+                            },
+                            .fnptr => {},
+                        }
+                    }
+                    // Not a load, try direct refinement lookup
+                    if (results[inst_idx].refinement) |gid| {
+                        const ref = refinements.at(gid);
+                        if (ref.* == .pointer) break :blk ref.pointer.to;
+                    }
+                    break :blk null;
+                },
+                .interned => |interned| {
+                    if (refinements.getGlobal(interned.ip_idx)) |gid| {
+                        const ref = refinements.at(gid);
+                        if (ref.* == .pointer) break :blk ref.pointer.to;
+                    }
+                    break :blk null;
+                },
+                .fnptr => break :blk null,
             }
-            break :blk null;
         } orelse return;
 
         // Find the AllocatorRef that references this arena and check/set deinit
@@ -3543,7 +3594,8 @@ pub const MemorySafety = union(enum) {
 
     /// Handle MkAllocator: call returns std.mem.Allocator.
     /// The allocator refinement is already created by typeToRefinement in Inst.call.
-    /// This handler links the allocator to an arena if it's from ArenaAllocator.allocator().
+    /// This handler wraps the allocator in a pointer to preserve identity across loads,
+    /// and links it to an arena if it's from ArenaAllocator.allocator().
     fn handleMkAllocator(state: State, index: usize, args: []const tag.Src, fqn: []const u8) !void {
         const results = state.results;
         const refinements = state.refinements;
@@ -3553,28 +3605,34 @@ pub const MemorySafety = union(enum) {
         const alloc_ref = refinements.at(alloc_idx);
         if (alloc_ref.* != .allocator) return;
 
-        // Check if this is ArenaAllocator.allocator() - need to link to arena
-        if (!gates.isArenaAllocator(fqn)) return;
+        // If this is ArenaAllocator.allocator(), link to arena
+        if (gates.isArenaAllocator(fqn) and args.len >= 1) {
+            // ArenaAllocator.allocator() has signature: allocator(self: *ArenaAllocator) -> Allocator
+            // args[0] is the arena pointer (self parameter)
+            const arena_ptr_gid: ?Gid = switch (args[0]) {
+                .inst => |inst| results[inst].refinement,
+                .interned => |interned| refinements.getGlobal(interned.ip_idx),
+                .fnptr => null,
+            };
+            if (arena_ptr_gid) |arena_ptr_idx| {
+                const ptr_ref = refinements.at(arena_ptr_idx);
+                if (ptr_ref.* == .pointer) {
+                    alloc_ref.allocator.arena_gid = ptr_ref.pointer.to;
+                }
+            }
+        }
 
-        // ArenaAllocator.allocator() has signature: allocator(self: *ArenaAllocator) -> Allocator
-        // args[0] is the arena pointer (self parameter)
-        if (args.len < 1) return;
-
-        // Get the arena pointer's refinement
-        const arena_ptr_gid: ?Gid = switch (args[0]) {
-            .inst => |inst| results[inst].refinement,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx),
-            .fnptr => null,
-        };
-        const arena_ptr_idx = arena_ptr_gid orelse return;
-
-        // Follow the pointer to get the arena's pointee GID
-        const ptr_ref = refinements.at(arena_ptr_idx);
-        if (ptr_ref.* != .pointer) return;
-        const arena_gid = ptr_ref.pointer.to;
-
-        // Set the arena_gid on the allocator refinement
-        alloc_ref.allocator.arena_gid = arena_gid;
+        // Wrap the allocator in a pointer to preserve identity across loads.
+        // When semideepCopy copies a pointer, it shares the same .to GID,
+        // so the allocator's identity (and arena_gid) stays stable.
+        const wrapper_ptr = try refinements.appendEntity(.{ .pointer = .{
+            .to = alloc_idx,
+            .analyte = .{
+                .undefined_safety = .{ .defined = {} },
+                .memory_safety = .{ .unset = {} },
+            },
+        } });
+        results[index].refinement = wrapper_ptr;
     }
 };
 

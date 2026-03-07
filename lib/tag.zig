@@ -1205,14 +1205,25 @@ pub const Store = struct {
         if (src_gid) |src_ref| {
             const src = state.refinements.at(src_ref);
 
-            // ALLOCATOR IDENTITY: When storing an allocator, make the pointer
-            // point directly to the source allocator refinement. This preserves
+            // ALLOCATOR IDENTITY: When storing an allocator (or pointer to allocator),
+            // make the pointer point directly to the source refinement. This preserves
             // allocator identity through store/load cycles. The Zig Allocator type
-            // is a struct, but we track it as .allocator refinement for analysis.
+            // is a struct, but we track it as .allocator refinement (or pointer to .allocator)
+            // for analysis.
             if (src.* == .allocator) {
                 ptr_ref.pointer.to = src_ref;
                 try splat(.store, state, index, self);
                 return;
+            }
+            // Handle pointer-wrapped allocators (from MkAllocator)
+            if (src.* == .pointer) {
+                const src_target = state.refinements.at(src.pointer.to);
+                if (src_target.* == .allocator) {
+                    // Storing pointer-to-allocator: preserve the wrapper pointer
+                    ptr_ref.pointer.to = src_ref;
+                    try splat(.store, state, index, self);
+                    return;
+                }
             }
 
             switch (pointee.*) {
