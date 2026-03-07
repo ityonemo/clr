@@ -174,8 +174,8 @@ pub const NullSafety = union(enum) {
         // Get pointer GID based on ptr type (like load does)
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // constant pointers - no null tracking
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // function pointers - no null tracking
         };
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
@@ -186,15 +186,15 @@ pub const NullSafety = union(enum) {
 
         // Check if we're storing null or a value
         switch (params.src) {
-            .int_const => |ty| {
-                if (ty.ty == .@"null") {
+            .interned => |interned| {
+                if (interned.ty.ty == .@"null") {
                     pointee.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
                 } else {
                     pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
                 }
             },
-            .inst, .int_var, .int_fnptr => {
-                // Runtime value or interned var - mark as non_null
+            .inst, .int_fnptr => {
+                // Runtime value or function pointer - mark as non_null
                 pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
             },
         }
@@ -536,7 +536,7 @@ test "store to optional with null sets null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store null to the optional
-    try NullSafety.store(state, 1, .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .@"null" = &test_scalar_type } } } });
+    try NullSafety.store(state, 1, .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .@"null" = &test_scalar_type } } } } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");

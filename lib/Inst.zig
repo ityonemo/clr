@@ -51,13 +51,10 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
             .inst => |idx| state.results[idx].refinement orelse {
                 std.debug.panic("srcSliceToGidSlice: instruction {} has no refinement", .{idx});
             },
-            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx) orelse {
-                std.debug.panic("srcSliceToGidSlice: global {} not found", .{ip_idx});
-            },
-            .int_const => |ty| blk: {
-                // Create refinement from type and mark as defined (compile-time constants are always defined)
-                // splatInitDefined handles marking pointer pointees as global memory
-                const ref = try tag.typeToRefinement(ty, state.refinements);
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse blk: {
+                // Not a tracked global - create refinement from type
+                // Mark as defined (compile-time constants are always defined)
+                const ref = try tag.typeToRefinement(interned.ty, state.refinements);
                 const gid = try state.refinements.appendEntity(ref);
                 tag.splatInitDefined(state.refinements, gid, state.ctx);
                 break :blk gid;
@@ -177,8 +174,7 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
     // Get pointer GID following the same pattern as Store.apply
     const ptr_gid: ?Gid = switch (ptr) {
         .inst => |p| state.results[p].refinement,
-        .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
-        .int_const => null,
+        .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
         .int_fnptr => null,
     };
 
@@ -213,7 +209,7 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
     }
 
     // Mark as defined via analysis dispatch - use store tag
-    const store_payload = tag.Store{ .ptr = ptr, .src = .{ .int_const = .{ .ty = .{ .fnptr = {} } } } };
+    const store_payload = tag.Store{ .ptr = ptr, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .fnptr = {} } } } } };
     try tag.splat(.store_safe, state, index, store_payload);
 
     // The store instruction itself gets void refinement
@@ -1038,7 +1034,7 @@ test "store_safe with undef keeps state undefined" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } } });
 
     // alloc's pointee stays undefined after store_safe with undef
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -1062,7 +1058,7 @@ test "store_safe with value sets state to defined" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // alloc's pointee becomes defined after store_safe with real value
     const pointee_idx = results[1].get(&refinements).pointer.to;
@@ -1088,7 +1084,7 @@ test "load from undefined instruction reports use before assign" {
 
     // Set up: alloc creates pointer to future, store with .undefined transforms to scalar+undefined
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } } });
 
     // Load from undefined instruction should return error
     try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } }));
@@ -1112,7 +1108,7 @@ test "load from defined instruction does not report error" {
 
     // Set up: alloc then store a real value
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // Load from defined instruction should NOT return error
     try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
@@ -1137,7 +1133,7 @@ test "all instructions get valid refinements after operations" {
     // Apply various operations that should all set refinements
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
     try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
     try Inst.apply(state, 4, .{ .block = .{ .ty = .{ .ty = .{ .void = {} } } } });
 
@@ -1178,7 +1174,7 @@ test "ret_safe writes return value to return slot" {
 
     // Allocate and store a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // Return the value from instruction 0
     try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
@@ -1213,7 +1209,7 @@ test "ret_safe with void src sets return to void" {
     };
 
     // Return void
-    try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .int_const = .{ .ty = .{ .void = {} } } } } });
+    try Inst.apply(state, 0, .{ .ret_safe = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .void = {} } } } } } });
 
     // Verify return entity is still void
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(return_gid).*));
@@ -1249,7 +1245,7 @@ test "ret_safe at entrypoint succeeds" {
 
     // Allocate a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // Return - should just succeed without error
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });

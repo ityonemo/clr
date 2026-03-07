@@ -1119,13 +1119,13 @@ test "generateFunction with simple cond_br block" {
     const expected =
         \\fn fn_42_cond_br_false_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = false, .condition_idx = 3 } });
-        \\    try Inst.apply(state, 6, .{ .br = .{ .block = 2, .src = .{ .int_const = .{ .ty = .{ .void = {} } } } } });
+        \\    try Inst.apply(state, 6, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .void = {} } } } } } });
         \\}
         \\
         \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = 3 } });
         \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 3 } } });
-        \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .int_const = .{ .ty = .{ .void = {} } } } } });
+        \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .void = {} } } } } } });
         \\}
         \\
         \\fn fn_42(ctx: *Context, refinements: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {
@@ -1145,9 +1145,9 @@ test "generateFunction with simple cond_br block" {
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 104, .ty = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } } });
         \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .ty = .{ .void = {} } } } });
-        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
         \\    try Inst.apply(state, 4, .{ .noop = .{} });
         \\    try Inst.apply(state, 5, .{ .noop = .{} });
         \\    try Inst.apply(state, 6, .{ .noop = .{} });

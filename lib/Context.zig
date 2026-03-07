@@ -133,7 +133,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
         .struct_field_ptr => |sfp| {
             const base = switch (sfp.base) {
                 .inst => |inst_idx| inst_idx,
-                .int_var, .int_const, .int_fnptr => return null, // global/constant base - no path name
+                .interned, .int_fnptr => return null, // global/constant base - no path name
             };
             const base_path = self.buildPathName(results, refinements, base);
 
@@ -184,7 +184,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
             // Load inherits name from its pointer source
             const ptr = switch (l.ptr) {
                 .inst => |idx| idx,
-                .int_var, .int_const, .int_fnptr => return null,
+                .interned, .int_fnptr => return null,
             };
             return self.buildPathName(results, refinements, ptr);
         },
@@ -196,7 +196,7 @@ pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refine
             // Optional unwrap: base.?
             const src_idx = switch (op.src) {
                 .inst => |idx| idx,
-                .int_const, .int_var, .int_fnptr => return null,
+                .interned, .int_fnptr => return null,
             };
             const base_path = self.buildPathName(results, refinements, src_idx) orelse return null;
             const arena_alloc = self.error_name_arena.allocator();

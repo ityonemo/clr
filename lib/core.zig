@@ -85,14 +85,20 @@ pub const Type = struct {
 pub const Src = union(enum) {
     /// Runtime value from a result in the results table (index into results[])
     inst: usize,
-    /// Interned variable by IP index - look up in refinements.getGlobal()
-    /// If found, it's a tracked user global; if not, it's a non-user interned var
-    /// This includes both direct globals and field pointers (which have their own IP index)
-    int_var: u32,
-    /// Interned constant - reify refinement from embedded type
-    int_const: Type,
+    /// Interned value - look up in refinements.getGlobal() by ip_idx.
+    /// If found, it's a tracked user global; if not, reify from embedded type.
+    /// This unifies what was previously int_var (globals) and int_const (comptime constants).
+    interned: Interned,
     /// Function pointer constant - array of possible target functions
     int_fnptr: []const FnInterpreter,
+};
+
+/// Interned value reference - combines IP index for lookup with type info for reification.
+pub const Interned = struct {
+    /// InternPool index of this value
+    ip_idx: u32,
+    /// Type info for reifying refinement if not found in global_map
+    ty: Type,
 };
 
 

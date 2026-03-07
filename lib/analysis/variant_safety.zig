@@ -98,8 +98,8 @@ pub const VariantSafety = struct {
         // Get the union pointer's refinement based on source type
         const ptr_ref: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement.?,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx).?,
-            .int_const, .int_fnptr => return, // comptime constant - no variant tracking
+            .interned => |interned| refinements.getGlobal(interned.ip_idx).?,
+            .int_fnptr => return, // function pointer - no variant tracking
         };
         const container_idx = refinements.at(ptr_ref).pointer.to;
         const u = &refinements.at(container_idx).@"union";
@@ -129,8 +129,8 @@ pub const VariantSafety = struct {
         // Get base pointer refinement - handle instruction or global base
         const base_ref: Gid = switch (params.base) {
             .inst => |inst| results[inst].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // constant base - no variant checking
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // function pointer - no variant checking
         };
 
         // Follow pointer to container - must be a pointer
@@ -216,8 +216,8 @@ pub const VariantSafety = struct {
         const inst_tag = results[union_check.union_inst].inst_tag orelse return;
         if (inst_tag != .load) return;
         const load_src = inst_tag.load.ptr;
-        if (load_src != .int_var) return; // Not a global
-        const global_ip_idx = load_src.int_var;
+        if (load_src != .interned) return; // Not an interned value
+        const global_ip_idx = load_src.interned.ip_idx;
 
         const global_ptr_gid = refinements.getGlobal(global_ip_idx) orelse return;
         const global_pointee_gid = refinements.at(global_ptr_gid).pointer.to;
@@ -287,8 +287,8 @@ pub const VariantSafety = struct {
 
         const ptr_gid: ?Gid = switch (load_src) {
             .inst => |inst| results[inst].refinement,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx),
-            .int_const, .int_fnptr => null,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx),
+            .int_fnptr => null,
         };
         const ptr_ref = ptr_gid orelse return;
         const pointee_gid = refinements.at(ptr_ref).pointer.to;

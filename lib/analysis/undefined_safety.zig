@@ -260,8 +260,8 @@ pub const UndefinedSafety = union(enum) {
     fn getPointeeFromSrc(src: tag.Src, results: []const Inst, refinements: *Refinements) ?Gid {
         const ptr_gid: Gid = switch (src) {
             .inst => |ptr| results[ptr].refinement orelse return null,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return null,
-            .int_const, .int_fnptr => return null,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return null,
+            .int_fnptr => return null,
         };
         return switch (refinements.at(ptr_gid).*) {
             .pointer => |p| p.to,
@@ -297,8 +297,8 @@ pub const UndefinedSafety = union(enum) {
         // Get the union pointer's refinement based on source type
         const ptr_ref: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement.?,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx).?,
-            .int_const, .int_fnptr => return, // comptime constant - no undefined tracking
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // comptime constant - no undefined tracking
         };
         const container_idx = refinements.at(ptr_ref).pointer.to;
         const u = &refinements.at(container_idx).@"union";
@@ -573,8 +573,8 @@ pub const UndefinedSafety = union(enum) {
         _ = state;
         _ = index;
         // For .inst: result shares source's entity, undefined state already correct
-        if (params.src == .int_const) {
-            @panic("optional_payload: int_const source unimplemented");
+        if (params.src == .interned) {
+            @panic("optional_payload: interned source unimplemented");
         }
     }
 
@@ -595,7 +595,7 @@ pub const UndefinedSafety = union(enum) {
     }
 
     /// With unified args, the GID already has proper defined/undefined state
-    /// set by srcSliceToGidSlice (int_const/int_fnptr are marked defined there).
+    /// set by srcSliceToGidSlice (interned/int_fnptr are marked defined there).
     pub fn arg(state: State, index: usize, params: tag.Arg) !void {
         _ = state;
         _ = index;
@@ -611,8 +611,16 @@ pub const UndefinedSafety = union(enum) {
         // When source is an eidx with existing refinement, undefined state is already set.
         // When br creates a new scalar (interned source), we need to set undefined.
         switch (params.src) {
-            .inst, .int_var => {}, // Source has existing refinement with undefined state
-            .int_const, .int_fnptr => {
+            .inst => {}, // Source has existing refinement with undefined state
+            .interned => |interned| {
+                // Check if it's a tracked global with existing refinement
+                if (state.refinements.getGlobal(interned.ip_idx) == null) {
+                    // Not a tracked global - comptime constant, mark as defined
+                    const block_idx = state.results[params.block].refinement orelse return;
+                    setDefinedRecursive(state.refinements, block_idx);
+                }
+            },
+            .int_fnptr => {
                 const block_idx = state.results[params.block].refinement orelse return;
                 setDefinedRecursive(state.refinements, block_idx);
             },
@@ -625,8 +633,14 @@ pub const UndefinedSafety = union(enum) {
         _ = index;
         // Only handle interned non-void returns - those are the ones that create new entities
         switch (params.src) {
-            .int_const => |ty| {
-                if (ty.ty != .void) {
+            .interned => |interned| {
+                // Check if it's a tracked global
+                if (state.refinements.getGlobal(interned.ip_idx) != null) {
+                    // Tracked global - already has undefined state from initWithGlobals
+                    return;
+                }
+                // Not a tracked global - comptime constant
+                if (interned.ty.ty != .void) {
                     // Interned values are compile-time constants, so defined
                     // With global refinements, return_gid points to slot in state.refinements
                     setDefinedRecursive(state.refinements, state.return_gid);
@@ -636,7 +650,7 @@ pub const UndefinedSafety = union(enum) {
                 // Function pointer constants are always defined
                 setDefinedRecursive(state.refinements, state.return_gid);
             },
-            .inst, .int_var => {}, // Already has undefined state from callee or initWithGlobals
+            .inst => {}, // Already has undefined state from callee
         }
     }
 
@@ -808,15 +822,15 @@ pub const UndefinedSafety = union(enum) {
         // Get pointer GID based on ptr type (like load does)
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse @panic("store: ptr inst has no refinement"),
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse @panic("store: global not found"),
-            .int_const, .int_fnptr => @panic("store: storing through constant pointer not supported"),
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse @panic("store: global not found"),
+            .int_fnptr => @panic("store: storing through constant pointer not supported"),
         };
         // Follow pointer to get pointee - panic on unexpected types
         const pointee_idx = refinements.at(ptr_gid).pointer.to;
 
-        // Check if source is an undefined type (int_const with .undefined wrapper)
+        // Check if source is an undefined type (interned with .undefined wrapper)
         const is_undef = switch (params.src) {
-            .int_const => |ty| ty.ty == .undefined,
+            .interned => |interned| interned.ty.ty == .undefined,
             else => false,
         };
 
@@ -825,8 +839,8 @@ pub const UndefinedSafety = union(enum) {
             // Build full path name for the destination pointer
             const name_when_set: ?[]const u8 = switch (params.ptr) {
                 .inst => |ptr| state.ctx.buildPathName(results, refinements, ptr),
-                .int_var => null, // TODO: look up global name from IP index
-                .int_const, .int_fnptr => null,
+                .interned => null, // TODO: look up global name from IP index
+                .int_fnptr => null,
             };
             const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = name_when_set } };
             setUndefinedRecursive(refinements, pointee_idx, undef_state);
@@ -893,31 +907,27 @@ pub const UndefinedSafety = union(enum) {
                         },
                     }
                 },
-                .int_const => |ty| {
-                    // Compile-time source - apply defined/undefined based on type
-                    applyInternedType(refinements, pointee_idx, ty, state.ctx);
-                },
-                .int_var => |ip_idx| {
-                    // Global source - look up in global_map and handle like .inst
-                    const global_gid = refinements.getGlobal(ip_idx) orelse {
-                        // Global not found (shouldn't happen) - just mark as defined
-                        setDefinedRecursive(refinements, pointee_idx);
-                        return;
-                    };
-                    // When storing a pointer value, update the destination's `to` field
-                    switch (refinements.at(pointee_idx).*) {
-                        .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
-                        .pointer => |*p| {
-                            // If global is also a pointer, update .to to share the target
-                            if (refinements.at(global_gid).* == .pointer) {
-                                const global_ptr = refinements.at(global_gid).pointer;
-                                p.to = global_ptr.to;
-                                p.analyte.undefined_safety = .{ .defined = {} };
-                            } else {
-                                p.analyte.undefined_safety = .{ .defined = {} };
-                            }
-                        },
-                        else => setDefinedRecursive(refinements, pointee_idx),
+                .interned => |interned| {
+                    // Try to look up as a tracked global first
+                    if (refinements.getGlobal(interned.ip_idx)) |global_gid| {
+                        // When storing a pointer value, update the destination's `to` field
+                        switch (refinements.at(pointee_idx).*) {
+                            .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
+                            .pointer => |*p| {
+                                // If global is also a pointer, update .to to share the target
+                                if (refinements.at(global_gid).* == .pointer) {
+                                    const global_ptr = refinements.at(global_gid).pointer;
+                                    p.to = global_ptr.to;
+                                    p.analyte.undefined_safety = .{ .defined = {} };
+                                } else {
+                                    p.analyte.undefined_safety = .{ .defined = {} };
+                                }
+                            },
+                            else => setDefinedRecursive(refinements, pointee_idx),
+                        }
+                    } else {
+                        // Not a tracked global - comptime constant, apply from type
+                        applyInternedType(refinements, pointee_idx, interned.ty, state.ctx);
                     }
                 },
                 .int_fnptr => {
@@ -1653,7 +1663,7 @@ test "store with .undefined type wrapper sets undefined" {
 
     // First alloc at instruction 1, then store with .undefined wrapper
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1677,7 +1687,7 @@ test "store with defined value sets defined" {
 
     // First alloc at instruction 1, then store a defined value
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1702,7 +1712,7 @@ test "store with .null to optional sets inner to defined" {
     // Alloc at instruction 1 with optional type, then store null
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .optional = &.{ .ty = .{ .scalar = {} } } } } } });
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .null = &.{ .ty = .{ .scalar = {} } } } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .null = &.{ .ty = .{ .scalar = {} } } } } } } } });
 
     // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;

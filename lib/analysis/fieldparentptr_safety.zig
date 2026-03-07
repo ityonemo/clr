@@ -37,8 +37,8 @@ pub const FieldParentPtrSafety = struct {
         // Get the container's type_id from the base pointer
         const base_ref: Gid = switch (params.base) {
             .inst => |inst| results[inst].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // interned constant, can't track
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // function pointer, can't track
         };
         const base_refinement = refinements.at(base_ref);
         if (base_refinement.* != .pointer) return;
@@ -144,8 +144,8 @@ pub const FieldParentPtrSafety = struct {
         // Get the field pointer's refinement GID
         const ptr_idx: Gid = switch (params.field_ptr) {
             .inst => |idx| results[idx].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // interned constant, can't track
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // function pointer, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
 

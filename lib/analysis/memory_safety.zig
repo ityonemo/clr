@@ -37,7 +37,8 @@ pub const Allocated = struct {
     freed: ?Free = null, // null = still allocated, has value = freed
     arena: ?Gid = null, // if allocated via arena, the arena's GID
 
-    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
+    allocator_gid: ?Gid, // GID of the allocator used for this allocation (for mismatch detection)
+    type_id: u32, // Type ID for error messages (from allocator refinement's type_id)
     name_at_alloc: ?[]const u8 = null, // Full path name when allocated (e.g., "container.ptr")
     returned: bool = false, // true if this allocation was returned to caller (not a local leak)
     is_slice: bool = false, // true if allocated with alloc (slice), false if create (single item)
@@ -98,12 +99,12 @@ pub const MemorySafety = union(enum) {
         // Get ptr instruction index - skip for globals/constants (no memory safety tracking needed)
         const ptr = switch (params.ptr) {
             .inst => |idx| idx,
-            .int_var, .int_const, .int_fnptr => return, // globals/constants - no memory safety tracking
+            .interned, .int_fnptr => return, // globals/constants - no memory safety tracking
         };
         const src = switch (params.src) {
             .inst => |idx| idx,
             // comptime/interned values don't have memory safety tracking - skip
-            .int_const, .int_var, .int_fnptr => return,
+            .interned, .int_fnptr => return,
         };
 
         const src_refinement_idx = results[src].refinement orelse return;
@@ -236,11 +237,11 @@ pub const MemorySafety = union(enum) {
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
             },
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 // Constant base - set .unset on result and nested refinements
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
@@ -266,8 +267,9 @@ pub const MemorySafety = union(enum) {
             .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = container_gid } },
             .allocated => |a| .{ .allocated = .{
                 .meta = a.meta,
-                .freed = a.freed,
+                .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
+                .freed = a.freed,
                 .root_gid = container_gid,
                 .is_slice = a.is_slice,
             } },
@@ -317,8 +319,9 @@ pub const MemorySafety = union(enum) {
             .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = region_gid } },
             .allocated => |a| .{ .allocated = .{
                 .meta = a.meta,
-                .freed = a.freed,
+                .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
+                .freed = a.freed,
                 .root_gid = region_gid,
                 .is_slice = a.is_slice,
             } },
@@ -338,8 +341,8 @@ pub const MemorySafety = union(enum) {
 
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // interned constant, can't track
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
@@ -371,8 +374,8 @@ pub const MemorySafety = union(enum) {
 
         const ptr_idx: Gid = switch (params.field_ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // interned constant, can't track
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
         // field_parent_ptr should only receive pointers from codegen
@@ -403,8 +406,9 @@ pub const MemorySafety = union(enum) {
             .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = null } },
             .allocated => |a| .{ .allocated = .{
                 .meta = a.meta,
-                .freed = a.freed,
+                .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
+                .freed = a.freed,
                 .root_gid = null,
             } },
             .global => |g| .{ .global = g },
@@ -422,7 +426,7 @@ pub const MemorySafety = union(enum) {
         const src_idx: Gid = switch (params.src) {
             .inst => |idx| results[idx].refinement orelse return,
             // comptime/interned values don't have memory safety tracking - skip
-            .int_const, .int_var, .int_fnptr => return,
+            .interned, .int_fnptr => return,
         };
 
         // Recursively check for allocations to mark as returned
@@ -879,6 +883,7 @@ pub const MemorySafety = union(enum) {
 
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
+            .allocator_gid = null, // OLD handler - no allocator GID from pseudo-opcode
             .type_id = type_id,
             .root_gid = null, // This is the root allocation
             .arena = arena_gid, // Track if allocated via arena
@@ -892,6 +897,7 @@ pub const MemorySafety = union(enum) {
         ptr.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
+                .allocator_gid = null,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
                 .arena = arena_gid, // Track if allocated via arena
@@ -993,7 +999,8 @@ pub const MemorySafety = union(enum) {
     /// Base allocation info for setAllocatedRecursive (without root_gid, which is computed).
     const AllocatedBase = struct {
         meta: Meta,
-        type_id: u32,
+        allocator_gid: ?Gid, // GID of allocator for identity comparison
+        type_id: u32, // Type ID for error messages
         root_gid: ?Gid, // Initial root_gid for the root node
         arena: ?Gid = null, // If allocated via arena, the arena's GID
     };
@@ -1005,6 +1012,7 @@ pub const MemorySafety = union(enum) {
         const ref = refinements.at(idx);
         const ms: MemorySafety = .{ .allocated = .{
             .meta = base.meta,
+            .allocator_gid = base.allocator_gid,
             .type_id = base.type_id,
             .root_gid = root_gid,
             .arena = base.arena,
@@ -1110,11 +1118,11 @@ pub const MemorySafety = union(enum) {
         // Resolve ptr source to get the pointer's refinement index
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement orelse @panic("alloc_destroy: inst has no refinement"),
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 // Trying to free a pointer to a global variable
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 // Trying to free an interned constant pointer (e.g., pointer to global)
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1231,6 +1239,7 @@ pub const MemorySafety = union(enum) {
 
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
+            .allocator_gid = null, // OLD handler - no allocator GID from pseudo-opcode
             .type_id = type_id,
             .root_gid = null, // This is the root allocation
             .arena = arena_gid, // Track if allocated via arena
@@ -1244,6 +1253,7 @@ pub const MemorySafety = union(enum) {
         ptr.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
+                .allocator_gid = null,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
                 .arena = arena_gid, // Track if allocated via arena
@@ -1255,6 +1265,7 @@ pub const MemorySafety = union(enum) {
         region.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
+                .allocator_gid = null,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
                 .arena = arena_gid, // Track if allocated via arena
@@ -1277,11 +1288,11 @@ pub const MemorySafety = union(enum) {
         // Resolve slice source to get the pointer's refinement index
         const ptr_idx: Gid = switch (params.slice) {
             .inst => |inst| results[inst].refinement orelse @panic("alloc_free: inst has no refinement"),
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 // Trying to free a global slice
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 // Trying to free an interned constant slice
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1391,11 +1402,11 @@ pub const MemorySafety = union(enum) {
         // Resolve slice source to get the pointer's refinement index
         const old_ptr_idx: Gid = switch (params.slice) {
             .inst => |inst| results[inst].refinement orelse @panic("alloc_realloc: old slice has no refinement"),
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 // Trying to realloc a global slice
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 // Trying to realloc an interned constant slice
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1489,6 +1500,7 @@ pub const MemorySafety = union(enum) {
 
         const alloc_base: AllocatedBase = .{
             .meta = ctx.meta,
+            .allocator_gid = null, // OLD handler - no allocator GID from pseudo-opcode
             .type_id = type_id,
             .root_gid = null,
         };
@@ -1501,6 +1513,7 @@ pub const MemorySafety = union(enum) {
         new_ptr.pointer.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
+                .allocator_gid = null,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
                 .is_slice = true, // realloc works with slices
@@ -1511,6 +1524,7 @@ pub const MemorySafety = union(enum) {
         new_region.region.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
+                .allocator_gid = null,
                 .type_id = alloc_base.type_id,
                 .root_gid = null,
                 .is_slice = true, // realloc works with slices
@@ -1539,11 +1553,11 @@ pub const MemorySafety = union(enum) {
             } };
         }
 
-        // Get ptr_idx from ptr - .int_const loads have no memory safety tracking needed
+        // Get ptr_idx from ptr - untracked interned loads have no memory safety tracking needed
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // No memory safety tracking for interned constants
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // No memory safety tracking for interned constants
         };
         const ptr_refinement = refinements.at(ptr_idx);
 
@@ -1586,11 +1600,11 @@ pub const MemorySafety = union(enum) {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
@@ -1620,6 +1634,7 @@ pub const MemorySafety = union(enum) {
                 result_ref.pointer.analyte.memory_safety = .{
                     .allocated = .{
                         .meta = a.meta,
+                        .allocator_gid = a.allocator_gid,
                         .type_id = a.type_id,
                         .freed = a.freed,
                         .root_gid = region_idx, // derived pointer - can't be freed directly
@@ -1657,8 +1672,8 @@ pub const MemorySafety = union(enum) {
 
         const base_ref: Gid = switch (params.base) {
             .inst => |idx| results[idx].refinement orelse return,
-            .int_var => |ip_idx| refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return, // interned constant, can't track
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return, // interned constant, can't track
         };
         const base_refinement = refinements.at(base_ref).*;
 
@@ -1788,6 +1803,21 @@ pub const MemorySafety = union(enum) {
         const msg = std.fmt.bufPrint(&buf, "freed with {s}\n", .{destroy_type_name}) catch return error.FormatError;
         try ctx.writer.writeAll(msg);
         return error.MismatchedAllocator;
+    }
+
+    /// Check if two allocators match (same allocator instance).
+    /// Handles both runtime allocators (with GIDs) and comptime allocators (with type_ids).
+    fn allocatorsMatch(alloc_gid: ?Gid, alloc_type_id: u32, free_gid: ?Gid, free_type_id: u32) bool {
+        if (alloc_gid != null and free_gid != null) {
+            // Both runtime allocators - compare by GID
+            return alloc_gid.? == free_gid.?;
+        } else if (alloc_gid == null and free_gid == null) {
+            // Both comptime allocators - compare by type_id
+            return alloc_type_id == free_type_id;
+        } else {
+            // One runtime, one comptime - definitely different
+            return false;
+        }
     }
 
     /// Report mismatched allocation method (create vs alloc)
@@ -2279,7 +2309,7 @@ pub const MemorySafety = union(enum) {
         if (args.len > 0) {
             const child_gid: ?Gid = switch (args[0]) {
                 .inst => |idx| state.results[idx].refinement,
-                .int_const, .int_var, .int_fnptr => null, // compile-time allocators
+                .interned, .int_fnptr => null, // compile-time allocators
             };
 
             if (child_gid) |gid| {
@@ -2617,8 +2647,8 @@ pub const MemorySafety = union(enum) {
         const field_index = params.field_index orelse return;
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |inst| state.results[inst].refinement orelse return,
-            .int_var => |ip_idx| state.refinements.getGlobal(ip_idx) orelse return,
-            .int_const, .int_fnptr => return,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
+            .int_fnptr => return,
         };
         const union_gid = state.refinements.at(ptr_gid).pointer.to;
         const field_gid = state.refinements.at(union_gid).@"union".fields[field_index] orelse return;
@@ -2750,8 +2780,6 @@ pub const MemorySafety = union(enum) {
         args: []const tag.Src,
         fqn: []const u8,
     ) anyerror!bool {
-        _ = return_type;
-
         if (gates.isAllocatorCreate(fqn)) {
             try handleAllocCreate(state, index, args);
             return true;
@@ -2767,18 +2795,48 @@ pub const MemorySafety = union(enum) {
             return true;
         }
 
+        // alignedAlloc is same as alloc, just different FQN pattern
+        if (gates.isAllocatorAlignedAlloc(fqn)) {
+            try handleAllocAlloc(state, index, args);
+            return true;
+        }
+
         if (gates.isAllocatorFree(fqn)) {
             try handleAllocFree(state, index, args);
             return true;
         }
 
-        // TODO: Migrate remaining allocator/arena pseudo-opcodes:
-        // - mem.Allocator.alignedAlloc (still uses opcode for now)
-        // - mem.Allocator.resize
-        // - mem.Allocator.realloc / remap
-        // - ArenaAllocator.init
-        // - ArenaAllocator.deinit
-        // - MkAllocator (by return type)
+        // resize returns bool (success/failure), produces scalar - no memory tracking needed
+        if (gates.isAllocatorResize(fqn)) {
+            setResultUnset(state, index);
+            return true;
+        }
+
+        // realloc/remap: frees old slice, allocates new slice
+        if (gates.isAllocatorRealloc(fqn) or gates.isAllocatorRemap(fqn)) {
+            try handleAllocRealloc(state, index, args);
+            return true;
+        }
+
+        // ArenaAllocator.init: creates arena, checks child allocator not deinited
+        if (gates.isArenaInit(fqn)) {
+            try handleArenaInit(state, index, args);
+            return true;
+        }
+
+        // ArenaAllocator.deinit: marks arena and all its allocations as freed
+        if (gates.isArenaDeinit(fqn)) {
+            try handleArenaDeinit(state, index, args);
+            return true;
+        }
+
+        // MkAllocator: call returns std.mem.Allocator
+        // The allocator refinement is already created by typeToRefinement.
+        // We just need to link it to the arena if this is ArenaAllocator.allocator().
+        if (return_type.ty == .allocator) {
+            try handleMkAllocator(state, index, args, fqn);
+            return true;
+        }
 
         return false;
     }
@@ -2796,29 +2854,48 @@ pub const MemorySafety = union(enum) {
         const ptr = &state.refinements.at(ptr_ref).pointer;
         const pointee_ref = ptr.to;
 
-        // Determine type_id and arena_gid from the allocator argument
-        // Default type_id = 0 means "unknown comptime allocator" - mismatched allocator
-        // detection won't work for these until we migrate all allocator opcodes together
+        // Get allocator GID, type_id, and arena_gid from the allocator argument
+        var allocator_gid: ?Gid = null;
         var type_id: u32 = 0;
         var arena_gid: ?Gid = null;
 
         // Try to get allocator info from args[0] (the allocator)
         if (args.len > 0) {
-            const alloc_gid: ?Gid = switch (args[0]) {
-                .inst => |inst| state.results[inst].refinement,
-                .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
-                .int_const, .int_fnptr => null,
-            };
-            if (alloc_gid) |agid| {
-                const alloc_ref = state.refinements.at(agid);
-                if (alloc_ref.* == .allocator) {
-                    // Check if allocating from a deinited allocator
-                    if (alloc_ref.allocator.deinit) |deinit_meta| {
-                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
+            switch (args[0]) {
+                .inst => |inst| {
+                    allocator_gid = state.results[inst].refinement;
+                    if (allocator_gid) |agid| {
+                        const alloc_ref = state.refinements.at(agid);
+                        if (alloc_ref.* == .allocator) {
+                            type_id = alloc_ref.allocator.type_id;
+                            // Check if allocating from a deinited allocator
+                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                                return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                            }
+                            arena_gid = alloc_ref.allocator.arena_gid;
+                        }
                     }
-                    type_id = alloc_ref.allocator.type_id;
-                    arena_gid = alloc_ref.allocator.arena_gid;
-                }
+                },
+                .interned => |interned| {
+                    // Try to look up as a tracked global first
+                    allocator_gid = state.refinements.getGlobal(interned.ip_idx);
+                    if (allocator_gid) |agid| {
+                        const alloc_ref = state.refinements.at(agid);
+                        if (alloc_ref.* == .allocator) {
+                            type_id = alloc_ref.allocator.type_id;
+                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                                return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                            }
+                            arena_gid = alloc_ref.allocator.arena_gid;
+                        }
+                    } else {
+                        // Not a tracked global - comptime allocator, type_id is embedded
+                        if (interned.ty.ty == .allocator) {
+                            type_id = interned.ty.ty.allocator;
+                        }
+                    }
+                },
+                .int_fnptr => {},
             }
         }
 
@@ -2833,6 +2910,7 @@ pub const MemorySafety = union(enum) {
 
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
+            .allocator_gid = allocator_gid,
             .type_id = type_id,
             .root_gid = null, // This is the root allocation
             .arena = arena_gid, // Track if allocated via arena
@@ -2845,7 +2923,8 @@ pub const MemorySafety = union(enum) {
         ptr.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
-                .type_id = alloc_base.type_id,
+                .allocator_gid = alloc_base.allocator_gid,
+                .type_id = type_id,
                 .root_gid = null,
                 .arena = arena_gid,
                 .is_slice = false, // create allocates single item
@@ -2870,11 +2949,11 @@ pub const MemorySafety = union(enum) {
         // Resolve ptr source to get the pointer's refinement index
         const ptr_idx: Gid = switch (args[1]) {
             .inst => |inst| results[inst].refinement orelse return,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 // Trying to free a pointer to a global variable
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 // Trying to free an interned constant pointer (e.g., pointer to global)
                 return reportFreeGlobalMemory(ctx);
             },
@@ -2915,24 +2994,42 @@ pub const MemorySafety = union(enum) {
             return reportDoubleFree(ctx, a, previous_free);
         }
 
-        // Determine type_id: prefer refinement-based if available (runtime allocators)
-        var destroy_type_id: u32 = 0; // default: unknown comptime allocator
+        // Get allocator GID and type_id for mismatch detection
+        var destroy_allocator_gid: ?Gid = null;
+        var destroy_type_id: u32 = 0;
         if (args.len > 0) {
-            const alloc_gid: ?Gid = switch (args[0]) {
-                .inst => |inst| results[inst].refinement,
-                .int_var => |ip_idx| refinements.getGlobal(ip_idx),
-                .int_const, .int_fnptr => null,
-            };
-            if (alloc_gid) |agid| {
-                const alloc_ref = refinements.at(agid);
-                if (alloc_ref.* == .allocator) {
-                    destroy_type_id = alloc_ref.allocator.type_id;
-                }
+            switch (args[0]) {
+                .inst => |inst| {
+                    destroy_allocator_gid = results[inst].refinement;
+                    if (destroy_allocator_gid) |agid| {
+                        const alloc_ref = refinements.at(agid);
+                        if (alloc_ref.* == .allocator) {
+                            destroy_type_id = alloc_ref.allocator.type_id;
+                        }
+                    }
+                },
+                .interned => |interned| {
+                    destroy_allocator_gid = refinements.getGlobal(interned.ip_idx);
+                    if (destroy_allocator_gid) |agid| {
+                        const alloc_ref = refinements.at(agid);
+                        if (alloc_ref.* == .allocator) {
+                            destroy_type_id = alloc_ref.allocator.type_id;
+                        }
+                    } else {
+                        // Comptime allocator - type_id is embedded in the type
+                        if (interned.ty.ty == .allocator) {
+                            destroy_type_id = interned.ty.ty.allocator;
+                        }
+                    }
+                },
+                .int_fnptr => {},
             }
         }
 
-        // Only check for mismatch if both type_ids are known (non-zero)
-        if (a.type_id != 0 and destroy_type_id != 0 and a.type_id != destroy_type_id) {
+        // Check for allocator mismatch (only if both GIDs are known)
+        if (a.allocator_gid != null and destroy_allocator_gid != null and
+            a.allocator_gid.? != destroy_allocator_gid.?)
+        {
             return reportMismatchedAllocator(ctx, a, destroy_type_id);
         }
 
@@ -2973,27 +3070,47 @@ pub const MemorySafety = union(enum) {
         const region = &region_refinement.region;
         const element_ref = region.to;
 
-        // Determine type_id and arena_gid from the allocator argument
+        // Get allocator GID, type_id, and arena_gid from the allocator argument
+        var allocator_gid: ?Gid = null;
         var type_id: u32 = 0;
         var arena_gid: ?Gid = null;
 
         // Try to get allocator info from args[0] (the allocator)
         if (args.len > 0) {
-            const alloc_gid: ?Gid = switch (args[0]) {
-                .inst => |inst| state.results[inst].refinement,
-                .int_var => |ip_idx| state.refinements.getGlobal(ip_idx),
-                .int_const, .int_fnptr => null,
-            };
-            if (alloc_gid) |agid| {
-                const alloc_ref = state.refinements.at(agid);
-                if (alloc_ref.* == .allocator) {
-                    // Check if allocating from a deinited allocator
-                    if (alloc_ref.allocator.deinit) |deinit_meta| {
-                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
+            switch (args[0]) {
+                .inst => |inst| {
+                    allocator_gid = state.results[inst].refinement;
+                    if (allocator_gid) |agid| {
+                        const alloc_ref = state.refinements.at(agid);
+                        if (alloc_ref.* == .allocator) {
+                            type_id = alloc_ref.allocator.type_id;
+                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                                return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                            }
+                            arena_gid = alloc_ref.allocator.arena_gid;
+                        }
                     }
-                    type_id = alloc_ref.allocator.type_id;
-                    arena_gid = alloc_ref.allocator.arena_gid;
-                }
+                },
+                .interned => |interned| {
+                    // Try to look up as a tracked global first
+                    allocator_gid = state.refinements.getGlobal(interned.ip_idx);
+                    if (allocator_gid) |agid| {
+                        const alloc_ref = state.refinements.at(agid);
+                        if (alloc_ref.* == .allocator) {
+                            type_id = alloc_ref.allocator.type_id;
+                            if (alloc_ref.allocator.deinit) |deinit_meta| {
+                                return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                            }
+                            arena_gid = alloc_ref.allocator.arena_gid;
+                        }
+                    } else {
+                        // Not a tracked global - comptime allocator, type_id is embedded
+                        if (interned.ty.ty == .allocator) {
+                            type_id = interned.ty.ty.allocator;
+                        }
+                    }
+                },
+                .int_fnptr => {},
             }
         }
 
@@ -3008,6 +3125,7 @@ pub const MemorySafety = union(enum) {
 
         const alloc_base: AllocatedBase = .{
             .meta = state.ctx.meta,
+            .allocator_gid = allocator_gid,
             .type_id = type_id,
             .root_gid = null,
             .arena = arena_gid,
@@ -3020,7 +3138,8 @@ pub const MemorySafety = union(enum) {
         ptr.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
-                .type_id = alloc_base.type_id,
+                .allocator_gid = alloc_base.allocator_gid,
+                .type_id = type_id,
                 .root_gid = null,
                 .arena = arena_gid,
                 .is_slice = true, // alloc allocates a slice
@@ -3031,7 +3150,8 @@ pub const MemorySafety = union(enum) {
         region.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
-                .type_id = alloc_base.type_id,
+                .allocator_gid = alloc_base.allocator_gid,
+                .type_id = type_id,
                 .root_gid = null,
                 .arena = arena_gid,
                 .is_slice = true,
@@ -3056,10 +3176,10 @@ pub const MemorySafety = union(enum) {
         // Resolve slice source to get the pointer's refinement index
         const ptr_idx: Gid = switch (args[1]) {
             .inst => |inst| results[inst].refinement orelse return,
-            .int_var => |nav_idx| refinements.getGlobal(nav_idx) orelse {
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_const, .int_fnptr => {
+            .int_fnptr => {
                 return reportFreeGlobalMemory(ctx);
             },
         };
@@ -3113,24 +3233,41 @@ pub const MemorySafety = union(enum) {
             return reportDoubleFree(ctx, a, previous_free);
         }
 
-        // Determine type_id from allocator
+        // Determine allocator GID and type_id from the free call
+        var free_allocator_gid: ?Gid = null;
         var free_type_id: u32 = 0;
-        if (args.len > 0) {
-            const alloc_gid: ?Gid = switch (args[0]) {
-                .inst => |inst| results[inst].refinement,
-                .int_var => |ip_idx| refinements.getGlobal(ip_idx),
-                .int_const, .int_fnptr => null,
-            };
-            if (alloc_gid) |agid| {
-                const alloc_ref = refinements.at(agid);
-                if (alloc_ref.* == .allocator) {
-                    free_type_id = alloc_ref.allocator.type_id;
+        switch (args[0]) {
+            .inst => |inst| {
+                free_allocator_gid = results[inst].refinement;
+                if (free_allocator_gid) |agid| {
+                    const alloc_ref = refinements.at(agid);
+                    if (alloc_ref.* == .allocator) {
+                        free_type_id = alloc_ref.allocator.type_id;
+                    }
                 }
-            }
+            },
+            .interned => |interned| {
+                // Try to look up as a tracked global first
+                free_allocator_gid = refinements.getGlobal(interned.ip_idx);
+                if (free_allocator_gid) |agid| {
+                    const alloc_ref = refinements.at(agid);
+                    if (alloc_ref.* == .allocator) {
+                        free_type_id = alloc_ref.allocator.type_id;
+                    }
+                } else {
+                    // Not a tracked global - comptime allocator, type_id is embedded
+                    if (interned.ty.ty == .allocator) {
+                        free_type_id = interned.ty.ty.allocator;
+                    }
+                }
+            },
+            .int_fnptr => {},
         }
 
-        // Only check mismatch if both type_ids are known (non-zero)
-        if (a.type_id != 0 and free_type_id != 0 and a.type_id != free_type_id) {
+        // Check for mismatched allocator (only if both are known)
+        if (a.allocator_gid != null and free_allocator_gid != null and
+            a.allocator_gid.? != free_allocator_gid.?)
+        {
             return reportMismatchedAllocator(ctx, a, free_type_id);
         }
 
@@ -3149,6 +3286,295 @@ pub const MemorySafety = union(enum) {
             .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
         };
         setFreedRecursive(refinements, pointee_idx, free_meta);
+    }
+
+    /// Handle mem.Allocator.realloc/remap calls.
+    /// Marks the old slice as freed and the new slice as allocated.
+    fn handleAllocRealloc(state: State, index: usize, args: []const tag.Src) !void {
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // realloc signature: realloc(self, slice, new_len) -> args[0]=allocator, args[1]=slice, args[2]=len
+        if (args.len < 2) return;
+
+        // === 1. Mark old slice as freed ===
+
+        // Resolve slice source to get the pointer's refinement index
+        const old_ptr_idx: Gid = switch (args[1]) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
+                return reportFreeGlobalMemory(ctx);
+            },
+            .int_fnptr => {
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
+        const old_ptr_refinement = refinements.at(old_ptr_idx);
+        if (old_ptr_refinement.* != .pointer) return;
+
+        // Get the old region entity
+        const old_region_idx = old_ptr_refinement.pointer.to;
+        const old_region_ref = refinements.at(old_region_idx);
+        if (old_region_ref.* != .region) return;
+
+        const old_region_analyte = &old_region_ref.region.analyte;
+
+        // Get memory_safety from old region
+        const old_ms = &(old_region_analyte.memory_safety orelse {
+            return reportFreeGlobalMemory(ctx);
+        });
+
+        // Check for invalid operations on old slice
+        switch (old_ms.*) {
+            .stack => |sp| {
+                if (sp.root_gid != null) {
+                    return reportFreeFieldPointerStack(ctx, sp);
+                }
+                return reportFreeStackMemory(ctx, sp);
+            },
+            .global => return reportFreeGlobalMemory(ctx),
+            .unset => return,
+            .error_stub => return,
+            .allocated => {},
+        }
+
+        const old_a = old_ms.allocated;
+
+        // Check for field pointer
+        if (old_a.root_gid != null) {
+            return reportFreeFieldPointer(ctx, old_a);
+        }
+
+        // Check for double-free
+        if (old_a.freed) |previous_free| {
+            return reportDoubleFree(ctx, old_a, previous_free);
+        }
+
+        // Get allocator GID and type_id for mismatch detection
+        var realloc_allocator_gid: ?Gid = null;
+        var realloc_type_id: u32 = 0;
+        switch (args[0]) {
+            .inst => |inst| {
+                realloc_allocator_gid = results[inst].refinement;
+                if (realloc_allocator_gid) |agid| {
+                    const alloc_ref = refinements.at(agid);
+                    if (alloc_ref.* == .allocator) {
+                        realloc_type_id = alloc_ref.allocator.type_id;
+                    }
+                }
+            },
+            .interned => |interned| {
+                // Try to look up as a tracked global first
+                realloc_allocator_gid = refinements.getGlobal(interned.ip_idx);
+                if (realloc_allocator_gid) |agid| {
+                    const alloc_ref = refinements.at(agid);
+                    if (alloc_ref.* == .allocator) {
+                        realloc_type_id = alloc_ref.allocator.type_id;
+                    }
+                } else {
+                    // Not a tracked global - comptime allocator, type_id is embedded
+                    if (interned.ty.ty == .allocator) {
+                        realloc_type_id = interned.ty.ty.allocator;
+                    }
+                }
+            },
+            .int_fnptr => {},
+        }
+
+        // Check for mismatched allocator
+        if (old_a.allocator_gid != null and realloc_allocator_gid != null and
+            old_a.allocator_gid.? != realloc_allocator_gid.?)
+        {
+            return reportMismatchedAllocator(ctx, old_a, realloc_type_id);
+        }
+
+        // Mark old slice as freed
+        const slice_inst: ?usize = switch (args[1]) {
+            .inst => |inst| inst,
+            else => null,
+        };
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
+        };
+        setFreedRecursive(refinements, old_region_idx, free_meta);
+
+        // === 2. Mark new slice as allocated ===
+
+        // Result is errorunion -> pointer -> region -> element
+        const eu_idx = results[index].refinement orelse return;
+        const eu_ref = refinements.at(eu_idx);
+        if (eu_ref.* != .errorunion) return;
+        const eu = &eu_ref.errorunion;
+        const new_ptr_idx = eu.to;
+        const new_ptr_ref = refinements.at(new_ptr_idx);
+        if (new_ptr_ref.* != .pointer) return;
+        const new_ptr = &new_ptr_ref.pointer;
+        const new_region_idx = new_ptr.to;
+        const new_region_ref = refinements.at(new_region_idx);
+        if (new_region_ref.* != .region) return;
+        const new_region = &new_region_ref.region;
+        const new_element_ref = new_region.to;
+
+        // Get arena_gid if allocator is from arena
+        var arena_gid: ?Gid = null;
+        if (realloc_allocator_gid) |agid| {
+            const alloc_ref = refinements.at(agid);
+            if (alloc_ref.* == .allocator) {
+                arena_gid = alloc_ref.allocator.arena_gid;
+            }
+        }
+
+        const alloc_base: AllocatedBase = .{
+            .meta = ctx.meta,
+            .allocator_gid = realloc_allocator_gid,
+            .type_id = realloc_type_id,
+            .root_gid = null,
+            .arena = arena_gid,
+        };
+
+        // Set error_stub on errorunion
+        eu.analyte.memory_safety = .{ .error_stub = {} };
+
+        // Set memory_safety on pointer
+        new_ptr.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .allocator_gid = alloc_base.allocator_gid,
+                .type_id = realloc_type_id,
+                .root_gid = null,
+                .arena = arena_gid,
+                .is_slice = true,
+            },
+        };
+
+        // Set memory_safety on region
+        new_region.analyte.memory_safety = .{
+            .allocated = .{
+                .meta = alloc_base.meta,
+                .allocator_gid = alloc_base.allocator_gid,
+                .type_id = realloc_type_id,
+                .root_gid = null,
+                .arena = arena_gid,
+                .is_slice = true,
+            },
+        };
+
+        // Set allocation state recursively on the element
+        setAllocatedRecursive(refinements, new_element_ref, alloc_base, null, true);
+    }
+
+    /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
+    /// Checks if the child allocator is from a deinited arena.
+    fn handleArenaInit(state: State, index: usize, args: []const tag.Src) !void {
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // ArenaAllocator.init signature: init(child_allocator) -> args[0]=child_allocator
+        // Check if child allocator is from a deinited arena
+        if (args.len > 0) {
+            const child_gid: ?Gid = switch (args[0]) {
+                .inst => |idx| state.results[idx].refinement,
+                .interned => |interned| refinements.getGlobal(interned.ip_idx),
+                .int_fnptr => null, // compile-time allocators
+            };
+
+            if (child_gid) |gid| {
+                const child_ref = refinements.at(gid);
+                if (child_ref.* == .allocator) {
+                    if (child_ref.allocator.deinit) |deinit_meta| {
+                        return reportAllocAfterDeinit(ctx, deinit_meta);
+                    }
+                }
+            }
+        }
+
+        // Initialize memory_safety on the result (ArenaAllocator struct)
+        // Inst.call already created the refinement, we just re-initialize it
+        if (state.results[index].refinement) |gid| {
+            initUnsetRecursive(refinements, gid);
+        }
+    }
+
+    /// Handle ArenaAllocator.deinit() - marks the arena as deinited.
+    /// All allocations made via this arena will be considered freed during leak check.
+    fn handleArenaDeinit(state: State, index: usize, args: []const tag.Src) !void {
+        _ = index;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        // ArenaAllocator.deinit signature: deinit(self: *ArenaAllocator) -> args[0]=arena_ptr
+        if (args.len < 1) return;
+
+        // Get the arena POINTEE's GID (follow pointer to match MkAllocator tracking)
+        const arena_gid = blk: {
+            const ptr_gid: ?Gid = switch (args[0]) {
+                .inst => |idx| state.results[idx].refinement,
+                .interned => |interned| refinements.getGlobal(interned.ip_idx),
+                .int_fnptr => null,
+            };
+            if (ptr_gid) |pgid| {
+                const ptr_ref = refinements.at(pgid);
+                if (ptr_ref.* != .pointer) break :blk null;
+                break :blk ptr_ref.pointer.to;
+            }
+            break :blk null;
+        } orelse return;
+
+        // Find the AllocatorRef that references this arena and check/set deinit
+        const allocator_ref = findAllocatorForArena(refinements, arena_gid) orelse return;
+        if (allocator_ref.deinit) |first_deinit| {
+            return reportDoubleDeinit(ctx, first_deinit);
+        }
+        allocator_ref.deinit = ctx.meta;
+
+        // Mark all allocations with this arena's GID as freed
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = null,
+        };
+
+        for (state.results) |inst| {
+            const gid = inst.refinement orelse continue;
+            markArenaAllocationFreed(refinements, gid, arena_gid, free_meta);
+        }
+    }
+
+    /// Handle MkAllocator: call returns std.mem.Allocator.
+    /// The allocator refinement is already created by typeToRefinement in Inst.call.
+    /// This handler links the allocator to an arena if it's from ArenaAllocator.allocator().
+    fn handleMkAllocator(state: State, index: usize, args: []const tag.Src, fqn: []const u8) !void {
+        const results = state.results;
+        const refinements = state.refinements;
+
+        // Get the allocator refinement that was created by Inst.call via typeToRefinement
+        const alloc_idx = results[index].refinement orelse return;
+        const alloc_ref = refinements.at(alloc_idx);
+        if (alloc_ref.* != .allocator) return;
+
+        // Check if this is ArenaAllocator.allocator() - need to link to arena
+        if (!gates.isArenaAllocator(fqn)) return;
+
+        // ArenaAllocator.allocator() has signature: allocator(self: *ArenaAllocator) -> Allocator
+        // args[0] is the arena pointer (self parameter)
+        if (args.len < 1) return;
+
+        // Get the arena pointer's refinement
+        const arena_ptr_gid: ?Gid = switch (args[0]) {
+            .inst => |inst| results[inst].refinement,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx),
+            .int_fnptr => null,
+        };
+        const arena_ptr_idx = arena_ptr_gid orelse return;
+
+        // Follow the pointer to get the arena's pointee GID
+        const ptr_ref = refinements.at(arena_ptr_idx);
+        if (ptr_ref.* != .pointer) return;
+        const arena_gid = ptr_ref.pointer.to;
+
+        // Set the arena_gid on the allocator refinement
+        alloc_ref.allocator.arena_gid = arena_gid;
     }
 };
 
@@ -3626,7 +4052,7 @@ test "load detects use after free" {
     // Create, unwrap, store (to make it defined), and free allocation
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
     try Inst.apply(state, 3, .{ .alloc_destroy = .{ .ptr = .{ .inst = 1 }, .type_id = 10, .allocator_inst = null } });
 
     // Load after free should error
@@ -3653,7 +4079,7 @@ test "load from live allocation does not error" {
     // Create, unwrap, and store to allocation (not freed)
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // Load from live allocation should succeed
     try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
@@ -3737,7 +4163,7 @@ test "onFinish allows passed allocation" {
     try Inst.apply(state, 0, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // Store to make the pointee defined
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // Return the pointer (marks as passed)
     try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 1 } } });
@@ -3788,13 +4214,13 @@ test "load from struct field shares pointer entity - freeing loaded pointer mark
     // inst 1: unwrap_errunion_payload - get the pointer
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
     // inst 2: store_safe - make pointee defined
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .int_const = .{ .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
 
     // inst 3: alloc - create struct on stack with a pointer field
     const struct_ty: tag.Type = .{ .ty = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } }} } };
     try Inst.apply(state, 3, .{ .alloc = .{ .ty = struct_ty } });
     // inst 4: store_safe - initialize struct with undefined
-    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = .{ .inst = 3 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &struct_ty } } } } });
+    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = .{ .inst = 3 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .undefined = &struct_ty } } } } } });
 
     // inst 5: struct_field_ptr - get pointer to field 0
     try Inst.apply(state, 5, .{ .struct_field_ptr = .{
@@ -3867,7 +4293,7 @@ test "global refinements: freeing struct pointer field is visible immediately" {
     const struct_ty: tag.Type = .{ .ty = .{ .@"struct" = &.{.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } }} } };
     try Inst.apply(state, 2, .{ .alloc = .{ .ty = struct_ty } });
     // inst 3 = store undefined struct
-    try Inst.apply(state, 3, .{ .store_safe = .{ .ptr = .{ .inst = 2 }, .src = .{ .int_const = .{ .ty = .{ .undefined = &struct_ty } } } } });
+    try Inst.apply(state, 3, .{ .store_safe = .{ .ptr = .{ .inst = 2 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .undefined = &struct_ty } } } } } });
     // inst 4 = struct_field_ptr to field 0
     try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = .{ .inst = 2 }, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .ty = .{ .pointer = &.{ .ty = .{ .scalar = {} } } } } } } } });
     // inst 5 = store allocation pointer into struct field
