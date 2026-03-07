@@ -671,7 +671,7 @@ fn payloadDbgStmt(info: *const FnInfo, datum: Data) []const u8 {
 }
 
 /// Convert an AIR Ref to a Src union string.
-/// Handles .inst (runtime instruction), .interned (globals and comptime), and .int_fnptr (function pointers).
+/// Handles .inst (runtime instruction), .interned (globals and comptime), and .fnptr (function pointers).
 fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
     const arena = info.arena;
     const ip = info.ip;
@@ -731,7 +731,7 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
                     }
                 }
 
-                // Function pointer constant - use int_fnptr variant (separate from interned)
+                // Function pointer constant - use fnptr variant (separate from interned)
                 if (type_key == .ptr_type and ip.indexToKey(type_key.ptr_type.child) == .func_type) {
                     if (extractFunctionFromPointer(ip, interned_idx)) |func_idx| {
                         // Add to call targets so the function is included in tree shaking
@@ -745,10 +745,10 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
                             .index = @intFromEnum(func_idx),
                             .arity = arity,
                         }) catch {};
-                        return clr_allocator.allocPrint(arena, ".{{ .int_fnptr = &.{{ &fn_{d} }} }}", .{@intFromEnum(func_idx)}, null);
+                        return clr_allocator.allocPrint(arena, ".{{ .fnptr = &.{{ &fn_{d} }} }}", .{@intFromEnum(func_idx)}, null);
                     }
                     // Couldn't extract function - return empty fnptr
-                    return ".{ .int_fnptr = &.{} }";
+                    return ".{ .fnptr = &.{} }";
                 }
             }
             // Default: use type string

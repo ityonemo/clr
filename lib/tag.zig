@@ -133,7 +133,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
         },
         .fnptr => {
-            // Function pointer type marker - choices come from Src.int_fnptr at store time
+            // Function pointer type marker - choices come from Src.fnptr at store time
             return .{ .fnptr = .{ .choices = &.{} } };
         },
         .recursive => {
@@ -394,7 +394,7 @@ pub const Bitcast = struct {
                 }
                 // Not tracked - comptime constant, handled by analysis modules
             },
-            .int_fnptr => {},
+            .fnptr => {},
         }
 
         try splat(.bitcast, state, index, self);
@@ -467,8 +467,8 @@ pub const Br = struct {
                 // Not tracked - comptime constant, handled by analysis modules (e.g., undefined.br marks as defined)
             },
             // Function pointer constant - create fnptr refinement with choices
-            .int_fnptr => |choices| {
-                // Deep copy choices since int_fnptr provides compile-time slice
+            .fnptr => |choices| {
+                // Deep copy choices since fnptr provides compile-time slice
                 const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
                 const fnptr_ref = Refinement{ .fnptr = .{ .choices = owned_choices } };
                 const fnptr_gid = try state.refinements.appendEntity(fnptr_ref);
@@ -650,7 +650,7 @@ pub const Load = struct {
                 try splat(.load, state, index, self);
                 return;
             },
-            .int_fnptr => return, // Can't load from function pointer
+            .fnptr => return, // Can't load from function pointer
         };
 
         const effective_ptr_gid = ptr_gid orelse {
@@ -699,7 +699,7 @@ pub const StructFieldPtr = struct {
                 try splat(.struct_field_ptr, state, index, self);
                 return;
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Function pointer base - use type info to create proper structure
                 _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
                 try splat(.struct_field_ptr, state, index, self);
@@ -862,8 +862,8 @@ pub const OptionalPayload = struct {
                     std.debug.panic("optional_payload: expected optional or errorunion for global, got {s}", .{@tagName(src_ref.*)});
                 }
             },
-            .int_fnptr => {
-                @panic("optional_payload: unexpected int_fnptr source");
+            .fnptr => {
+                @panic("optional_payload: unexpected fnptr source");
             },
         }
         try splat(.optional_payload, state, index, self);
@@ -917,8 +917,8 @@ pub const OptionalPayloadPtr = struct {
                     std.debug.panic("optional_payload_ptr: expected global pointer to optional, got pointer to {s}", .{@tagName(optional_ref.*)});
                 }
             },
-            .int_fnptr => {
-                @panic("optional_payload_ptr: unexpected int_fnptr source");
+            .fnptr => {
+                @panic("optional_payload_ptr: unexpected fnptr source");
             },
         }
         try splat(.optional_payload_ptr, state, index, self);
@@ -971,8 +971,8 @@ pub const UnwrapErrunionPayloadPtr = struct {
                     std.debug.panic("unwrap_errunion_payload_ptr: expected global pointer to errorunion, got pointer to {s}", .{@tagName(errunion_ref.*)});
                 }
             },
-            .int_fnptr => {
-                @panic("unwrap_errunion_payload_ptr: unexpected int_fnptr source");
+            .fnptr => {
+                @panic("unwrap_errunion_payload_ptr: unexpected fnptr source");
             },
         }
         try splat(.unwrap_errunion_payload_ptr, state, index, self);
@@ -1037,7 +1037,7 @@ pub const RetSafe = struct {
                     }
                 }
             },
-            .int_fnptr => |choices| {
+            .fnptr => |choices| {
                 // Return a function pointer constant - deep copy choices
                 const owned_choices = try allocator.dupe(FnInterpreter, choices);
                 cloned.at(return_gid).* = .{ .fnptr = .{ .choices = owned_choices } };
@@ -1179,7 +1179,7 @@ pub const Store = struct {
         const ptr_gid: ?Gid = switch (self.ptr) {
             .inst => |ptr| state.results[ptr].refinement,
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
-            .int_fnptr => null,
+            .fnptr => null,
         };
         const effective_ptr_gid = ptr_gid orelse {
             try splat(.store, state, index, self);
@@ -1197,7 +1197,7 @@ pub const Store = struct {
         const src_gid: ?Gid = switch (self.src) {
             .inst => |src| state.results[src].refinement,
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
-            .int_fnptr => null,
+            .fnptr => null,
         };
 
         // Update structural .to fields when storing compatible types
@@ -1278,8 +1278,8 @@ pub const UnwrapErrunionPayload = struct {
                 const payload_gid = src_ref.errorunion.to;
                 state.results[index].refinement = payload_gid;
             },
-            .int_fnptr => {
-                std.debug.panic("unwrap_errunion_payload: int_fnptr sources not supported", .{});
+            .fnptr => {
+                std.debug.panic("unwrap_errunion_payload: fnptr sources not supported", .{});
             },
         }
         try splat(.unwrap_errunion_payload, state, index, self);
@@ -1324,7 +1324,7 @@ pub const WrapErrunionPayload = struct {
                     break :blk try state.refinements.appendEntity(ref);
                 }
             },
-            .int_fnptr => |choices| blk: {
+            .fnptr => |choices| blk: {
                 // Create fnptr refinement with choices - deep copy
                 const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
                 const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
@@ -1671,7 +1671,7 @@ pub const SetUnionTag = struct {
         const ptr_eidx: Gid = switch (self.ptr) {
             .inst => |inst| state.results[inst].refinement.?,
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // comptime constant - no tracking needed
+            .fnptr => return, // comptime constant - no tracking needed
         };
 
         // Follow the pointer to get the union refinement
@@ -1742,7 +1742,7 @@ pub const UnionInit = struct {
                             fields[i] = try state.refinements.appendEntity(field_ref);
                         }
                     },
-                    .int_fnptr => |choices| {
+                    .fnptr => |choices| {
                         // Function pointer - create fnptr entity with choices (deep copy)
                         const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
                         const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
@@ -1774,7 +1774,7 @@ pub const ArrayElemVal = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const base = switch (self.base) {
             .inst => |idx| idx,
-            .interned, .int_fnptr => @panic("interned source not implemented"),
+            .interned, .fnptr => @panic("interned source not implemented"),
         };
         // base must have a refinement - it's the slice/array value
         const base_ref = state.results[base].refinement.?;
@@ -1808,7 +1808,7 @@ pub const PtrAdd = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const ptr_idx = switch (self.ptr) {
             .inst => |idx| idx,
-            .interned, .int_fnptr => @panic("interned source not implemented"),
+            .interned, .fnptr => @panic("interned source not implemented"),
         };
         // Share the pointer's refinement - result points to same allocation
         if (state.results[ptr_idx].refinement) |src_gid| {
@@ -1828,7 +1828,7 @@ pub const ArrayToSlice = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const src_idx = switch (self.source) {
             .inst => |idx| idx,
-            .interned, .int_fnptr => @panic("interned source not implemented"),
+            .interned, .fnptr => @panic("interned source not implemented"),
         };
         // Share the source refinement - both many-pointer and slice are pointer→region
         if (state.results[src_idx].refinement) |src_gid| {
@@ -1886,7 +1886,7 @@ pub const PtrElemPtr = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const base = switch (self.base) {
             .inst => |idx| idx,
-            .interned, .int_fnptr => @panic("interned source not implemented"),
+            .interned, .fnptr => @panic("interned source not implemented"),
         };
         // base must have a refinement - it's the slice value
         const base_ref = state.results[base].refinement.?;

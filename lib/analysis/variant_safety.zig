@@ -99,7 +99,7 @@ pub const VariantSafety = struct {
         const ptr_ref: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement.?,
             .interned => |interned| refinements.getGlobal(interned.ip_idx).?,
-            .int_fnptr => return, // function pointer - no variant tracking
+            .fnptr => return, // function pointer - no variant tracking
         };
         const container_idx = refinements.at(ptr_ref).pointer.to;
         const u = &refinements.at(container_idx).@"union";
@@ -130,7 +130,7 @@ pub const VariantSafety = struct {
         const base_ref: Gid = switch (params.base) {
             .inst => |inst| results[inst].refinement orelse return,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // function pointer - no variant checking
+            .fnptr => return, // function pointer - no variant checking
         };
 
         // Follow pointer to container - must be a pointer
@@ -288,7 +288,7 @@ pub const VariantSafety = struct {
         const ptr_gid: ?Gid = switch (load_src) {
             .inst => |inst| results[inst].refinement,
             .interned => |interned| refinements.getGlobal(interned.ip_idx),
-            .int_fnptr => null,
+            .fnptr => null,
         };
         const ptr_ref = ptr_gid orelse return;
         const pointee_gid = refinements.at(ptr_ref).pointer.to;

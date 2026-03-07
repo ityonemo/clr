@@ -59,8 +59,8 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
                 tag.splatInitDefined(state.refinements, gid, state.ctx);
                 break :blk gid;
             },
-            .int_fnptr => |choices| blk: {
-                // Deep copy choices since int_fnptr provides compile-time slice
+            .fnptr => |choices| blk: {
+                // Deep copy choices since fnptr provides compile-time slice
                 const owned_choices = try allocator.dupe(tag.FnInterpreter, choices);
                 const gid = try state.refinements.appendEntity(.{ .fnptr = .{ .choices = owned_choices } });
                 tag.splatInitDefined(state.refinements, gid, state.ctx);
@@ -175,7 +175,7 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
     const ptr_gid: ?Gid = switch (ptr) {
         .inst => |p| state.results[p].refinement,
         .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
-        .int_fnptr => null,
+        .fnptr => null,
     };
 
     const effective_ptr_gid = ptr_gid orelse {

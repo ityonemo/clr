@@ -261,7 +261,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_gid: Gid = switch (src) {
             .inst => |ptr| results[ptr].refinement orelse return null,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return null,
-            .int_fnptr => return null,
+            .fnptr => return null,
         };
         return switch (refinements.at(ptr_gid).*) {
             .pointer => |p| p.to,
@@ -298,7 +298,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_ref: Gid = switch (params.ptr) {
             .inst => |inst| results[inst].refinement.?,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // comptime constant - no undefined tracking
+            .fnptr => return, // comptime constant - no undefined tracking
         };
         const container_idx = refinements.at(ptr_ref).pointer.to;
         const u = &refinements.at(container_idx).@"union";
@@ -595,7 +595,7 @@ pub const UndefinedSafety = union(enum) {
     }
 
     /// With unified args, the GID already has proper defined/undefined state
-    /// set by srcSliceToGidSlice (interned/int_fnptr are marked defined there).
+    /// set by srcSliceToGidSlice (interned/fnptr are marked defined there).
     pub fn arg(state: State, index: usize, params: tag.Arg) !void {
         _ = state;
         _ = index;
@@ -620,7 +620,7 @@ pub const UndefinedSafety = union(enum) {
                     setDefinedRecursive(state.refinements, block_idx);
                 }
             },
-            .int_fnptr => {
+            .fnptr => {
                 const block_idx = state.results[params.block].refinement orelse return;
                 setDefinedRecursive(state.refinements, block_idx);
             },
@@ -646,7 +646,7 @@ pub const UndefinedSafety = union(enum) {
                     setDefinedRecursive(state.refinements, state.return_gid);
                 }
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Function pointer constants are always defined
                 setDefinedRecursive(state.refinements, state.return_gid);
             },
@@ -823,7 +823,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse @panic("store: ptr inst has no refinement"),
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse @panic("store: global not found"),
-            .int_fnptr => @panic("store: storing through constant pointer not supported"),
+            .fnptr => @panic("store: storing through constant pointer not supported"),
         };
         // Follow pointer to get pointee - panic on unexpected types
         const pointee_idx = refinements.at(ptr_gid).pointer.to;
@@ -840,7 +840,7 @@ pub const UndefinedSafety = union(enum) {
             const name_when_set: ?[]const u8 = switch (params.ptr) {
                 .inst => |ptr| state.ctx.buildPathName(results, refinements, ptr),
                 .interned => null, // TODO: look up global name from IP index
-                .int_fnptr => null,
+                .fnptr => null,
             };
             const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = name_when_set } };
             setUndefinedRecursive(refinements, pointee_idx, undef_state);
@@ -930,7 +930,7 @@ pub const UndefinedSafety = union(enum) {
                         applyInternedType(refinements, pointee_idx, interned.ty, state.ctx);
                     }
                 },
-                .int_fnptr => {
+                .fnptr => {
                     // Function pointer source - mark pointee as defined
                     setDefinedRecursive(refinements, pointee_idx);
                 },

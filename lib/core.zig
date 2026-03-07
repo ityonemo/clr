@@ -90,7 +90,7 @@ pub const Src = union(enum) {
     /// This unifies what was previously int_var (globals) and int_const (comptime constants).
     interned: Interned,
     /// Function pointer constant - array of possible target functions
-    int_fnptr: []const FnInterpreter,
+    fnptr: []const FnInterpreter,
 };
 
 /// Interned value reference - combines IP index for lookup with type info for reification.

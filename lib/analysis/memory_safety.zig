@@ -99,12 +99,12 @@ pub const MemorySafety = union(enum) {
         // Get ptr instruction index - skip for globals/constants (no memory safety tracking needed)
         const ptr = switch (params.ptr) {
             .inst => |idx| idx,
-            .interned, .int_fnptr => return, // globals/constants - no memory safety tracking
+            .interned, .fnptr => return, // globals/constants - no memory safety tracking
         };
         const src = switch (params.src) {
             .inst => |idx| idx,
             // comptime/interned values don't have memory safety tracking - skip
-            .interned, .int_fnptr => return,
+            .interned, .fnptr => return,
         };
 
         const src_refinement_idx = results[src].refinement orelse return;
@@ -241,7 +241,7 @@ pub const MemorySafety = union(enum) {
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Constant base - set .unset on result and nested refinements
                 initUnsetRecursive(refinements, ptr_idx);
                 return;
@@ -342,7 +342,7 @@ pub const MemorySafety = union(enum) {
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // interned constant, can't track
+            .fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
@@ -375,7 +375,7 @@ pub const MemorySafety = union(enum) {
         const ptr_idx: Gid = switch (params.field_ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // interned constant, can't track
+            .fnptr => return, // interned constant, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
         // field_parent_ptr should only receive pointers from codegen
@@ -426,7 +426,7 @@ pub const MemorySafety = union(enum) {
         const src_idx: Gid = switch (params.src) {
             .inst => |idx| results[idx].refinement orelse return,
             // comptime/interned values don't have memory safety tracking - skip
-            .interned, .int_fnptr => return,
+            .interned, .fnptr => return,
         };
 
         // Recursively check for allocations to mark as returned
@@ -1122,7 +1122,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to free a pointer to a global variable
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Trying to free an interned constant pointer (e.g., pointer to global)
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1292,7 +1292,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to free a global slice
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Trying to free an interned constant slice
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1406,7 +1406,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to realloc a global slice
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Trying to realloc an interned constant slice
                 return reportFreeGlobalMemory(ctx);
             },
@@ -1557,7 +1557,7 @@ pub const MemorySafety = union(enum) {
         const ptr_idx: Gid = switch (params.ptr) {
             .inst => |ptr| results[ptr].refinement orelse return,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // No memory safety tracking for interned constants
+            .fnptr => return, // No memory safety tracking for interned constants
         };
         const ptr_refinement = refinements.at(ptr_idx);
 
@@ -1604,7 +1604,7 @@ pub const MemorySafety = union(enum) {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
-            .int_fnptr => {
+            .fnptr => {
                 result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
                 return;
             },
@@ -1673,7 +1673,7 @@ pub const MemorySafety = union(enum) {
         const base_ref: Gid = switch (params.base) {
             .inst => |idx| results[idx].refinement orelse return,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return, // interned constant, can't track
+            .fnptr => return, // interned constant, can't track
         };
         const base_refinement = refinements.at(base_ref).*;
 
@@ -2309,7 +2309,7 @@ pub const MemorySafety = union(enum) {
         if (args.len > 0) {
             const child_gid: ?Gid = switch (args[0]) {
                 .inst => |idx| state.results[idx].refinement,
-                .interned, .int_fnptr => null, // compile-time allocators
+                .interned, .fnptr => null, // compile-time allocators
             };
 
             if (child_gid) |gid| {
@@ -2648,7 +2648,7 @@ pub const MemorySafety = union(enum) {
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |inst| state.results[inst].refinement orelse return,
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
-            .int_fnptr => return,
+            .fnptr => return,
         };
         const union_gid = state.refinements.at(ptr_gid).pointer.to;
         const field_gid = state.refinements.at(union_gid).@"union".fields[field_index] orelse return;
@@ -2895,7 +2895,7 @@ pub const MemorySafety = union(enum) {
                         }
                     }
                 },
-                .int_fnptr => {},
+                .fnptr => {},
             }
         }
 
@@ -2953,7 +2953,7 @@ pub const MemorySafety = union(enum) {
                 // Trying to free a pointer to a global variable
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_fnptr => {
+            .fnptr => {
                 // Trying to free an interned constant pointer (e.g., pointer to global)
                 return reportFreeGlobalMemory(ctx);
             },
@@ -3022,7 +3022,7 @@ pub const MemorySafety = union(enum) {
                         }
                     }
                 },
-                .int_fnptr => {},
+                .fnptr => {},
             }
         }
 
@@ -3110,7 +3110,7 @@ pub const MemorySafety = union(enum) {
                         }
                     }
                 },
-                .int_fnptr => {},
+                .fnptr => {},
             }
         }
 
@@ -3179,7 +3179,7 @@ pub const MemorySafety = union(enum) {
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_fnptr => {
+            .fnptr => {
                 return reportFreeGlobalMemory(ctx);
             },
         };
@@ -3261,7 +3261,7 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .int_fnptr => {},
+            .fnptr => {},
         }
 
         // Check for mismatched allocator (only if both are known)
@@ -3306,7 +3306,7 @@ pub const MemorySafety = union(enum) {
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
                 return reportFreeGlobalMemory(ctx);
             },
-            .int_fnptr => {
+            .fnptr => {
                 return reportFreeGlobalMemory(ctx);
             },
         };
@@ -3379,7 +3379,7 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .int_fnptr => {},
+            .fnptr => {},
         }
 
         // Check for mismatched allocator
@@ -3477,7 +3477,7 @@ pub const MemorySafety = union(enum) {
             const child_gid: ?Gid = switch (args[0]) {
                 .inst => |idx| state.results[idx].refinement,
                 .interned => |interned| refinements.getGlobal(interned.ip_idx),
-                .int_fnptr => null, // compile-time allocators
+                .fnptr => null, // compile-time allocators
             };
 
             if (child_gid) |gid| {
@@ -3512,7 +3512,7 @@ pub const MemorySafety = union(enum) {
             const ptr_gid: ?Gid = switch (args[0]) {
                 .inst => |idx| state.results[idx].refinement,
                 .interned => |interned| refinements.getGlobal(interned.ip_idx),
-                .int_fnptr => null,
+                .fnptr => null,
             };
             if (ptr_gid) |pgid| {
                 const ptr_ref = refinements.at(pgid);
@@ -3564,7 +3564,7 @@ pub const MemorySafety = union(enum) {
         const arena_ptr_gid: ?Gid = switch (args[0]) {
             .inst => |inst| results[inst].refinement,
             .interned => |interned| refinements.getGlobal(interned.ip_idx),
-            .int_fnptr => null,
+            .fnptr => null,
         };
         const arena_ptr_idx = arena_ptr_gid orelse return;
 
