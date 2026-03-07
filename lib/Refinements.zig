@@ -20,12 +20,12 @@ pub const GlobalDef = struct {
     /// InternPool index of the pointer to this global (e.g., IP index of &global_point)
     ip_idx: u32,
     /// The type of the global variable.
-    /// If the global was declared with `= undefined`, this will be wrapped
-    /// in `.{ .ty = .{ .undefined = &inner_type } }` (consistent with store_safe).
+    /// If the global was declared with `= undefined`, this will be `.undefined`.
     ty: tag.Type,
+    /// Type ID for struct/union types (used for field name lookup via ctx.getFieldId)
+    type_id: ?u32 = null,
     /// Source location info - extracted from nav if available.
-    /// Use .? to access - crash if unexpectedly null.
-    loc: ?SourceLoc,
+    loc: SourceLoc,
     children: ChildInfo = .{ .scalar = {} },
 
     pub const SourceLoc = struct {
@@ -442,16 +442,15 @@ fn createGlobalEntity(
         // Call splatInitGlobal to let analysis modules handle it (no direct analyte access).
         if (field_info != null) {
             const pointee_gid = self.at(existing_gid).pointer.to;
-            const loc_info = def.loc orelse GlobalDef.SourceLoc{};
-            const loc = tag.GlobalLocation{ .file = loc_info.file, .line = loc_info.line, .column = loc_info.column };
+            const loc = tag.GlobalLocation{ .file = def.loc.file, .line = def.loc.line, .column = def.loc.column };
             tag.splatInitGlobal(self, existing_gid, pointee_gid, ctx, false, false, loc, field_info);
         }
         return existing_gid;
     }
 
     // Check if the type is wrapped in .undefined or .null
-    const is_undefined = def.ty.ty == .undefined;
-    const is_null = def.ty.ty == .null;
+    const is_undefined = def.ty == .undefined;
+    const is_null = def.ty == .null;
 
     var pointee_gid: Gid = undefined;
 
@@ -481,11 +480,7 @@ fn createGlobalEntity(
         },
         .struct_fields => |field_ip_indices| {
             // Struct global with field pointer children.
-            // Get the container type_id from the def's type
-            const container_type_id: Tid = comptime blk: {
-                const inner_ty = if (def.ty.ty == .undefined) def.ty.ty.undefined else if (def.ty.ty == .null) def.ty.ty.null else &def.ty;
-                break :blk inner_ty.id orelse @compileError("struct GlobalDef must have type_id");
-            };
+            const container_type_id: Tid = comptime def.type_id orelse @compileError("struct GlobalDef must have type_id");
 
             // Create field pointer globals with field_info
             var field_gids: [field_ip_indices.len]Gid = undefined;
@@ -513,16 +508,12 @@ fn createGlobalEntity(
         .union_field => |uaf| {
             const allocator = self.list.allocator;
 
-            // Get the type_id from the def's type (unwrap undefined if needed)
-            const type_id: Tid = comptime blk: {
-                const inner_ty = if (def.ty.ty == .undefined) def.ty.ty.undefined else if (def.ty.ty == .null) def.ty.ty.null else &def.ty;
-                break :blk inner_ty.id orelse @compileError("union GlobalDef must have type_id");
-            };
+            const type_id: Tid = comptime def.type_id orelse @compileError("union GlobalDef must have type_id");
 
-            // Get the union field types from the type
+            // Get the union field types from the type (unwrap undefined/null if needed)
             const union_field_types: []const tag.Type = comptime blk: {
-                const inner_ty = if (def.ty.ty == .undefined) def.ty.ty.undefined else if (def.ty.ty == .null) def.ty.ty.null else &def.ty;
-                break :blk inner_ty.ty.@"union";
+                const inner_ty = if (def.ty == .undefined) def.ty.undefined else if (def.ty == .null) def.ty.null else &def.ty;
+                break :blk inner_ty.@"union".variants;
             };
 
             // field_value_ip_idx == null means the field value is undefined
@@ -541,8 +532,7 @@ fn createGlobalEntity(
 
                     // Initialize the field's undefined state
                     // (splatInitGlobal for union won't recurse into fields, so we must do it here)
-                    const field_loc_info = def.loc orelse GlobalDef.SourceLoc{};
-                    const field_loc = tag.GlobalLocation{ .file = field_loc_info.file, .line = field_loc_info.line, .column = field_loc_info.column };
+                    const field_loc = tag.GlobalLocation{ .file = def.loc.file, .line = def.loc.line, .column = def.loc.column };
                     tag.splatInitGlobal(self, 0, field_gid, ctx, field_value_is_undefined, false, field_loc, null);
                 }
             }
@@ -563,8 +553,7 @@ fn createGlobalEntity(
     self.global_map.put(def.ip_idx, ptr_gid) catch {};
 
     // Dispatch to analysis modules to initialize state
-    const loc_info = def.loc orelse GlobalDef.SourceLoc{};
-    const loc = tag.GlobalLocation{ .file = loc_info.file, .line = loc_info.line, .column = loc_info.column };
+    const loc = tag.GlobalLocation{ .file = def.loc.file, .line = def.loc.line, .column = def.loc.column };
     tag.splatInitGlobal(self, ptr_gid, pointee_gid, ctx, is_undefined, is_null, loc, field_info);
 
     return ptr_gid;
@@ -927,9 +916,9 @@ test "initWithGlobals sets null_safety for null optional global" {
     defer ctx.deinit();
 
     // Create global_defs with a null optional
-    const inner_scalar: tag.Type = .{ .ty = .{ .scalar = {} } };
-    const optional_type: tag.Type = .{ .ty = .{ .optional = &inner_scalar } };
-    const null_type: tag.Type = .{ .ty = .{ .null = &optional_type } };
+    const inner_scalar: tag.Type = .{ .scalar = {} };
+    const optional_type: tag.Type = .{ .optional = &inner_scalar };
+    const null_type: tag.Type = .{ .null = &optional_type };
 
     const global_defs = [_]GlobalDef{
         .{ .ip_idx = 100, .ty = null_type, .loc = .{ .file = "test.zig", .line = 1, .column = 1 } },
@@ -963,12 +952,12 @@ test "initWithGlobals sets undefined_safety for undefined union global" {
     defer ctx.deinit();
 
     // Create global_defs with an undefined union
-    const inner_scalar: tag.Type = .{ .ty = .{ .scalar = {} } };
-    const union_type: tag.Type = .{ .id = 5120, .ty = .{ .@"union" = &.{ inner_scalar, inner_scalar } } };
-    const undefined_union_type: tag.Type = .{ .ty = .{ .undefined = &union_type } };
+    const inner_scalar: tag.Type = .{ .scalar = {} };
+    const union_type: tag.Type = .{ .@"union" = &.{ .type_id = 5120, .variants = &.{ inner_scalar, inner_scalar } } };
+    const undefined_union_type: tag.Type = .{ .undefined = &union_type };
 
     const global_defs = [_]GlobalDef{
-        .{ .ip_idx = 100, .ty = undefined_union_type, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
+        .{ .ip_idx = 100, .ty = undefined_union_type, .type_id = 5120, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
     };
 
     var refinements = initWithGlobals(allocator, &ctx, &global_defs);
@@ -1003,12 +992,12 @@ test "semideepCopy preserves union undefined_safety" {
     defer ctx.deinit();
 
     // Create global_defs with an undefined union
-    const inner_scalar: tag.Type = .{ .ty = .{ .scalar = {} } };
-    const union_type: tag.Type = .{ .id = 5120, .ty = .{ .@"union" = &.{ inner_scalar, inner_scalar } } };
-    const undefined_union_type: tag.Type = .{ .ty = .{ .undefined = &union_type } };
+    const inner_scalar: tag.Type = .{ .scalar = {} };
+    const union_type: tag.Type = .{ .@"union" = &.{ .type_id = 5120, .variants = &.{ inner_scalar, inner_scalar } } };
+    const undefined_union_type: tag.Type = .{ .undefined = &union_type };
 
     const global_defs = [_]GlobalDef{
-        .{ .ip_idx = 100, .ty = undefined_union_type, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
+        .{ .ip_idx = 100, .ty = undefined_union_type, .type_id = 5120, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
     };
 
     var refinements = initWithGlobals(allocator, &ctx, &global_defs);

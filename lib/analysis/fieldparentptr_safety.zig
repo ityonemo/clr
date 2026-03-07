@@ -34,27 +34,13 @@ pub const FieldParentPtrSafety = struct {
         const ptr_idx = results[index].refinement orelse return;
         const ptr = &refinements.at(ptr_idx).pointer;
 
-        // Get the container's type_id from the base pointer
-        const base_ref: Gid = switch (params.base) {
-            .inst => |inst| results[inst].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
-            .fnptr => return, // function pointer, can't track
-        };
-        const base_refinement = refinements.at(base_ref);
-        if (base_refinement.* != .pointer) return;
-
-        const container_idx = base_refinement.pointer.to;
-        const container = refinements.at(container_idx);
-
-        const container_type_id: Tid = switch (container.*) {
-            .@"struct" => |s| s.type_id,
-            .@"union" => |u| u.type_id,
-            else => return, // Not a struct/union, can't track
-        };
+        // Use the type_id from the tag params (set by codegen from the container type)
+        // If type_id is 0, we can't track fieldParentPtr
+        if (params.type_id == 0) return;
 
         ptr.analyte.fieldparentptr_safety = .{
             .field_index = params.field_index,
-            .container_type_id = container_type_id,
+            .container_type_id = params.type_id,
         };
     }
 
@@ -157,20 +143,9 @@ pub const FieldParentPtrSafety = struct {
             return reportNotFieldPointer(state.ctx, params);
         };
 
-        // Get expected type_id from params.ty (the claimed container type)
-        // Note: We use params.ty instead of the result entity because memory_safety
-        // may have already updated the result to point to the original container.
-        const expected_type_id: Tid = blk: {
-            // params.ty is pointer -> struct/union, extract the struct/union type_id
-            switch (params.ty.ty) {
-                .pointer => |container_ty| break :blk container_ty.id orelse return,
-                else => return,
-            }
-        };
-
         // Check 2: Container type must match (compare type_ids)
-        if (origin.container_type_id != expected_type_id) {
-            return reportWrongContainerType(state.ctx, origin, expected_type_id);
+        if (origin.container_type_id != params.type_id) {
+            return reportWrongContainerType(state.ctx, origin, params.type_id);
         }
 
         // Check 3: Field index must match
@@ -287,8 +262,8 @@ test "struct_field_ptr records origin on field pointer" {
     };
     const state = testState(&ctx, &results, &refinements);
 
-    // Call struct_field_ptr to set origin tracking
-    try FieldParentPtrSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
+    // Call struct_field_ptr to set origin tracking (type_id = 100 matches the struct)
+    try FieldParentPtrSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} }, .type_id = 100 });
 
     // Verify fieldparentptr_safety was set
     const ptr_ref = refinements.at(field_ptr_gid);
@@ -329,7 +304,7 @@ test "field_parent_ptr succeeds when origin matches" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should succeed - type_id 100 matches, field_index 0 matches
-    try FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    try FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 100 });
 }
 
 test "field_parent_ptr errors on non-field pointer" {
@@ -364,7 +339,7 @@ test "field_parent_ptr errors on non-field pointer" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should error - pointer doesn't have fieldparentptr_safety
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 100 });
     try std.testing.expectError(error.InvalidFieldParentPtr, result);
 }
 
@@ -400,8 +375,8 @@ test "field_parent_ptr errors on wrong container type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should error - type mismatch (100 != 200)
-    // params.ty is pointer -> struct with type_id 200 (the claimed type)
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .pointer = &.{ .id = 200, .ty = .{ .scalar = {} } } } } });
+    // params.type_id = 200 (the claimed type)
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 0, .ty = .{ .pointer = &.{ .scalar = {} } }, .type_id = 200 });
     try std.testing.expectError(error.FieldParentPtrTypeMismatch, result);
 }
 
@@ -439,7 +414,7 @@ test "field_parent_ptr errors on wrong field index" {
     const state = testState(&ctx, &results, &refinements);
 
     // Should error - field mismatch (claims field 1, but pointer is from field 0)
-    // params.ty is pointer -> struct with type_id 100 (matching type, wrong field)
-    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .pointer = &.{ .id = 100, .ty = .{ .scalar = {} } } } } });
+    // params.type_id = 100 (matching type, wrong field)
+    const result = FieldParentPtrSafety.field_parent_ptr(state, 1, .{ .field_ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .pointer = &.{ .scalar = {} } }, .type_id = 100 });
     try std.testing.expectError(error.FieldParentPtrFieldMismatch, result);
 }

@@ -55,29 +55,36 @@ pub const Meta = struct {
 /// Name identifier for types and variables.
 pub const Name = u32;
 
-/// Represents a struct or union field with type and optional name.
-///
-/// This struct exists to propagate information from the AIR generator into
-/// the parameters of a instruction. Some operations are expected to set
-/// the type based on interned information; in those cases, the type will be used.
-pub const Type = struct {
-    id: ?Name = null,
-    ty: union(enum) {
-        scalar: void,
-        pointer: *const Type,
-        optional: *const Type,
-        errorunion: *const Type, // error union payload type
-        null: *const Type, // used to signal that an optional is being set to null. Inner type must be optional.
-        undefined: *const Type, // used to signal that the type is undefined, must be scalar, pointer, optional
-        region: *const Type, // unused, for now, will represent slices (maybe)
-        @"struct": []const Type, // field types for struct
-        @"union": []const Type, // field types for union
-        allocator: Name, // allocator type identified by type_id (vtable FQN hash)
-        fnptr: void, // function pointer type marker - choices stored separately in Src
-        recursive: Name, // reference to the refinement that is being recurred.
-        void: void,
-        unimplemented: void, // placeholder for unhandled types - will crash if accessed
-    },
+/// Struct type descriptor with type_id for field name lookup.
+pub const StructType = struct {
+    type_id: u32, // InternPool index for getFieldId lookup
+    fields: []const Type,
+};
+
+/// Union type descriptor with type_id for variant name lookup.
+pub const UnionType = struct {
+    type_id: u32, // InternPool index for getFieldId lookup
+    variants: []const Type,
+};
+
+/// Type descriptor for AIR instructions. Propagates type information from
+/// codegen into instruction parameters for analysis modules.
+pub const Type = union(enum) {
+    scalar: void, // simple value type (int, float, bool, etc.)
+    pointer: *const Type, // pointer to inner type
+    optional: *const Type, // optional wrapping inner type
+    errorunion: *const Type, // error union with payload type
+    null: *const Type, // signals setting optional to null; inner is the optional's payload type
+    undefined: *const Type, // signals undefined value; inner is the actual type
+    region: *const Type, // slice/array region; inner is element type
+    @"struct": *const StructType, // struct with type_id and field types
+    @"union": *const UnionType, // union with type_id and variant types
+    allocator: Name, // pseudo-allocator, should always be pointed to, the allocator
+                     // pointer represents the pointer to metadata + pointer to vtable.
+    fnptr: void, // function pointer (choices stored in Src.fnptr)
+    recursive: Name, // self-referential type placeholder (Name unused, set to 0)
+    void: void, // void type
+    unimplemented: void, // placeholder for unhandled types (will crash if accessed)
 };
 
 /// Source reference for instructions - indicates where a value comes from.

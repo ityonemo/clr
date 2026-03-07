@@ -187,7 +187,7 @@ pub const NullSafety = union(enum) {
         // Check if we're storing null or a value
         switch (params.src) {
             .interned => |interned| {
-                if (interned.ty.ty == .@"null") {
+                if (interned.ty == .@"null") {
                     pointee.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
                 } else {
                     pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
@@ -331,8 +331,8 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
 }
 
 // Helper type for testing null stores
-const test_scalar_type: tag.Type = .{ .ty = .{ .scalar = {} } };
-const test_null_type: tag.Type = .{ .ty = .{ .@"null" = &test_scalar_type } };
+const test_scalar_type: tag.Type = .{ .scalar = {} };
+const test_null_type: tag.Type = .{ .@"null" = &test_scalar_type };
 
 test "is_non_null records check on optional" {
     const allocator = std.testing.allocator;
@@ -536,7 +536,7 @@ test "store to optional with null sets null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store null to the optional
-    try NullSafety.store(state, 1, .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .@"null" = &test_scalar_type } } } } });
+    try NullSafety.store(state, 1, .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .@"null" = &test_scalar_type } } } });
 
     const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");

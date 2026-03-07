@@ -439,7 +439,7 @@ test "buildPathName for struct_field_ptr builds field path" {
     // Inst 1: struct_field_ptr accessing field 0 (bar) of inst 0
     var results = [_]Inst{
         .{ .name_id = 1, .refinement = ptr_gid }, // foo
-        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 1);
@@ -468,7 +468,7 @@ test "buildPathName for compound path: foo.?.bar" {
     var results = [_]Inst{
         .{ .name_id = 1 }, // foo
         .{ .inst_tag = .{ .optional_payload = .{ .src = .{ .inst = 0 } } }, .refinement = ptr_gid },
-        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = .{ .inst = 1 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } } },
+        .{ .inst_tag = .{ .struct_field_ptr = .{ .base = .{ .inst = 1 }, .field_index = 0, .ty = .{ .scalar = {} } } } },
     };
 
     const path = ctx.buildPathName(&results, &refinements, 2);

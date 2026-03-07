@@ -69,9 +69,9 @@ pub const INVALID_GID = core.INVALID_GID;
 /// Convert a Type (from codegen) to a Refinement.
 /// Used when storing interned values to determine the refinement structure.
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
+/// Note: For struct/union types, type_id is set to 0 here; actual type_id comes from tag struct fields.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
-    const type_id = ty.id orelse 0;
-    return switch (ty.ty) {
+    return switch (ty) {
         .scalar => .{ .scalar = .{} },
         .void => .void,
         .pointer => |child| {
@@ -119,18 +119,22 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // Region container has null undefined (only child has undefined state)
             return .{ .region = .{ .to = child_idx } };
         },
-        inline .@"struct", .@"union" => |type_fields, class_tag| blk: {
+        .@"struct" => |struct_type| {
             const allocator = refinements.list.allocator;
-            const FieldType = if (class_tag == .@"union") ?Gid else Gid;
-            const fields = allocator.alloc(FieldType, type_fields.len) catch @panic("out of memory");
-            for (type_fields, 0..) |field_type, i| {
-                // For structs, create entities for each field; for unions, all fields start inactive (null)
-                fields[i] = if (class_tag == .@"union")
-                    null
-                else
-                    try refinements.appendEntity(try typeToRefinement(field_type, refinements));
+            const fields = allocator.alloc(Gid, struct_type.fields.len) catch @panic("out of memory");
+            for (struct_type.fields, 0..) |field_type, i| {
+                fields[i] = try refinements.appendEntity(try typeToRefinement(field_type, refinements));
             }
-            break :blk @unionInit(Refinement, @tagName(class_tag), .{ .fields = fields, .type_id = type_id });
+            return .{ .@"struct" = .{ .fields = fields, .type_id = struct_type.type_id } };
+        },
+        .@"union" => |union_type| {
+            const allocator = refinements.list.allocator;
+            // Union variants start as inactive (null)
+            const fields = allocator.alloc(?Gid, union_type.variants.len) catch @panic("out of memory");
+            for (fields) |*f| {
+                f.* = null;
+            }
+            return .{ .@"union" = .{ .fields = fields, .type_id = union_type.type_id } };
         },
         .fnptr => {
             // Function pointer type marker - choices come from Src.fnptr at store time
@@ -376,7 +380,7 @@ pub const Bitcast = struct {
                 const src_ref = state.refinements.at(src_gid);
 
                 // Check if we're converting pointer to optional (e.g., *T to ?*T)
-                if (self.ty.ty == .optional and src_ref.* == .pointer) {
+                if (self.ty == .optional and src_ref.* == .pointer) {
                     // Create optional wrapper that points to the existing pointer entity
                     const opt_gid = try state.refinements.appendEntity(.{
                         .optional = .{ .to = src_gid },
@@ -684,6 +688,8 @@ pub const StructFieldPtr = struct {
     field_index: usize,
     /// Result type (pointer to field type)
     ty: Type,
+    /// Container type_id for fieldParentPtr validation
+    type_id: u32 = 0,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get the base pointer's refinement based on source type
@@ -729,7 +735,7 @@ pub const StructFieldPtr = struct {
                     // Field is inactive - create entity for it
                     // For tagged unions, the analysis module (variant_safety) will report the error
                     // For untagged unions, this creates the entity on first access
-                    const new_field_ref = try typeToRefinement(self.ty.ty.pointer.*, state.refinements);
+                    const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
                     const new_idx = try state.refinements.appendEntity(new_field_ref);
                     // Persist in union's fields array (for untagged unions, this is correct;
                     // for tagged unions, variant_safety will report error before this matters)
@@ -814,6 +820,8 @@ pub const FieldParentPtr = struct {
     field_index: usize,
     /// Result type (pointer to parent container)
     ty: Type,
+    /// Container type_id for validation
+    type_id: u32,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create pointer to parent container using type info
@@ -1024,9 +1032,9 @@ pub const RetSafe = struct {
                     cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(global_gid).*);
                 } else {
                     // Not tracked - comptime return value
-                    if (interned.ty.ty == .void) {
+                    if (interned.ty == .void) {
                         cloned.at(return_gid).* = .void;
-                    } else if (interned.ty.ty == .undefined) {
+                    } else if (interned.ty == .undefined) {
                         // Explicitly undefined value - mark as undefined
                         cloned.at(return_gid).* = try typeToRefinement(interned.ty, cloned);
                         splatInit(cloned, return_gid, state.ctx);
@@ -1205,25 +1213,14 @@ pub const Store = struct {
         if (src_gid) |src_ref| {
             const src = state.refinements.at(src_ref);
 
-            // ALLOCATOR IDENTITY: When storing an allocator (or pointer to allocator),
-            // make the pointer point directly to the source refinement. This preserves
+            // ALLOCATOR IDENTITY: When storing an allocator, make the pointer
+            // point directly to the source allocator refinement. This preserves
             // allocator identity through store/load cycles. The Zig Allocator type
-            // is a struct, but we track it as .allocator refinement (or pointer to .allocator)
-            // for analysis.
+            // is a struct, but we track it as .allocator refinement for analysis.
             if (src.* == .allocator) {
                 ptr_ref.pointer.to = src_ref;
                 try splat(.store, state, index, self);
                 return;
-            }
-            // Handle pointer-wrapped allocators (from MkAllocator)
-            if (src.* == .pointer) {
-                const src_target = state.refinements.at(src.pointer.to);
-                if (src_target.* == .allocator) {
-                    // Storing pointer-to-allocator: preserve the wrapper pointer
-                    ptr_ref.pointer.to = src_ref;
-                    try splat(.store, state, index, self);
-                    return;
-                }
             }
 
             switch (pointee.*) {
@@ -1316,7 +1313,7 @@ pub const WrapErrunionPayload = struct {
                 // Get payload refinement from source instruction
                 const src_gid = state.results[src].refinement orelse {
                     // Source has no refinement - create based on type
-                    const ref = try typeToRefinement(self.ty.ty.errorunion.*, state.refinements);
+                    const ref = try typeToRefinement(self.ty.errorunion.*, state.refinements);
                     break :blk try state.refinements.appendEntity(ref);
                 };
                 // Deep copy the payload so we have our own entity
@@ -1726,16 +1723,17 @@ pub const UnionInit = struct {
     field_index: usize,
     init: Src,
     ty: Type,
+    type_id: u32,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create union refinement from type info
-        const union_fields = self.ty.ty.@"union";
+        const union_type = self.ty.@"union";
         const allocator = state.refinements.list.allocator;
 
         // Union fields use ?Gid - null means inactive, some means active
-        const fields = allocator.alloc(?Gid, union_fields.len) catch @panic("out of memory");
+        const fields = allocator.alloc(?Gid, union_type.variants.len) catch @panic("out of memory");
 
-        for (union_fields, 0..) |_, i| {
+        for (union_type.variants, 0..) |_, i| {
             if (i == self.field_index) {
                 // Active field - create entity from init value
                 switch (self.init) {
@@ -1770,7 +1768,7 @@ pub const UnionInit = struct {
             }
         }
 
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .type_id = self.ty.id orelse 0 } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"union" = .{ .fields = fields, .type_id = self.type_id } });
         try splat(.union_init, state, index, self);
     }
 };
@@ -2778,7 +2776,7 @@ test "dbg_var_ptr sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc to create a pointer
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expect(results[1].name_id == null);
 
     // dbg_var_ptr should set the name_id on the target instruction
@@ -2874,7 +2872,7 @@ test "br shares source refinement with block" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a block at index 0
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
 
     // Create a value at index 1
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
@@ -3011,12 +3009,12 @@ test "block creates refinement based on type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Block with scalar type
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
 
     // Block with void type
-    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .ty = .{ .void = {} } } } });
+    try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .void = {} } } });
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
@@ -3070,7 +3068,7 @@ test "struct_field_ptr gets pointer to struct field" {
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -3106,7 +3104,7 @@ test "struct_field_val extracts field value from struct" {
     results[0].refinement = struct_eidx;
 
     // struct_field_val should extract field 0
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } } });
 
     // Result should share the field's entity
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
@@ -3196,7 +3194,7 @@ test "set_union_tag updates union variant" {
     results[0].refinement = ptr_gid;
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
 
     // The union's active field should be set (field 1), others null
     const union_ref = refinements.at(union_gid);
@@ -3255,9 +3253,10 @@ test "union_init creates union with active variant" {
 
     // union_init should create a union with active variant set
     try Inst.apply(state, 1, .{ .union_init = .{
-        .ty = .{ .ty = .{ .@"union" = &.{ .{ .ty = .{ .scalar = {} } }, .{ .ty = .{ .scalar = {} } } } } },
+        .ty = .{ .@"union" = &.{ .type_id = 0, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } },
         .field_index = 1,
         .init = .{ .inst = 0 },
+        .type_id = 0,
     } });
 
     try std.testing.expect(results[1].refinement != null);

@@ -617,7 +617,7 @@ test "set_union_tag sets active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Set variant 1 as active
-    try VariantSafety.set_union_tag(state, 1, .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
+    try VariantSafety.set_union_tag(state, 1, .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } });
 
     // Check variant_safety was created
     const u = refinements.at(union_eidx).@"union";
@@ -660,7 +660,7 @@ test "struct_field_ptr allows access to active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access active field 1 - should succeed
-    try VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .ty = .{ .scalar = {} } } });
+    try VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } });
 }
 
 test "struct_field_ptr errors on inactive variant" {
@@ -696,7 +696,7 @@ test "struct_field_ptr errors on inactive variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access inactive field 0 - should error
-    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -732,7 +732,7 @@ test "struct_field_val errors on inactive variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access inactive field 0 - should error
-    const result = VariantSafety.struct_field_val(state, 1, .{ .operand = 0, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_val(state, 1, .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -771,7 +771,7 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access any field when ambiguous - should error
-    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .ty = .{ .scalar = {} } } });
+    const result = VariantSafety.struct_field_ptr(state, 1, .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} } });
     try std.testing.expectError(error.AmbiguousVariantAccess, result);
 }
 

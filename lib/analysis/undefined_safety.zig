@@ -640,7 +640,7 @@ pub const UndefinedSafety = union(enum) {
                     return;
                 }
                 // Not a tracked global - comptime constant
-                if (interned.ty.ty != .void) {
+                if (interned.ty != .void) {
                     // Interned values are compile-time constants, so defined
                     // With global refinements, return_gid points to slot in state.refinements
                     setDefinedRecursive(state.refinements, state.return_gid);
@@ -705,17 +705,17 @@ pub const UndefinedSafety = union(enum) {
     /// Handles field-level undefined for structs where some fields may be undefined.
     /// Uses forceDefinedRecursive because explicit stores should overwrite existing undefined states.
     fn applyInternedType(refinements: *Refinements, idx: Gid, ty: tag.Type, ctx: *Context) void {
-        switch (ty.ty) {
+        switch (ty) {
             .undefined => {
                 // Mark as undefined - don't recurse further, undefined is terminal
                 const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = ctx.meta } };
                 setUndefinedRecursive(refinements, idx, undef_state);
             },
-            .@"struct" => |field_types| {
+            .@"struct" => |struct_type| {
                 // Apply field-level undefined state
                 switch (refinements.at(idx).*) {
                     .@"struct" => |s| {
-                        for (field_types, 0..) |field_type, i| {
+                        for (struct_type.fields, 0..) |field_type, i| {
                             if (i < s.fields.len) {
                                 applyInternedType(refinements, s.fields[i], field_type, ctx);
                             }
@@ -762,13 +762,13 @@ pub const UndefinedSafety = union(enum) {
                     else => forceDefinedRecursive(refinements, idx),
                 }
             },
-            .@"union" => |field_types| {
+            .@"union" => |union_type| {
                 // Apply field-level undefined state for unions
                 switch (refinements.at(idx).*) {
                     .@"union" => |*u| {
                         // Mark union itself as defined (since we're storing a value, not undefined)
                         u.analyte.undefined_safety = .{ .defined = {} };
-                        for (field_types, 0..) |field_type, i| {
+                        for (union_type.variants, 0..) |field_type, i| {
                             if (i < u.fields.len) {
                                 if (u.fields[i]) |field_idx| {
                                     applyInternedType(refinements, field_idx, field_type, ctx);
@@ -830,7 +830,7 @@ pub const UndefinedSafety = union(enum) {
 
         // Check if source is an undefined type (interned with .undefined wrapper)
         const is_undef = switch (params.src) {
-            .interned => |interned| interned.ty.ty == .undefined,
+            .interned => |interned| interned.ty == .undefined,
             else => false,
         };
 
@@ -1632,7 +1632,7 @@ test "alloc creates pointer to typed pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.Alloc.apply (creates pointer to typed pointee)
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
 
     // alloc creates pointer; pointee type is determined by .ty parameter
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1655,7 +1655,7 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .ty = .{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .scalar = {} } } });
 
     // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
     const eu_idx = results[1].refinement.?;
@@ -1681,8 +1681,8 @@ test "store with .undefined type wrapper sets undefined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with .undefined wrapper
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .undefined = &.{ .ty = .{ .scalar = {} } } } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1705,8 +1705,8 @@ test "store with defined value sets defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store a defined value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .scalar = {} } } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .scalar = {} } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
 
     // Check the pointee's undefined state
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
@@ -1729,9 +1729,9 @@ test "store with .null to optional sets inner to defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc at instruction 1 with optional type, then store null
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .ty = .{ .optional = &.{ .ty = .{ .scalar = {} } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .ty = .{ .null = &.{ .ty = .{ .scalar = {} } } } } } } } });
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .@"null" = &.{ .scalar = {} } } } } } });
 
     // Check the pointee is an optional
     const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;

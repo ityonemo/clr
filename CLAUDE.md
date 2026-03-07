@@ -293,6 +293,10 @@ If you find yourself writing `.analyte.undefined = ...` or `.analyte.memory_safe
   const p = refinement.pointer;
   ```
 
+- **Fix ALL usages when making a field non-optional** - When changing a struct field from optional (`?T`) to non-optional (`T`), you must find and fix ALL places that treat it as optional. Don't fix one occurrence and assume you're done. Use grep to find ALL of: `if (x.field) |`, `x.field != null`, `x.field.?`, and fix them all in one pass. Missing any will cause compile errors or subtle bugs.
+
+- **When type info says it's X, the refinement is X** - If `interned.ty == .allocator`, the refinement WILL be `.allocator`. Don't add redundant checks like `if (alloc_ref.* == .allocator)`. Trust the type system - if it's wrong, we want a crash to find the bug, not silent failure.
+
 ## TDD Procedure: Adding a New AIR Tag Handler
 
 Follow these steps to add support for a new AIR instruction tag:

@@ -113,6 +113,7 @@ pub const ChildInfo = union(enum) {
 pub const GlobalInfo = struct {
     ip_idx: u32,
     type_str: []const u8, // Pre-formatted type string (wrapped in .undefined if global is undefined)
+    type_id: ?u32 = null, // Type ID for struct/union globals (used for field name lookup)
     loc: ?SourceLoc = null,
     children: ChildInfo = .{ .scalar = {} },
 };
@@ -125,13 +126,13 @@ var global_registry: std.AutoHashMapUnmanaged(u32, GlobalInfo) = .empty;
 var nav_to_ip: std.AutoHashMapUnmanaged(u32, u32) = .empty;
 
 /// Register a global variable. Returns the ip_idx for reference.
-/// The type_str should be wrapped in .{ .ty = .{ .undefined = &inner } } if the global is undefined.
-/// If nav_idx is provided, also records the nav→ip mapping for field pointer lookups.
-pub fn registerGlobal(ip_idx: u32, type_str: []const u8, children: ChildInfo) u32 {
+/// type_id is required for struct/union globals (used for field name lookup).
+pub fn registerGlobal(ip_idx: u32, type_str: []const u8, type_id: ?u32, children: ChildInfo) u32 {
     if (global_registry.get(ip_idx) == null) {
         global_registry.put(clr_allocator.allocator(), ip_idx, .{
             .ip_idx = ip_idx,
             .type_str = type_str,
+            .type_id = type_id,
             .children = children,
         }) catch {};
     }
@@ -139,16 +140,16 @@ pub fn registerGlobal(ip_idx: u32, type_str: []const u8, children: ChildInfo) u3
 }
 
 /// Register a global with nav→ip mapping for parent struct lookup.
-pub fn registerGlobalWithNav(ip_idx: u32, nav_idx: u32, type_str: []const u8, children: ChildInfo) u32 {
+pub fn registerGlobalWithNav(ip_idx: u32, nav_idx: u32, type_str: []const u8, type_id: ?u32, children: ChildInfo) u32 {
     nav_to_ip.put(clr_allocator.allocator(), nav_idx, ip_idx) catch {};
-    return registerGlobal(ip_idx, type_str, children);
+    return registerGlobal(ip_idx, type_str, type_id, children);
 }
 
 /// Register a struct field pointer and update the parent struct's struct_fields.
 /// nav_idx is the nav of the parent struct, field_index is which field, field_ip_idx is this field pointer's IP index.
 pub fn registerFieldPointer(nav_idx: u32, field_index: usize, num_fields: usize, field_ip_idx: u32, field_type_str: []const u8) void {
-    // Register the field pointer itself
-    _ = registerGlobal(field_ip_idx, field_type_str, .{ .scalar = {} });
+    // Register the field pointer itself (no type_id needed for field pointers)
+    _ = registerGlobal(field_ip_idx, field_type_str, null, .{ .scalar = {} });
 
     // Find the parent struct by nav_idx
     const parent_ip_idx = nav_to_ip.get(nav_idx) orelse return;
@@ -454,13 +455,13 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
     // Wrap in .undefined if the global is undefined, or .null if it's a null optional
     // For .null, we need the INNER type (not the optional wrapper) since .null implies optional
     const final_type_str = if (is_undefined)
-        clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .undefined = &{s} }} }}", .{type_str}, null)
+        clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .undefined = &{s} }}", .{type_str}, null)
     else if (is_null) blk: {
         // Extract the child type from the optional
         const type_key = ip.indexToKey(nav_type);
         const inner_type = if (type_key == .opt_type) type_key.opt_type else nav_type;
         const inner_type_str = clr_codegen.typeToStringForGlobal(arena.allocator(), ip, inner_type);
-        break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .null = &{s} }} }}", .{inner_type_str}, null);
+        break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .null = &{s} }}", .{inner_type_str}, null);
     } else
         clr_allocator.allocator().dupe(u8, type_str) catch return;
 
@@ -529,9 +530,19 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
         }
         break :blk children;
     };
+    // Extract type_id for struct/union types
+    const type_id: ?u32 = blk: {
+        const type_key = ip.indexToKey(nav_type);
+        if (type_key == .struct_type or type_key == .union_type) {
+            break :blk @intFromEnum(nav_type);
+        }
+        break :blk null;
+    };
+
     global_registry.put(clr_allocator.allocator(), actual_ip_idx, .{
         .ip_idx = actual_ip_idx,
         .type_str = final_type_str,
+        .type_id = type_id,
         .loc = .{ .file = file_path, .line = line, .column = column },
         .children = final_children,
     }) catch {};
