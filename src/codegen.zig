@@ -719,7 +719,11 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
                     if (info.name_map.get(alloc_info.id) == null) {
                         info.name_map.put(arena, alloc_info.id, alloc_info.name) catch {};
                     }
-                    break :blk clr_allocator.allocPrint(arena, ".{{ .ty = .{{ .allocator = {d} }} }}", .{alloc_info.id}, null);
+                    // Register allocator for identity tracking (mismatch detection)
+                    // Use global allocator since registerGlobal stores the string
+                    const alloc_type_str = clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .ty = .{{ .allocator = {d} }} }}", .{alloc_info.id}, null);
+                    _ = clr.registerGlobal(@intFromEnum(interned_idx), alloc_type_str, .{ .scalar = {} });
+                    break :blk alloc_type_str;
                 }
 
                 // Check for aggregate value (struct) with field-level undefined
@@ -783,22 +787,25 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
     const nav = ip.getNav(nav_idx);
     const fqn = nav.fqn.toSlice(ip);
 
-    // Only track user globals (starts with root module name)
-    if (!std.mem.startsWith(u8, fqn, info.root_name)) return null;
+    // Check if pointee is an allocator type - these need identity tracking for mismatch detection
+    const nav_type = nav.typeOf(ip);
+    const is_allocator = isAllocatorType(ip, nav_type);
+
+    // Only track user globals (starts with root module name), unless it's an allocator
+    if (!is_allocator and !std.mem.startsWith(u8, fqn, info.root_name)) return null;
 
     // Check if it's a mutable variable (not a constant)
-    // Constants are always defined, so we only track mutable vars
+    // Constants are always defined, so we only track mutable vars - unless it's an allocator
     const is_const = switch (nav.status) {
         .fully_resolved => |fr| fr.is_const,
         .type_resolved => |tr| tr.is_const,
         .unresolved => return null,
     };
-    if (is_const) return null; // Skip constants
+    if (!is_allocator and is_const) return null; // Skip constants (but not allocators)
 
     // Skip field pointers - these should be handled by tryFieldPtrRef
     // A field pointer has non-zero byte_offset OR points to a different type than the nav's type
     if (ptr.byte_offset != 0) return null;
-    const nav_type = nav.typeOf(ip);
     const ptr_type_key = ip.indexToKey(ptr.ty);
     if (ptr_type_key == .ptr_type) {
         const pointee_type = ptr_type_key.ptr_type.child;
