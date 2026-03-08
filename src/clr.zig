@@ -277,13 +277,8 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const nav = ip.getNav(func.owner_nav);
     const fqn = nav.fqn.toSlice(ip);
 
-    // Get root module name to filter user code from stdlib.
+    // Get root module name for entrypoint detection
     const root_name = zcu.root_mod.fully_qualified_name;
-
-    // Skip non-user functions (stdlib) - these crash navSrcLine/toAbsolute in Release
-    if (!std.mem.startsWith(u8, fqn, root_name)) {
-        return null;
-    }
 
     // Check if this is the main function (entrypoint)
     var expected_main: [256]u8 = undefined;
@@ -295,13 +290,20 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const data = func_air.instructions.items(.data);
     const extra = func_air.extra.items;
 
-    // Get function's source location
-    const base_line = zcu.navSrcLine(func.owner_nav);
+    // Get file scope first (this doesn't crash even for stdlib)
     const file_scope = zcu.navFileScope(func.owner_nav);
+
+    // Check if ZIR is available for source line extraction
+    // Stdlib functions may not have ZIR loaded (unloaded to save memory or never loaded for builtins)
+    const base_line: u32 = if (file_scope.zir != null)
+        zcu.navSrcLine(func.owner_nav)
+    else
+        0; // Fallback: no source line available for stdlib
+
     // Use sub_path directly to avoid toAbsolute crash in Release mode
     const file_path = file_scope.path.sub_path;
 
-    // Extract parameter names from ZIR
+    // Extract parameter names from ZIR (extractParamNames handles null ZIR internally)
     const param_names = extractParamNames(zcu, ip, func, file_scope);
 
     // Per-function arena for temporary allocations during code generation

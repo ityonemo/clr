@@ -88,6 +88,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .unwrap_errunion_payload, .optional_payload, .optional_payload_ptr, .unwrap_errunion_payload_ptr => payloadTransferOp(info, datum),
         .errunion_payload_ptr_set => payloadErrunionPayloadPtrSet(info, datum),
         .wrap_errunion_payload => payloadWrapErrunionPayload(info, datum),
+        .wrap_optional => payloadWrapOptional(info, datum),
         .is_non_null, .is_null, .is_non_err, .is_non_null_ptr, .is_null_ptr => payloadUnOp(info, datum),
         .br => payloadBr(info, datum),
         .block => payloadBlock(info, datum),
@@ -133,6 +134,18 @@ fn payloadWrapErrunionPayload(info: *const FnInfo, datum: Data) []const u8 {
         typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
     else
         ".{ .errorunion = &.{ .scalar = {} } }";
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
+}
+
+/// Payload for wrap_optional - wraps a value in an optional (non-null case).
+/// Takes a payload value and creates an optional containing that value.
+fn payloadWrapOptional(info: *const FnInfo, datum: Data) []const u8 {
+    const operand = datum.ty_op.operand;
+    const src_str = srcString(info, operand);
+    const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
+        typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
+    else
+        ".{ .optional = &.{ .scalar = {} } }";
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
 }
 
@@ -339,25 +352,24 @@ fn extractFunctionFromPointer(ip: *const InternPool, ip_idx: InternPool.Index) ?
 
 /// Extract type info for AllocCreate payload.
 /// allocator.create(T) returns Allocator.Error!*T, so we unwrap error union then pointer.
-/// NOTE: Returns ".{ .unknown = {} }" when type cannot be determined, which will cause
-/// a compile error in the generated .air.zig - this is intentional to surface extraction failures.
-/// TODO: Audit other places in codegen that fall back to scalar and consider using .unknown instead.
+/// NOTE: Returns ".{ .unimplemented = {} }" when type cannot be determined.
+/// This will crash at runtime if the refinement is accessed, surfacing extraction failures.
 fn extractAllocCreateType(info: *const FnInfo, datum: Data) []const u8 {
     const callee_ref = datum.pl_op.operand;
-    const ip_idx = callee_ref.toInterned() orelse return ".{ .unknown = {} }";
+    const ip_idx = callee_ref.toInterned() orelse return ".{ .unimplemented = {} }";
 
     // Get function and its type
     const func_key = info.ip.indexToKey(ip_idx);
     const func_ty = switch (func_key) {
         .func => |f| f.ty,
-        else => return ".{ .unknown = {} }",
+        else => return ".{ .unimplemented = {} }",
     };
 
     // Get function type to access return_type
     const func_type_key = info.ip.indexToKey(func_ty);
     const return_type = switch (func_type_key) {
         .func_type => |ft| ft.return_type,
-        else => return ".{ .unknown = {} }",
+        else => return ".{ .unimplemented = {} }",
     };
 
     // Return type is Allocator.Error!*T - unwrap error union to get *T
@@ -366,7 +378,7 @@ fn extractAllocCreateType(info: *const FnInfo, datum: Data) []const u8 {
         break :blk switch (return_key) {
             .error_union_type => |eu| eu.payload_type,
             .ptr_type => return_type, // Already unwrapped
-            else => return ".{ .unknown = {} }",
+            else => return ".{ .unimplemented = {} }",
         };
     };
 
@@ -375,7 +387,7 @@ fn extractAllocCreateType(info: *const FnInfo, datum: Data) []const u8 {
         const ptr_key = info.ip.indexToKey(ptr_type);
         break :blk switch (ptr_key) {
             .ptr_type => |p| p.child,
-            else => return ".{ .unknown = {} }",
+            else => return ".{ .unimplemented = {} }",
         };
     };
 
@@ -385,20 +397,20 @@ fn extractAllocCreateType(info: *const FnInfo, datum: Data) []const u8 {
 /// Extract element type T from allocator.alloc() return type Allocator.Error![]T
 fn extractAllocAllocType(info: *const FnInfo, datum: Data) []const u8 {
     const callee_ref = datum.pl_op.operand;
-    const ip_idx = callee_ref.toInterned() orelse return ".{ .unknown = {} }";
+    const ip_idx = callee_ref.toInterned() orelse return ".{ .unimplemented = {} }";
 
     // Get function and its type
     const func_key = info.ip.indexToKey(ip_idx);
     const func_ty = switch (func_key) {
         .func => |f| f.ty,
-        else => return ".{ .unknown = {} }",
+        else => return ".{ .unimplemented = {} }",
     };
 
     // Get function type to access return_type
     const func_type_key = info.ip.indexToKey(func_ty);
     const return_type = switch (func_type_key) {
         .func_type => |ft| ft.return_type,
-        else => return ".{ .unknown = {} }",
+        else => return ".{ .unimplemented = {} }",
     };
 
     // Return type is Allocator.Error![]T or ?[]T - unwrap to get []T
@@ -408,7 +420,7 @@ fn extractAllocAllocType(info: *const FnInfo, datum: Data) []const u8 {
             .error_union_type => |eu| eu.payload_type,
             .opt_type => |child| child, // remap returns ?[]T
             .ptr_type => return_type, // Already unwrapped
-            else => return ".{ .unknown = {} }",
+            else => return ".{ .unimplemented = {} }",
         };
     };
 
@@ -418,7 +430,7 @@ fn extractAllocAllocType(info: *const FnInfo, datum: Data) []const u8 {
         const slice_key = info.ip.indexToKey(slice_type);
         break :blk switch (slice_key) {
             .ptr_type => |p| p.child,
-            else => return ".{ .unknown = {} }",
+            else => return ".{ .unimplemented = {} }",
         };
     };
 
@@ -432,7 +444,7 @@ fn payloadStructFieldPtr(info: *const FnInfo, datum: Data, field_index: usize) [
     const ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
         typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
     else
-        ".{ .unknown = {} }"; // Will cause compile error if hit
+        ".{ .unimplemented = {} }"; // Will cause compile error if hit
     const base_src = srcString(info, datum.ty_op.operand);
 
     // Extract container type_id from operand's type (pointer to struct -> struct type)
@@ -465,7 +477,7 @@ fn payloadStructFieldVal(info: *const FnInfo, datum: Data) []const u8 {
     const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
         typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
     else
-        ".{ .unknown = {} }"; // Will cause compile error if hit
+        ".{ .unimplemented = {} }"; // Will cause compile error if hit
     const payload_index = datum.ty_pl.payload;
 
     // StructField: struct_operand (Ref as u32), field_index (u32)
@@ -486,7 +498,7 @@ fn payloadFieldParentPtr(info: *const FnInfo, datum: Data) []const u8 {
     const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
         typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
     else
-        ".{ .unknown = {} }";
+        ".{ .unimplemented = {} }";
     const payload_index = datum.ty_pl.payload;
 
     // FieldParentPtr: field_ptr (Ref as u32), field_index (u32)

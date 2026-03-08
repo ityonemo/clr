@@ -335,6 +335,9 @@ pub fn switch_br(
     comptime index: usize,
     comptime case_fns: anytype,
 ) !void {
+    // Large switch statements (e.g., byte-based tokenizers) need higher branch limit
+    @setEvalBranchQuota(100000);
+
     const ctx = state.ctx;
     const results = state.results;
     const return_gid = state.return_gid;

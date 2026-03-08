@@ -2112,7 +2112,8 @@ pub const MemorySafety = union(enum) {
                 ref.recursive.analyte.memory_safety = .{ .unset = {} };
                 retval_init(refinements, r.to, ctx);
             },
-            .noreturn, .unimplemented => unreachable,
+            .unimplemented => @panic("retval_init: unimplemented return type"),
+            .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
         }
     }
 
@@ -2172,7 +2173,8 @@ pub const MemorySafety = union(enum) {
                 ref.recursive.analyte.memory_safety = .{ .unset = {} };
                 retval_init_defined_inner(refinements, r.to, false);
             },
-            .void, .noreturn, .unimplemented => {},
+            .void, .noreturn => {},
+            .unimplemented => @panic("retval_init_defined: unimplemented return type"),
         }
     }
 
@@ -2434,6 +2436,11 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn sub_with_overflow(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setStructUnset(state, index);
+    }
+
+    pub fn mul_with_overflow(state: State, index: usize, params: anytype) !void {
         _ = params;
         setStructUnset(state, index);
     }

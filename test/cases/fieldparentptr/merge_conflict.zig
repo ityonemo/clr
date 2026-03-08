@@ -1,9 +1,10 @@
 // Test that fieldparentptr_safety detects conflicting origins after branch merge
-const std = @import("std");
 const S = struct { x: u8, y: u8 };
 
 fn someCondition() bool {
-    return std.crypto.random.boolean();
+    var x: bool = true;
+    _ = &x;
+    return x;
 }
 
 pub fn main() u8 {

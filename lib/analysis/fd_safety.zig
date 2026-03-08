@@ -113,8 +113,8 @@ pub const FdSafety = union(enum) {
             gates.isPosixPread(fqn) or gates.isPosixPwrite(fqn))
         {
             try checkFdUse(state, args);
-            // Don't intercept - let the call proceed normally
-            return false;
+            // Intercept to avoid diving into stdlib syscall code
+            return true;
         }
 
         return false;

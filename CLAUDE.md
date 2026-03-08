@@ -79,7 +79,7 @@ bats test/integration/allocator.bats -f "double-free"
 **Integration Test Efficiency**: The full test suite is expensive (~7 min). Follow these rules:
 1. Run `./run_integration.sh` only ONCE per feature, right before committing
 2. If the output shows all tests as "ok", they passed - don't re-run to "verify"
-3. Don't pipe to `tail` or `grep` then re-run to check exit codes - read the output the first time
+3. **NEVER pipe `./run_integration.sh` to `| tail`, `| head`, `| grep`, etc.** - this wastes the full test run. Instead, use tee to capture and display: `./run_integration.sh 2>&1 | tee /tmp/integration_results.txt; echo "Exit code: $?"`
 4. If you need to check a specific test, use `./run_one.sh` or `bats -f "pattern"` instead of the full suite
 5. NEVER run the full integration suite multiple times in a row for the same set of changes
 
@@ -261,7 +261,7 @@ If you find yourself writing `.analyte.undefined = ...` or `.analyte.memory_safe
   const pointee_idx = refinements.at(ptr_idx).pointer.to;
   ```
 
-- **Always crash on `.unimplemented`** - Never silently handle or propagate `.unimplemented` refinements. If code encounters `.unimplemented`, it should crash immediately. This surfaces issues that need to be fixed (missing tag handlers, incomplete type tracking) rather than hiding them. The crash tells us exactly what needs to be implemented.
+- **Always crash on `.unimplemented`** - Never silently handle or propagate `.unimplemented` refinements. If code encounters `.unimplemented`, it should crash immediately. This surfaces issues that need to be fixed (missing tag handlers, incomplete type tracking) rather than hiding them. The crash tells us exactly what needs to be implemented. **NEVER remove `.unimplemented` panics** - these crashes are signals that something important is missing from our code and needs to be implemented.
 
 - **Rely on Zig's bounds checking** - Don't write explicit bounds checks before array access. Zig's runtime safety already panics on out-of-bounds access with a clear error message. Add a comment explaining why the access is guaranteed valid:
   ```zig
@@ -577,6 +577,19 @@ Only `ret_safe` is implemented. The following return variants are marked as `Uni
 - **`ret_addr`**: Returns the return address (used for stack traces). Probably safe to leave as unimplemented since it's metadata, not data flow.
 - **`ret_load`**: Returns by loading from a pointer (used for large return values that don't fit in registers). **TODO**: This affects data flow and needs implementation.
 - **`ret_ptr`**: Returns the pointer where the return value should be stored (caller provides storage). **TODO**: This affects data flow and needs implementation.
+
+### `std.crypto.random` causes false positives
+
+The `std.crypto.random` module (including `std.crypto.random.boolean()`, `std.crypto.random.bytes()`, etc.) triggers false positive "use of undefined value" errors. This is because the stdlib implementation uses complex patterns that our analysis doesn't fully track.
+
+**Workaround for tests**: Instead of `std.crypto.random.boolean()`, use:
+```zig
+fn someCondition() bool {
+    var x: bool = true;
+    _ = &x;  // Prevent comptime evaluation
+    return x;
+}
+```
 
 ## Known Issues / Future Work
 

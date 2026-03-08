@@ -383,6 +383,11 @@ pub const UndefinedSafety = union(enum) {
         markStructFieldsDefined(state.results, index, state.refinements);
     }
 
+    pub fn mul_with_overflow(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        markStructFieldsDefined(state.results, index, state.refinements);
+    }
+
     fn markResultDefined(state: State, index: usize, params: anytype) !void {
         _ = params;
         const result_idx = state.results[index].refinement.?;
@@ -1268,7 +1273,8 @@ pub const UndefinedSafety = union(enum) {
                 // that is already being processed. Following would cause infinite recursion.
             },
             .void => {}, // void return type is valid
-            .noreturn, .unimplemented => unreachable,
+            .unimplemented => @panic("retval_init: unimplemented return type"),
+            .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
         }
     }
 
@@ -1313,7 +1319,8 @@ pub const UndefinedSafety = union(enum) {
                 // that is already being processed. Following would cause infinite recursion.
             },
             .void => {}, // void return type is valid
-            .noreturn, .unimplemented => unreachable,
+            .unimplemented => @panic("retval_init_defined: unimplemented return type"),
+            .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
         }
     }
 
