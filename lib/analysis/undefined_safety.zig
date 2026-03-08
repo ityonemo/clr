@@ -1382,7 +1382,6 @@ pub const UndefinedSafety = union(enum) {
         fqn: []const u8,
     ) anyerror!bool {
         _ = return_type;
-        _ = args;
 
         if (gates.isAllocatorCreate(fqn)) {
             handleAllocatorCreate(state, index);
@@ -1394,7 +1393,88 @@ pub const UndefinedSafety = union(enum) {
             return false; // memory_safety.call() intercepts
         }
 
+        // POSIX fd functions - check for undefined fd arguments
+        if (gates.isPosixClose(fqn)) {
+            // close(fd) - arg[0] is fd
+            try checkArgUndefined(state, args, 0);
+            return false; // fd_safety.call() intercepts
+        }
+
+        if (gates.isPosixRead(fqn) or gates.isPosixPread(fqn)) {
+            // read(fd, buf, ...) - arg[0] is fd
+            try checkArgUndefined(state, args, 0);
+            return false;
+        }
+
+        if (gates.isPosixWrite(fqn) or gates.isPosixPwrite(fqn)) {
+            // write(fd, buf, ...) - arg[0] is fd
+            try checkArgUndefined(state, args, 0);
+            return false;
+        }
+
+        if (gates.isPosixDup(fqn)) {
+            // dup(oldfd) - arg[0] is fd
+            try checkArgUndefined(state, args, 0);
+            return false; // fd_safety.call() intercepts
+        }
+
+        if (gates.isPosixDup2(fqn)) {
+            // dup2(oldfd, newfd) - arg[0] and arg[1] are fds
+            try checkArgUndefined(state, args, 0);
+            try checkArgUndefined(state, args, 1);
+            return false; // fd_safety.call() intercepts
+        }
+
+        // fd-opening functions - mark result as defined
+        if (gates.isPosixOpen(fqn) or gates.isPosixOpenat(fqn) or
+            gates.isPosixSocket(fqn) or gates.isPosixAccept(fqn) or
+            gates.isPosixEpollCreate(fqn) or gates.isPosixPipe(fqn))
+        {
+            handleFdOpen(state, index);
+            return false; // fd_safety.call() intercepts
+        }
+
         return false;
+    }
+
+    /// Check if argument at given index is undefined
+    fn checkArgUndefined(state: State, args: []const tag.Src, arg_index: usize) !void {
+        if (arg_index >= args.len) return;
+
+        const src = args[arg_index];
+        const arg_gid: Refinements.Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse return,
+            .interned, .fnptr => return, // Interned values are always defined
+        };
+
+        const arg_ref = state.refinements.at(arg_gid);
+        switch (arg_ref.*) {
+            .scalar => |s| {
+                const undef = s.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            .pointer => |p| {
+                const undef = p.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Handle fd-opening functions - mark result as defined
+    fn handleFdOpen(state: State, index: usize) void {
+        const result_idx = state.results[index].refinement orelse return;
+        // fd functions return errorunion -> scalar (fd_t)
+        // Mark the entire result tree as defined
+        setDefinedRecursive(state.refinements, result_idx);
     }
 
     /// Handle mem.Allocator.create - mark pointee as undefined.

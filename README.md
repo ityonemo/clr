@@ -60,12 +60,23 @@ Currently implemented:
 - Loop analysis (for, while, for-else, while-else with fixed-point iteration)
 - Global variable tracking (undefined, variant, and memory safety)
 - Recursive datatypes (linked lists, trees, recursive unions)
+- File descriptor safety:
+  - `posix.open`/`close`/`dup`/`dup2`/`socket`/`accept`/`epoll_create`/`pipe` tracking
+  - Use-after-close detection (read/write/dup on closed fd)
+  - Double-close detection
+  - Fd leak detection (unclosed fds at function exit)
+  - Return propagation (returned fds exempt from leak warnings)
+  - Undefined fd argument detection (close/read/write with undefined fd)
 
 Planned (see LIMITATIONS.md for details):
 - Interned constants (int_const values like string literals, comptime pointers)
 - Moving provenance
 - Recursive functions
 - async/await
+- Aliasing safety (detecting conflicting mutable references)
+- Allocator lifecycle safety (init/deinit for all allocator types, leak detection at deinit for GPA/MemoryPool, bulk-free semantics for Arena/FBA)
+- Mutex safety (lock/unlock pairing, deadlock detection)
+- Custom coercion capability (user-defined refinement rules)
 
 Maybe:
 - dbg_var_val lookahead for better error messages (see below)
@@ -158,7 +169,8 @@ clr/
 │       ├── undefined_safety.zig  # Use-before-assign tracking
 │       ├── memory_safety.zig     # Allocation/free tracking
 │       ├── null_safety.zig       # Optional unwrap checking
-│       └── variant_safety.zig    # Tagged union field access
+│       ├── variant_safety.zig    # Tagged union field access
+│       └── fd_safety.zig         # File descriptor tracking
 ├── test/
 │   ├── integration/         # BATS integration tests
 │   │   ├── test_helper.bash

@@ -483,3 +483,40 @@ load test_helper
     [[ "$output" =~ "use of undefined" ]]
     [[ "$output" =~ "call_undefined_fnptr.zig" ]]
 }
+
+# =============================================================================
+# POSIX fd function tests
+# =============================================================================
+
+@test "detects closing undefined fd" {
+    run compile_and_run "$TEST_CASES/undefined/posix/close_undefined_fd.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+    [[ "$output" =~ "close_undefined_fd.main" ]]
+}
+
+@test "detects reading from undefined fd" {
+    run compile_and_run "$TEST_CASES/undefined/posix/read_undefined_fd.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+    [[ "$output" =~ "read_undefined_fd.main" ]]
+}
+
+@test "detects writing to undefined fd" {
+    run compile_and_run "$TEST_CASES/undefined/posix/write_undefined_fd.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+    [[ "$output" =~ "write_undefined_fd.main" ]]
+}
+
+@test "detects dup on undefined fd" {
+    run compile_and_run "$TEST_CASES/undefined/posix/dup_undefined_fd.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined" ]]
+    [[ "$output" =~ "dup_undefined_fd.main" ]]
+}
+
+@test "no error for correct posix fd operations" {
+    run compile_and_run "$TEST_CASES/undefined/posix/valid_fd_operations.zig"
+    [ "$status" -eq 0 ]
+}
