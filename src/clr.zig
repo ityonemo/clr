@@ -277,6 +277,24 @@ fn generate(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, _: c_anyopaque_const_
     const nav = ip.getNav(func.owner_nav);
     const fqn = nav.fqn.toSlice(ip);
 
+    // Check if this function will be intercepted at runtime
+    // If so, generate a stub instead of full AIR processing
+    if (clr_codegen.shouldIntercept(fqn)) {
+        const stub = clr_codegen.generateInterceptedStub(func_index, fqn);
+        const mir = clr_allocator.allocator().create(FuncMir) catch return null;
+        mir.* = .{
+            .func_index = func_index,
+            .owner_nav = @intFromEnum(func.owner_nav),
+            .text = stub,
+            .call_targets = &.{}, // No calls from stub
+            .entrypoint = false,
+            .name_mappings = &.{},
+            .field_mappings = &.{},
+            .return_type = null,
+        };
+        return @ptrCast(mir);
+    }
+
     // Get root module name for entrypoint detection
     const root_name = zcu.root_mod.fully_qualified_name;
 
