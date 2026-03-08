@@ -4,6 +4,7 @@ const memory_safety_analysis = @import("analysis/memory_safety.zig");
 const null_safety_analysis = @import("analysis/null_safety.zig");
 const variant_safety_analysis = @import("analysis/variant_safety.zig");
 const fieldparentptr_safety_analysis = @import("analysis/fieldparentptr_safety.zig");
+const fd_safety_analysis = @import("analysis/fd_safety.zig");
 
 const Analyte = @This();
 
@@ -14,6 +15,7 @@ const analyses = .{
     null_safety_analysis.NullSafety,
     variant_safety_analysis.VariantSafety,
     fieldparentptr_safety_analysis.FieldParentPtrSafety,
+    fd_safety_analysis.FdSafety,
 };
 
 /// Check at comptime if any analysis module has a shim for the given FQN.
@@ -35,6 +37,7 @@ memory_safety: ?memory_safety_analysis.MemorySafety = null,
 null_safety: ?null_safety_analysis.NullSafety = null,
 variant_safety: ?variant_safety_analysis.VariantSafety = null,
 fieldparentptr_safety: ?fieldparentptr_safety_analysis.FieldParentPtrSafety = null,
+fd_safety: ?fd_safety_analysis.FdSafety = null,
 
 /// Deep copy the analyte, calling .copy() on each analysis type.
 pub fn copy(self: Analyte, allocator: std.mem.Allocator) error{OutOfMemory}!Analyte {

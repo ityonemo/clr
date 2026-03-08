@@ -70,3 +70,76 @@ pub fn isArenaDeinit(fqn: []const u8) bool {
 pub fn isArenaAllocator(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "ArenaAllocator.allocator") != null;
 }
+
+// =========================================================================
+// File Descriptor Operations (posix)
+// =========================================================================
+
+/// Match posix.open calls (but NOT openat)
+pub fn isPosixOpen(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "posix.openat") != null) return false;
+    return std.mem.indexOf(u8, fqn, "posix.open") != null;
+}
+
+/// Match posix.openat calls
+pub fn isPosixOpenat(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.openat") != null;
+}
+
+/// Match posix.close calls
+pub fn isPosixClose(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.close") != null;
+}
+
+/// Match posix.socket calls
+pub fn isPosixSocket(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.socket") != null;
+}
+
+/// Match posix.accept calls
+pub fn isPosixAccept(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.accept") != null;
+}
+
+/// Match posix.pipe calls
+pub fn isPosixPipe(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.pipe") != null;
+}
+
+/// Match posix.dup calls (but NOT dup2)
+pub fn isPosixDup(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "posix.dup2") != null) return false;
+    return std.mem.indexOf(u8, fqn, "posix.dup") != null;
+}
+
+/// Match posix.dup2 calls
+pub fn isPosixDup2(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.dup2") != null;
+}
+
+/// Match posix.epoll_create calls
+pub fn isPosixEpollCreate(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.epoll_create") != null;
+}
+
+/// Match posix.read calls
+pub fn isPosixRead(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "posix.pread") != null) return false;
+    return std.mem.indexOf(u8, fqn, "posix.read") != null;
+}
+
+/// Match posix.write calls
+pub fn isPosixWrite(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "posix.pwrite") != null) return false;
+    return std.mem.indexOf(u8, fqn, "posix.write") != null;
+}
+
+/// Match posix.pread calls
+pub fn isPosixPread(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.pread") != null;
+}
+
+/// Match posix.pwrite calls
+pub fn isPosixPwrite(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.pwrite") != null;
+}

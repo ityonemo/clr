@@ -55,7 +55,8 @@ const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
 const NullSafety = @import("analysis/null_safety.zig").NullSafety;
 const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
 const FieldParentPtrSafety = @import("analysis/fieldparentptr_safety.zig").FieldParentPtrSafety;
-pub const analyses = .{ UndefinedSafety, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety };
+const FdSafety = @import("analysis/fd_safety.zig").FdSafety;
+pub const analyses = .{ UndefinedSafety, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety, FdSafety };
 
 // Re-export core types
 pub const Meta = core.Meta;
