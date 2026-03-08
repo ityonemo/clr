@@ -1,9 +1,10 @@
 // Test that shallow-copied active_metas cannot be mutated unexpectedly
-const std = @import("std");
 const Union = union(enum) { a: u8, b: u8 };
 
 fn someCondition() bool {
-    return std.crypto.random.boolean();
+    var x: bool = true;
+    _ = &x;
+    return x;
 }
 
 pub fn main() u8 {

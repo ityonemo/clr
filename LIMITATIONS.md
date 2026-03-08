@@ -2,26 +2,6 @@
 
 ## Currently Not Implemented, But Planned
 
-### Complex Type Extraction
-
-Some codegen paths emit `.{ .ty = .{ .unknown = {} } }` when type extraction fails, but the runtime `Type` union doesn't support the `unknown` variant. This causes compile errors in the generated analyzer.
-
-**Affected cases**:
-- Some allocator type extraction paths (e.g., when callee reference cannot be resolved)
-- Deeply nested struct types that hit recursion limits
-
-**Note**: Most unhandled types correctly use `.{ .ty = .{ .unimplemented = {} } }` which IS supported and will crash at runtime with a clear error if accessed.
-
-**Planned fix**: Replace remaining `.unknown` emissions with `.unimplemented` or add `unknown` variant to `lib/tag.zig` Type union.
-
-### DbgVarVal Analysis Handlers
-
-The `dbg_var_ptr` instruction requires analysis module handlers to retroactively set variable names on analysis states (because in AIR, `dbg_var_ptr` comes after `store` instructions that create the states).
-
-The similar `dbg_var_val` instruction (for non-pointer values) does not currently have analysis handlers. If value variables need names in error messages, handlers would need to be added.
-
-**Investigation needed**: Test whether undefined tracking for value variables (not pointers) produces error messages that would benefit from variable names.
-
 ### Cross-Function Global Mutation
 
 Global variables are tracked within individual functions, but mutations to globals by called functions are not propagated back to callers.
@@ -56,21 +36,13 @@ pub fn main() void {
 
 **Future fix**: Track that global pointer variables contain values that point to global memory. May require analyzing the global's initial value from the InternPool.
 
-### Arena-Style Allocators
+### Nested Arena Allocators
 
-Arena-style memory management is fully tracked:
-
-**What works**:
-- `ArenaAllocator.init()` - Creates arena, checks child allocator isn't deinited
-- `ArenaAllocator.deinit()` - Marks all arena allocations as freed
-- `ArenaAllocator.allocator()` - Returns allocator linked to arena instance
-- Allocations from arena don't report as leaks when arena is deinited
-- Use-after-deinit detection (allocating from deinited arena)
-- Double-deinit detection
-- Cross-allocator mismatch (arena alloc freed with page_allocator)
-- Arenas returned from functions are properly tracked
+Arena-style memory management is fully tracked, with one exception:
 
 **Limitation**: Nested arenas (arena backed by another arena) - the child allocator deinit check only works for runtime allocators, not nested arena scenarios.
+
+All other arena operations work correctly: init, deinit, allocator(), leak detection, use-after-deinit, double-deinit, and cross-allocator mismatch detection.
 
 ### Global Union Initial Values
 
@@ -141,41 +113,42 @@ pub fn main() void {
 
 **Future improvement**: Could add optional program-end leak detection that checks if global-reachable allocations are freed before `main` returns.
 
-### Unimplemented AIR Tags
+### Standard Library Random Functions
 
-The following AIR instruction tags are not yet implemented and produce `.unimplemented` refinements:
+Functions from `std.crypto.random` (e.g., `std.crypto.random.boolean()`, `std.crypto.random.int()`) are not properly analyzed and may cause false positives.
 
-**Array/Slice operations**:
-- `aggregate_init` - Initialize aggregate (array/struct) from elements
-- `slice` - Create slice from pointer and length (subslices via `slice_ptr` ARE supported)
+**Why**: These functions use complex internal state and syscalls that the analyzer cannot fully track. The return values appear as "unimplemented" refinements, which can propagate and cause spurious undefined value errors.
 
-**Type conversions**:
-- `intcast` - Integer type casting
+**Workaround**: For test cases, use local variables instead:
+```zig
+// Instead of:
+if (std.crypto.random.boolean()) { ... }
 
-**Error unions**:
-- `wrap_errunion_err` - Wrap error into error union (error propagation)
+// Use:
+fn someCondition() bool {
+    var x: bool = true;
+    _ = &x;  // Prevent comptime evaluation
+    return x;
+}
+```
 
-**Debug/minor** (these produce void and don't affect analysis):
-- `dbg_inline_block` - Inlined function debug info
-- `memset_safe` - Memory set
+### Partially Implemented AIR Tags
+
+The following AIR instruction tags are handled (don't crash) but produce `.unimplemented` refinements that may propagate and cause issues downstream:
+
+- `dbg_inline_block` - Inlined function debug info (would require codegen to emit inlined function body)
 - `ret_addr` - Return address for stack traces
 - `stack_trace_frames` - Stack trace frame info
-- `noop_debug` - Pruned debug instruction
+
+These are unlikely to affect most code since they're primarily used for debugging and stack traces.
 
 ## Needs Investigation
 
-### Review All Parameters That Should Be Src Type
+### DbgVarPtr Global Support
 
-After refactoring `Store.ptr` from `?usize` to `Src` type (to support globals), other tag struct parameters may also need to be converted to `Src` for consistency and global support:
+The `dbg_var_ptr.ptr` field is currently `?usize` (instruction index only). To support naming global variables in error messages, this may need conversion to `Src` type.
 
-**Candidates to review**:
-- `alloc_destroy.ptr` - currently `usize`, may need `Src` for freeing global allocations
-- `dbg_var_ptr.ptr` - currently `?usize`, may need `Src` for global variable names
-- `set_union_tag.ptr` - currently `usize`, may need `Src` for global unions
-
-**Already using Src**:
-- `Store.ptr` - converted to support globals
-- `Load.ptr` - already uses `Src` for globals
+**Already using Src**: `Store.ptr`, `Load.ptr`, `AllocDestroy.ptr`, `SetUnionTag.ptr`
 
 **Note**: Not all `ptr` fields need to be `Src`. Some are indices into local results (like `struct_field_ptr.base`) which will never be globals.
 

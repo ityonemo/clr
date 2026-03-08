@@ -1355,6 +1355,58 @@ pub const WrapErrunionPayload = struct {
     }
 };
 
+/// WrapOptional takes a payload value and wraps it in an optional.
+/// This is the inverse of OptionalPayload.
+pub const WrapOptional = struct {
+    /// Source value to wrap as the optional payload.
+    src: Src,
+    /// Result type (the optional type).
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Get payload GID from source
+        const payload_gid: Gid = switch (self.src) {
+            .inst => |src| blk: {
+                const src_gid = state.results[src].refinement orelse {
+                    // Source has no refinement - create based on type
+                    const inner_ty = if (self.ty == .optional) self.ty.optional.* else Type{ .scalar = {} };
+                    const ref = try typeToRefinement(inner_ty, state.refinements);
+                    break :blk try state.refinements.appendEntity(ref);
+                };
+                // Deep copy the payload so we have our own entity
+                const src_ref = state.refinements.at(src_gid).*;
+                break :blk try Refinement.copyTo(src_ref, state.refinements, state.refinements);
+            },
+            .interned => |interned| blk: {
+                // Try to look up as tracked global first
+                if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
+                    const global_ref = state.refinements.at(global_gid).*;
+                    break :blk try Refinement.copyTo(global_ref, state.refinements, state.refinements);
+                } else {
+                    const ref = try typeToRefinement(interned.ty, state.refinements);
+                    break :blk try state.refinements.appendEntity(ref);
+                }
+            },
+            .fnptr => |choices| blk: {
+                const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
+                const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
+                    .choices = owned_choices,
+                } });
+                splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                break :blk fnptr_gid;
+            },
+        };
+
+        // Create the optional that points to the payload (non-null case)
+        const optional_gid = try state.refinements.appendEntity(.{ .optional = .{
+            .to = payload_gid,
+        } });
+
+        state.results[index].refinement = optional_gid;
+        try splat(.wrap_optional, state, index, self);
+    }
+};
+
 /// Entity operation: CREATE-PTR
 /// Creates pointer to error union payload.
 ///
@@ -1946,11 +1998,30 @@ pub const AnyTag = union(enum) {
     // Simple tags - math/comparison operations that produce scalar values
     // this will have to be refined to pass parameters and divide into BinOp and UnOp.
     bit_and: Simple(.bit_and),
+    bool_or: Simple(.bool_or),
+    not: Simple(.not),
     cmp_eq: Simple(.cmp_eq),
     cmp_gt: Simple(.cmp_gt),
     cmp_gte: Simple(.cmp_gte),
     cmp_lt: Simple(.cmp_lt),
     cmp_lte: Simple(.cmp_lte),
+    cmp_vector: Simple(.cmp_vector), // Vector comparison - produces scalar result
+    cmp_neq: Simple(.cmp_neq), // Not equal comparison
+    reduce: Simple(.reduce), // Vector reduction - produces scalar result
+    select: Simple(.select), // Vector select operation - produces scalar result
+    min: Simple(.min), // Minimum of two values
+    max: Simple(.max), // Maximum of two values
+    div_trunc: Simple(.div_trunc), // Truncating division
+    div_floor: Simple(.div_floor), // Floor division
+    div_exact: Simple(.div_exact), // Exact division
+    mod: Simple(.mod), // Modulo operation
+    rem: Simple(.rem), // Remainder operation
+    mul: Simple(.mul), // Multiplication
+    trunc: Simple(.trunc), // Truncate to smaller type
+    shl: Simple(.shl), // Shift left
+    shr: Simple(.shr), // Shift right
+    xor: Simple(.xor), // Bitwise XOR
+    bit_or: Simple(.bit_or), // Bitwise OR
     ctz: Simple(.ctz),
     sub: Simple(.sub),
     add: Simple(.add),
@@ -1992,6 +2063,7 @@ pub const AnyTag = union(enum) {
     array_elem_val: ArrayElemVal,
     ptr_elem_ptr: PtrElemPtr,
     sub_with_overflow: OverflowOp(.sub_with_overflow),
+    mul_with_overflow: OverflowOp(.mul_with_overflow),
     @"try": UnwrapErrunionPayload, // try extracts payload from error union, same as unwrap_errunion_payload
     unreach: Unreach,
     unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
@@ -2007,6 +2079,13 @@ pub const AnyTag = union(enum) {
 
     // Enum safety check - produces a bool scalar for cond_br
     is_named_enum_value: Simple(.is_named_enum_value),
+
+    // Memory operations
+    memcpy: Void, // Memory copy - no refinement tracking needed for now
+    @"splat": Simple(.@"splat"), // Vector splat - creates scalar result
+
+    // Optional wrapper
+    wrap_optional: WrapOptional,
 };
 
 pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {

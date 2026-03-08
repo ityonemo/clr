@@ -143,3 +143,48 @@ pub fn isPosixPread(fqn: []const u8) bool {
 pub fn isPosixPwrite(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "posix.pwrite") != null;
 }
+
+// =========================================================================
+// Formatter Functions
+// =========================================================================
+
+/// Match fmt.format calls
+pub fn isFmtFormat(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "fmt.format") != null;
+}
+
+/// Match fmt.bufPrint calls (but NOT bufPrintZ)
+pub fn isFmtBufPrint(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "fmt.bufPrintZ") != null) return false;
+    return std.mem.indexOf(u8, fqn, "fmt.bufPrint") != null;
+}
+
+/// Match fmt.bufPrintZ calls
+pub fn isFmtBufPrintZ(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "fmt.bufPrintZ") != null;
+}
+
+/// Match fmt.count calls
+pub fn isFmtCount(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "fmt.count") != null;
+}
+
+/// Match log.scoped calls (std.log.scoped(...).debug/info/warn/err)
+pub fn isLogScoped(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "log.scoped") != null;
+}
+
+/// Match log.default calls (std.log.default.debug/info/warn/err)
+pub fn isLogDefault(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "log.default") != null;
+}
+
+/// Check if FQN matches any formatter function
+pub fn isFormatter(fqn: []const u8) bool {
+    return isFmtFormat(fqn) or
+        isFmtBufPrint(fqn) or
+        isFmtBufPrintZ(fqn) or
+        isFmtCount(fqn) or
+        isLogScoped(fqn) or
+        isLogDefault(fqn);
+}
