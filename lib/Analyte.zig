@@ -8,28 +8,6 @@ const fd_safety_analysis = @import("analysis/fd_safety.zig");
 
 const Analyte = @This();
 
-/// All analysis modules for shim introspection
-const analyses = .{
-    undefined_analysis.UndefinedSafety,
-    memory_safety_analysis.MemorySafety,
-    null_safety_analysis.NullSafety,
-    variant_safety_analysis.VariantSafety,
-    fieldparentptr_safety_analysis.FieldParentPtrSafety,
-    fd_safety_analysis.FdSafety,
-};
-
-/// Check at comptime if any analysis module has a shim for the given FQN.
-/// Returns true if at least one module has a declaration matching the FQN.
-pub fn hasShim(comptime fqn: []const u8) bool {
-    if (fqn.len == 0) return false;
-    inline for (analyses) |Analysis| {
-        if (@hasDecl(Analysis, fqn)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /// Analyte holds the analysis state for a value.
 /// Each analysis contributes its state type here.
 undefined_safety: ?undefined_analysis.UndefinedSafety = null,

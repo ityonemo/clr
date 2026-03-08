@@ -133,18 +133,6 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     state.results[index].refinement = return_gid;
 }
 
-/// Dispatch to all analysis shims for a given FQN.
-/// Called by Inst.call when a shimmed stdlib function is invoked.
-/// Shim functions are named with @"fqn" syntax in analysis modules.
-/// If no shim exists for the FQN, this is a no-op.
-pub fn splatShim(comptime fqn: []const u8, state: State, index: usize, return_type: tag.Type, args: []const tag.Src) !void {
-    inline for (tag.analyses) |Analysis| {
-        if (@hasDecl(Analysis, fqn)) {
-            try @field(Analysis, fqn)(state, index, return_type, args);
-        }
-    }
-}
-
 /// Dispatch call info to all analysis modules' runtime filters.
 /// Each analysis module implements a `call` function that receives FQN at runtime
 /// and returns true if it intercepts (handles) the call.
