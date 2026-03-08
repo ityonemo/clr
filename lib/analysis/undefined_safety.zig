@@ -1441,7 +1441,67 @@ pub const UndefinedSafety = union(enum) {
             return false; // fd_safety.call() intercepts
         }
 
+        // Formatter functions - check tuple args for undefined values
+        if (gates.isFormatter(fqn)) {
+            try handleFormatter(state, args);
+            return true; // Intercept - stub is generated
+        }
+
         return false;
+    }
+
+    /// Handle formatter functions - check all args recursively for undefined values
+    fn handleFormatter(state: State, args: []const tag.Src) !void {
+        for (args) |src| {
+            const arg_gid: Refinements.Gid = switch (src) {
+                // Inst args must have refinements
+                .inst => |inst| state.results[inst].refinement.?,
+                // Interned values are comptime constants - always defined
+                .interned => continue,
+                // Function pointers can't be undefined (they're addresses)
+                .fnptr => continue,
+            };
+            try checkUndefinedRecursive(state, arg_gid);
+        }
+    }
+
+    /// Recursively check a refinement for undefined values (for tuple/struct args)
+    fn checkUndefinedRecursive(state: State, gid: Refinements.Gid) !void {
+        const ref = state.refinements.at(gid);
+        switch (ref.*) {
+            .scalar => |s| {
+                const undef = s.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            .pointer => |p| {
+                const undef = p.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    try checkUndefinedRecursive(state, field_gid);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |field_gid_opt| {
+                    if (field_gid_opt) |field_gid| {
+                        try checkUndefinedRecursive(state, field_gid);
+                    }
+                }
+            },
+            .optional => |o| try checkUndefinedRecursive(state, o.to),
+            .errorunion => |e| try checkUndefinedRecursive(state, e.to),
+            .region => |r| try checkUndefinedRecursive(state, r.to),
+            .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
+        }
     }
 
     /// Check if argument at given index is undefined
@@ -1625,8 +1685,12 @@ test "alloc_create creates errorunion -> pointer -> pointee" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
+    // First create an allocator refinement at inst 0 (memory_safety.alloc_create expects this)
+    const alloc_ref = try refinements.appendEntity(.{ .allocator = .{ .type_id = 10 } });
+    results[0].refinement = alloc_ref;
+
     // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = null, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = 0, .ty = .{ .scalar = {} } } });
 
     // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
     const eu_idx = results[1].refinement.?;

@@ -195,6 +195,37 @@ Use `./clear.sh` to clean up generated `.air.zig` files when done.
    }
    ```
 
+4. **NEVER silently ignore missing data** - When accessing data that MUST exist (refinements, results, fields), NEVER use `orelse continue`, `orelse return`, or `orelse` with a fallback value. These patterns hide bugs by silently skipping over invariant violations. If something should exist and doesn't, CRASH to expose the bug.
+
+   **BANNED PATTERNS** (never write these):
+   ```zig
+   // BAD: Silently skips if refinement missing - hides bugs
+   const gid = results[inst].refinement orelse continue;
+   const gid = results[inst].refinement orelse return;
+   const ref = refinements.getGlobal(idx) orelse return;
+
+   // BAD: Falls back to default - corrupts analysis
+   const gid = results[inst].refinement orelse 0;
+   const ref = map.get(key) orelse .{ .scalar = {} };
+   ```
+
+   **REQUIRED PATTERNS** (use these instead):
+   ```zig
+   // GOOD: Crash immediately if invariant violated
+   const gid = results[inst].refinement.?;
+   const ref = refinements.getGlobal(idx).?;
+
+   // GOOD: If truly optional, use explicit check with comment
+   // Args from interned values don't have refinements - skip them
+   if (src == .interned) continue;
+   const gid = results[inst].refinement.?;
+   ```
+
+   The ONLY valid uses of `orelse continue/return` are:
+   - Iterating over genuinely optional data (e.g., sparse union fields)
+   - Early exit when a feature is intentionally not applicable
+   - ALWAYS add a comment explaining WHY it's optional
+
 ## Architecture: Tag Handlers vs Analysis Modules
 
 **IMPORTANT**: The following files must NEVER contain `.analyte.xxx_safety` patterns (except in tests):

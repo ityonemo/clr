@@ -3910,6 +3910,77 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     , .{ func_index, func_index }, null);
 }
 
+// =============================================================================
+// Compile-Time Function Interception
+// =============================================================================
+//
+// Functions that will be intercepted at runtime should be stubbed at compile
+// time to avoid generating full AIR for stdlib internals (syscalls, etc.).
+// =============================================================================
+
+/// Check if FQN contains pattern (simple substring search, no stdlib calls)
+fn containsPattern(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len > haystack.len) return false;
+    if (needle.len == 0) return true;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.mem.eql(u8, haystack[i..][0..needle.len], needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Check if a function FQN matches patterns that will be intercepted at runtime.
+pub fn shouldIntercept(fqn: []const u8) bool {
+    // Allocator operations
+    if (containsPattern(fqn, "mem.Allocator.create")) return true;
+    if (containsPattern(fqn, "mem.Allocator.destroy")) return true;
+    if (containsPattern(fqn, "mem.Allocator.alloc")) return true;
+    if (containsPattern(fqn, "mem.Allocator.alignedAlloc")) return true;
+    if (containsPattern(fqn, "mem.Allocator.free")) return true;
+    if (containsPattern(fqn, "mem.Allocator.realloc")) return true;
+    if (containsPattern(fqn, "mem.Allocator.resize")) return true;
+    if (containsPattern(fqn, "mem.Allocator.remap")) return true;
+    if (containsPattern(fqn, "mem.Allocator.dupe")) return true;
+    // Arena operations
+    if (containsPattern(fqn, "ArenaAllocator.init")) return true;
+    if (containsPattern(fqn, "ArenaAllocator.deinit")) return true;
+    if (containsPattern(fqn, "ArenaAllocator.allocator")) return true;
+    // Posix operations (dive into syscalls)
+    if (containsPattern(fqn, "posix.open")) return true;
+    if (containsPattern(fqn, "posix.close")) return true;
+    if (containsPattern(fqn, "posix.read")) return true;
+    if (containsPattern(fqn, "posix.write")) return true;
+    if (containsPattern(fqn, "posix.socket")) return true;
+    if (containsPattern(fqn, "posix.accept")) return true;
+    if (containsPattern(fqn, "posix.pipe")) return true;
+    if (containsPattern(fqn, "posix.dup")) return true;
+    if (containsPattern(fqn, "posix.epoll_create")) return true;
+    if (containsPattern(fqn, "posix.pread")) return true;
+    if (containsPattern(fqn, "posix.pwrite")) return true;
+    // Formatter functions (comptime format string pattern)
+    if (containsPattern(fqn, "fmt.format")) return true;
+    if (containsPattern(fqn, "fmt.bufPrint")) return true;
+    if (containsPattern(fqn, "fmt.count")) return true;
+    if (containsPattern(fqn, "log.scoped")) return true;
+    if (containsPattern(fqn, "log.default")) return true;
+    return false;
+}
+
+/// Generate a stub for a function that will be intercepted at runtime.
+/// Body panics - if executed, runtime interception failed (pattern drift).
+pub fn generateInterceptedStub(func_index: u32, fqn: []const u8) []u8 {
+    return clr_allocator.allocPrint(clr_allocator.allocator(),
+        \\// Intercepted: {s}
+        \\fn fn_{d}(_: *Context, _: *Refinements, _: Gid, _: []const Gid) anyerror!Gid {{
+        \\    @panic("intercepted stub executed: {s} - runtime interception failed, check for pattern drift");
+        \\}}
+        \\
+    , .{ fqn, func_index, fqn }, null);
+}
+
 const CallTarget = @import("clr.zig").CallTarget;
 
 test {
