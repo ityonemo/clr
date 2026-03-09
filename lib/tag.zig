@@ -1446,8 +1446,11 @@ pub const ErrunionPayloadPtrSet = struct {
     }
 };
 
-pub fn Simple(comptime instr: anytype) type {
+/// Unary operation - takes a single source operand, produces scalar result
+pub fn UnOp(comptime instr: anytype) type {
     return struct {
+        src: Src,
+
         pub fn apply(self: @This(), state: State, index: usize) !void {
             _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             try splat(instr, state, index, self);
@@ -1970,15 +1973,6 @@ pub const AnyTag = union(enum) {
 
     // Implemented tags
     alloc: Alloc,
-    alloc_create: AllocCreate,
-    alloc_destroy: AllocDestroy,
-    alloc_alloc: AllocAlloc, // Slice allocation: allocator.alloc()
-    alloc_free: AllocFree, // Slice deallocation: allocator.free()
-    alloc_resize: AllocResize, // Slice resize: allocator.resize() - returns bool
-    alloc_realloc: AllocRealloc, // Slice reallocation: allocator.realloc()/remap()
-    mkallocator: MkAllocator,
-    arena_deinit: ArenaDeinit, // ArenaAllocator.deinit() - frees all arena allocations
-    arena_init: ArenaInit, // ArenaAllocator.init() - creates an ArenaAllocator
     arg: Arg,
     bitcast: Bitcast,
     br: Br,
@@ -1995,36 +1989,39 @@ pub const AnyTag = union(enum) {
     store_safe: Store, // Same as store, just with runtime safety checks
     unwrap_errunion_payload: UnwrapErrunionPayload,
 
-    // Simple tags - math/comparison operations that produce scalar values
-    // this will have to be refined to pass parameters and divide into BinOp and UnOp.
-    bit_and: Simple(.bit_and),
-    bool_or: Simple(.bool_or),
-    not: Simple(.not),
-    cmp_eq: Simple(.cmp_eq),
-    cmp_gt: Simple(.cmp_gt),
-    cmp_gte: Simple(.cmp_gte),
-    cmp_lt: Simple(.cmp_lt),
-    cmp_lte: Simple(.cmp_lte),
-    cmp_vector: Simple(.cmp_vector), // Vector comparison - produces scalar result
-    cmp_neq: Simple(.cmp_neq), // Not equal comparison
-    reduce: Simple(.reduce), // Vector reduction - produces scalar result
-    select: Simple(.select), // Vector select operation - produces scalar result
-    min: Simple(.min), // Minimum of two values
-    max: Simple(.max), // Maximum of two values
-    div_trunc: Simple(.div_trunc), // Truncating division
-    div_floor: Simple(.div_floor), // Floor division
-    div_exact: Simple(.div_exact), // Exact division
-    mod: Simple(.mod), // Modulo operation
-    rem: Simple(.rem), // Remainder operation
-    mul: Simple(.mul), // Multiplication
-    trunc: Simple(.trunc), // Truncate to smaller type
-    shl: Simple(.shl), // Shift left
-    shr: Simple(.shr), // Shift right
-    xor: Simple(.xor), // Bitwise XOR
-    bit_or: Simple(.bit_or), // Bitwise OR
-    ctz: Simple(.ctz),
-    sub: Simple(.sub),
-    add: Simple(.add),
+    // Binary operations (bin_op) - two operands, scalar result
+    bit_and: BinOp(.bit_and),
+    bit_or: BinOp(.bit_or),
+    xor: BinOp(.xor),
+    bool_or: BinOp(.bool_or),
+    cmp_eq: BinOp(.cmp_eq),
+    cmp_neq: BinOp(.cmp_neq),
+    cmp_gt: BinOp(.cmp_gt),
+    cmp_gte: BinOp(.cmp_gte),
+    cmp_lt: BinOp(.cmp_lt),
+    cmp_lte: BinOp(.cmp_lte),
+    min: BinOp(.min),
+    max: BinOp(.max),
+    add: BinOp(.add),
+    sub: BinOp(.sub),
+    mul: BinOp(.mul),
+    div_trunc: BinOp(.div_trunc),
+    div_floor: BinOp(.div_floor),
+    div_exact: BinOp(.div_exact),
+    mod: BinOp(.mod),
+    rem: BinOp(.rem),
+    shl: BinOp(.shl),
+    shr: BinOp(.shr),
+
+    // Unary operations (un_op/ty_op) - one operand, scalar result
+    not: UnOp(.not),
+    trunc: UnOp(.trunc),
+    ctz: UnOp(.ctz),
+
+    // Vector operations (special payloads)
+    cmp_vector: Void, // Vector comparison - complex payload
+    reduce: Void, // Vector reduction - complex payload
+    select: Void, // Vector select - complex payload
 
     // Unimplemented tags (no-op)
     add_with_overflow: OverflowOp(.add_with_overflow),
@@ -2053,7 +2050,7 @@ pub const AnyTag = union(enum) {
     ret_load: RetLoad,
     ret_ptr: RetPtr,
     slice: Slice,
-    slice_len: Simple(.slice_len), // Get length of slice - produces scalar
+    slice_len: UnOp(.slice_len), // Get length of slice - produces scalar
     slice_ptr: SlicePtr, // Extract pointer from slice - produces pointer
     slice_elem_ptr: PtrElemPtr, // Slice element pointer - same as ptr_elem_ptr (uniform region)
     slice_elem_val: ArrayElemVal, // Slice element value - same as array_elem_val (uniform region)
@@ -2066,7 +2063,7 @@ pub const AnyTag = union(enum) {
     mul_with_overflow: OverflowOp(.mul_with_overflow),
     @"try": UnwrapErrunionPayload, // try extracts payload from error union, same as unwrap_errunion_payload
     unreach: Unreach,
-    unwrap_errunion_err: Simple(.unwrap_errunion_err), // produces error scalar
+    unwrap_errunion_err: UnOp(.unwrap_errunion_err), // produces error scalar
     unwrap_errunion_payload_ptr: UnwrapErrunionPayloadPtr, // *(E!T) -> *T (pointer to payload)
     errunion_payload_ptr_set: ErrunionPayloadPtrSet, // *(E!T) -> *T
     wrap_errunion_err: WrapErrunionErr,
@@ -2078,14 +2075,196 @@ pub const AnyTag = union(enum) {
     union_init: UnionInit,
 
     // Enum safety check - produces a bool scalar for cond_br
-    is_named_enum_value: Simple(.is_named_enum_value),
+    is_named_enum_value: UnOp(.is_named_enum_value),
 
     // Memory operations
     memcpy: Void, // Memory copy - no refinement tracking needed for now
-    @"splat": Simple(.@"splat"), // Vector splat - creates scalar result
+    splat: TransferOp, // Vector splat - creates scalar result
 
     // Optional wrapper
     wrap_optional: WrapOptional,
+
+    // =========================================================================
+    // Missing AIR tags - implemented for completeness
+    // =========================================================================
+
+    // Pointer/slice operations
+    ptr_elem_val: ArrayElemVal, // Same structure as array_elem_val
+    ptr_slice_len_ptr: TransferOp, // Get slice length through pointer
+    ptr_slice_ptr_ptr: TransferOp, // Get slice pointer through pointer
+
+    // Error/optional operations
+    is_err: UnOp(.is_err),
+    is_err_ptr: UnOp(.is_err_ptr),
+    is_non_err_ptr: UnOp(.is_non_err_ptr),
+    error_set_has_value: UnOp(.error_set_has_value),
+    optional_payload_ptr_set: TransferOp,
+    unwrap_errunion_err_ptr: TransferOp,
+
+    // Type conversions
+    fpext: TransferOp,
+    fptrunc: TransferOp,
+    intcast_safe: TransferOp,
+    int_from_float: TransferOp,
+    int_from_float_optimized: TransferOp,
+    int_from_float_safe: TransferOp,
+    int_from_float_optimized_safe: TransferOp,
+    float_from_int: TransferOp,
+    addrspace_cast: TransferOp,
+
+    // Math unary operations
+    sqrt: UnOp(.sqrt),
+    sin: UnOp(.sin),
+    cos: UnOp(.cos),
+    tan: UnOp(.tan),
+    exp: UnOp(.exp),
+    exp2: UnOp(.exp2),
+    log: UnOp(.log),
+    log2: UnOp(.log2),
+    log10: UnOp(.log10),
+    floor: UnOp(.floor),
+    ceil: UnOp(.ceil),
+    round: UnOp(.round),
+    trunc_float: UnOp(.trunc_float),
+    neg: UnOp(.neg),
+    neg_optimized: UnOp(.neg_optimized),
+    abs: UnOp(.abs),
+
+    // Bit operations
+    popcount: UnOp(.popcount),
+    byte_swap: UnOp(.byte_swap),
+    bit_reverse: UnOp(.bit_reverse),
+    clz: UnOp(.clz),
+
+    // Binary arithmetic - wrap/sat/safe variants
+    add_safe: BinOp(.add_safe),
+    add_wrap: BinOp(.add_wrap),
+    add_sat: BinOp(.add_sat),
+    sub_safe: BinOp(.sub_safe),
+    sub_wrap: BinOp(.sub_wrap),
+    sub_sat: BinOp(.sub_sat),
+    mul_safe: BinOp(.mul_safe),
+    mul_wrap: BinOp(.mul_wrap),
+    mul_sat: BinOp(.mul_sat),
+    div_float: BinOp(.div_float),
+    bool_and: BinOp(.bool_and),
+    shr_exact: BinOp(.shr_exact),
+    shl_exact: BinOp(.shl_exact),
+    shl_sat: BinOp(.shl_sat),
+
+    // Optimized variants (same behavior, just compiler hints)
+    add_optimized: BinOp(.add_optimized),
+    sub_optimized: BinOp(.sub_optimized),
+    mul_optimized: BinOp(.mul_optimized),
+    div_float_optimized: BinOp(.div_float_optimized),
+    div_trunc_optimized: BinOp(.div_trunc_optimized),
+    div_floor_optimized: BinOp(.div_floor_optimized),
+    div_exact_optimized: BinOp(.div_exact_optimized),
+    rem_optimized: BinOp(.rem_optimized),
+    mod_optimized: BinOp(.mod_optimized),
+    cmp_lt_optimized: BinOp(.cmp_lt_optimized),
+    cmp_lte_optimized: BinOp(.cmp_lte_optimized),
+    cmp_eq_optimized: BinOp(.cmp_eq_optimized),
+    cmp_gte_optimized: BinOp(.cmp_gte_optimized),
+    cmp_gt_optimized: BinOp(.cmp_gt_optimized),
+    cmp_neq_optimized: BinOp(.cmp_neq_optimized),
+    cmp_lt_errors_len: BinOp(.cmp_lt_errors_len),
+    cmp_vector_optimized: Void, // Vector comparison - complex payload
+    reduce_optimized: Void, // Vector reduction - complex payload
+
+    // Try variants
+    try_cold: UnwrapErrunionPayload, // Same as try
+    try_ptr: UnwrapErrunionPayloadPtr, // try on pointer
+    try_ptr_cold: UnwrapErrunionPayloadPtr,
+
+    // Overflow operations
+    shl_with_overflow: OverflowOp(.shl_with_overflow),
+
+    // Void/noreturn operations
+    ret: Void, // Plain return
+    trap: Void, // Unreachable trap
+    breakpoint: Void, // Debug breakpoint
+    atomic_store_unordered: Void,
+    atomic_store_monotonic: Void,
+    atomic_store_release: Void,
+    atomic_store_seq_cst: Void,
+    memset: Void,
+    memmove: Void,
+    prefetch: Void,
+    set_err_return_trace: Void,
+    save_err_return_trace_index: Void,
+    vector_store_elem: Void,
+    c_va_end: Void,
+
+    // Error trace / addresses
+    err_return_trace: Void,
+    c_va_start: Void,
+    frame_addr: Void,
+
+    // Runtime nav pointer
+    runtime_nav_ptr: Void,
+
+    // Inferred allocs
+    inferred_alloc: Void,
+    inferred_alloc_comptime: Void,
+
+    // Atomic operations
+    atomic_load: Void,
+    atomic_rmw: Void,
+    cmpxchg_weak: Void,
+    cmpxchg_strong: Void,
+
+    // Shuffle operations
+    shuffle_one: Void,
+    shuffle_two: Void,
+
+    // C varargs
+    c_va_arg: TransferOp,
+    c_va_copy: TransferOp,
+
+    // WASM operations
+    wasm_memory_grow: Void,
+    wasm_memory_size: Void,
+    work_group_id: Void,
+    work_group_size: Void,
+    work_item_id: Void,
+
+    // Mul add
+    mul_add: Void,
+
+    // Assembly
+    assembly: Void,
+
+    // Tag/error name
+    tag_name: Void,
+    error_name: Void,
+};
+
+/// Binary operation tag - produces scalar result from two operands
+pub fn BinOp(comptime tag: anytype) type {
+    return struct {
+        lhs: Src,
+        rhs: Src,
+
+        pub fn apply(self: @This(), state: State, index: usize) !void {
+            // Binary operations produce scalar results
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            try splat(tag, state, index, self);
+        }
+    };
+}
+
+/// Transfer operation - creates scalar result, lets analyses handle transfer
+/// Used for operations like ptr_slice_len_ptr, fpext, etc.
+pub const TransferOp = struct {
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create a scalar result - analyses will handle any property transfer
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        // Let each analysis decide how to handle this operation
+        try splat(.transfer_op, state, index, self);
+    }
 };
 
 pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {

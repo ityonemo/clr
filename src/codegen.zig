@@ -90,13 +90,16 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .wrap_errunion_payload => payloadWrapErrunionPayload(info, datum),
         .wrap_optional => payloadWrapOptional(info, datum),
         .is_non_null, .is_null, .is_non_err, .is_non_null_ptr, .is_null_ptr => payloadUnOp(info, datum),
+        // Additional is_* checks using un_op
+        .is_err, .is_err_ptr, .is_non_err_ptr, .error_set_has_value => payloadUnOp(info, datum),
         .br => payloadBr(info, datum),
         .block => payloadBlock(info, datum),
         .struct_field_ptr_index_0 => payloadStructFieldPtr(info, datum, 0),
         .struct_field_ptr_index_1 => payloadStructFieldPtr(info, datum, 1),
         .struct_field_ptr_index_2 => payloadStructFieldPtr(info, datum, 2),
         .struct_field_ptr_index_3 => payloadStructFieldPtr(info, datum, 3),
-        // Note: All struct_field_ptr_index_N are mapped to struct_field_ptr via altName()
+        // Plain struct_field_ptr uses ty_pl with StructField payload (for field_index > 3)
+        .struct_field_ptr => payloadStructFieldPtrGeneric(info, datum),
         .struct_field_val => payloadStructFieldVal(info, datum),
         .field_parent_ptr => payloadFieldParentPtr(info, datum),
         .ret_ptr => payloadRetPtr(info, datum),
@@ -104,16 +107,137 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .set_union_tag => payloadSetUnionTag(info, datum),
         .get_union_tag => payloadGetUnionTag(info, datum),
         .@"try", .try_cold => payloadTry(info, datum),
+        // try_ptr and try_ptr_cold use ty_pl like try
+        .try_ptr, .try_ptr_cold => payloadTry(info, datum),
         .array_elem_val, .slice_elem_val => payloadArrayElemVal(info, datum),
+        // ptr_elem_val uses bin_op like array_elem_val
+        .ptr_elem_val => payloadArrayElemVal(info, datum),
         .ptr_elem_ptr, .slice_elem_ptr => payloadPtrElemPtr(info, datum),
         .slice_ptr => payloadSlicePtr(info, datum),
         .array_to_slice => payloadArrayToSlice(info, datum),
         .ptr_add, .ptr_sub => payloadPtrAdd(info, datum),
+        // Slice pointer access (ty_op)
+        .ptr_slice_len_ptr, .ptr_slice_ptr_ptr => payloadTransferOp(info, datum),
+        // Additional ty_op operations that transfer properties
+        .optional_payload_ptr_set, .unwrap_errunion_err_ptr => payloadTransferOp(info, datum),
+        // Type conversion ops (ty_op)
+        .fpext, .fptrunc, .intcast_safe, .addrspace_cast => payloadTransferOp(info, datum),
+        .int_from_float, .int_from_float_optimized, .int_from_float_safe, .int_from_float_optimized_safe => payloadTransferOp(info, datum),
+        .float_from_int => payloadTransferOp(info, datum),
+        // Math unary ops (un_op) - produce scalar result
+        .sqrt, .sin, .cos, .tan, .exp, .exp2, .log, .log2, .log10 => payloadUnOp(info, datum),
+        .floor, .ceil, .round, .trunc_float, .neg, .neg_optimized, .abs => payloadUnOp(info, datum),
+        // Bit operations (ty_op) - these use ty_op but UnOp expects src
+        .popcount, .byte_swap, .bit_reverse, .clz => payloadTransferOp(info, datum),
+        // Other ty_op operations that produce scalar (not, trunc, ctz, slice_len, etc.)
+        .not, .trunc, .ctz, .slice_len, .unwrap_errunion_err => payloadTransferOp(info, datum),
+        // is_named_enum_value uses un_op
+        .is_named_enum_value => payloadUnOp(info, datum),
+        // Vector ops
+        .splat => payloadTransferOp(info, datum),
+        // C varargs (ty_op)
+        .c_va_arg, .c_va_copy => payloadTransferOp(info, datum),
+        // Binary arithmetic (bin_op)
+        .add, .sub, .mul, .div_trunc, .div_floor, .div_exact, .rem, .mod => payloadBinOp(info, datum),
+        .min, .max => payloadBinOp(info, datum),
+        .bit_and, .bit_or, .xor => payloadBinOp(info, datum),
+        .shl, .shr => payloadBinOp(info, datum),
+        .cmp_eq, .cmp_neq, .cmp_lt, .cmp_lte, .cmp_gt, .cmp_gte => payloadBinOp(info, datum),
+        .bool_and, .bool_or => payloadBinOp(info, datum),
+        // Safe/wrap/sat variants (bin_op)
+        .add_safe, .add_wrap, .add_sat, .sub_safe, .sub_wrap, .sub_sat => payloadBinOp(info, datum),
+        .mul_safe, .mul_wrap, .mul_sat => payloadBinOp(info, datum),
+        .div_float, .shr_exact, .shl_exact, .shl_sat => payloadBinOp(info, datum),
+        // Optimized variants (bin_op)
+        .add_optimized, .sub_optimized, .mul_optimized => payloadBinOp(info, datum),
+        .div_float_optimized, .div_trunc_optimized, .div_floor_optimized, .div_exact_optimized => payloadBinOp(info, datum),
+        .rem_optimized, .mod_optimized => payloadBinOp(info, datum),
+        .cmp_lt_optimized, .cmp_lte_optimized, .cmp_eq_optimized => payloadBinOp(info, datum),
+        .cmp_gte_optimized, .cmp_gt_optimized, .cmp_neq_optimized => payloadBinOp(info, datum),
+        .cmp_lt_errors_len => payloadBinOp(info, datum),
         .loop => ".{}", // Loop uses Block payload, but tag handler doesn't need it
         .repeat => payloadRepeat(info, datum),
         .switch_dispatch => payloadSwitchDispatch(info, datum),
+        // Void/noreturn tags - no payload needed
+        .ret, .trap, .breakpoint, .unreach => ".{}",
+        .atomic_store_unordered, .atomic_store_monotonic, .atomic_store_release, .atomic_store_seq_cst => ".{}",
+        .memset, .memset_safe, .memmove, .memcpy => ".{}",
+        .prefetch, .set_err_return_trace, .save_err_return_trace_index => ".{}",
+        .vector_store_elem => ".{}",
+        .c_va_end => ".{}",
+        // Error trace (ty field only)
+        .err_return_trace, .c_va_start => ".{}",
+        // Frame/runtime addresses
+        .frame_addr, .ret_addr => ".{}",
+        // Runtime nav pointer
+        .runtime_nav_ptr => ".{}",
+        // Inferred allocs
+        .inferred_alloc, .inferred_alloc_comptime => ".{}",
+        // Atomic ops - complex payloads, stub for now
+        .atomic_load, .atomic_rmw => ".{}",
+        .cmpxchg_weak, .cmpxchg_strong => ".{}",
+        // Shuffle ops (ty_pl)
+        .shuffle_one, .shuffle_two => ".{}",
+        // Reduce ops
+        .reduce, .reduce_optimized => ".{}",
+        // WASM ops
+        .wasm_memory_grow, .wasm_memory_size => ".{}",
+        .work_group_id, .work_group_size, .work_item_id => ".{}",
+        // Mul add (pl_op)
+        .mul_add => ".{}",
+        // Assembly
+        .assembly => ".{}",
+        // Tag/error name
+        .tag_name, .error_name => ".{}",
+        // Cmp vector
+        .cmp_vector, .cmp_vector_optimized => ".{}",
+        // Overflow ops (ty_pl)
+        .shl_with_overflow => ".{}",
         else => ".{}",
     };
+}
+
+/// Payload for binary operations using bin_op field
+fn payloadBinOp(info: *const FnInfo, datum: Data) []const u8 {
+    const lhs_str = srcString(info, datum.bin_op.lhs);
+    const rhs_str = srcString(info, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .lhs = {s}, .rhs = {s} }}", .{ lhs_str, rhs_str }, null);
+}
+
+/// Payload for plain struct_field_ptr (field_index > 3, uses ty_pl with StructField)
+fn payloadStructFieldPtrGeneric(info: *const FnInfo, datum: Data) []const u8 {
+    const ty_str = if (datum.ty_pl.ty.toInterned()) |ty_idx|
+        typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
+    else
+        ".{ .unimplemented = {} }";
+
+    // Extract from extra data (StructField payload has two u32 fields)
+    const payload_index = datum.ty_pl.payload;
+    // StructField: struct_operand (Ref as u32), field_index (u32)
+    const operand_raw = info.extra[payload_index];
+    const field_index = info.extra[payload_index + 1];
+    const operand: Ref = @enumFromInt(operand_raw);
+    const base_src = srcString(info, operand);
+
+    // Extract container type_id from operand's type
+    const type_id: u32 = blk: {
+        const operand_type: ?InternPool.Index = if (operand.toIndex()) |idx|
+            getInstResultType(info.ip, info.tags, info.data, @intFromEnum(idx))
+        else if (operand.toInterned()) |interned_idx|
+            info.ip.typeOf(interned_idx)
+        else
+            null;
+
+        if (operand_type) |ptr_type_idx| {
+            const ptr_key = info.ip.indexToKey(ptr_type_idx);
+            if (ptr_key == .ptr_type) {
+                break :blk @intFromEnum(ptr_key.ptr_type.child);
+            }
+        }
+        break :blk 0;
+    };
+
+    return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d} }}", .{ base_src, field_index, ty_str, type_id }, null);
 }
 
 /// Payload for operations that transfer all properties from source to result.
