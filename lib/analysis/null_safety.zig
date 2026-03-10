@@ -25,51 +25,22 @@ pub const NullSafety = union(enum) {
         hasher.update(&.{@intFromEnum(self)});
     }
 
-    /// is_non_null marks the optional as checked (unknown state).
-    /// cond_br will resolve to non_null or null based on the branch.
+    /// is_non_null is a pure operation - it tests nullity and returns a boolean.
+    /// It does NOT modify the optional's analyte. The narrowing happens in cond_br.
     pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {
+        _ = state;
         _ = index;
-        const results = state.results;
-        const refinements = state.refinements;
-        const src_idx = switch (params.src) {
-            .inst => |s| results[s].refinement orelse return,
-            else => return, // Comptime - no tracking needed
-        };
-
-        // Only optionals can have null_safety (testValid enforces this)
-        const ref = refinements.at(src_idx);
-        if (ref.* != .optional) return;
-        const analyte = &ref.optional.analyte;
-
-        // Only record check if we don't already know the null state
-        // If we already know it's null or non_null, keep that information
-        const ns = analyte.null_safety;
-        if (ns == null or ns.? == .unknown) {
-            analyte.null_safety = .{ .unknown = {} };
-        }
+        _ = params;
+        // Pure operation - does nothing to the analyte
     }
 
-    /// is_null marks the optional as checked (unknown state).
-    /// cond_br will resolve to non_null or null based on the branch.
+    /// is_null is a pure operation - it tests nullity and returns a boolean.
+    /// It does NOT modify the optional's analyte. The narrowing happens in cond_br.
     pub fn is_null(state: State, index: usize, params: tag.IsNull) !void {
+        _ = state;
         _ = index;
-        const results = state.results;
-        const refinements = state.refinements;
-        const src_idx = switch (params.src) {
-            .inst => |s| results[s].refinement orelse return,
-            else => return, // Comptime - no tracking needed
-        };
-
-        // Only optionals can have null_safety (testValid enforces this)
-        const ref = refinements.at(src_idx);
-        if (ref.* != .optional) return;
-        const analyte = &ref.optional.analyte;
-
-        // Only record check if we don't already know the null state
-        const ns = analyte.null_safety;
-        if (ns == null or ns.? == .unknown) {
-            analyte.null_safety = .{ .unknown = {} };
-        }
+        _ = params;
+        // Pure operation - does nothing to the analyte
     }
 
     /// cond_br is emitted at branch start - look up the source optional directly
@@ -100,9 +71,9 @@ pub const NullSafety = union(enum) {
         const opt_ref = refinements.at(opt_gid);
         if (opt_ref.* != .optional) return;
 
-        // Only update if we're in .unknown state (not already resolved)
-        const ns = opt_ref.optional.analyte.null_safety orelse return;
-        if (ns != .unknown) return;
+        // Only narrow if state is unchecked (null) or .unknown - don't overwrite known state
+        const ns = opt_ref.optional.analyte.null_safety;
+        if (ns != null and ns.? != .unknown) return;
 
         // Determine if this is the non-null branch
         // is_non_null + true branch = non_null, is_non_null + false branch = null
@@ -158,11 +129,7 @@ pub const NullSafety = union(enum) {
 
         const ns = ref.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
         switch (ns) {
-            // .unknown means a check WAS performed (is_non_null executed) but no cond_br
-            // narrowed it to .non_null or .null. This happens when the compiler proves
-            // the optional is always non-null and optimizes away the branch. The runtime
-            // safety check will still catch actual nulls, so this is safe.
-            .unknown => {},
+            .unknown => return reportUncheckedUnwrap(ctx, results[src_idx].name_id),
             .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name_id),
             .non_null => {}, // Safe
         }
@@ -437,7 +404,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
 const test_scalar_type: tag.Type = .{ .scalar = {} };
 const test_null_type: tag.Type = .{ .@"null" = &test_scalar_type };
 
-test "is_non_null records check on optional" {
+test "is_non_null does not modify analyte" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -449,20 +416,20 @@ test "is_non_null records check on optional" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional refinement
+    // Create an optional refinement with no null_safety set
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
-    // is_non_null should set null_safety to .unknown
+    // is_non_null is a pure operation - does nothing to the analyte
     try NullSafety.is_non_null(state, 1, .{ .src = .{ .inst = 0 } });
 
-    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .unknown);
+    // null_safety should still be null (unset)
+    try std.testing.expect(refinements.at(opt_eidx).optional.analyte.null_safety == null);
 }
 
-test "is_null records check on optional" {
+test "is_null does not modify analyte" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -474,17 +441,17 @@ test "is_null records check on optional" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional refinement
+    // Create an optional refinement with no null_safety set
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
 
     var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
-    // is_null should set null_safety to .unknown
+    // is_null is a pure operation - does nothing to the analyte
     try NullSafety.is_null(state, 1, .{ .src = .{ .inst = 0 } });
 
-    const ns = refinements.at(opt_eidx).optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .unknown);
+    // null_safety should still be null (unset)
+    try std.testing.expect(refinements.at(opt_eidx).optional.analyte.null_safety == null);
 }
 
 test "cond_br sets non_null on true branch after is_non_null check" {
@@ -499,9 +466,8 @@ test "cond_br sets non_null on true branch after is_non_null check" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional with unknown null_safety
+    // Create an optional with no null_safety set (unchecked)
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .unknown = {} } },
         .to = 0,
     } });
 
@@ -530,9 +496,8 @@ test "cond_br sets null on false branch after is_non_null check" {
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
 
-    // Create an optional with unknown null_safety
+    // Create an optional with no null_safety set (unchecked)
     const opt_eidx = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .unknown = {} } },
         .to = 0,
     } });
 
@@ -617,33 +582,6 @@ test "optional_payload succeeds on checked non_null" {
     const state = testState(&ctx, &results, &refinements);
 
     // optional_payload should succeed
-    try NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
-}
-
-test "optional_payload succeeds on unknown state (check was performed)" {
-    // When is_non_null is called but no cond_br follows (compiler optimized it away),
-    // the state is .unknown. This should be SAFE because a runtime check WAS performed.
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    // Create an optional with .unknown null_safety (check was performed, not yet narrowed)
-    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .unknown = {} } },
-        .to = 0,
-    } });
-
-    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
-    const state = testState(&ctx, &results, &refinements);
-
-    // optional_payload should succeed - a check WAS performed (is_non_null)
-    // Even though cond_br didn't narrow to .non_null, runtime safety will catch nulls
     try NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
 }
 

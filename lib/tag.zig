@@ -3411,7 +3411,7 @@ test "struct_field_val extracts field value from struct" {
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
 }
 
-test "is_non_null records check on optional" {
+test "is_non_null does not modify analyte" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -3430,16 +3430,15 @@ test "is_non_null records check on optional" {
     const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
     results[0].refinement = opt_gid;
 
-    // is_non_null should record the check
+    // is_non_null is a pure operation - does nothing to the analyte
     try Inst.apply(state, 1, .{ .is_non_null = .{ .src = .{ .inst = 0 } } });
 
-    // The optional's null_safety should be set to unknown with check info
+    // The optional's null_safety should still be null (unset)
     const opt_ref = refinements.at(opt_gid);
-    try std.testing.expect(opt_ref.optional.analyte.null_safety != null);
-    try std.testing.expectEqual(.unknown, std.meta.activeTag(opt_ref.optional.analyte.null_safety.?));
+    try std.testing.expect(opt_ref.optional.analyte.null_safety == null);
 }
 
-test "is_null records check on optional" {
+test "is_null does not modify analyte" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -3458,13 +3457,12 @@ test "is_null records check on optional" {
     const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
     results[0].refinement = opt_gid;
 
-    // is_null should record the check
+    // is_null is a pure operation - does nothing to the analyte
     try Inst.apply(state, 1, .{ .is_null = .{ .src = .{ .inst = 0 } } });
 
-    // The optional's null_safety should be set to unknown with check info
+    // The optional's null_safety should still be null (unset)
     const opt_ref = refinements.at(opt_gid);
-    try std.testing.expect(opt_ref.optional.analyte.null_safety != null);
-    try std.testing.expectEqual(.unknown, std.meta.activeTag(opt_ref.optional.analyte.null_safety.?));
+    try std.testing.expect(opt_ref.optional.analyte.null_safety == null);
 }
 
 test "set_union_tag updates union variant" {
