@@ -191,7 +191,7 @@ When a false positive is identified, follow this cycle **exactly**. Do NOT skip 
 
 3. **Write a unit test that reproduces the error** - Create a minimal unit test in `lib/` that triggers the exact same failure. This test should fail before the fix.
 
-4. **Write an integration test that reproduces the error** - Create a test case in `test/cases/` and corresponding BATS test in `test/integration/`. This test should also fail before the fix.
+4. **Write an integration test that reproduces the error** - Create a minimal Zig test case in `test/cases/` and a corresponding BATS test in `test/integration/*.bats`. This is NOT the vendor wrapper or other complex code - it's a focused, minimal reproduction. This test should also fail before the fix.
 
 5. **Use the unit test to fix the error** - Iterate on the fix using the fast unit test cycle (`zig test lib/lib.zig`). Unit tests run in seconds; use them.
 

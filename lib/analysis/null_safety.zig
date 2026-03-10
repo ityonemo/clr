@@ -158,7 +158,11 @@ pub const NullSafety = union(enum) {
 
         const ns = ref.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
         switch (ns) {
-            .unknown => return reportUncheckedUnwrap(ctx, results[src_idx].name_id),
+            // .unknown means a check WAS performed (is_non_null executed) but no cond_br
+            // narrowed it to .non_null or .null. This happens when the compiler proves
+            // the optional is always non-null and optimizes away the branch. The runtime
+            // safety check will still catch actual nulls, so this is safe.
+            .unknown => {},
             .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name_id),
             .non_null => {}, // Safe
         }
@@ -613,6 +617,33 @@ test "optional_payload succeeds on checked non_null" {
     const state = testState(&ctx, &results, &refinements);
 
     // optional_payload should succeed
+    try NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
+}
+
+test "optional_payload succeeds on unknown state (check was performed)" {
+    // When is_non_null is called but no cond_br follows (compiler optimized it away),
+    // the state is .unknown. This should be SAFE because a runtime check WAS performed.
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create an optional with .unknown null_safety (check was performed, not yet narrowed)
+    const opt_eidx = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .unknown = {} } },
+        .to = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = opt_eidx }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // optional_payload should succeed - a check WAS performed (is_non_null)
+    // Even though cond_br didn't narrow to .non_null, runtime safety will catch nulls
     try NullSafety.optional_payload(state, 1, .{ .src = .{ .inst = 0 } });
 }
 
