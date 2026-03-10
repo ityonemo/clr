@@ -200,6 +200,105 @@ pub const NullSafety = union(enum) {
         }
     }
 
+    /// aggregate_init creates a struct/array from element values.
+    /// Copy null_safety state from each source element to the corresponding field.
+    pub fn aggregate_init(state: State, index: usize, params: tag.AggregateInit) !void {
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+
+        switch (result_ref.*) {
+            .@"struct" => |s| {
+                // For structs: copy null_safety from each source element to corresponding field
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i < params.elements.len) {
+                        const src = params.elements[i];
+                        copyNullSafetyState(state, field_gid, src);
+                    }
+                }
+            },
+            .region => |r| {
+                // For arrays/regions: use uniform model - first element applies to all
+                if (params.elements.len > 0) {
+                    copyNullSafetyState(state, r.to, params.elements[0]);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Copy null_safety state from a source to a destination refinement.
+    fn copyNullSafetyState(state: State, dst_gid: Gid, src: tag.Src) void {
+        const src_gid: ?Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => null, // Interned values have no runtime null tracking
+            .fnptr => null, // Function pointers are never null optionals
+        };
+
+        if (src_gid == null) return;
+
+        // Copy analyte state recursively from source to destination
+        copyNullSafetyStateRecursive(state.refinements, dst_gid, src_gid.?);
+    }
+
+    /// Recursively copy null_safety state from source GID to destination GID.
+    fn copyNullSafetyStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+        const src_ref = refinements.at(src_gid);
+        const dst_ref = refinements.at(dst_gid);
+
+        // Copy null_safety analyte based on type
+        switch (dst_ref.*) {
+            .optional => |*o| {
+                o.analyte.null_safety = switch (src_ref.*) {
+                    .optional => |so| so.analyte.null_safety,
+                    else => null,
+                };
+                if (src_ref.* == .optional) {
+                    copyNullSafetyStateRecursive(refinements, o.to, src_ref.optional.to);
+                }
+            },
+            .pointer => |p| {
+                // Pointers don't have null_safety, but recurse to pointee
+                if (src_ref.* == .pointer) {
+                    copyNullSafetyStateRecursive(refinements, p.to, src_ref.pointer.to);
+                }
+            },
+            .errorunion => |e| {
+                if (src_ref.* == .errorunion) {
+                    copyNullSafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
+                }
+            },
+            .@"struct" => |s| {
+                if (src_ref.* == .@"struct") {
+                    const src_s = src_ref.@"struct";
+                    for (s.fields, 0..) |field_gid, i| {
+                        if (i < src_s.fields.len) {
+                            copyNullSafetyStateRecursive(refinements, field_gid, src_s.fields[i]);
+                        }
+                    }
+                }
+            },
+            .@"union" => |u| {
+                if (src_ref.* == .@"union") {
+                    const src_u = src_ref.@"union";
+                    for (u.fields, 0..) |maybe_field, i| {
+                        const field_gid = maybe_field orelse continue;
+                        if (i < src_u.fields.len) {
+                            if (src_u.fields[i]) |src_field| {
+                                copyNullSafetyStateRecursive(refinements, field_gid, src_field);
+                            }
+                        }
+                    }
+                }
+            },
+            .region => |r| {
+                if (src_ref.* == .region) {
+                    copyNullSafetyStateRecursive(refinements, r.to, src_ref.region.to);
+                }
+            },
+            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
     /// Merge null_safety states for a single optional node.
     /// Called by tag.splatMerge which handles the tree traversal.
     pub fn merge(
@@ -619,4 +718,68 @@ test "semideepCopy preserves null_safety on optional" {
     const ns = refinements.at(copy_eidx).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");
     try std.testing.expectEqualStrings("test.zig", ns.@"null".file);
+}
+
+test "aggregate_init incorporates null_safety state from source elements" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 5;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Instruction 1: alloc for an optional that will be set to null
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
+    // Store null to it
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .null = &.{ .scalar = {} } } } } } });
+
+    // Instruction 2: alloc for an optional that will be set to non-null
+    try Inst.apply(state, 2, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
+    // Store a value (non-null) to it
+    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 2 }, .src = .{ .interned = .{ .ip_idx = 42, .ty = .{ .optional = &.{ .scalar = {} } } } } } });
+
+    // Load the optionals so we can use them as sources
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } }); // null optional
+    try Inst.apply(state, 4, .{ .load = .{ .ptr = .{ .inst = 2 } } }); // non-null optional
+
+    // Create struct with two optional fields using aggregate_init
+    // Field 0 should be null (from inst 3), field 1 should be non-null (from inst 4)
+    const struct_type = tag.Type{ .@"struct" = &.{
+        .type_id = 100,
+        .fields = &.{ .{ .optional = &.{ .scalar = {} } }, .{ .optional = &.{ .scalar = {} } } },
+    } };
+    const elements = &[_]tag.Src{ .{ .inst = 3 }, .{ .inst = 4 } };
+    try Inst.apply(state, 0, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
+
+    // Check the struct's fields
+    const struct_gid = results[0].refinement.?;
+    const struct_ref = refinements.at(struct_gid);
+    try std.testing.expectEqual(.@"struct", std.meta.activeTag(struct_ref.*));
+
+    const field0_gid = struct_ref.@"struct".fields[0];
+    const field1_gid = struct_ref.@"struct".fields[1];
+
+    // Field 0 should have null state (from null source)
+    const field0_ref = refinements.at(field0_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(field0_ref.*));
+    // null_safety should be set - if null, aggregate_init didn't incorporate source state
+    try std.testing.expect(field0_ref.optional.analyte.null_safety != null);
+    const field0_ns = field0_ref.optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.@"null", std.meta.activeTag(field0_ns));
+
+    // Field 1 should have non_null state (from non-null source)
+    const field1_ref = refinements.at(field1_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(field1_ref.*));
+    // null_safety should be set - if null, aggregate_init didn't incorporate source state
+    try std.testing.expect(field1_ref.optional.analyte.null_safety != null);
+    const field1_ns = field1_ref.optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.non_null, std.meta.activeTag(field1_ns));
+
+    refinements.testValid();
 }

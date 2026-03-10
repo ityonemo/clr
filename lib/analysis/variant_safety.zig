@@ -559,6 +559,164 @@ pub const VariantSafety = struct {
     }
 
     // =========================================================================
+    // Aggregate Init Handler
+    // =========================================================================
+
+    /// Handle aggregate_init - copy variant_safety state from source unions to struct fields.
+    pub fn aggregate_init(state: State, index: usize, params: tag.AggregateInit) !void {
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+
+        switch (result_ref.*) {
+            .@"struct" => |s| {
+                // For structs: copy variant_safety from each source element to corresponding field
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i >= params.elements.len) break;
+                    const src = params.elements[i];
+                    copyVariantSafetyState(state, field_gid, src);
+                }
+            },
+            .region => |r| {
+                // For arrays/regions: use uniform model - first element applies to all
+                if (params.elements.len > 0) {
+                    copyVariantSafetyState(state, r.to, params.elements[0]);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Copy variant_safety state from a source to a destination refinement.
+    fn copyVariantSafetyState(state: State, dst_gid: Gid, src: tag.Src) void {
+        const src_gid: ?Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => null, // Interned values don't have variant_safety
+            .fnptr => null, // Function pointers don't have variant_safety
+        };
+
+        // For interned/fnptr sources, nothing to copy
+        if (src_gid == null) return;
+
+        const src_ref = state.refinements.at(src_gid.?);
+        const dst_ref = state.refinements.at(dst_gid);
+
+        // Only copy variant_safety for union types
+        switch (dst_ref.*) {
+            .@"union" => |*u| {
+                // Source must also be a union
+                if (src_ref.* != .@"union") return;
+                const src_u = src_ref.@"union";
+                const src_vs = src_u.analyte.variant_safety orelse return;
+
+                // Copy the variant_safety if destination doesn't have one
+                if (u.analyte.variant_safety == null) {
+                    const allocator = state.refinements.list.allocator;
+                    u.analyte.variant_safety = src_vs.copy(allocator) catch @panic("OOM");
+
+                    // Also copy field entities for active variants
+                    for (src_vs.active_metas, 0..) |meta_opt, i| {
+                        if (meta_opt != null) {
+                            // This variant is active - ensure field entity exists
+                            if (i < src_u.fields.len and i < u.fields.len) {
+                                if (u.fields[i] == null) {
+                                    if (src_u.fields[i]) |src_field_gid| {
+                                        // Copy the field entity from source
+                                        const src_field_ref = state.refinements.at(src_field_gid).*;
+                                        const copied_gid = Refinements.Refinement.copyTo(src_field_ref, state.refinements, state.refinements) catch @panic("OOM");
+                                        // Re-fetch after potential reallocation
+                                        state.refinements.at(dst_gid).@"union".fields[i] = copied_gid;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .@"struct" => |s| {
+                // If destination is a struct, recurse into fields
+                if (src_ref.* != .@"struct") return;
+                const src_s = src_ref.@"struct";
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i < src_s.fields.len) {
+                        copyVariantSafetyStateRecursive(state.refinements, field_gid, src_s.fields[i]);
+                    }
+                }
+            },
+            .optional => |o| {
+                if (src_ref.* != .optional) return;
+                copyVariantSafetyStateRecursive(state.refinements, o.to, src_ref.optional.to);
+            },
+            .errorunion => |e| {
+                if (src_ref.* != .errorunion) return;
+                copyVariantSafetyStateRecursive(state.refinements, e.to, src_ref.errorunion.to);
+            },
+            .region => |r| {
+                if (src_ref.* != .region) return;
+                copyVariantSafetyStateRecursive(state.refinements, r.to, src_ref.region.to);
+            },
+            // Other types don't have variant_safety
+            else => {},
+        }
+    }
+
+    /// Recursively copy variant_safety state from source GID to destination GID.
+    fn copyVariantSafetyStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+        const src_ref = refinements.at(src_gid);
+        const dst_ref = refinements.at(dst_gid);
+
+        switch (dst_ref.*) {
+            .@"union" => |*u| {
+                if (src_ref.* != .@"union") return;
+                const src_u = src_ref.@"union";
+                const src_vs = src_u.analyte.variant_safety orelse return;
+
+                if (u.analyte.variant_safety == null) {
+                    const allocator = refinements.list.allocator;
+                    u.analyte.variant_safety = src_vs.copy(allocator) catch @panic("OOM");
+
+                    // Also copy field entities for active variants
+                    for (src_vs.active_metas, 0..) |meta_opt, i| {
+                        if (meta_opt != null) {
+                            if (i < src_u.fields.len and i < u.fields.len) {
+                                if (u.fields[i] == null) {
+                                    if (src_u.fields[i]) |src_field_gid| {
+                                        const src_field_ref = refinements.at(src_field_gid).*;
+                                        const copied_gid = Refinements.Refinement.copyTo(src_field_ref, refinements, refinements) catch @panic("OOM");
+                                        // Re-fetch after potential reallocation
+                                        refinements.at(dst_gid).@"union".fields[i] = copied_gid;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            .@"struct" => |s| {
+                if (src_ref.* != .@"struct") return;
+                const src_s = src_ref.@"struct";
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i < src_s.fields.len) {
+                        copyVariantSafetyStateRecursive(refinements, field_gid, src_s.fields[i]);
+                    }
+                }
+            },
+            .optional => |o| {
+                if (src_ref.* != .optional) return;
+                copyVariantSafetyStateRecursive(refinements, o.to, src_ref.optional.to);
+            },
+            .errorunion => |e| {
+                if (src_ref.* != .errorunion) return;
+                copyVariantSafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
+            },
+            .region => |r| {
+                if (src_ref.* != .region) return;
+                copyVariantSafetyStateRecursive(refinements, r.to, src_ref.region.to);
+            },
+            else => {},
+        }
+    }
+
+    // =========================================================================
     // Runtime Call Filter
     // =========================================================================
 
@@ -791,4 +949,63 @@ test "cond_br is no-op" {
 
     // cond_br should succeed without modifying anything
     try VariantSafety.cond_br(state, 1, .{ .branch = true, .condition_idx = 0 });
+}
+
+test "aggregate_init incorporates variant_safety state from source elements" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 4;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Instruction 1: alloc for a union with variant 0 active
+    // Union type with 2 variants (scalars)
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } } } });
+    // Set variant 0 as active via set_union_tag
+    // Note: set_union_tag expects ptr (pointer to union), field_index, and ty (type of field)
+    try Inst.apply(state, 0, .{ .set_union_tag = .{ .ptr = .{ .inst = 1 }, .field_index = 0, .ty = .{ .scalar = {} } } });
+
+    // Instruction 2: alloc for a union with variant 1 active
+    try Inst.apply(state, 2, .{ .alloc = .{ .ty = .{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } } } });
+    // Set variant 1 as active
+    try Inst.apply(state, 0, .{ .set_union_tag = .{ .ptr = .{ .inst = 2 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+
+    // Load the unions so we can use them as sources
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } }); // variant 0 active
+    // Note: Can't easily load inst 2 at index 4 since we only have 4 results, use inst 1 twice for simplicity
+
+    // Create struct with one union field using aggregate_init
+    // The field should inherit variant 0 as active
+    const struct_type = tag.Type{ .@"struct" = &.{
+        .type_id = 100,
+        .fields = &.{ .{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } } },
+    } };
+    const elements = &[_]tag.Src{ .{ .inst = 3 } };
+    try Inst.apply(state, 0, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
+
+    // Check the struct's field
+    const struct_gid = results[0].refinement.?;
+    const struct_ref = refinements.at(struct_gid);
+    try std.testing.expectEqual(.@"struct", std.meta.activeTag(struct_ref.*));
+
+    const field0_gid = struct_ref.@"struct".fields[0];
+    const field0_ref = refinements.at(field0_gid);
+    try std.testing.expectEqual(.@"union", std.meta.activeTag(field0_ref.*));
+
+    // Field should have variant_safety showing variant 0 is active
+    // variant_safety should be set - if null, aggregate_init didn't incorporate source state
+    try std.testing.expect(field0_ref.@"union".analyte.variant_safety != null);
+    const vs = field0_ref.@"union".analyte.variant_safety.?;
+    // VariantSafety.active_metas[variant_index] != null means that variant is active
+    try std.testing.expect(vs.active_metas[0] != null); // variant 0 active
+    try std.testing.expect(vs.active_metas[1] == null); // variant 1 not active
+
+    refinements.testValid();
 }

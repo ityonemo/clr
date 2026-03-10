@@ -651,7 +651,9 @@ pub const Load = struct {
                 }
                 // Not tracked - comptime constant pointer, create refinement from type
                 const ref = try typeToRefinement(interned.ty, state.refinements);
-                _ = try Inst.clobberInst(state.refinements, state.results, index, ref);
+                const gid = try Inst.clobberInst(state.refinements, state.results, index, ref);
+                // Initialize as defined - comptime constants are always defined
+                splatInitDefined(state.refinements, gid, state.ctx);
                 try splat(.load, state, index, self);
                 return;
             },
@@ -1646,13 +1648,23 @@ pub const Intcast = struct {
     }
 };
 
-/// Entity operation: UNIMPLEMENTED
+/// Entity operation: CREATE
 /// AggregateInit creates a struct/array/tuple from element values.
-/// TODO: Should create proper composite type from element values.
+/// The created aggregate incorporates analysis state from source elements.
 pub const AggregateInit = struct {
+    ty: Type,
+    /// Source elements for each field/element of the aggregate.
+    /// For structs: elements[i] is the source for field i.
+    /// For arrays/regions: elements[0] is used for all elements (uniform model).
+    elements: []const Src,
+
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
+        const refinement = try typeToRefinement(self.ty, state.refinements);
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
+        // Initialize as defined first (sets up base analyte state)
+        splatInitDefined(state.refinements, gid, state.ctx);
+        // Then dispatch to analysis modules to incorporate source element state
+        try splat(.aggregate_init, state, index, self);
     }
 };
 
@@ -1973,6 +1985,8 @@ pub const AnyTag = union(enum) {
 
     // Implemented tags
     alloc: Alloc,
+    alloc_create: AllocCreate,
+    alloc_destroy: AllocDestroy,
     arg: Arg,
     bitcast: Bitcast,
     br: Br,
@@ -3238,13 +3252,16 @@ test "Simple tags produce scalar" {
     var results = [_]Inst{.{}} ** 6;
     const state = testState(&ctx, &results, &refinements);
 
-    // All Simple tags should produce scalar refinements
-    try Inst.apply(state, 0, .{ .bit_and = .{} });
-    try Inst.apply(state, 1, .{ .cmp_eq = .{} });
-    try Inst.apply(state, 2, .{ .cmp_gt = .{} });
-    try Inst.apply(state, 3, .{ .cmp_lte = .{} });
-    try Inst.apply(state, 4, .{ .ctz = .{} });
-    try Inst.apply(state, 5, .{ .sub = .{} });
+    // BinOp and UnOp tags should produce scalar refinements
+    // Use interned source (comptime constant) as dummy operands
+    const dummy_src = Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+
+    try Inst.apply(state, 0, .{ .bit_and = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 1, .{ .cmp_eq = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 2, .{ .cmp_gt = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 3, .{ .cmp_lte = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 4, .{ .ctz = .{ .src = dummy_src } });
+    try Inst.apply(state, 5, .{ .sub = .{ .lhs = dummy_src, .rhs = dummy_src } });
 
     for (0..6) |i| {
         try std.testing.expect(results[i].refinement != null);

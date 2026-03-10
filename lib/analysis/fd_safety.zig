@@ -344,6 +344,118 @@ pub const FdSafety = union(enum) {
     }
 
     // =========================================================================
+    // Aggregate Init Handler
+    // =========================================================================
+
+    /// Handle aggregate_init - copy fd_safety state from source elements to struct fields.
+    pub fn aggregate_init(state: State, index: usize, params: tag.AggregateInit) !void {
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+
+        switch (result_ref.*) {
+            .@"struct" => |s| {
+                // For structs: copy fd_safety from each source element to corresponding field
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i >= params.elements.len) break;
+                    const src = params.elements[i];
+                    copyFdSafetyState(state, field_gid, src);
+                }
+            },
+            .region => |r| {
+                // For arrays/regions: use uniform model - first element applies to all
+                if (params.elements.len > 0) {
+                    copyFdSafetyState(state, r.to, params.elements[0]);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Copy fd_safety state from a source to a destination refinement.
+    fn copyFdSafetyState(state: State, dst_gid: Gid, src: tag.Src) void {
+        const src_gid: ?Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => null, // Interned values don't have fd_safety
+            .fnptr => null, // Function pointers don't have fd_safety
+        };
+
+        // For interned/fnptr sources, nothing to copy
+        if (src_gid == null) return;
+
+        const src_ref = state.refinements.at(src_gid.?);
+        const dst_ref = state.refinements.at(dst_gid);
+
+        // Copy fd_safety for scalar types
+        switch (dst_ref.*) {
+            .scalar => |*s| {
+                if (src_ref.* != .scalar) return;
+                const src_fd = src_ref.scalar.analyte.fd_safety orelse return;
+                s.analyte.fd_safety = src_fd;
+            },
+            .@"struct" => |s| {
+                // If destination is a struct, recurse into fields
+                if (src_ref.* != .@"struct") return;
+                const src_s = src_ref.@"struct";
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i < src_s.fields.len) {
+                        copyFdSafetyStateRecursive(state.refinements, field_gid, src_s.fields[i]);
+                    }
+                }
+            },
+            .optional => |o| {
+                if (src_ref.* != .optional) return;
+                copyFdSafetyStateRecursive(state.refinements, o.to, src_ref.optional.to);
+            },
+            .errorunion => |e| {
+                if (src_ref.* != .errorunion) return;
+                copyFdSafetyStateRecursive(state.refinements, e.to, src_ref.errorunion.to);
+            },
+            .region => |r| {
+                if (src_ref.* != .region) return;
+                copyFdSafetyStateRecursive(state.refinements, r.to, src_ref.region.to);
+            },
+            // Other types don't have fd_safety
+            else => {},
+        }
+    }
+
+    /// Recursively copy fd_safety state from source GID to destination GID.
+    fn copyFdSafetyStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+        const src_ref = refinements.at(src_gid);
+        const dst_ref = refinements.at(dst_gid);
+
+        switch (dst_ref.*) {
+            .scalar => |*s| {
+                if (src_ref.* != .scalar) return;
+                const src_fd = src_ref.scalar.analyte.fd_safety orelse return;
+                s.analyte.fd_safety = src_fd;
+            },
+            .@"struct" => |s| {
+                if (src_ref.* != .@"struct") return;
+                const src_s = src_ref.@"struct";
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i < src_s.fields.len) {
+                        copyFdSafetyStateRecursive(refinements, field_gid, src_s.fields[i]);
+                    }
+                }
+            },
+            .optional => |o| {
+                if (src_ref.* != .optional) return;
+                copyFdSafetyStateRecursive(refinements, o.to, src_ref.optional.to);
+            },
+            .errorunion => |e| {
+                if (src_ref.* != .errorunion) return;
+                copyFdSafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
+            },
+            .region => |r| {
+                if (src_ref.* != .region) return;
+                copyFdSafetyStateRecursive(refinements, r.to, src_ref.region.to);
+            },
+            else => {},
+        }
+    }
+
+    // =========================================================================
     // Error Reporting
     // =========================================================================
 
@@ -367,3 +479,61 @@ pub const FdSafety = union(enum) {
         return error.FdLeak;
     }
 };
+
+// =========================================================================
+// Tests
+// =========================================================================
+
+test "aggregate_init incorporates fd_safety state from source elements" {
+    const lib = @import("../lib.zig");
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Create results array for 2 instructions:
+    // inst 0: source scalar (will have fd open state)
+    // inst 1: aggregate_init result
+    var results = [_]Inst{.{}} ** 2;
+
+    // Create source scalar with fd_safety.open
+    const source_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .fd_safety = .{ .open = .{
+                .meta = .{ .function = "test", .file = "test.zig", .line = 5, .column = 10 },
+                .fd_type = .file,
+            } },
+        },
+    } });
+    results[0].refinement = source_scalar_gid;
+
+    // Apply aggregate_init with the source scalar as element
+    const aggregate_init = tag.AggregateInit{
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = {} }} } },
+        .elements = &.{.{ .inst = 0 }},
+    };
+    try aggregate_init.apply(lib.State{
+        .results = &results,
+        .refinements = &refinements,
+        .ctx = &ctx,
+        .return_gid = 0,
+    }, 1);
+
+    // Verify inst 1 has struct refinement
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expect(result_ref.* == .@"struct");
+
+    // Verify field 0 has fd_safety.open state from source
+    const field_gid = result_ref.@"struct".fields[0];
+    const field_ref = refinements.at(field_gid);
+    try std.testing.expect(field_ref.* == .scalar);
+    try std.testing.expect(field_ref.scalar.analyte.fd_safety != null);
+    try std.testing.expect(field_ref.scalar.analyte.fd_safety.? == .open);
+    try std.testing.expectEqual(FdType.file, field_ref.scalar.analyte.fd_safety.?.open.fd_type);
+}

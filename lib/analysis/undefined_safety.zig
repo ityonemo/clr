@@ -388,6 +388,165 @@ pub const UndefinedSafety = union(enum) {
         markStructFieldsDefined(state.results, index, state.refinements);
     }
 
+    /// aggregate_init creates a struct/array from element values.
+    /// Copy undefined_safety state from each source element to the corresponding field.
+    pub fn aggregate_init(state: State, index: usize, params: tag.AggregateInit) !void {
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+
+        switch (result_ref.*) {
+            .@"struct" => |s| {
+                // For structs: copy undefined_safety from each source element to corresponding field
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i >= params.elements.len) break;
+                    const src = params.elements[i];
+                    copyUndefinedState(state, field_gid, src);
+                }
+            },
+            .region => |r| {
+                // For arrays/regions: use uniform model - first element applies to all
+                if (params.elements.len > 0) {
+                    copyUndefinedState(state, r.to, params.elements[0]);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Copy undefined_safety state from a source to a destination refinement.
+    fn copyUndefinedState(state: State, dst_gid: Gid, src: tag.Src) void {
+        const src_gid: ?Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => null, // Interned values are comptime - always defined
+            .fnptr => null, // Function pointers are always defined
+        };
+
+        // For interned/fnptr sources, mark destination as defined
+        if (src_gid == null) {
+            setDefinedRecursive(state.refinements, dst_gid);
+            return;
+        }
+
+        // Copy analyte state from source to destination
+        const src_ref = state.refinements.at(src_gid.?);
+        const dst_ref = state.refinements.at(dst_gid);
+
+        // Get undefined_safety from source based on its type
+        const src_undef: ?UndefinedSafety = switch (src_ref.*) {
+            .scalar => |s| s.analyte.undefined_safety,
+            .pointer => |p| p.analyte.undefined_safety,
+            .allocator => |a| a.analyte.undefined_safety,
+            .fnptr => |f| f.analyte.undefined_safety,
+            // Container types don't have undefined state on themselves
+            .optional, .errorunion, .@"struct", .@"union", .region, .recursive, .void, .noreturn, .unimplemented => null,
+        };
+
+        // Set undefined_safety on destination based on its type
+        switch (dst_ref.*) {
+            .scalar => |*s| s.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
+            .pointer => |*p| p.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
+            .allocator => |*a| a.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
+            .fnptr => |*f| f.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
+            // For container types in destination, recurse
+            .optional => |o| copyUndefinedStateRecursive(state.refinements, o.to, src_gid.?),
+            .errorunion => |e| copyUndefinedStateRecursive(state.refinements, e.to, src_gid.?),
+            .@"struct" => |s| {
+                // Copy to matching struct fields
+                const src_s = src_ref.@"struct";
+                for (s.fields, 0..) |field_gid, i| {
+                    if (i < src_s.fields.len) {
+                        copyUndefinedStateRecursive(state.refinements, field_gid, src_s.fields[i]);
+                    }
+                }
+            },
+            .@"union" => |u| {
+                // Copy to matching union variants
+                const src_u = src_ref.@"union";
+                for (u.fields, 0..) |maybe_field, i| {
+                    const field_gid = maybe_field orelse continue;
+                    if (i < src_u.fields.len) {
+                        if (src_u.fields[i]) |src_field| {
+                            copyUndefinedStateRecursive(state.refinements, field_gid, src_field);
+                        }
+                    }
+                }
+            },
+            .region => |r| copyUndefinedStateRecursive(state.refinements, r.to, src_gid.?),
+            .recursive, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    /// Recursively copy undefined_safety state from source GID to destination GID.
+    fn copyUndefinedStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+        const src_ref = refinements.at(src_gid);
+        const dst_ref = refinements.at(dst_gid);
+
+        // Get and set analyte state based on types
+        switch (dst_ref.*) {
+            .scalar => |*s| s.analyte.undefined_safety = switch (src_ref.*) {
+                .scalar => |ss| ss.analyte.undefined_safety orelse .{ .defined = {} },
+                else => .{ .defined = {} },
+            },
+            .pointer => |*p| {
+                p.analyte.undefined_safety = switch (src_ref.*) {
+                    .pointer => |sp| sp.analyte.undefined_safety orelse .{ .defined = {} },
+                    else => .{ .defined = {} },
+                };
+                // Also copy pointee state
+                if (src_ref.* == .pointer) {
+                    copyUndefinedStateRecursive(refinements, p.to, src_ref.pointer.to);
+                }
+            },
+            .optional => |o| {
+                if (src_ref.* == .optional) {
+                    copyUndefinedStateRecursive(refinements, o.to, src_ref.optional.to);
+                }
+            },
+            .errorunion => |e| {
+                if (src_ref.* == .errorunion) {
+                    copyUndefinedStateRecursive(refinements, e.to, src_ref.errorunion.to);
+                }
+            },
+            .@"struct" => |s| {
+                if (src_ref.* == .@"struct") {
+                    const src_s = src_ref.@"struct";
+                    for (s.fields, 0..) |field_gid, i| {
+                        if (i < src_s.fields.len) {
+                            copyUndefinedStateRecursive(refinements, field_gid, src_s.fields[i]);
+                        }
+                    }
+                }
+            },
+            .@"union" => |u| {
+                if (src_ref.* == .@"union") {
+                    const src_u = src_ref.@"union";
+                    for (u.fields, 0..) |maybe_field, i| {
+                        const field_gid = maybe_field orelse continue;
+                        if (i < src_u.fields.len) {
+                            if (src_u.fields[i]) |src_field| {
+                                copyUndefinedStateRecursive(refinements, field_gid, src_field);
+                            }
+                        }
+                    }
+                }
+            },
+            .allocator => |*a| a.analyte.undefined_safety = switch (src_ref.*) {
+                .allocator => |sa| sa.analyte.undefined_safety orelse .{ .defined = {} },
+                else => .{ .defined = {} },
+            },
+            .fnptr => |*f| f.analyte.undefined_safety = switch (src_ref.*) {
+                .fnptr => |sf| sf.analyte.undefined_safety orelse .{ .defined = {} },
+                else => .{ .defined = {} },
+            },
+            .region => |r| {
+                if (src_ref.* == .region) {
+                    copyUndefinedStateRecursive(refinements, r.to, src_ref.region.to);
+                }
+            },
+            .recursive, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
     fn markResultDefined(state: State, index: usize, params: anytype) !void {
         _ = params;
         const result_idx = state.results[index].refinement.?;
@@ -884,10 +1043,22 @@ pub const UndefinedSafety = union(enum) {
                             }
                         },
                         .@"struct" => |s| {
-                            // When storing a struct value, mark all fields as defined
-                            // Don't set undefined_safety on struct itself - it's a container type
-                            for (s.fields) |field_idx| {
-                                setDefinedRecursive(refinements, field_idx);
+                            // When storing a struct value, copy undefined_safety from source fields
+                            // The source is also a struct - copy field by field
+                            const src_gid = results[src_idx].refinement.?;
+                            const src_ref = refinements.at(src_gid);
+                            if (src_ref.* == .@"struct") {
+                                const src_s = src_ref.@"struct";
+                                for (s.fields, 0..) |field_idx, i| {
+                                    if (i < src_s.fields.len) {
+                                        copyUndefinedStateRecursive(refinements, field_idx, src_s.fields[i]);
+                                    }
+                                }
+                            } else {
+                                // Fallback: mark all fields as defined
+                                for (s.fields) |field_idx| {
+                                    setDefinedRecursive(refinements, field_idx);
+                                }
                             }
                         },
                         .@"union" => |*u| {
@@ -1778,6 +1949,61 @@ test "store with .null to optional sets inner to defined" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(inner_idx).scalar.analyte.undefined_safety.?));
 }
 
+test "store struct copies undefined_safety from source fields to destination fields" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 5;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Instruction 1: alloc a pointer to struct with 2 scalar fields
+    // This creates destination struct with undefined fields
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{
+        .type_id = 100,
+        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+    } } } });
+
+    // Check that destination fields start as undefined
+    const ptr_gid = results[1].refinement.?;
+    const dst_struct_gid = refinements.at(ptr_gid).pointer.to;
+    const dst_field0_gid = refinements.at(dst_struct_gid).@"struct".fields[0];
+    const dst_field1_gid = refinements.at(dst_struct_gid).@"struct".fields[1];
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(dst_field0_gid).scalar.analyte.undefined_safety.?));
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(dst_field1_gid).scalar.analyte.undefined_safety.?));
+
+    // Create source scalars with defined state
+    const src_scalar0_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} }, .memory_safety = .{ .unset = {} } },
+    } });
+    results[2].refinement = src_scalar0_gid;
+    const src_scalar1_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} }, .memory_safety = .{ .unset = {} } },
+    } });
+    results[3].refinement = src_scalar1_gid;
+
+    // Create source struct using aggregate_init (this properly allocates fields)
+    const struct_type = tag.Type{ .@"struct" = &.{
+        .type_id = 100,
+        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+    } };
+    const elements = &[_]tag.Src{ .{ .inst = 2 }, .{ .inst = 3 } };
+    try Inst.apply(state, 4, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
+
+    // Store the source struct to the destination (through the pointer)
+    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 4 } } });
+
+    // Check that destination fields are now defined (copied from source)
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(dst_field0_gid).scalar.analyte.undefined_safety.?));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(dst_field1_gid).scalar.analyte.undefined_safety.?));
+}
+
 test "load from undefined inst returns error" {
     const allocator = std.testing.allocator;
 
@@ -1902,4 +2128,64 @@ test "reportUseBeforeAssign without name_when_set returns error" {
     } };
 
     try std.testing.expectError(error.UseBeforeAssign, undef.reportUseBeforeAssign(&ctx));
+}
+
+test "aggregate_init incorporates undefined state from source elements" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Manually create scalar refinements with defined and undefined states
+    // inst 0: defined scalar
+    const defined_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .defined, .memory_safety = .{ .unset = {} } },
+    } });
+    results[0].refinement = defined_scalar_gid;
+
+    // inst 1: undefined scalar
+    const undefined_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .undefined_safety = .{ .undefined = .{
+                .meta = .{ .function = "test", .file = "test.zig", .line = 5, .column = 10 },
+            } },
+            .memory_safety = .{ .unset = {} },
+        },
+    } });
+    results[1].refinement = undefined_scalar_gid;
+
+    // Create struct with two scalar fields using aggregate_init
+    // Field 0 should be defined (from inst 0), field 1 should be undefined (from inst 1)
+    const struct_type = tag.Type{ .@"struct" = &.{
+        .type_id = 100,
+        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+    } };
+    const elements = &[_]tag.Src{ .{ .inst = 0 }, .{ .inst = 1 } };
+    try Inst.apply(state, 2, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
+
+    // Check the struct's fields
+    const struct_gid = results[2].refinement.?;
+    const struct_ref = refinements.at(struct_gid);
+    try std.testing.expectEqual(.@"struct", std.meta.activeTag(struct_ref.*));
+
+    const field0_gid = struct_ref.@"struct".fields[0];
+    const field1_gid = struct_ref.@"struct".fields[1];
+
+    // Field 0 should be defined (from defined source)
+    const field0_undef = refinements.at(field0_gid).scalar.analyte.undefined_safety.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(field0_undef));
+
+    // Field 1 should be undefined (from undefined source)
+    const field1_undef = refinements.at(field1_gid).scalar.analyte.undefined_safety.?;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(field1_undef));
+
+    refinements.testValid();
 }

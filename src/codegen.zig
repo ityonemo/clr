@@ -193,6 +193,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .cmp_vector, .cmp_vector_optimized => ".{}",
         // Overflow ops (ty_pl)
         .shl_with_overflow => ".{}",
+        .aggregate_init => payloadAggregateInit(info, datum),
         else => ".{}",
     };
 }
@@ -390,6 +391,64 @@ fn payloadAlloc(info: *const FnInfo, datum: Data) []const u8 {
     };
     const pointee_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, pointee_type);
     return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
+}
+
+/// Payload for aggregate_init (creates struct/array/tuple)
+fn payloadAggregateInit(info: *const FnInfo, datum: Data) []const u8 {
+    const result_type = datum.ty_pl.ty.toInterned() orelse return ".{ .ty = .{ .unimplemented = {} }, .elements = &.{} }";
+    const type_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, result_type);
+
+    // Get element count from the type
+    const type_key = info.ip.indexToKey(result_type);
+    const elem_count: usize = switch (type_key) {
+        .struct_type => blk: {
+            const loaded = info.ip.loadStructType(result_type);
+            break :blk loaded.field_types.get(info.ip).len;
+        },
+        .tuple_type => |t| t.types.len,
+        .array_type => |a| @intCast(a.len),
+        .vector_type => |v| v.len,
+        else => 0,
+    };
+
+    if (elem_count == 0) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{}} }}", .{type_str}, null);
+    }
+
+    // Extract payload index - use raw pointer access for DLL safety
+    const raw_ptr: [*]const u32 = @ptrCast(&datum);
+    // ty_pl: { ty: Ref (u32), payload: u32 }
+    const payload_index: usize = @intCast(raw_ptr[1]);
+
+    // Build elements - fully inlined to avoid DLL issues
+    if (elem_count == 0) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{}} }}", .{type_str}, null);
+    }
+
+    // Get first element
+    const elem0: []const u8 = if (payload_index < info.extra.len) blk: {
+        const raw = info.extra[payload_index];
+        const ref: Ref = @enumFromInt(raw);
+        break :blk srcString(info, ref);
+    } else ".{ .inst = 0 }";
+
+    if (elem_count == 1) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s} }} }}", .{ type_str, elem0 }, null);
+    }
+
+    // Get second element
+    const elem1: []const u8 = if (payload_index + 1 < info.extra.len) blk: {
+        const raw = info.extra[payload_index + 1];
+        const ref: Ref = @enumFromInt(raw);
+        break :blk srcString(info, ref);
+    } else ".{ .inst = 0 }";
+
+    if (elem_count == 2) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s}, {s} }} }}", .{ type_str, elem0, elem1 }, null);
+    }
+
+    // For more than 2 elements, just return unimplemented for now
+    return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{}} }}", .{type_str}, null);
 }
 
 /// Extract the return type string for a function given its InternPool index.
@@ -2045,8 +2104,8 @@ fn getInstResultType(_: *const InternPool, tags: []const Tag, data: []const Data
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
         => datum.ty_op.ty.toInterned(),
-        // Block stores result type in ty_pl.ty
-        .block => datum.ty_pl.ty.toInterned(),
+        // Block and aggregate_init store result type in ty_pl.ty
+        .block, .aggregate_init => datum.ty_pl.ty.toInterned(),
         else => null,
     };
 }

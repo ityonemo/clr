@@ -142,6 +142,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no false positive when storing struct returned from function call" {
+    run compile_and_run "$TEST_CASES/undefined/basic/store_struct_from_call.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "detects undefined field when callee misses setting it" {
     run compile_and_run "$TEST_CASES/undefined/structs/struct_field_missed_when_passed.zig"
     [ "$status" -ne 0 ]
