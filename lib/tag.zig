@@ -243,7 +243,9 @@ pub const AllocResize = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = self;
         // resize returns a bool - create scalar result
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        // The result is defined (the resize operation executed)
+        splatInitDefined(state.refinements, gid, state.ctx);
         try splat(.alloc_resize, state, index, .{});
     }
 };
@@ -650,10 +652,15 @@ pub const Load = struct {
                     break :blk gid;
                 }
                 // Not tracked - comptime constant pointer, create refinement from type
-                const ref = try typeToRefinement(interned.ty, state.refinements);
-                const gid = try Inst.clobberInst(state.refinements, state.results, index, ref);
+                // interned.ty is the pointer type, so create that first
+                const ptr_ref = try typeToRefinement(interned.ty, state.refinements);
+                const ptr_gid_temp = try state.refinements.appendEntity(ptr_ref);
                 // Initialize as defined - comptime constants are always defined
-                splatInitDefined(state.refinements, gid, state.ctx);
+                splatInitDefined(state.refinements, ptr_gid_temp, state.ctx);
+                // Now follow the pointer to get the pointee (same as tracked case)
+                const pointee_gid = state.refinements.at(ptr_gid_temp).pointer.to;
+                const new_gid = try state.refinements.semideepCopy(pointee_gid);
+                state.results[index].refinement = new_gid;
                 try splat(.load, state, index, self);
                 return;
             },
@@ -1039,11 +1046,17 @@ pub const RetSafe = struct {
                         cloned.at(return_gid).* = .void;
                     } else if (interned.ty == .undefined) {
                         // Explicitly undefined value - mark as undefined
-                        cloned.at(return_gid).* = try typeToRefinement(interned.ty, cloned);
+                        // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
+                        // dangling pointer if typeToRefinement causes list reallocation.
+                        const ref = try typeToRefinement(interned.ty, cloned);
+                        cloned.at(return_gid).* = ref;
                         splatInit(cloned, return_gid, state.ctx);
                     } else {
                         // Non-void, non-undefined comptime value (constants, null) - mark as defined
-                        cloned.at(return_gid).* = try typeToRefinement(interned.ty, cloned);
+                        // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
+                        // dangling pointer if typeToRefinement causes list reallocation.
+                        const ref = try typeToRefinement(interned.ty, cloned);
+                        cloned.at(return_gid).* = ref;
                         splatInitDefined(cloned, return_gid, state.ctx);
                     }
                 }
@@ -1454,7 +1467,9 @@ pub fn UnOp(comptime instr: anytype) type {
         src: Src,
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            // Unary operations produce defined results (the operation executed)
+            splatInitDefined(state.refinements, gid, state.ctx);
             try splat(instr, state, index, self);
         }
     };
@@ -1469,7 +1484,9 @@ pub fn NullCheck(comptime instr: anytype) type {
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
             // Result is a boolean scalar (the result of the null check)
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            // Null checks produce defined results (the check executed)
+            splatInitDefined(state.refinements, gid, state.ctx);
             try splat(instr, state, index, self);
         }
     };
@@ -1534,7 +1551,9 @@ pub const IsNonErr = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the error check)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        // The result is defined (the error check executed)
+        splatInitDefined(state.refinements, gid, state.ctx);
         try splat(.is_non_err, state, index, self);
     }
 };
@@ -1777,7 +1796,9 @@ pub const GetUnionTag = struct {
     operand: ?usize, // the union instruction we're getting the tag from
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        // The result is defined (we read the tag value)
+        splatInitDefined(state.refinements, gid, state.ctx);
         try splat(.get_union_tag, state, index, self);
     }
 };
@@ -2262,7 +2283,9 @@ pub fn BinOp(comptime tag: anytype) type {
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
             // Binary operations produce scalar results
-            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            // Binary operations produce defined results (the operation executed)
+            splatInitDefined(state.refinements, gid, state.ctx);
             try splat(tag, state, index, self);
         }
     };
@@ -2275,7 +2298,9 @@ pub const TransferOp = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create a scalar result - analyses will handle any property transfer
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        // The result is defined (the transfer operation executed)
+        splatInitDefined(state.refinements, gid, state.ctx);
         // Let each analysis decide how to handle this operation
         try splat(.transfer_op, state, index, self);
     }
@@ -3541,4 +3566,130 @@ test "union_init creates union with active variant" {
     // Field 1 should be active (non-null), field 0 inactive (null)
     try std.testing.expect(union_ref.@"union".fields[0] == null);
     try std.testing.expect(union_ref.@"union".fields[1] != null);
+}
+
+test "ret_safe with deeply nested type (3 levels) with early_returns" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Pre-populate refinements to match the crash scenario (136 items)
+    for (0..136) |_| {
+        _ = try refinements.appendEntity(.{ .scalar = .{} });
+    }
+
+    // Create the return slot at the expected position
+    const return_gid = try refinements.appendEntity(.{ .optional = .{ .to = 0 } }); // placeholder
+
+    var results = [_]Inst{.{}} ** 20;
+
+    // Set up early_returns to match the real scenario
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer {
+        for (early_returns.items) |s| {
+            s.refinements.deinit();
+            allocator.destroy(s.refinements);
+        }
+        early_returns.deinit(allocator);
+    }
+
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .early_returns = &early_returns,
+    };
+
+    // The type that causes the crash: 3 levels of nesting
+    // .null -> .pointer -> .region -> .scalar
+    const nested_type: Type = .{ .null = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+
+    // Call ret_safe with the deeply nested type
+    try Inst.apply(state, 0, .{ .ret_safe = .{
+        .src = .{ .interned = .{ .ip_idx = 9999, .ty = nested_type } },
+    } });
+
+    // Verify early_returns has one entry with the cloned refinements
+    try std.testing.expectEqual(@as(usize, 1), early_returns.items.len);
+
+    // The cloned refinements should have the optional at return_gid
+    const cloned = early_returns.items[0].refinements;
+    const return_ref = cloned.at(return_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(return_ref.*));
+}
+
+test "typeToRefinement on cloned table with 3-level nested type" {
+    const allocator = std.testing.allocator;
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Pre-populate refinements to match the crash scenario (136 items)
+    for (0..136) |_| {
+        _ = try refinements.appendEntity(.{ .scalar = .{} });
+    }
+
+    // Clone the refinements
+    const cloned = try allocator.create(Refinements);
+    cloned.* = try refinements.clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    // The type that causes the crash: 3 levels of nesting
+    const nested_type: Type = .{ .null = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+
+    // Call typeToRefinement directly on the cloned table
+    const result = try typeToRefinement(nested_type, cloned);
+
+    // Should return an optional
+    try std.testing.expectEqual(.optional, std.meta.activeTag(result));
+}
+
+test "reallocation bug: assign typeToRefinement result to slot in same table" {
+    const allocator = std.testing.allocator;
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    // Pre-populate to a size that will cause reallocation when 3 more items are added
+    // ArrayList typically grows by doubling, so we want to be just under a power of 2
+    for (0..126) |_| {
+        _ = try refinements.appendEntity(.{ .scalar = .{} });
+    }
+
+    // Add a return slot
+    const return_gid = try refinements.appendEntity(.{ .scalar = .{} });
+
+    // Clone the refinements
+    const cloned = try allocator.create(Refinements);
+    cloned.* = try refinements.clone(allocator);
+    defer {
+        cloned.deinit();
+        allocator.destroy(cloned);
+    }
+
+    // This pattern is what ret_safe does - and it's buggy!
+    // The LHS (cloned.at(return_gid)) is evaluated first, returning a pointer.
+    // Then typeToRefinement appends entities, potentially reallocating.
+    // The pointer becomes dangling if reallocation occurred.
+    const nested_type: Type = .{ .null = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+
+    // This is the buggy pattern from ret_safe line 1051:
+    // cloned.at(return_gid).* = try typeToRefinement(interned.ty, cloned);
+    //
+    // The fix is to evaluate typeToRefinement FIRST, then assign:
+    const result = try typeToRefinement(nested_type, cloned);
+    cloned.at(return_gid).* = result;
+
+    // Should work now
+    try std.testing.expectEqual(.optional, std.meta.activeTag(cloned.at(return_gid).*));
 }

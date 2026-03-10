@@ -1957,11 +1957,12 @@ pub const MemorySafety = union(enum) {
                             // Entity may not exist in all branches during recursive merge traversal
                             const branch_gid = branch_gid_opt orelse continue;
                             const branch_ref = branch.refinements.at(branch_gid);
-                            // Original was pointer/scalar with allocation, branch copy must be same type
+                            // For optionals, branches may have different inner types
+                            // (e.g., .null vs .scalar) - skip branches without analytes
                             const branch_analyte = switch (branch_ref.*) {
                                 .pointer => |*p| &p.analyte,
                                 .scalar => |*s| &s.analyte,
-                                else => unreachable,
+                                else => continue, // .null, .optional, etc. have no analyte
                             };
                             // Branch may have different memory_safety state (e.g., null branch has .unset)
                             // Only check freed state if branch also has .allocated
@@ -1996,10 +1997,12 @@ pub const MemorySafety = union(enum) {
                         const branch = branch_opt orelse continue;
                         const branch_gid = branch_gid_opt orelse continue;
                         const branch_ref = branch.refinements.at(branch_gid);
+                        // For optionals, branches may have different inner types
+                        // (e.g., .null vs .scalar) - skip branches without analytes
                         const branch_analyte = switch (branch_ref.*) {
                             .pointer => |*p| &p.analyte,
                             .scalar => |*s| &s.analyte,
-                            else => unreachable,
+                            else => continue, // .null, .optional, etc. have no analyte
                         };
                         if (branch_analyte.memory_safety) |ms| {
                             if (ms == .allocated or ms == .global) {
@@ -2021,11 +2024,12 @@ pub const MemorySafety = union(enum) {
                 // Entity may not exist in all branches during recursive merge traversal
                 const branch_gid = branch_gid_opt orelse continue;
                 const branch_ref = branch.refinements.at(branch_gid);
-                // Original was pointer/scalar, branch copy must be same type
+                // For optionals, branches may have different inner types
+                // (e.g., .null vs .scalar) - skip branches without analytes
                 const branch_analyte = switch (branch_ref.*) {
                     .pointer => |*p| &p.analyte,
                     .scalar => |*s| &s.analyte,
-                    else => unreachable,
+                    else => continue, // .null, .optional, etc. have no analyte
                 };
                 if (branch_analyte.memory_safety) |ms| {
                     orig_analyte.memory_safety = ms;

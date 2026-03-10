@@ -154,6 +154,19 @@ This is much faster than re-running `./run_integration.sh` or even `./run_one.sh
 4. Run `zig build -Doptimize=ReleaseFast` to rebuild libclr
 5. Directly execute the `.air.zig` file to test the fix
 
+**Instrumenting .air.zig files**: When debugging runtime crashes or unexpected behavior, you can add debug prints directly to the generated `.air.zig` file:
+
+```zig
+// Add debug output before a problematic instruction
+std.debug.print("DEBUG: refinement = {any}\n", .{state.refinements.at(some_gid).*});
+try Inst.apply(state, 16, .{ .ret_safe = ... });
+```
+
+This lets you inspect state at specific points in the instruction sequence without modifying `lib/` code. After instrumenting, run directly:
+```sh
+zig run --dep clr -Mroot=my_test.air.zig -Mclr=lib/lib.zig
+```
+
 Use `./clear.sh` to clean up generated `.air.zig` files when done.
 
 ## Development Guidelines
@@ -165,6 +178,37 @@ Use `./clear.sh` to clean up generated `.air.zig` files when done.
   4. Follow the TDD Procedure below for adding new AIR tag handlers
 - **Do not modify the zig/ submodule** - Any changes to the Zig compiler must be made by humans, not AI
 - **Use debug.zig for debugging** - Use `src/debug.zig` for debug output. It uses `std.fmt.bufPrint` with raw Linux syscalls. Do not modify this file - it works correctly in the DLL context where `std.debug.print` does not.
+
+## False Positive Investigation Cycle (CRITICAL)
+
+When a false positive is identified, follow this cycle **exactly**. Do NOT skip steps or take shortcuts.
+
+### The 8-Step Cycle
+
+1. **False positive identified** - Document the error message, location, and why it's a false positive (the code is actually correct).
+
+2. **Instrument .air.zig to verify understanding** - Add debug output to the generated `.air.zig` file to confirm your understanding of the issue. Run the instrumented file directly with `zig run` to verify. This step is CRITICAL - do not assume you understand the problem without verifying.
+
+3. **Write a unit test that reproduces the error** - Create a minimal unit test in `lib/` that triggers the exact same failure. This test should fail before the fix.
+
+4. **Write an integration test that reproduces the error** - Create a test case in `test/cases/` and corresponding BATS test in `test/integration/`. This test should also fail before the fix.
+
+5. **Use the unit test to fix the error** - Iterate on the fix using the fast unit test cycle (`zig test lib/lib.zig`). Unit tests run in seconds; use them.
+
+6. **Verify the integration test now passes** - Run the specific integration test with `./run_one.sh` or `bats -f "pattern"` to confirm the fix works end-to-end.
+
+7. **Run full integration cycle** - Run `./run_integration.sh` to verify nothing else is broken. Only do this ONCE before committing.
+
+8. **Commit, move on** - Commit the fix and proceed to the next error (if any).
+
+### Why This Cycle Matters
+
+- **Step 2 prevents wasted effort** - Instrumenting first ensures you understand the actual problem, not what you assume the problem is.
+- **Steps 3-4 ensure reproducibility** - Without tests, you can't prove the fix works or detect regressions.
+- **Step 5 enables fast iteration** - Unit tests run in seconds. Integration tests take minutes. Fix bugs with unit tests.
+- **Step 7 catches regressions** - The full suite must pass before committing.
+
+**NEVER skip the instrumentation step (Step 2).** Complex analysis bugs often have subtle root causes. Verify your understanding before writing fixes.
 
 ## Iron Rules (DO NOT VIOLATE)
 
