@@ -1456,9 +1456,9 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             visited.put(arena, ty, {}) catch @panic("out of memory");
             break :blk unionTypeToStringSimple(arena, ip, ty, visited);
         },
-        // Enums and ints are scalars (we don't track them)
+        // Enums, ints, and error sets are scalars (we don't track them individually)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type => ".{ .scalar = {} }",
+        .enum_type, .int_type, .error_set_type => ".{ .scalar = {} }",
         // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
         .func_type => ".{ .unimplemented = {} }",
         else => ".{ .unimplemented = {} }",
@@ -1649,9 +1649,9 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             visited.put(arena, ty, {}) catch @panic("out of memory");
             break :blk unionTypeToString(name_map, field_map, arena, ip, ty, visited);
         },
-        // Enums and ints are scalars (we don't track them)
+        // Enums, ints, and error sets are scalars (we don't track them individually)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type => ".{ .scalar = {} }",
+        .enum_type, .int_type, .error_set_type => ".{ .scalar = {} }",
         // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
         .func_type => ".{ .unimplemented = {} }",
         else => ".{ .unimplemented = {} }",
@@ -4171,10 +4171,13 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     _ = arity; // Unified signature always uses args slice
 
     // FnInterpreter signature: *Context, *Refinements, Gid, []const Gid
+    // Mark return value as defined - unresolved functions may return initialized values
+    // (syscall wrappers, etc.). Conservative assumption avoids false positives.
     return clr_allocator.allocPrint(clr_allocator.allocator(),
-        \\fn fn_{d}(ctx: *Context, _: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {{
+        \\fn fn_{d}(ctx: *Context, refinements: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {{
         \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
         \\    ctx.dumpStackTrace();
+        \\    clr.splatInitDefined(refinements, return_gid, ctx);
         \\    return return_gid;
         \\}}
         \\

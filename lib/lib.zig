@@ -6,6 +6,7 @@ pub const Src = @import("tag.zig").Src;
 pub const Type = @import("tag.zig").Type;
 pub const typeToRefinement = @import("tag.zig").typeToRefinement;
 pub const splatInit = @import("tag.zig").splatInit;
+pub const splatInitDefined = @import("tag.zig").splatInitDefined;
 pub const splatInitGlobal = @import("tag.zig").splatInitGlobal;
 pub const GlobalLocation = @import("tag.zig").GlobalLocation;
 pub const Gid = Refinements.Gid;
