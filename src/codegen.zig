@@ -114,6 +114,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .ptr_elem_val => payloadArrayElemVal(info, datum),
         .ptr_elem_ptr, .slice_elem_ptr => payloadPtrElemPtr(info, datum),
         .slice_ptr => payloadSlicePtr(info, datum),
+        .slice => payloadSlice(info, datum),
         .array_to_slice => payloadArrayToSlice(info, datum),
         .ptr_add, .ptr_sub => payloadPtrAdd(info, datum),
         // Slice pointer access (ty_op)
@@ -342,6 +343,18 @@ fn payloadSlicePtr(info: *const FnInfo, datum: Data) []const u8 {
     return clr_allocator.allocPrint(info.arena, ".{{ .slice = {?d} }}", .{slice}, null);
 }
 
+/// Payload for slice - creates a slice from a pointer with bounds.
+/// ty_pl format: ty is the result slice type.
+fn payloadSlice(info: *const FnInfo, datum: Data) []const u8 {
+    // The result type is a slice (pointer to region)
+    const ty_ref = datum.ty_pl.ty;
+    if (ty_ref.toInterned()) |interned_idx| {
+        const type_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, interned_idx);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{type_str}, null);
+    }
+    return ".{}";
+}
+
 /// Payload for array_to_slice - converts array/many-pointer to slice.
 /// ty_op format: operand is the array/many-pointer value.
 fn payloadArrayToSlice(info: *const FnInfo, datum: Data) []const u8 {
@@ -531,6 +544,39 @@ fn extractFunctionFromPointer(ip: *const InternPool, ip_idx: InternPool.Index) ?
         },
         else => return null,
     }
+}
+
+/// Extract return type from a function or pointer-to-function TYPE.
+/// Used as a fallback when extractFunctionFromPointer fails but we still have type info.
+/// Handles both direct func_type and ptr_type pointing to func_type.
+/// Returns null if the type is not a function or pointer to function.
+fn extractReturnTypeFromPtrType(
+    name_map: *std.AutoHashMapUnmanaged(u32, []const u8),
+    field_map: *FieldHashMap,
+    arena: std.mem.Allocator,
+    ip: *const InternPool,
+    ip_idx: InternPool.Index,
+) ?[]const u8 {
+    // Get the type of this value
+    const val_type = ip.typeOf(ip_idx);
+    const type_key = ip.indexToKey(val_type);
+
+    // Get the return type, handling both direct func_type and ptr_type -> func_type
+    const return_type_idx = switch (type_key) {
+        .func_type => |ft| ft.return_type, // Direct function type
+        .ptr_type => |pt| blk: {
+            // Pointer to function - get the child func_type
+            const func_type_key = ip.indexToKey(pt.child);
+            break :blk switch (func_type_key) {
+                .func_type => |ft| ft.return_type,
+                else => return null,
+            };
+        },
+        else => return null,
+    };
+
+    // Convert return type to string
+    return typeToString(name_map, field_map, arena, ip, return_type_idx);
 }
 
 /// Extract type info for AllocCreate payload.
@@ -1984,16 +2030,28 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
         break :blk .{ called, ret_type };
     } else if (callee_ref.toInterned()) |ip_idx| blk: {
         // Check if this is a function pointer constant (&function_name)
-        const resolved_func_idx = extractFunctionFromPointer(info.ip, ip_idx) orelse ip_idx;
-        // Add to call targets so the function is included in tree shaking
-        info.call_targets.append(clr_allocator.allocator(), .{
-            .index = @intFromEnum(resolved_func_idx),
-            .arity = args_len,
-        }) catch {};
-        // Direct call to known function - use InternPool index as func_index
-        const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(resolved_func_idx)}, null);
-        const ret_type = extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, resolved_func_idx);
-        break :blk .{ called, ret_type };
+        if (extractFunctionFromPointer(info.ip, ip_idx)) |resolved_func_idx| {
+            // Successfully resolved function - add to call targets for tree shaking
+            info.call_targets.append(clr_allocator.allocator(), .{
+                .index = @intFromEnum(resolved_func_idx),
+                .arity = args_len,
+            }) catch {};
+            // Direct call to known function - use InternPool index as func_index
+            const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(resolved_func_idx)}, null);
+            const ret_type = extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, resolved_func_idx);
+            break :blk .{ called, ret_type };
+        } else {
+            // Function value not resolved, but we can still try to get return type from pointer type
+            info.call_targets.append(clr_allocator.allocator(), .{
+                .index = @intFromEnum(ip_idx),
+                .arity = args_len,
+            }) catch {};
+            const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
+            // Try to get return type from pointer-to-function type
+            const ret_type = extractReturnTypeFromPtrType(info.name_map, info.field_map, info.arena, info.ip, ip_idx) orelse
+                ".{ .unimplemented = {} }";
+            break :blk .{ called, ret_type };
+        }
     } else .{ "null", ".{ .unimplemented = {} }" };
 
     // Build args slice string: &[_]Src{ Arg, Arg, ... }
@@ -2104,8 +2162,8 @@ fn getInstResultType(_: *const InternPool, tags: []const Tag, data: []const Data
         .struct_field_ptr_index_2,
         .struct_field_ptr_index_3,
         => datum.ty_op.ty.toInterned(),
-        // Block and aggregate_init store result type in ty_pl.ty
-        .block, .aggregate_init => datum.ty_pl.ty.toInterned(),
+        // Block, aggregate_init, and slice store result type in ty_pl.ty
+        .block, .aggregate_init, .slice => datum.ty_pl.ty.toInterned(),
         else => null,
     };
 }

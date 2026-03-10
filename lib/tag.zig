@@ -1731,10 +1731,17 @@ pub const WrapErrunionErr = struct {
 /// Entity operation: UNIMPLEMENTED
 /// Slice creates a slice (ptr + len) from an array or pointer.
 /// TODO: Needs codegen support to get element type from ty_op.ty.
+/// Slice operation - creates a slice from a pointer with bounds.
+/// Result is a pointer to region (slice type).
 pub const Slice = struct {
+    /// The result type (slice type)
+    ty: Type = .{ .unimplemented = {} },
+
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
+        // Create refinement based on the type - slices are pointers to regions
+        const refinement = try typeToRefinement(self.ty, state.refinements);
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
+        splatInitDefined(state.refinements, gid, state.ctx);
     }
 };
 
