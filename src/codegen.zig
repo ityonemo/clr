@@ -3345,6 +3345,7 @@ fn generateOneFunction(
         tag: Tag,
         datum: Data,
         is_noop: bool,
+        is_dotq_pattern: bool = false, // For dotQ pattern cond_br: generate Inst.apply instead of Inst.cond_br
     };
     var stack: std.ArrayListUnmanaged(InstrData) = .empty;
 
@@ -3370,9 +3371,10 @@ fn generateOneFunction(
                 var is_dotq_noop = false;
                 if (tag == .cond_br) {
                     if (isDotQPattern(info.ip, idx, info.tags, info.data, info.extra)) {
-                        // .? pattern detected - noop the cond_br, skip branch functions
+                        // .? pattern detected at TOP LEVEL - mark as noop to NOT narrow state.
+                        // Top-level .? on an ambiguous optional should still error.
+                        // (For nested .? inside cond_br branches, see .sub case which generates inline cond_br)
                         is_dotq_noop = true;
-                        // Don't add branch functions to worklist
                     } else if (extractCondBrBodies(idx, info.data, info.extra)) |bodies| {
                         worklist.append(info.arena, .{ .sub = .{
                             .func_index = func_index,
@@ -3475,7 +3477,7 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop, .is_dotq_pattern = false }) catch @panic("out of memory");
             }
         },
         .sub => {
@@ -3495,11 +3497,12 @@ fn generateOneFunction(
                 const datum = info.data[idx];
 
                 // Check for nested cond_br (unless it's a .? pattern)
-                var is_dotq_noop = false;
+                var is_dotq_pattern = false;
                 if (tag == .cond_br) {
                     if (isDotQPattern(info.ip, idx, info.tags, info.data, info.extra)) {
-                        // .? pattern detected - noop the cond_br, skip branch functions
-                        is_dotq_noop = true;
+                        // .? pattern detected - still generate cond_br for null_safety narrowing,
+                        // but skip branch function generation (they just call unwrapNull + unreach)
+                        is_dotq_pattern = true;
                     } else if (extractCondBrBodies(idx, info.data, info.extra)) |bodies| {
                         worklist.append(info.arena, .{ .sub = .{
                             .func_index = func_index,
@@ -3596,7 +3599,7 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop }) catch @panic("out of memory");
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = false, .is_dotq_pattern = is_dotq_pattern }) catch @panic("out of memory");
             }
         },
     }
@@ -3653,8 +3656,17 @@ fn generateOneFunction(
             // Generate noop for unreferenced instruction
             line = generateNoopLine(info.arena, instr.idx);
         } else if (instr.tag == .cond_br) {
-            // Generate Inst.cond_br call with function references
-            line = generateCondBrLine(info.arena, instr.idx, func_index);
+            if (instr.is_dotq_pattern) {
+                // DotQ pattern: generate Inst.apply with cond_br tag for narrowing,
+                // but don't reference branch functions (they're not generated)
+                const cond_br_datum = info.data[instr.idx];
+                const condition_ref = cond_br_datum.pl_op.operand;
+                const condition_idx: ?u32 = if (condition_ref.toIndex()) |i| @intFromEnum(i) else null;
+                line = generateDotQCondBrLine(info.arena, instr.idx, condition_idx);
+            } else {
+                // Generate Inst.cond_br call with function references
+                line = generateCondBrLine(info.arena, instr.idx, func_index);
+            }
         } else if (instr.tag == .switch_br) {
             // Generate Inst.switch_br call with all case function references
             if (extractSwitchBrBodies(info.arena, info.ip, instr.idx, info.tags, info.data, info.extra)) |bodies| {
@@ -3727,6 +3739,24 @@ fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u3
         \\    try Inst.cond_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d});
         \\
     , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
+}
+
+/// Generate Inst.apply with cond_br tag for dotQ patterns (.? operator)
+/// This narrows null_safety state without generating branch functions
+/// The true branch is always taken (after the safety check, the optional is non-null)
+fn generateDotQCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, condition_idx: ?u32) []const u8 {
+    if (condition_idx) |cond_idx| {
+        return clr_allocator.allocPrint(arena,
+            \\    try Inst.apply(state, {d}, .{{ .cond_br = .{{ .branch = true, .condition_idx = {d} }} }});
+            \\
+        , .{ cond_br_idx, cond_idx }, null);
+    } else {
+        // No condition index - use null
+        return clr_allocator.allocPrint(arena,
+            \\    try Inst.apply(state, {d}, .{{ .cond_br = .{{ .branch = true, .condition_idx = null }} }});
+            \\
+        , .{cond_br_idx}, null);
+    }
 }
 
 /// Generate the Inst.loop call line with body function reference
