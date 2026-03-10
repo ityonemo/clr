@@ -2825,6 +2825,13 @@ pub const MemorySafety = union(enum) {
         initUnsetRecursive(state.refinements, ref_idx);
     }
 
+    /// WrapOptional creates an optional refinement - initialize memory_safety
+    pub fn wrap_optional(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        const ref_idx = state.results[index].refinement orelse return;
+        initUnsetRecursive(state.refinements, ref_idx);
+    }
+
     /// RetPtr creates a return value entity via typeToRefinement for struct/union returns
     pub fn ret_ptr(state: State, index: usize, params: anytype) !void {
         _ = params;
@@ -4667,5 +4674,40 @@ test "aggregate_init incorporates memory_safety state from source elements" {
     const field1_ms = field1_ref.pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.stack, std.meta.activeTag(field1_ms));
 
+    refinements.testValid();
+}
+
+test "wrap_optional sets memory_safety on optional" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a pointer with defined memory_safety
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .pointer = &.{ .scalar = {} } } } });
+
+    // Wrap it in an optional
+    try Inst.apply(state, 1, .{ .wrap_optional = .{
+        .src = .{ .inst = 0 },
+        .ty = .{ .optional = &.{ .pointer = &.{ .scalar = {} } } },
+    } });
+
+    // Check the optional has memory_safety set
+    const optional_gid = results[1].refinement.?;
+    const optional_ref = refinements.at(optional_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(optional_ref.*));
+
+    // memory_safety must be non-null for testValid to pass
+    try std.testing.expect(optional_ref.optional.analyte.memory_safety != null);
+
+    // This should not panic
     refinements.testValid();
 }

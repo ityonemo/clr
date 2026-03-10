@@ -33,3 +33,10 @@ load test_helper
     run compile_and_run "$TEST_CASES/misc/nested_block_optional_simd.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "wrap_optional sets memory_safety on optional" {
+    # Tests that wrap_optional correctly initializes memory_safety on optionals.
+    # Without proper initialization, testValid() would panic.
+    run compile_and_run "$TEST_CASES/wrap_optional/basic.zig"
+    [ "$status" -eq 0 ]
+}
