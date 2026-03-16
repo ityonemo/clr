@@ -2023,6 +2023,7 @@ fn payloadLoad(info: *const FnInfo, datum: Data, inst_index: usize) []const u8 {
 /// The bit_or → store pattern is specific to packed struct field assignment.
 fn detectPackedRmw(info: *const FnInfo, datum: Data, inst_index: usize) bool {
     // Load must be from an instruction (not interned)
+    if (datum.ty_op.operand == .none) return false;
     const ptr_idx = datum.ty_op.operand.toIndex() orelse return false;
     const ptr_inst: usize = @intFromEnum(ptr_idx);
 
@@ -3767,16 +3768,31 @@ fn generateOneFunction(
 
             // Build block_body_map: block_idx -> body_indices
             // Build block_body_set: set of all body indices (to exclude from main iteration)
+            // IMPORTANT: Recursively extract block bodies so nested blocks are also in the map
             var block_body_map: std.AutoHashMapUnmanaged(u32, []const u32) = .empty;
             var block_body_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
+
+            // Use a pending list to recursively process nested blocks
+            var pending_blocks: std.ArrayListUnmanaged(u32) = .empty;
             var body_it = body_set.iterator();
             while (body_it.next()) |entry| {
                 const bidx = entry.key_ptr.*;
                 if (info.tags[bidx] == .block) {
-                    if (extractBlockBody(bidx, info.data, info.extra)) |body| {
-                        block_body_map.put(info.arena, bidx, body) catch @panic("out of memory");
-                        for (body) |body_idx| {
-                            block_body_set.put(info.arena, body_idx, {}) catch @panic("out of memory");
+                    pending_blocks.append(info.arena, bidx) catch @panic("out of memory");
+                }
+            }
+
+            // Process all blocks recursively
+            while (pending_blocks.items.len > 0) {
+                const bidx = pending_blocks.pop().?;
+                if (block_body_map.contains(bidx)) continue; // Already processed
+                if (extractBlockBody(bidx, info.data, info.extra)) |body| {
+                    block_body_map.put(info.arena, bidx, body) catch @panic("out of memory");
+                    for (body) |body_idx| {
+                        block_body_set.put(info.arena, body_idx, {}) catch @panic("out of memory");
+                        // If this body index is itself a block, add it to pending
+                        if (info.tags[body_idx] == .block) {
+                            pending_blocks.append(info.arena, body_idx) catch @panic("out of memory");
                         }
                     }
                 }
@@ -3906,86 +3922,126 @@ fn generateOneFunction(
                 const is_union_tag_safety = tag == .cmp_eq and
                     isUnionTagSafetyPattern(info.ip, idx, info.tags, info.data, info.extra);
 
-                // If this is a block with a body, push the body FIRST (in descending order)
-                // so when popped, we get: block, body_first, body_second, ..., body_last
+                // If this is a block with a body, recursively push the body items to stack.
+                // Stack is LIFO: we want output order [15, 16, 17, 18, 19, 22, 23, 24, 31, 32, 33, 34]
+                // So main stack should be [34, 33, 32, 31, 24, 23, 22, 19, 18, 17, 16, 15] after pushing.
+                //
+                // For block 14 with body [15, 16, 17, 18, 19, 32, 33, 34] where 19 has body [22, 23, 24, 31]:
+                // Iterate descending: 34, 33, 32, 19, 18, 17, 16, 15
+                // When we hit 19: first recursively push 19's body [31, 24, 23, 22], THEN push 19
+                //
+                // Using explicit stack to simulate recursion:
+                // Each frame has: body slice, position, and optional pending_emit (block to emit after body)
                 if (tag == .block) {
+                    const Frame = struct {
+                        body: []const u32,
+                        pos: usize,
+                        pending_emit: ?struct { idx: u32, is_dotq: bool } = null,
+                    };
+                    var call_stack: std.ArrayListUnmanaged(Frame) = .empty;
+
                     if (block_body_map.get(idx)) |body| {
-                        // Push body in descending index order
-                        var bi: usize = body.len;
-                        while (bi > 0) {
-                            bi -= 1;
-                            const body_idx = body[bi];
-                            const body_tag = info.tags[body_idx];
-                            const body_datum = info.data[body_idx];
+                        call_stack.append(info.arena, .{ .body = body, .pos = body.len }) catch @panic("out of memory");
+                    }
 
-                            // Also check for nested cond_br/switch_br that need worklist entries
-                            var body_is_dotq_pattern = false;
-                            if (body_tag == .cond_br) {
-                                if (isDotQPattern(info.ip, body_idx, info.tags, info.data, info.extra)) {
-                                    body_is_dotq_pattern = true;
-                                } else if (extractCondBrBodies(body_idx, info.data, info.extra)) |bodies| {
-                                    worklist.append(info.arena, .{ .sub = .{
-                                        .func_index = func_index,
-                                        .instr_index = body_idx,
-                                        .tag = .cond_br_true,
-                                        .body_indices = bodies.then,
-                                    } }) catch @panic("out of memory");
-                                    worklist.append(info.arena, .{ .sub = .{
-                                        .func_index = func_index,
-                                        .instr_index = body_idx,
-                                        .tag = .cond_br_false,
-                                        .body_indices = bodies.@"else",
-                                    } }) catch @panic("out of memory");
-                                }
-                            }
-                            if (body_tag == .switch_br) {
-                                if (extractSwitchBrBodies(info.arena, info.ip, body_idx, info.tags, info.data, info.extra)) |bodies| {
-                                    const has_else = bodies.else_body.len > 0;
-                                    const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
-                                    for (bodies.cases, 0..) |case, case_idx| {
-                                        const union_tag_body: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
-                                            .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
-                                        else
-                                            null;
-                                        worklist.append(info.arena, .{ .sub = .{
-                                            .func_index = func_index,
-                                            .instr_index = body_idx,
-                                            .tag = .{ .switch_case = .{
-                                                .case_index = @intCast(case_idx),
-                                                .num_cases = num_cases,
-                                                .union_tag = union_tag_body,
-                                            } },
-                                            .body_indices = case.body,
-                                        } }) catch @panic("out of memory");
-                                    }
-                                    if (has_else) {
-                                        worklist.append(info.arena, .{ .sub = .{
-                                            .func_index = func_index,
-                                            .instr_index = body_idx,
-                                            .tag = .{ .switch_case = .{
-                                                .case_index = @intCast(bodies.cases.len),
-                                                .num_cases = num_cases,
-                                                .union_tag = null,
-                                            } },
-                                            .body_indices = bodies.else_body,
-                                        } }) catch @panic("out of memory");
-                                    }
-                                }
-                            }
-                            // Check for nested loop
-                            if (body_tag == .loop) {
-                                if (extractBlockBody(body_idx, info.data, info.extra)) |loop_body| {
-                                    worklist.append(info.arena, .{ .sub = .{
-                                        .func_index = func_index,
-                                        .instr_index = body_idx,
-                                        .tag = .loop_body,
-                                        .body_indices = loop_body,
-                                    } }) catch @panic("out of memory");
-                                }
-                            }
+                    while (call_stack.items.len > 0) {
+                        const frame = &call_stack.items[call_stack.items.len - 1];
 
-                            stack.append(info.arena, .{ .idx = body_idx, .tag = body_tag, .datum = body_datum, .is_noop = false, .is_dotq_pattern = body_is_dotq_pattern }) catch @panic("out of memory");
+                        // First, emit any pending block from a previous iteration
+                        if (frame.pending_emit) |pend| {
+                            const pend_tag = info.tags[pend.idx];
+                            const pend_datum = info.data[pend.idx];
+                            stack.append(info.arena, .{ .idx = pend.idx, .tag = pend_tag, .datum = pend_datum, .is_noop = false, .is_dotq_pattern = pend.is_dotq }) catch @panic("out of memory");
+                            frame.pending_emit = null;
+                            continue;
                         }
+
+                        if (frame.pos == 0) {
+                            // Done with this frame
+                            _ = call_stack.pop();
+                            continue;
+                        }
+                        frame.pos -= 1;
+                        const body_idx = frame.body[frame.pos];
+                        const body_tag = info.tags[body_idx];
+                        const body_datum = info.data[body_idx];
+
+                        // Check for worklist entries
+                        var body_is_dotq_pattern = false;
+                        if (body_tag == .cond_br) {
+                            if (isDotQPattern(info.ip, body_idx, info.tags, info.data, info.extra)) {
+                                body_is_dotq_pattern = true;
+                            } else if (extractCondBrBodies(body_idx, info.data, info.extra)) |bodies| {
+                                worklist.append(info.arena, .{ .sub = .{
+                                    .func_index = func_index,
+                                    .instr_index = body_idx,
+                                    .tag = .cond_br_true,
+                                    .body_indices = bodies.then,
+                                } }) catch @panic("out of memory");
+                                worklist.append(info.arena, .{ .sub = .{
+                                    .func_index = func_index,
+                                    .instr_index = body_idx,
+                                    .tag = .cond_br_false,
+                                    .body_indices = bodies.@"else",
+                                } }) catch @panic("out of memory");
+                            }
+                        }
+                        if (body_tag == .switch_br) {
+                            if (extractSwitchBrBodies(info.arena, info.ip, body_idx, info.tags, info.data, info.extra)) |bodies| {
+                                const has_else = bodies.else_body.len > 0;
+                                const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                                for (bodies.cases, 0..) |case, case_idx| {
+                                    const union_tag_body: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
+                                        .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                                    else
+                                        null;
+                                    worklist.append(info.arena, .{ .sub = .{
+                                        .func_index = func_index,
+                                        .instr_index = body_idx,
+                                        .tag = .{ .switch_case = .{
+                                            .case_index = @intCast(case_idx),
+                                            .num_cases = num_cases,
+                                            .union_tag = union_tag_body,
+                                        } },
+                                        .body_indices = case.body,
+                                    } }) catch @panic("out of memory");
+                                }
+                                if (has_else) {
+                                    worklist.append(info.arena, .{ .sub = .{
+                                        .func_index = func_index,
+                                        .instr_index = body_idx,
+                                        .tag = .{ .switch_case = .{
+                                            .case_index = @intCast(bodies.cases.len),
+                                            .num_cases = num_cases,
+                                            .union_tag = null,
+                                        } },
+                                        .body_indices = bodies.else_body,
+                                    } }) catch @panic("out of memory");
+                                }
+                            }
+                        }
+                        if (body_tag == .loop) {
+                            if (extractBlockBody(body_idx, info.data, info.extra)) |loop_body| {
+                                worklist.append(info.arena, .{ .sub = .{
+                                    .func_index = func_index,
+                                    .instr_index = body_idx,
+                                    .tag = .loop_body,
+                                    .body_indices = loop_body,
+                                } }) catch @panic("out of memory");
+                            }
+                        }
+
+                        // If nested block, defer emit and push new frame for its body
+                        if (body_tag == .block) {
+                            if (block_body_map.get(body_idx)) |nested_body| {
+                                frame.pending_emit = .{ .idx = body_idx, .is_dotq = body_is_dotq_pattern };
+                                call_stack.append(info.arena, .{ .body = nested_body, .pos = nested_body.len }) catch @panic("out of memory");
+                                continue;
+                            }
+                        }
+
+                        // Push this item to main stack
+                        stack.append(info.arena, .{ .idx = body_idx, .tag = body_tag, .datum = body_datum, .is_noop = false, .is_dotq_pattern = body_is_dotq_pattern }) catch @panic("out of memory");
                     }
                 }
 

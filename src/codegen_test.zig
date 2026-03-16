@@ -830,11 +830,18 @@ test "instLine for add_with_overflow (OverflowOp)" {
 
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
+    // OverflowOp uses ty_pl where payload points to Bin in extra (lhs, rhs refs)
+    // Create refs for lhs (inst 3) and rhs (inst 4)
+    const Ref = Air.Inst.Ref;
+    const lhs_ref: Ref = @enumFromInt(@as(u32, 3) | (1 << 31)); // inst 3
+    const rhs_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31)); // inst 4
+    const extra: []const u32 = &.{ @intFromEnum(lhs_ref), @intFromEnum(rhs_ref) };
+
     const datum: Data = .{ .ty_pl = .{ .ty = .none, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .add_with_overflow, datum, 9, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 9, .{ .add_with_overflow = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 9, .{ .add_with_overflow = .{ .lhs = .{ .inst = 3 }, .rhs = .{ .inst = 4 } } });\n", result);
 }
 
 test "instLine for sub_with_overflow (OverflowOp)" {
@@ -846,11 +853,17 @@ test "instLine for sub_with_overflow (OverflowOp)" {
 
     var name_map = std.AutoHashMapUnmanaged(u32, []const u8){};
 
+    // OverflowOp uses ty_pl where payload points to Bin in extra (lhs, rhs refs)
+    const Ref = Air.Inst.Ref;
+    const lhs_ref: Ref = @enumFromInt(@as(u32, 5) | (1 << 31)); // inst 5
+    const rhs_ref: Ref = @enumFromInt(@as(u32, 6) | (1 << 31)); // inst 6
+    const extra: []const u32 = &.{ @intFromEnum(lhs_ref), @intFromEnum(rhs_ref) };
+
     const datum: Data = .{ .ty_pl = .{ .ty = .none, .payload = 0 } };
-    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
+    const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .sub_with_overflow, datum, 10, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 10, .{ .sub_with_overflow = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 10, .{ .sub_with_overflow = .{ .lhs = .{ .inst = 5 }, .rhs = .{ .inst = 6 } } });\n", result);
 }
 
 // =============================================================================
