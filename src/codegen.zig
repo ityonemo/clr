@@ -3678,11 +3678,32 @@ fn generateOneFunction(
         .sub => {
             // For sub functions, only process body_set indices (which includes block expansions)
             // No noops needed - parent function handles indices outside our body
-            // Collect and sort body_set keys to iterate in order
+
+            // Build block_body_map: block_idx -> body_indices
+            // Build block_body_set: set of all body indices (to exclude from main iteration)
+            var block_body_map: std.AutoHashMapUnmanaged(u32, []const u32) = .empty;
+            var block_body_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
+            var body_it = body_set.iterator();
+            while (body_it.next()) |entry| {
+                const bidx = entry.key_ptr.*;
+                if (info.tags[bidx] == .block) {
+                    if (extractBlockBody(bidx, info.data, info.extra)) |body| {
+                        block_body_map.put(info.arena, bidx, body) catch @panic("out of memory");
+                        for (body) |body_idx| {
+                            block_body_set.put(info.arena, body_idx, {}) catch @panic("out of memory");
+                        }
+                    }
+                }
+            }
+
+            // Collect body_set keys, EXCLUDING block bodies (they'll be inlined with their blocks)
             var body_indices_list: std.ArrayListUnmanaged(u32) = .empty;
             var it = body_set.iterator();
             while (it.next()) |entry| {
-                body_indices_list.append(info.arena, entry.key_ptr.*) catch @panic("out of memory");
+                const idx = entry.key_ptr.*;
+                // Skip if this is a block body - it will be inlined after its parent block
+                if (block_body_set.contains(idx)) continue;
+                body_indices_list.append(info.arena, idx) catch @panic("out of memory");
             }
             // Sort in descending order for stack (will be reversed when popped)
             std.mem.sort(u32, body_indices_list.items, {}, std.sort.desc(u32));
@@ -3798,6 +3819,89 @@ fn generateOneFunction(
                 // Noop these to avoid false positives when assigning to undefined unions
                 const is_union_tag_safety = tag == .cmp_eq and
                     isUnionTagSafetyPattern(info.ip, idx, info.tags, info.data, info.extra);
+
+                // If this is a block with a body, push the body FIRST (in descending order)
+                // so when popped, we get: block, body_first, body_second, ..., body_last
+                if (tag == .block) {
+                    if (block_body_map.get(idx)) |body| {
+                        // Push body in descending index order
+                        var bi: usize = body.len;
+                        while (bi > 0) {
+                            bi -= 1;
+                            const body_idx = body[bi];
+                            const body_tag = info.tags[body_idx];
+                            const body_datum = info.data[body_idx];
+
+                            // Also check for nested cond_br/switch_br that need worklist entries
+                            var body_is_dotq_pattern = false;
+                            if (body_tag == .cond_br) {
+                                if (isDotQPattern(info.ip, body_idx, info.tags, info.data, info.extra)) {
+                                    body_is_dotq_pattern = true;
+                                } else if (extractCondBrBodies(body_idx, info.data, info.extra)) |bodies| {
+                                    worklist.append(info.arena, .{ .sub = .{
+                                        .func_index = func_index,
+                                        .instr_index = body_idx,
+                                        .tag = .cond_br_true,
+                                        .body_indices = bodies.then,
+                                    } }) catch @panic("out of memory");
+                                    worklist.append(info.arena, .{ .sub = .{
+                                        .func_index = func_index,
+                                        .instr_index = body_idx,
+                                        .tag = .cond_br_false,
+                                        .body_indices = bodies.@"else",
+                                    } }) catch @panic("out of memory");
+                                }
+                            }
+                            if (body_tag == .switch_br) {
+                                if (extractSwitchBrBodies(info.arena, info.ip, body_idx, info.tags, info.data, info.extra)) |bodies| {
+                                    const has_else = bodies.else_body.len > 0;
+                                    const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
+                                    for (bodies.cases, 0..) |case, case_idx| {
+                                        const union_tag_body: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
+                                            .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                                        else
+                                            null;
+                                        worklist.append(info.arena, .{ .sub = .{
+                                            .func_index = func_index,
+                                            .instr_index = body_idx,
+                                            .tag = .{ .switch_case = .{
+                                                .case_index = @intCast(case_idx),
+                                                .num_cases = num_cases,
+                                                .union_tag = union_tag_body,
+                                            } },
+                                            .body_indices = case.body,
+                                        } }) catch @panic("out of memory");
+                                    }
+                                    if (has_else) {
+                                        worklist.append(info.arena, .{ .sub = .{
+                                            .func_index = func_index,
+                                            .instr_index = body_idx,
+                                            .tag = .{ .switch_case = .{
+                                                .case_index = @intCast(bodies.cases.len),
+                                                .num_cases = num_cases,
+                                                .union_tag = null,
+                                            } },
+                                            .body_indices = bodies.else_body,
+                                        } }) catch @panic("out of memory");
+                                    }
+                                }
+                            }
+                            // Check for nested loop
+                            if (body_tag == .loop) {
+                                if (extractBlockBody(body_idx, info.data, info.extra)) |loop_body| {
+                                    worklist.append(info.arena, .{ .sub = .{
+                                        .func_index = func_index,
+                                        .instr_index = body_idx,
+                                        .tag = .loop_body,
+                                        .body_indices = loop_body,
+                                    } }) catch @panic("out of memory");
+                                }
+                            }
+
+                            stack.append(info.arena, .{ .idx = body_idx, .tag = body_tag, .datum = body_datum, .is_noop = false, .is_dotq_pattern = body_is_dotq_pattern }) catch @panic("out of memory");
+                        }
+                    }
+                }
 
                 stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_union_tag_safety, .is_dotq_pattern = is_dotq_pattern }) catch @panic("out of memory");
             }

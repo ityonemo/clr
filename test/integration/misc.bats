@@ -40,3 +40,11 @@ load test_helper
     run compile_and_run "$TEST_CASES/wrap_optional/basic.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for switch expression initializing struct" {
+    # Tests that block bodies execute inline before subsequent instructions.
+    # In AIR, switch expression blocks have bodies at high indices that must
+    # execute before the block result is used.
+    run compile_and_run "$TEST_CASES/undefined/block_body_order.zig"
+    [ "$status" -eq 0 ]
+}
