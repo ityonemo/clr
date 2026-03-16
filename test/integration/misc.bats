@@ -48,3 +48,11 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/block_body_order.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for packed struct initialization" {
+    # Packed structs use read-modify-write patterns that load undefined bits
+    # before masking and storing. Fields should start as defined to avoid
+    # false positives on the initial read.
+    run compile_and_run "$TEST_CASES/undefined/packed_struct_init.zig"
+    [ "$status" -eq 0 ]
+}

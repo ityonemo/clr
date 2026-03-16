@@ -80,15 +80,28 @@ pub const UndefinedSafety = union(enum) {
     }
 
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
-        _ = params;
         const results = state.results;
         const refinements = state.refinements;
         // The pointer itself is defined (it exists)
         const ptr_idx = results[index].refinement.?;
         refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
         // The pointee starts as undefined (must be set by store before use)
+        // Exception: packed structs use read-modify-write initialization, so their
+        // fields should start as defined to avoid false positives on the initial read.
         const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        if (isPackedStruct(params.ty)) {
+            setUndefinedRecursive(refinements, pointee_idx, .{ .defined = {} });
+        } else {
+            setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        }
+    }
+
+    /// Check if a type is a packed struct.
+    fn isPackedStruct(ty: core.Type) bool {
+        return switch (ty) {
+            .@"struct" => |s| s.is_packed,
+            else => false,
+        };
     }
 
     /// Handle allocator.realloc()/remap() - set undefined state for reallocation

@@ -1738,7 +1738,7 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
 }
 
 /// Convert a struct type to a Type string with type_id and field types.
-/// Format: .{ .@"struct" = &.{ .type_id = ID, .fields = &.{ TYPE_1, TYPE_2, ... } } }
+/// Format: .{ .@"struct" = &.{ .type_id = ID, .packed = BOOL, .fields = &.{ TYPE_1, TYPE_2, ... } } }
 /// Field names are registered as a side effect into name_map and field_map.
 fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field_map: ?*clr.FieldHashMap, arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
     const loaded = ip.loadStructType(type_index);
@@ -1747,8 +1747,15 @@ fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
     // Use InternPool index as unique type_id for this struct type
     const type_id: u32 = @intFromEnum(type_index);
 
+    // Check if this is a packed struct
+    const is_packed = loaded.layout == .@"packed";
+
     if (field_types.len == 0) {
-        return clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{}} }} }}", .{type_id}, null);
+        if (is_packed) {
+            return clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{}}, .is_packed = true }} }}", .{type_id}, null);
+        } else {
+            return clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{}} }} }}", .{type_id}, null);
+        }
     }
 
     // Limit recursion depth - type too deeply nested
@@ -1783,7 +1790,12 @@ fn structTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         result.appendSlice(arena, field_type_str) catch @panic("out of memory");
     }
 
-    result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    // Close fields array and add is_packed if needed
+    if (is_packed) {
+        result.appendSlice(arena, " }, .is_packed = true } }") catch @panic("out of memory");
+    } else {
+        result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    }
     return result.items;
 }
 

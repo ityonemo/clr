@@ -59,6 +59,7 @@ pub const Name = u32;
 pub const StructType = struct {
     type_id: u32, // InternPool index for getFieldId lookup
     fields: []const Type,
+    is_packed: bool = false, // true for packed structs (read-modify-write initialization)
 };
 
 /// Union type descriptor with type_id for variant name lookup.
