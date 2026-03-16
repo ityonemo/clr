@@ -16,7 +16,7 @@
 // Each tag performs one of these entity operations:
 //
 // CREATE - Allocate new independent entity
-//   Tags: alloc, alloc_create, arg, bitcast (on value), bit_and, cmp_*,
+//   Tags: alloc, arg, bitcast (on value), bit_and, cmp_*,
 //         ctz, sub, add_with_overflow, sub_with_overflow, is_non_err,
 //         is_non_null, is_null, get_union_tag, unwrap_errunion_err,
 //         wrap_errunion_err, wrap_errunion_payload, block, br, cond_br,
@@ -33,7 +33,7 @@
 //
 // MODIFY - Update pre-existing entity
 //   Tags: store, store_safe, ret_safe, ret_load, ret_ptr, set_union_tag,
-//         alloc_destroy, memset_safe
+//         memset_safe
 //
 // NO-OP / METADATA - No entity impact
 //   Tags: noop, noop_debug, dbg_stmt, dbg_var_ptr, dbg_var_val,
@@ -56,7 +56,7 @@ const NullSafety = @import("analysis/null_safety.zig").NullSafety;
 const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
 const FieldParentPtrSafety = @import("analysis/fieldparentptr_safety.zig").FieldParentPtrSafety;
 const FdSafety = @import("analysis/fd_safety.zig").FdSafety;
-pub const analyses = .{ UndefinedSafety, MemorySafety, NullSafety, VariantSafety, FieldParentPtrSafety, FdSafety };
+const Analyte = @import("Analyte.zig");
 
 // Re-export core types
 pub const Meta = core.Meta;
@@ -166,73 +166,6 @@ pub const Alloc = struct {
         // Create pointer entity pointing to the typed pointee
         _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = pointee_idx } });
         try splat(.alloc, state, index, self);
-    }
-};
-
-pub const AllocCreate = struct {
-    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
-    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
-    ty: Type,
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        // AllocCreate returns Allocator.Error!*T, so we create errorunion -> ptr -> T
-        // Create pointee from type info
-        const pointee_ref = try typeToRefinement(self.ty, state.refinements);
-        const pointee_idx = try state.refinements.appendEntity(pointee_ref);
-        // Create pointer entity pointing to the typed pointee
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .to = pointee_idx } });
-        // Wrap in error union
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .to = ptr_idx } });
-        try splat(.alloc_create, state, index, self);
-    }
-};
-
-pub const AllocDestroy = struct {
-    /// Source of pointer being freed - instruction index or interned pointer
-    ptr: Src,
-    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
-    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-        try splat(.alloc_destroy, state, index, self);
-    }
-};
-
-/// Slice allocation: allocator.alloc(T, len)
-/// Returns Allocator.Error![]T, which is errorunion → pointer → region → element_type
-pub const AllocAlloc = struct {
-    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
-    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
-    ty: Type, // Element type T (not the slice type)
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        // AllocAlloc returns Allocator.Error![]T
-        // Create: errorunion → pointer → region → element_type
-        // Create element refinement from type info
-        const element_ref = try typeToRefinement(self.ty, state.refinements);
-        const element_idx = try state.refinements.appendEntity(element_ref);
-        // Create region pointing to element (uniform region model - all elements share state)
-        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .to = element_idx } });
-        // Create pointer to region (the slice itself)
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .to = region_idx } });
-        // Wrap in error union
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .to = ptr_idx } });
-        try splat(.alloc_alloc, state, index, self);
-    }
-};
-
-/// Slice deallocation: allocator.free(slice)
-/// Takes a slice and returns void
-pub const AllocFree = struct {
-    /// Source of slice being freed - instruction index or interned pointer
-    slice: Src,
-    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
-    allocator_inst: ?usize, // Optional instruction index for runtime allocator (to read type_id from refinement)
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-        try splat(.alloc_free, state, index, self);
     }
 };
 
@@ -1475,6 +1408,68 @@ pub fn UnOp(comptime instr: anytype) type {
     };
 }
 
+/// Reduce operation - reduces a vector to a scalar value
+/// In our system vectors are scalars, so this is like a UnOp
+pub const Reduce = struct {
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        splatInitDefined(state.refinements, gid, state.ctx);
+        try splat(.reduce, state, index, self);
+    }
+};
+
+/// Select operation - vector select (ternary: mask, a, b)
+/// In our system vectors are scalars
+pub const Select = struct {
+    mask: Src,
+    a: Src,
+    b: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        splatInitDefined(state.refinements, gid, state.ctx);
+        try splat(.select, state, index, self);
+    }
+};
+
+/// Memory copy operation - copies from src to dest
+/// Should propagate undefined state from source to destination
+pub const Memcpy = struct {
+    dest: Src,
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.memcpy, state, index, self);
+    }
+};
+
+/// Memory set operation - sets memory to a value
+/// Should mark destination as defined
+pub const Memset = struct {
+    dest: Src,
+    value: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.memset, state, index, self);
+    }
+};
+
+/// Memory move operation - moves from src to dest (overlapping allowed)
+/// Should propagate undefined state from source to destination
+pub const Memmove = struct {
+    dest: Src,
+    src: Src,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        try splat(.memmove, state, index, self);
+    }
+};
+
 /// NullCheck creates a null check struct (is_non_null, is_null, is_non_null_ptr, is_null_ptr).
 /// These all have a src field and produce a boolean scalar result.
 pub fn NullCheck(comptime instr: anytype) type {
@@ -1497,13 +1492,19 @@ pub fn NullCheck(comptime instr: anytype) type {
 /// fields as scalars. The Undefined analysis marks them as defined via splat.
 pub fn OverflowOp(comptime instr: anytype) type {
     return struct {
+        lhs: Src,
+        rhs: Src,
+
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            _ = self;
             const allocator = state.refinements.list.allocator;
 
             // Create two scalar fields (result and overflow flag)
             const field0_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
             const field1_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
+
+            // Initialize fields as defined (overflow ops always produce defined results)
+            splatInitDefined(state.refinements, field0_gid, state.ctx);
+            splatInitDefined(state.refinements, field1_gid, state.ctx);
 
             // clobberInst takes ownership of fields slice
             const fields = allocator.alloc(Gid, 2) catch @panic("out of memory");
@@ -1511,7 +1512,7 @@ pub fn OverflowOp(comptime instr: anytype) type {
             fields[1] = field1_gid;
 
             _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .@"struct" = .{ .fields = fields, .type_id = 0 } });
-            try splat(instr, state, index, .{});
+            try splat(instr, state, index, self);
         }
     };
 }
@@ -2013,8 +2014,6 @@ pub const AnyTag = union(enum) {
 
     // Implemented tags
     alloc: Alloc,
-    alloc_create: AllocCreate,
-    alloc_destroy: AllocDestroy,
     arg: Arg,
     bitcast: Bitcast,
     br: Br,
@@ -2035,6 +2034,7 @@ pub const AnyTag = union(enum) {
     bit_and: BinOp(.bit_and),
     bit_or: BinOp(.bit_or),
     xor: BinOp(.xor),
+    bool_and: BinOp(.bool_and),
     bool_or: BinOp(.bool_or),
     cmp_eq: BinOp(.cmp_eq),
     cmp_neq: BinOp(.cmp_neq),
@@ -2047,9 +2047,7 @@ pub const AnyTag = union(enum) {
     add: BinOp(.add),
     sub: BinOp(.sub),
     mul: BinOp(.mul),
-    div_trunc: BinOp(.div_trunc),
-    div_floor: BinOp(.div_floor),
-    div_exact: BinOp(.div_exact),
+    div: BinOp(.div),
     mod: BinOp(.mod),
     rem: BinOp(.rem),
     shl: BinOp(.shl),
@@ -2060,10 +2058,10 @@ pub const AnyTag = union(enum) {
     trunc: UnOp(.trunc),
     ctz: UnOp(.ctz),
 
-    // Vector operations (special payloads)
-    cmp_vector: Void, // Vector comparison - complex payload
-    reduce: Void, // Vector reduction - complex payload
-    select: Void, // Vector select - complex payload
+    // Vector operations (vectors are scalars in our system)
+    cmp_vector: BinOp(.cmp_vector), // Vector comparison
+    reduce: Reduce, // Vector reduction to scalar
+    select: Select, // Vector select (ternary: mask, a, b)
 
     // Unimplemented tags (no-op)
     add_with_overflow: OverflowOp(.add_with_overflow),
@@ -2084,7 +2082,6 @@ pub const AnyTag = union(enum) {
     is_non_null_ptr: IsNonNullPtr,
     is_null: IsNull,
     is_null_ptr: IsNullPtr,
-    memset_safe: Void,
     noop_debug: Void,
     ptr_add: PtrAdd,
     ptr_sub: PtrAdd, // Same logic as ptr_add
@@ -2120,7 +2117,7 @@ pub const AnyTag = union(enum) {
     is_named_enum_value: UnOp(.is_named_enum_value),
 
     // Memory operations
-    memcpy: Void, // Memory copy - no refinement tracking needed for now
+    memcpy: Memcpy, // Memory copy - propagates undefined from src to dest
     splat: TransferOp, // Vector splat - creates scalar result
 
     // Optional wrapper
@@ -2169,7 +2166,6 @@ pub const AnyTag = union(enum) {
     round: UnOp(.round),
     trunc_float: UnOp(.trunc_float),
     neg: UnOp(.neg),
-    neg_optimized: UnOp(.neg_optimized),
     abs: UnOp(.abs),
 
     // Bit operations
@@ -2177,42 +2173,6 @@ pub const AnyTag = union(enum) {
     byte_swap: UnOp(.byte_swap),
     bit_reverse: UnOp(.bit_reverse),
     clz: UnOp(.clz),
-
-    // Binary arithmetic - wrap/sat/safe variants
-    add_safe: BinOp(.add_safe),
-    add_wrap: BinOp(.add_wrap),
-    add_sat: BinOp(.add_sat),
-    sub_safe: BinOp(.sub_safe),
-    sub_wrap: BinOp(.sub_wrap),
-    sub_sat: BinOp(.sub_sat),
-    mul_safe: BinOp(.mul_safe),
-    mul_wrap: BinOp(.mul_wrap),
-    mul_sat: BinOp(.mul_sat),
-    div_float: BinOp(.div_float),
-    bool_and: BinOp(.bool_and),
-    shr_exact: BinOp(.shr_exact),
-    shl_exact: BinOp(.shl_exact),
-    shl_sat: BinOp(.shl_sat),
-
-    // Optimized variants (same behavior, just compiler hints)
-    add_optimized: BinOp(.add_optimized),
-    sub_optimized: BinOp(.sub_optimized),
-    mul_optimized: BinOp(.mul_optimized),
-    div_float_optimized: BinOp(.div_float_optimized),
-    div_trunc_optimized: BinOp(.div_trunc_optimized),
-    div_floor_optimized: BinOp(.div_floor_optimized),
-    div_exact_optimized: BinOp(.div_exact_optimized),
-    rem_optimized: BinOp(.rem_optimized),
-    mod_optimized: BinOp(.mod_optimized),
-    cmp_lt_optimized: BinOp(.cmp_lt_optimized),
-    cmp_lte_optimized: BinOp(.cmp_lte_optimized),
-    cmp_eq_optimized: BinOp(.cmp_eq_optimized),
-    cmp_gte_optimized: BinOp(.cmp_gte_optimized),
-    cmp_gt_optimized: BinOp(.cmp_gt_optimized),
-    cmp_neq_optimized: BinOp(.cmp_neq_optimized),
-    cmp_lt_errors_len: BinOp(.cmp_lt_errors_len),
-    cmp_vector_optimized: Void, // Vector comparison - complex payload
-    reduce_optimized: Void, // Vector reduction - complex payload
 
     // Try variants
     try_cold: UnwrapErrunionPayload, // Same as try
@@ -2230,8 +2190,9 @@ pub const AnyTag = union(enum) {
     atomic_store_monotonic: Void,
     atomic_store_release: Void,
     atomic_store_seq_cst: Void,
-    memset: Void,
-    memmove: Void,
+    memset: Memset, // Memory set - marks dest as defined
+    memset_safe: Memset, // Same as memset with safety checks
+    memmove: Memmove, // Memory move - propagates undefined from src to dest
     prefetch: Void,
     set_err_return_trace: Void,
     save_err_return_trace_index: Void,
@@ -2314,9 +2275,13 @@ pub const TransferOp = struct {
 };
 
 pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype) !void {
-    inline for (analyses) |Analysis| {
-        if (@hasDecl(Analysis, @tagName(tag))) {
-            try @field(Analysis, @tagName(tag))(state, index, payload);
+    const tagName = @tagName(tag);
+    inline for (Analyte.analyses, 0..) |Analysis, i| {
+        if (@hasDecl(Analysis, tagName)) {
+            const should = if (state.restrict) |restricted| @intFromEnum(restricted) == i else true;
+            if (should) {
+                try @field(Analysis, tagName)(state, index, payload);
+            }
         }
     }
 }
@@ -2325,7 +2290,7 @@ pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype
 /// Each analysis can implement `onFinish` to do end-of-function processing
 /// (e.g., memory leak detection after all paths have been processed).
 pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "onFinish")) {
             try Analysis.onFinish(results, ctx, refinements);
         }
@@ -2336,7 +2301,7 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !v
 /// to set up initial analysis state (e.g., marking values as defined).
 /// Each analysis can implement `retval_init` to initialize its state.
 pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "retval_init")) {
             Analysis.retval_init(refinements, gid, ctx);
         }
@@ -2347,7 +2312,7 @@ pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: *Context) void {
 /// (constants, null) that are not the .undefined type wrapper.
 /// Calls retval_init_defined if available (marks as defined), otherwise retval_init.
 pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "retval_init_defined")) {
             Analysis.retval_init_defined(refinements, gid);
         } else if (@hasDecl(Analysis, "retval_init")) {
@@ -2360,7 +2325,7 @@ pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void
 /// Allows analyses to process the returned value (e.g., clear "returned" flags
 /// on allocations to transfer ownership from callee to caller).
 pub fn splatCallReturn(refinements: *Refinements, return_gid: Gid) void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "call_return")) {
             Analysis.call_return(refinements, return_gid);
         }
@@ -2385,7 +2350,7 @@ pub const GlobalFieldInfo = struct {
 /// Dispatches to init_from_type handlers to set up analysis state.
 /// Called when a Type (e.g., .undefined wrapper) needs to mark the resulting refinement.
 pub fn splatInitFromType(ref: *Refinement, is_undefined: bool, meta: Meta) void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_from_type")) {
             Analysis.init_from_type(ref, is_undefined, meta);
         }
@@ -2406,7 +2371,7 @@ pub fn splatInitGlobal(
     loc: GlobalLocation,
     field_info: ?GlobalFieldInfo,
 ) void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_global")) {
             Analysis.init_global(refinements, ptr_gid, pointee_gid, ctx, is_undefined, is_null, loc, field_info);
         }
@@ -2538,7 +2503,7 @@ fn copyAnalytesRecursive(dst_refinements: *Refinements, src_refinements: *Refine
 /// is no longer reachable from any result slot after the branch completes.
 /// Analysis modules can implement `orphaned` to handle these (e.g., detect leaked allocations).
 fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, gid: Gid) !void {
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "orphaned")) {
             try Analysis.orphaned(ctx, refinements, branch_refinements, gid);
         }
@@ -2841,7 +2806,7 @@ fn mergeRefinementRecursive(
     try merged.put(orig_gid, {});
 
     // Call each analyzer's merge for this node
-    inline for (analyses) |Analysis| {
+    inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "merge")) {
             try Analysis.merge(
                 ctx,
@@ -3418,60 +3383,6 @@ test "struct_field_val extracts field value from struct" {
     try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
 }
 
-test "is_non_null does not modify analyte" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 2;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Create an optional
-    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
-    results[0].refinement = opt_gid;
-
-    // is_non_null is a pure operation - does nothing to the analyte
-    try Inst.apply(state, 1, .{ .is_non_null = .{ .src = .{ .inst = 0 } } });
-
-    // The optional's null_safety should still be null (unset)
-    const opt_ref = refinements.at(opt_gid);
-    try std.testing.expect(opt_ref.optional.analyte.null_safety == null);
-}
-
-test "is_null does not modify analyte" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 2;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Create an optional
-    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
-    results[0].refinement = opt_gid;
-
-    // is_null is a pure operation - does nothing to the analyte
-    try Inst.apply(state, 1, .{ .is_null = .{ .src = .{ .inst = 0 } } });
-
-    // The optional's null_safety should still be null (unset)
-    const opt_ref = refinements.at(opt_gid);
-    try std.testing.expect(opt_ref.optional.analyte.null_safety == null);
-}
-
 test "set_union_tag updates union variant" {
     const allocator = std.testing.allocator;
 
@@ -3522,11 +3433,20 @@ test "get_union_tag produces scalar" {
     var results = [_]Inst{.{}} ** 2;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create a union
-    const field_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    // Create a union with an active variant
+    const field_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
     const fields = try allocator.alloc(?Gid, 1);
     fields[0] = field_gid;
+    // Set up active_metas to mark the first variant as active
+    const active_metas = try allocator.alloc(?core.Meta, 1);
+    active_metas[0] = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 };
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{
+        .analyte = .{
+            .undefined_safety = .{ .defined = {} },
+            .variant_safety = .{ .active_metas = active_metas },
+        },
         .fields = fields,
         .type_id = 0,
     } });

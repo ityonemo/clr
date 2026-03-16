@@ -691,7 +691,7 @@ test "instLine for unreach" {
     try std.testing.expectEqualStrings("    try Inst.apply(state, 7, .{ .unreach = .{} });\n", result);
 }
 
-test "instLine for bit_and (Simple)" {
+test "instLine for bit_and (BinOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -704,10 +704,10 @@ test "instLine for bit_and (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .bit_and, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .bit_and = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .bit_and = .{ .lhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } }, .rhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
-test "instLine for cmp_eq (Simple)" {
+test "instLine for cmp_eq (BinOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -720,10 +720,10 @@ test "instLine for cmp_eq (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .cmp_eq, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_eq = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_eq = .{ .lhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } }, .rhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
-test "instLine for cmp_gt (Simple)" {
+test "instLine for cmp_gt (BinOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -736,10 +736,10 @@ test "instLine for cmp_gt (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .cmp_gt, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_gt = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_gt = .{ .lhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } }, .rhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
-test "instLine for cmp_lte (Simple)" {
+test "instLine for cmp_lte (BinOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -752,10 +752,10 @@ test "instLine for cmp_lte (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .cmp_lte, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_lte = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .cmp_lte = .{ .lhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } }, .rhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
-test "instLine for ctz (Simple)" {
+test "instLine for ctz (UnOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -768,10 +768,10 @@ test "instLine for ctz (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .ctz, datum, 2, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .ctz = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .ctz = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
-test "instLine for sub (Simple)" {
+test "instLine for sub (BinOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -784,7 +784,7 @@ test "instLine for sub (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .sub, datum, 5, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .sub = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 5, .{ .sub = .{ .lhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } }, .rhs = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
 test "instLine for is_non_err" {
@@ -805,7 +805,7 @@ test "instLine for is_non_err" {
     try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .is_non_err = .{ .src = .{ .inst = 5 } } });\n", result);
 }
 
-test "instLine for unwrap_errunion_err (Simple)" {
+test "instLine for unwrap_errunion_err (UnOp)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -818,7 +818,7 @@ test "instLine for unwrap_errunion_err (Simple)" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .unwrap_errunion_err, datum, 8, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 8, .{ .unwrap_errunion_err = .{} });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 8, .{ .unwrap_errunion_err = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });\n", result);
 }
 
 test "instLine for add_with_overflow (OverflowOp)" {

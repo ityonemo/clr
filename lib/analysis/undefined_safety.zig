@@ -91,38 +91,6 @@ pub const UndefinedSafety = union(enum) {
         setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
-    pub fn alloc_create(state: State, index: usize, params: tag.AllocCreate) !void {
-        _ = params;
-        const results = state.results;
-        const refinements = state.refinements;
-        // Result is errorunion -> ptr -> pointee
-        const eu_idx = results[index].refinement.?;
-        const ptr_idx = refinements.at(eu_idx).errorunion.to;
-        // The pointer itself is defined (it exists)
-        refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
-        // The pointee starts as undefined (must be set by store before use)
-        const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
-    }
-
-    /// Handle allocator.alloc() - set undefined state for slice allocation
-    /// Result structure: errorunion → pointer → region → element
-    pub fn alloc_alloc(state: State, index: usize, params: tag.AllocAlloc) !void {
-        _ = params;
-        const results = state.results;
-        const refinements = state.refinements;
-        // Result is errorunion -> pointer -> region -> element
-        const eu_idx = results[index].refinement.?;
-        const ptr_idx = refinements.at(eu_idx).errorunion.to;
-        // The pointer itself is defined (the slice exists)
-        refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
-        // The region is a container type - don't set undefined state on it
-        const region_idx = refinements.at(ptr_idx).pointer.to;
-        // The elements start as undefined (must be set before use)
-        const element_idx = refinements.at(region_idx).region.to;
-        setUndefinedRecursive(refinements, element_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
-    }
-
     /// Handle allocator.realloc()/remap() - set undefined state for reallocation
     /// Result structure: errorunion → pointer → region → element
     /// Since realloc preserves data from the original slice, elements are defined
@@ -313,54 +281,78 @@ pub const UndefinedSafety = union(enum) {
         }
     }
 
+    /// get_union_tag: Extracts the tag from a union value.
+    ///
+    /// When the union is undefined or has no active variant, we mark the RESULT as undefined
+    /// rather than erroring immediately. This is important because Zig generates safety checks
+    /// (get_union_tag + cmp_eq + cond_br) BEFORE union field assignments to verify the variant.
+    /// If we errored here, valid initialization code like `var u: Union = undefined; u.field = val;`
+    /// would fail. Instead, we propagate the undefined state to the result, and the error will
+    /// occur later if the undefined tag is actually used in a way that matters (e.g., compared
+    /// and branched on without the subsequent store fixing the union state).
     pub fn get_union_tag(state: State, index: usize, params: tag.GetUnionTag) !void {
         const results = state.results;
         const refinements = state.refinements;
+        const ctx = state.ctx;
+        const result_gid = results[index].refinement.?;
 
-        // Get the union we're reading the tag from
+        // Get the source union to check its state
         const operand = params.operand orelse {
-            // No operand (interned) - tag is defined
-            const result_idx = results[index].refinement.?;
-            refinements.at(result_idx).scalar.analyte.undefined_safety = .{ .defined = {} };
+            // No operand - can't determine source, assume defined
             return;
         };
-
-        const union_ref = results[operand].refinement orelse {
-            // No refinement on operand - assume defined
-            const result_idx = results[index].refinement.?;
-            refinements.at(result_idx).scalar.analyte.undefined_safety = .{ .defined = {} };
+        const src_gid = results[operand].refinement orelse {
+            // No refinement on source - assume defined
             return;
         };
+        const src_ref = refinements.at(src_gid);
 
-        // Check if the union is defined
-        const union_refinement = refinements.at(union_ref);
-        if (union_refinement.* != .@"union") {
-            std.debug.panic("get_union_tag: expected union, got {s}", .{@tagName(union_refinement.*)});
+        // Check if the source is a union
+        if (src_ref.* != .@"union") {
+            // Not a union - assume defined
+            return;
+        }
+        const u = src_ref.@"union";
+
+        // Check 1: If the union itself is undefined, mark result as undefined
+        if (u.analyte.undefined_safety) |us| {
+            if (us == .undefined) {
+                refinements.at(result_gid).scalar.analyte.undefined_safety = .{
+                    .undefined = .{ .meta = us.undefined.meta, .name_when_set = us.undefined.name_when_set },
+                };
+                return;
+            }
         }
 
-        const union_undefined = union_refinement.@"union".analyte.undefined_safety;
-        const result_idx = results[index].refinement.?;
-
-        if (union_undefined) |undef_state| {
-            // Propagate undefined state from union to tag
-            refinements.at(result_idx).scalar.analyte.undefined_safety = undef_state;
+        // Check 2: If no variant is active (all active_metas are null), mark result as undefined
+        if (u.analyte.variant_safety) |vs| {
+            var any_active = false;
+            for (vs.active_metas) |meta| {
+                if (meta != null) {
+                    any_active = true;
+                    break;
+                }
+            }
+            if (!any_active) {
+                // No active variant - result tag is undefined
+                refinements.at(result_gid).scalar.analyte.undefined_safety = .{
+                    .undefined = .{ .meta = ctx.meta },
+                };
+                return;
+            }
         } else {
-            // Union has no undefined tracking - assume defined
-            refinements.at(result_idx).scalar.analyte.undefined_safety = .{ .defined = {} };
+            // No variant_safety tracking at all - result tag is undefined
+            refinements.at(result_gid).scalar.analyte.undefined_safety = .{
+                .undefined = .{ .meta = ctx.meta },
+            };
+            return;
         }
+
+        // Otherwise, tag is defined (splatInitDefined already set this in tag handler)
     }
 
-    // Simple operations produce defined scalar results
-    pub const bit_and = markResultDefined;
-    pub const cmp_eq = markResultDefined;
-    pub const cmp_gt = markResultDefined;
-    pub const cmp_gte = markResultDefined;
-    pub const cmp_lt = markResultDefined;
-    pub const cmp_lte = markResultDefined;
-    pub const ctz = markResultDefined;
+    // Simple operations produce defined scalar results (non-binop/unop)
     pub const slice_len = markResultDefined;
-    pub const sub = markResultDefined;
-    pub const add = markResultDefined;
     pub const is_non_err = markResultDefined;
     pub const unwrap_errunion_err = markResultDefined;
     pub const is_named_enum_value = markResultDefined;
@@ -372,20 +364,130 @@ pub const UndefinedSafety = union(enum) {
     pub const is_non_null_ptr = markResultDefined;
     pub const is_null_ptr = markResultDefined;
 
-    // Overflow operations produce a struct with defined fields
-    pub fn add_with_overflow(state: State, index: usize, params: anytype) !void {
-        _ = params;
-        markStructFieldsDefined(state.results, index, state.refinements);
+    // =========================================================================
+    // BinOp handlers - check operands for undefined values
+    // =========================================================================
+
+    fn binOpHandler(state: State, index: usize, params: anytype) !void {
+        _ = index;
+        try checkSrcUndefined(state, params.lhs);
+        try checkSrcUndefined(state, params.rhs);
     }
 
-    pub fn sub_with_overflow(state: State, index: usize, params: anytype) !void {
-        _ = params;
-        markStructFieldsDefined(state.results, index, state.refinements);
+    pub const add = binOpHandler;
+    pub const sub = binOpHandler;
+    pub const mul = binOpHandler;
+    pub const div = binOpHandler;
+    pub const mod = binOpHandler;
+    pub const rem = binOpHandler;
+    pub const shl = binOpHandler;
+    pub const shr = binOpHandler;
+    pub const bit_and = binOpHandler;
+    pub const bit_or = binOpHandler;
+    pub const xor = binOpHandler;
+    pub const bool_and = binOpHandler;
+    pub const bool_or = binOpHandler;
+    pub const cmp_eq = binOpHandler;
+    pub const cmp_neq = binOpHandler;
+    pub const cmp_gt = binOpHandler;
+    pub const cmp_gte = binOpHandler;
+    pub const cmp_lt = binOpHandler;
+    pub const cmp_lte = binOpHandler;
+    pub const min = binOpHandler;
+    pub const max = binOpHandler;
+    pub const cmp_vector = binOpHandler;
+    pub const add_with_overflow = binOpHandler;
+    pub const sub_with_overflow = binOpHandler;
+    pub const mul_with_overflow = binOpHandler;
+
+    // =========================================================================
+    // UnOp handlers - check operand for undefined value
+    // =========================================================================
+
+    fn unOpHandler(state: State, index: usize, params: anytype) !void {
+        _ = index;
+        try checkSrcUndefined(state, params.src);
     }
 
-    pub fn mul_with_overflow(state: State, index: usize, params: anytype) !void {
-        _ = params;
-        markStructFieldsDefined(state.results, index, state.refinements);
+    pub const ctz = unOpHandler;
+    pub const clz = unOpHandler;
+    pub const not = unOpHandler;
+    pub const trunc = unOpHandler;
+    pub const popcount = unOpHandler;
+    pub const byte_swap = unOpHandler;
+    pub const bit_reverse = unOpHandler;
+
+    // Math unary ops - check input for undefined
+    pub const sqrt = unOpHandler;
+    pub const sin = unOpHandler;
+    pub const cos = unOpHandler;
+    pub const tan = unOpHandler;
+    pub const exp = unOpHandler;
+    pub const exp2 = unOpHandler;
+    pub const log = unOpHandler;
+    pub const log2 = unOpHandler;
+    pub const log10 = unOpHandler;
+    pub const floor = unOpHandler;
+    pub const ceil = unOpHandler;
+    pub const round = unOpHandler;
+    pub const trunc_float = unOpHandler;
+    pub const neg = unOpHandler;
+    pub const abs = unOpHandler;
+
+    // Vector reduce - check source for undefined
+    pub const reduce = unOpHandler;
+
+    // Select (ternary) - check all three operands for undefined
+    fn selectHandler(state: State, index: usize, params: anytype) !void {
+        _ = index;
+        try checkSrcUndefined(state, params.mask);
+        try checkSrcUndefined(state, params.a);
+        try checkSrcUndefined(state, params.b);
+    }
+    pub const select = selectHandler;
+
+    // Memory operations - just check operands are defined
+    fn memsetHandler(state: State, _: usize, params: anytype) !void {
+        try checkSrcUndefined(state, params.dest);
+        try checkSrcUndefined(state, params.value);
+    }
+    pub const memset = memsetHandler;
+    pub const memset_safe = memsetHandler;
+
+    fn memcpyHandler(state: State, _: usize, params: anytype) !void {
+        try checkSrcUndefined(state, params.dest);
+        try checkSrcUndefined(state, params.src);
+    }
+    pub const memcpy = memcpyHandler;
+    pub const memmove = memcpyHandler;
+
+    /// Check if a Src operand is undefined and error if so
+    fn checkSrcUndefined(state: State, src: tag.Src) !void {
+        const gid: Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse return,
+            .interned, .fnptr => return, // Interned values are always defined
+        };
+
+        const ref = state.refinements.at(gid);
+        switch (ref.*) {
+            .scalar => |s| {
+                const undef = s.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            .pointer => |p| {
+                const undef = p.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            else => {},
+        }
     }
 
     /// aggregate_init creates a struct/array from element values.
@@ -1798,394 +1900,4 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         },
         else => {},
     }
-}
-
-/// Helper to create a test context with specific meta values
-fn initTestContext(allocator: std.mem.Allocator, discarding: *std.Io.Writer.Discarding, file: []const u8, line: u32, column: ?u32) Context {
-    var ctx = Context.init(allocator, &discarding.writer);
-    ctx.meta.file = file;
-    ctx.meta.line = line;
-    ctx.meta.column = column;
-    ctx.meta.function = "test_func";
-    return ctx;
-}
-
-fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
-    return .{
-        .ctx = ctx,
-        .results = results,
-        .refinements = refinements,
-        .return_gid = 0,
-    };
-}
-
-test "alloc creates pointer to typed pointee" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Use Inst.apply which calls tag.Alloc.apply (creates pointer to typed pointee)
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-
-    // alloc creates pointer; pointee type is determined by .ty parameter
-    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
-    refinements.testValid();
-}
-
-test "alloc_create creates errorunion -> pointer -> pointee" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // First create an allocator refinement at inst 0 (memory_safety.alloc_create expects this)
-    const alloc_ref = try refinements.appendEntity(.{ .allocator = .{ .type_id = 10 } });
-    results[0].refinement = alloc_ref;
-
-    // Use Inst.apply which calls tag.AllocCreate.apply (creates errorunion -> ptr -> pointee)
-    try Inst.apply(state, 1, .{ .alloc_create = .{ .type_id = 10, .allocator_inst = 0, .ty = .{ .scalar = {} } } });
-
-    // alloc_create creates errorunion -> pointer -> pointee (scalar in this case)
-    const eu_idx = results[1].refinement.?;
-    try std.testing.expectEqual(.errorunion, std.meta.activeTag(refinements.at(eu_idx).*));
-    const ptr_idx = refinements.at(eu_idx).errorunion.to;
-    try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(ptr_idx).*));
-    const pointee_idx = refinements.at(ptr_idx).pointer.to;
-    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
-}
-
-test "store with .undefined type wrapper sets undefined" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // First alloc at instruction 1, then store with .undefined wrapper
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
-
-    // Check the pointee's undefined state
-    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    const undef = refinements.at(pointee_idx).scalar.analyte.undefined_safety.?;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
-}
-
-test "store with defined value sets defined" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // First alloc at instruction 1, then store a defined value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
-
-    // Check the pointee's undefined state
-    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    const undef = refinements.at(pointee_idx).scalar.analyte.undefined_safety.?;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
-}
-
-test "store with .null to optional sets inner to defined" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Alloc at instruction 1 with optional type, then store null
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .optional = &.{ .scalar = {} } } } });
-    // Store null to the optional - inner should be defined (null is a valid defined value)
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .@"null" = &.{ .scalar = {} } } } } } });
-
-    // Check the pointee is an optional
-    const pointee_idx = refinements.at(results[1].refinement.?).pointer.to;
-    try std.testing.expectEqual(.optional, std.meta.activeTag(refinements.at(pointee_idx).*));
-
-    // Check the optional's inner value is a defined scalar
-    const inner_idx = refinements.at(pointee_idx).optional.to;
-    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(inner_idx).*));
-    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(inner_idx).scalar.analyte.undefined_safety.?));
-}
-
-test "store struct copies undefined_safety from source fields to destination fields" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 5;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Instruction 1: alloc a pointer to struct with 2 scalar fields
-    // This creates destination struct with undefined fields
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{
-        .type_id = 100,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
-    } } } });
-
-    // Check that destination fields start as undefined
-    const ptr_gid = results[1].refinement.?;
-    const dst_struct_gid = refinements.at(ptr_gid).pointer.to;
-    const dst_field0_gid = refinements.at(dst_struct_gid).@"struct".fields[0];
-    const dst_field1_gid = refinements.at(dst_struct_gid).@"struct".fields[1];
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(dst_field0_gid).scalar.analyte.undefined_safety.?));
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(dst_field1_gid).scalar.analyte.undefined_safety.?));
-
-    // Create source scalars with defined state
-    const src_scalar0_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined_safety = .{ .defined = {} }, .memory_safety = .{ .unset = {} } },
-    } });
-    results[2].refinement = src_scalar0_gid;
-    const src_scalar1_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined_safety = .{ .defined = {} }, .memory_safety = .{ .unset = {} } },
-    } });
-    results[3].refinement = src_scalar1_gid;
-
-    // Create source struct using aggregate_init (this properly allocates fields)
-    const struct_type = tag.Type{ .@"struct" = &.{
-        .type_id = 100,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
-    } };
-    const elements = &[_]tag.Src{ .{ .inst = 2 }, .{ .inst = 3 } };
-    try Inst.apply(state, 4, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
-
-    // Store the source struct to the destination (through the pointer)
-    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 4 } } });
-
-    // Check that destination fields are now defined (copied from source)
-    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(dst_field0_gid).scalar.analyte.undefined_safety.?));
-    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(dst_field1_gid).scalar.analyte.undefined_safety.?));
-}
-
-test "load from undefined inst returns error" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-
-    // Create pointer -> undefined scalar
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = .{
-            .function = "test_func",
-            .file = "test.zig",
-            .line = 1,
-        } } } },
-    } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .to = pointee_idx } });
-
-    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try std.testing.expectError(
-        error.UseBeforeAssign,
-        UndefinedSafety.load(state, 0, .{ .ptr = .{ .inst = 1 } }),
-    );
-}
-
-test "load from defined inst does not return error" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-
-    // Create pointer -> defined scalar
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .to = pointee_idx } });
-
-    // Set up result for the load instruction (index 0)
-    _ = try Inst.clobberInst(&refinements, &results, 0, .{ .scalar = .{} });
-
-    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try UndefinedSafety.load(state, 0, .{ .ptr = .{ .inst = 1 } });
-}
-
-test "load from inst without undefined tracking does not return error" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-
-    // Create pointer -> scalar with no undefined tracking (undefined = null)
-    const pointee_idx = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = null } } });
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .pointer = .{ .to = pointee_idx } });
-
-    const state = State{ .ctx = &ctx, .results = &results, .refinements = &refinements, .return_gid = 0 };
-    try UndefinedSafety.load(state, 0, .{ .ptr = .{ .inst = 1 } });
-}
-
-fn testGetName(id: u32) []const u8 {
-    return switch (id) {
-        1 => "my_var",
-        else => "unknown",
-    };
-}
-
-test "reportUseBeforeAssign with name_when_set returns error" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    ctx.meta.function = "test_func";
-    ctx.getName = &testGetName;
-    defer ctx.deinit();
-
-    const undef = UndefinedSafety{ .undefined = .{
-        .meta = .{
-            .function = "test_func",
-            .file = "file.zig",
-            .line = 42,
-            .column = 8,
-        },
-        .name_when_set = "my_var",
-    } };
-
-    try std.testing.expectError(error.UseBeforeAssign, undef.reportUseBeforeAssign(&ctx));
-}
-
-test "reportUseBeforeAssign without name_when_set returns error" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    ctx.meta.function = "test_func";
-    defer ctx.deinit();
-
-    const undef = UndefinedSafety{ .undefined = .{
-        .meta = .{
-            .function = "test_func",
-            .file = "file.zig",
-            .line = 42,
-            .column = 8,
-        },
-    } };
-
-    try std.testing.expectError(error.UseBeforeAssign, undef.reportUseBeforeAssign(&ctx));
-}
-
-test "aggregate_init incorporates undefined state from source elements" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = initTestContext(allocator, &discarding, "test.zig", 10, 5);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Manually create scalar refinements with defined and undefined states
-    // inst 0: defined scalar
-    const defined_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .undefined_safety = .defined, .memory_safety = .{ .unset = {} } },
-    } });
-    results[0].refinement = defined_scalar_gid;
-
-    // inst 1: undefined scalar
-    const undefined_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{
-            .undefined_safety = .{ .undefined = .{
-                .meta = .{ .function = "test", .file = "test.zig", .line = 5, .column = 10 },
-            } },
-            .memory_safety = .{ .unset = {} },
-        },
-    } });
-    results[1].refinement = undefined_scalar_gid;
-
-    // Create struct with two scalar fields using aggregate_init
-    // Field 0 should be defined (from inst 0), field 1 should be undefined (from inst 1)
-    const struct_type = tag.Type{ .@"struct" = &.{
-        .type_id = 100,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
-    } };
-    const elements = &[_]tag.Src{ .{ .inst = 0 }, .{ .inst = 1 } };
-    try Inst.apply(state, 2, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
-
-    // Check the struct's fields
-    const struct_gid = results[2].refinement.?;
-    const struct_ref = refinements.at(struct_gid);
-    try std.testing.expectEqual(.@"struct", std.meta.activeTag(struct_ref.*));
-
-    const field0_gid = struct_ref.@"struct".fields[0];
-    const field1_gid = struct_ref.@"struct".fields[1];
-
-    // Field 0 should be defined (from defined source)
-    const field0_undef = refinements.at(field0_gid).scalar.analyte.undefined_safety.?;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(field0_undef));
-
-    // Field 1 should be undefined (from undefined source)
-    const field1_undef = refinements.at(field1_gid).scalar.analyte.undefined_safety.?;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(field1_undef));
-
-    refinements.testValid();
 }

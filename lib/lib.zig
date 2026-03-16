@@ -12,6 +12,7 @@ pub const GlobalLocation = @import("tag.zig").GlobalLocation;
 pub const Gid = Refinements.Gid;
 pub const GlobalDef = Refinements.GlobalDef;
 const std = @import("std");
+const Analyte = @import("Analyte.zig");
 
 // Debug utilities
 /// Dump analysis state. Call as: clr.dump(state);
@@ -53,6 +54,9 @@ pub const State = struct {
     /// Used by orphan detection to skip entities that are stale copies of properly-handled allocations.
     /// Passed through nested merges to accumulate all copy destinations.
     copied_gids: ?*std.AutoHashMap(Gid, void) = null,
+    /// for testing: only run analysis on one analyte mode.
+    /// should never be null outside of testing.
+    restrict: ?Analyte.Mode = null,
 };
 
 /// Unified wrapper function signature for interprocedural analysis.
@@ -62,4 +66,11 @@ pub const FnInterpreter = *const fn (*Context, *Refinements, Gid, []const Gid) a
 
 test {
     @import("std").testing.refAllDecls(@This());
+    // Analysis module unit tests
+    _ = @import("analysis/null_safety_test.zig");
+    _ = @import("analysis/undefined_safety_test.zig");
+    _ = @import("analysis/memory_safety_test.zig");
+    _ = @import("analysis/variant_safety_test.zig");
+    _ = @import("analysis/fieldparentptr_safety_test.zig");
+    _ = @import("analysis/fd_safety_test.zig");
 }

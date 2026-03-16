@@ -69,6 +69,27 @@ fn altName(tag: Tag) []const u8 {
     return switch (tag) {
         .@"try" => "@\"try\"",
         .struct_field_ptr_index_0, .struct_field_ptr_index_1, .struct_field_ptr_index_2, .struct_field_ptr_index_3 => "struct_field_ptr",
+        // Binary op variants map to base operations
+        .add_safe, .add_wrap, .add_sat, .add_optimized => "add",
+        .sub_safe, .sub_wrap, .sub_sat, .sub_optimized => "sub",
+        .mul_safe, .mul_wrap, .mul_sat, .mul_optimized => "mul",
+        .div_trunc, .div_floor, .div_exact, .div_float, .div_trunc_optimized, .div_floor_optimized, .div_exact_optimized, .div_float_optimized => "div",
+        .rem_optimized => "rem",
+        .mod_optimized => "mod",
+        .shl_exact, .shl_sat => "shl",
+        .shr_exact => "shr",
+        .cmp_eq_optimized => "cmp_eq",
+        .cmp_neq_optimized => "cmp_neq",
+        .cmp_lt_optimized, .cmp_lt_errors_len => "cmp_lt",
+        .cmp_lte_optimized => "cmp_lte",
+        .cmp_gt_optimized => "cmp_gt",
+        .cmp_gte_optimized => "cmp_gte",
+        // Unary op variants map to base operations
+        .neg_optimized => "neg",
+        .trunc_float => "trunc",
+        // Vector op variants map to base operations
+        .reduce_optimized => "reduce",
+        .cmp_vector_optimized => "cmp_vector",
         else => @tagName(tag),
     };
 }
@@ -162,7 +183,9 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         // Void/noreturn tags - no payload needed
         .ret, .trap, .breakpoint, .unreach => ".{}",
         .atomic_store_unordered, .atomic_store_monotonic, .atomic_store_release, .atomic_store_seq_cst => ".{}",
-        .memset, .memset_safe, .memmove, .memcpy => ".{}",
+        .memset, .memset_safe => payloadMemset(info, datum),
+        .memcpy => payloadMemcpy(info, datum),
+        .memmove => payloadMemmove(info, datum),
         .prefetch, .set_err_return_trace, .save_err_return_trace_index => ".{}",
         .vector_store_elem => ".{}",
         .c_va_end => ".{}",
@@ -180,7 +203,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         // Shuffle ops (ty_pl)
         .shuffle_one, .shuffle_two => ".{}",
         // Reduce ops
-        .reduce, .reduce_optimized => ".{}",
+        .reduce, .reduce_optimized => payloadReduce(info, datum),
         // WASM ops
         .wasm_memory_grow, .wasm_memory_size => ".{}",
         .work_group_id, .work_group_size, .work_item_id => ".{}",
@@ -190,10 +213,12 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .assembly => ".{}",
         // Tag/error name
         .tag_name, .error_name => ".{}",
-        // Cmp vector
-        .cmp_vector, .cmp_vector_optimized => ".{}",
-        // Overflow ops (ty_pl)
-        .shl_with_overflow => ".{}",
+        // Cmp vector (bin_op)
+        .cmp_vector, .cmp_vector_optimized => payloadBinOp(info, datum),
+        // Select (pl_op with Bin payload)
+        .select => payloadSelect(info, datum),
+        // Overflow ops (ty_pl with Bin payload)
+        .add_with_overflow, .sub_with_overflow, .mul_with_overflow, .shl_with_overflow => payloadOverflowOp(info, datum),
         .aggregate_init => payloadAggregateInit(info, datum),
         else => ".{}",
     };
@@ -203,6 +228,60 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
 fn payloadBinOp(info: *const FnInfo, datum: Data) []const u8 {
     const lhs_str = srcString(info, datum.bin_op.lhs);
     const rhs_str = srcString(info, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .lhs = {s}, .rhs = {s} }}", .{ lhs_str, rhs_str }, null);
+}
+
+/// Payload for memset/memset_safe (bin_op: dest slice, value)
+fn payloadMemset(info: *const FnInfo, datum: Data) []const u8 {
+    const dest_str = srcString(info, datum.bin_op.lhs);
+    const value_str = srcString(info, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .dest = {s}, .value = {s} }}", .{ dest_str, value_str }, null);
+}
+
+/// Payload for memcpy (bin_op: dest slice, src pointer) - noalias: src and dest cannot overlap
+fn payloadMemcpy(info: *const FnInfo, datum: Data) []const u8 {
+    const dest_str = srcString(info, datum.bin_op.lhs);
+    const src_str = srcString(info, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .dest = {s}, .src = {s} }}", .{ dest_str, src_str }, null);
+}
+
+/// Payload for memmove (bin_op: dest slice, src pointer) - src and dest may overlap
+fn payloadMemmove(info: *const FnInfo, datum: Data) []const u8 {
+    const dest_str = srcString(info, datum.bin_op.lhs);
+    const src_str = srcString(info, datum.bin_op.rhs);
+    return clr_allocator.allocPrint(info.arena, ".{{ .dest = {s}, .src = {s} }}", .{ dest_str, src_str }, null);
+}
+
+/// Payload for reduce (reduce: operand)
+fn payloadReduce(info: *const FnInfo, datum: Data) []const u8 {
+    const src_str = srcString(info, datum.reduce.operand);
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for select (pl_op with Bin payload: mask is operand, a/b from extra)
+fn payloadSelect(info: *const FnInfo, datum: Data) []const u8 {
+    const mask_str = srcString(info, datum.pl_op.operand);
+    // Extract a and b from extra data (Bin payload)
+    const payload_index = datum.pl_op.payload;
+    const a_raw = info.extra[payload_index];
+    const b_raw = info.extra[payload_index + 1];
+    const a: Ref = @enumFromInt(a_raw);
+    const b: Ref = @enumFromInt(b_raw);
+    const a_str = srcString(info, a);
+    const b_str = srcString(info, b);
+    return clr_allocator.allocPrint(info.arena, ".{{ .mask = {s}, .a = {s}, .b = {s} }}", .{ mask_str, a_str, b_str }, null);
+}
+
+/// Payload for overflow ops (ty_pl with Bin payload)
+fn payloadOverflowOp(info: *const FnInfo, datum: Data) []const u8 {
+    // Extract lhs and rhs from extra data (Bin payload)
+    const payload_index = datum.ty_pl.payload;
+    const lhs_raw = info.extra[payload_index];
+    const rhs_raw = info.extra[payload_index + 1];
+    const lhs: Ref = @enumFromInt(lhs_raw);
+    const rhs: Ref = @enumFromInt(rhs_raw);
+    const lhs_str = srcString(info, lhs);
+    const rhs_str = srcString(info, rhs);
     return clr_allocator.allocPrint(info.arena, ".{{ .lhs = {s}, .rhs = {s} }}", .{ lhs_str, rhs_str }, null);
 }
 
@@ -3273,6 +3352,59 @@ fn isDotQPattern(ip: *const InternPool, cond_br_idx: usize, tags: []const Tag, d
     return false;
 }
 
+/// Check if cmp_eq at idx is part of a union tag safety check pattern.
+/// Zig generates this pattern before union field assignment to check the variant:
+/// get_union_tag + cmp_eq + cond_br(call inactiveUnionField + unreach).
+/// We detect this pattern to noop the cmp_eq, allowing assignment to undefined unions.
+///
+/// Pattern:
+/// 1. cmp_eq where LHS is from get_union_tag
+/// 2. cmp_eq result is used by a cond_br
+/// 3. cold branch of cond_br calls inactiveUnionField
+fn isUnionTagSafetyPattern(ip: *const InternPool, idx: usize, tags: []const Tag, data: []const Data, extra: []const u32) bool {
+    // 1. Check if this is cmp_eq
+    if (tags[idx] != .cmp_eq) return false;
+
+    // 2. Check if LHS is from get_union_tag
+    const cmp_datum = data[idx];
+    const lhs_ref = cmp_datum.bin_op.lhs;
+    const lhs_idx = lhs_ref.toIndex() orelse return false;
+    const lhs_idx_u32: u32 = @intFromEnum(lhs_idx);
+
+    if (tags[lhs_idx_u32] != .get_union_tag) return false;
+
+    // 3. Look forward for a cond_br that uses this cmp_eq's result
+    const cmp_idx: Air.Inst.Index = @enumFromInt(idx);
+    const cmp_ref = cmp_idx.toRef();
+    for (idx + 1..tags.len) |search_idx| {
+        const search_tag = tags[search_idx];
+        if (search_tag == .cond_br) {
+            const cond_br_datum = data[search_idx];
+            const condition_ref = cond_br_datum.pl_op.operand;
+
+            // Check if this cond_br uses our cmp_eq result
+            if (condition_ref == cmp_ref) {
+                // 4. Check if cold branch calls inactiveUnionField
+                const bodies = extractCondBrBodies(search_idx, data, extra) orelse return false;
+
+                for (bodies.@"else") |else_idx| {
+                    const else_tag = tags[else_idx];
+                    if (else_tag == .call or else_tag == .call_always_tail or
+                        else_tag == .call_never_tail or else_tag == .call_never_inline)
+                    {
+                        const fqn = getCallFqn(ip, data[else_idx]) orelse continue;
+                        if (std.mem.endsWith(u8, fqn, "inactiveUnionField")) {
+                            return true;
+                        }
+                    }
+                }
+                return false; // Found cond_br using our result but no inactiveUnionField
+            }
+        }
+    }
+    return false;
+}
+
 /// Generate Zig source code for a function from AIR instructions using worklist algorithm.
 /// This processes the main function and any nested conditionals, outputting branch functions
 /// first (so they're in scope) followed by the main function.
@@ -3535,7 +3667,12 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop, .is_dotq_pattern = false }) catch @panic("out of memory");
+                // Check for union tag safety pattern (cmp_eq in get_union_tag + cmp_eq + cond_br pattern)
+                // Noop these to avoid false positives when assigning to undefined unions
+                const is_union_tag_safety = tag == .cmp_eq and
+                    isUnionTagSafetyPattern(info.ip, idx, info.tags, info.data, info.extra);
+
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop or is_union_tag_safety, .is_dotq_pattern = false }) catch @panic("out of memory");
             }
         },
         .sub => {
@@ -3657,7 +3794,12 @@ fn generateOneFunction(
                     }
                 }
 
-                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = false, .is_dotq_pattern = is_dotq_pattern }) catch @panic("out of memory");
+                // Check for union tag safety pattern (cmp_eq in get_union_tag + cmp_eq + cond_br pattern)
+                // Noop these to avoid false positives when assigning to undefined unions
+                const is_union_tag_safety = tag == .cmp_eq and
+                    isUnionTagSafetyPattern(info.ip, idx, info.tags, info.data, info.extra);
+
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_union_tag_safety, .is_dotq_pattern = is_dotq_pattern }) catch @panic("out of memory");
             }
         },
     }
