@@ -96,13 +96,13 @@ fn altName(tag: Tag) []const u8 {
 
 /// Returns the payload string for a given tag and data.
 /// Note: call tags are handled separately in buildInstLines via payloadCallParts.
-fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []const u8 {
+fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32, inst_index: usize) []const u8 {
     return switch (tag) {
         .alloc => payloadAlloc(info, datum),
         .arg => payloadArg(info, datum, arg_counter),
         .dbg_stmt => payloadDbgStmt(info, datum),
         .store, .store_safe => payloadStore(info, datum),
-        .load => payloadLoad(info, datum),
+        .load => payloadLoad(info, datum, inst_index),
         .ret_safe => payloadRetSafe(info, datum),
         .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(info, datum),
         .bitcast => payloadBitcast(info, datum),
@@ -138,8 +138,8 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32) []con
         .slice => payloadSlice(info, datum),
         .array_to_slice => payloadArrayToSlice(info, datum),
         .ptr_add, .ptr_sub => payloadPtrAdd(info, datum),
-        // Slice pointer access (ty_op)
-        .ptr_slice_len_ptr, .ptr_slice_ptr_ptr => payloadTransferOp(info, datum),
+        // Slice pointer access (ty_op) - creates pointer to slice component
+        .ptr_slice_len_ptr, .ptr_slice_ptr_ptr => payloadSliceFieldPtr(info, datum),
         // Additional ty_op operations that transfer properties
         .optional_payload_ptr_set, .unwrap_errunion_err_ptr => payloadTransferOp(info, datum),
         // Type conversion ops (ty_op)
@@ -300,25 +300,36 @@ fn payloadStructFieldPtrGeneric(info: *const FnInfo, datum: Data) []const u8 {
     const operand: Ref = @enumFromInt(operand_raw);
     const base_src = srcString(info, operand);
 
-    // Extract container type_id from operand's type
-    const type_id: u32 = blk: {
-        const operand_type: ?InternPool.Index = if (operand.toIndex()) |idx|
-            getInstResultType(info.ip, info.tags, info.data, @intFromEnum(idx))
-        else if (operand.toInterned()) |interned_idx|
-            info.ip.typeOf(interned_idx)
-        else
-            null;
+    // Extract container type_id from operand's type and check if packed
+    var type_id: u32 = 0;
+    var is_packed: bool = false;
 
-        if (operand_type) |ptr_type_idx| {
-            const ptr_key = info.ip.indexToKey(ptr_type_idx);
-            if (ptr_key == .ptr_type) {
-                break :blk @intFromEnum(ptr_key.ptr_type.child);
+    const operand_type: ?InternPool.Index = if (operand.toIndex()) |idx|
+        getInstResultType(info.ip, info.tags, info.data, @intFromEnum(idx))
+    else if (operand.toInterned()) |interned_idx|
+        info.ip.typeOf(interned_idx)
+    else
+        null;
+
+    if (operand_type) |ptr_type_idx| {
+        const ptr_key = info.ip.indexToKey(ptr_type_idx);
+        if (ptr_key == .ptr_type) {
+            const child_idx = ptr_key.ptr_type.child;
+            type_id = @intFromEnum(child_idx);
+            // Check if the container is a packed struct
+            const child_key = info.ip.indexToKey(child_idx);
+            if (child_key == .struct_type) {
+                const loaded = info.ip.loadStructType(child_idx);
+                is_packed = loaded.layout == .@"packed";
             }
         }
-        break :blk 0;
-    };
+    }
 
-    return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d} }}", .{ base_src, field_index, ty_str, type_id }, null);
+    if (is_packed) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d}, .is_packed = true }}", .{ base_src, field_index, ty_str, type_id }, null);
+    } else {
+        return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d} }}", .{ base_src, field_index, ty_str, type_id }, null);
+    }
 }
 
 /// Payload for operations that transfer all properties from source to result.
@@ -328,6 +339,18 @@ fn payloadTransferOp(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(info, operand);
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
+}
+
+/// Payload for ptr_slice_ptr_ptr and ptr_slice_len_ptr.
+/// These create pointers to slice components, so we need the result type.
+fn payloadSliceFieldPtr(info: *const FnInfo, datum: Data) []const u8 {
+    const operand = datum.ty_op.operand;
+    const src_str = srcString(info, operand);
+    const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
+        typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
+    else
+        ".{ .pointer = &.{ .scalar = {} } }";
+    return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
 }
 
 /// Payload for wrap_errunion_payload - wraps a value in an error union (success case).
@@ -756,25 +779,36 @@ fn payloadStructFieldPtr(info: *const FnInfo, datum: Data, field_index: usize) [
     const base_src = srcString(info, datum.ty_op.operand);
 
     // Extract container type_id from operand's type (pointer to struct -> struct type)
-    const type_id: u32 = blk: {
-        // Try to get operand type from instruction or interned
-        const operand_type: ?InternPool.Index = if (datum.ty_op.operand.toIndex()) |idx|
-            getInstResultType(info.ip, info.tags, info.data, @intFromEnum(idx))
-        else if (datum.ty_op.operand.toInterned()) |interned_idx|
-            info.ip.typeOf(interned_idx) // typeOf returns InternPool.Index directly
-        else
-            null;
+    // Also check if the container is a packed struct
+    var type_id: u32 = 0;
+    var is_packed: bool = false;
 
-        if (operand_type) |ptr_type_idx| {
-            const ptr_key = info.ip.indexToKey(ptr_type_idx);
-            if (ptr_key == .ptr_type) {
-                break :blk @intFromEnum(ptr_key.ptr_type.child);
+    const operand_type: ?InternPool.Index = if (datum.ty_op.operand.toIndex()) |idx|
+        getInstResultType(info.ip, info.tags, info.data, @intFromEnum(idx))
+    else if (datum.ty_op.operand.toInterned()) |interned_idx|
+        info.ip.typeOf(interned_idx)
+    else
+        null;
+
+    if (operand_type) |ptr_type_idx| {
+        const ptr_key = info.ip.indexToKey(ptr_type_idx);
+        if (ptr_key == .ptr_type) {
+            const child_idx = ptr_key.ptr_type.child;
+            type_id = @intFromEnum(child_idx);
+            // Check if the container is a packed struct
+            const child_key = info.ip.indexToKey(child_idx);
+            if (child_key == .struct_type) {
+                const loaded = info.ip.loadStructType(child_idx);
+                is_packed = loaded.layout == .@"packed";
             }
         }
-        break :blk 0;
-    };
+    }
 
-    return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d} }}", .{ base_src, field_index, ty_str, type_id }, null);
+    if (is_packed) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d}, .is_packed = true }}", .{ base_src, field_index, ty_str, type_id }, null);
+    } else {
+        return clr_allocator.allocPrint(info.arena, ".{{ .base = {s}, .field_index = {d}, .ty = {s}, .type_id = {d} }}", .{ base_src, field_index, ty_str, type_id }, null);
+    }
 }
 
 /// Payload for struct_field_val - extracts a field value from a struct by value.
@@ -941,11 +975,11 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                 }
             }
             // Regular store - use standard apply
-            const tag_payload = payload(info, tag, datum, arg_counter);
+            const tag_payload = payload(info, tag, datum, arg_counter, inst_index);
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
         },
         else => blk: {
-            const tag_payload = payload(info, tag, datum, arg_counter);
+            const tag_payload = payload(info, tag, datum, arg_counter, inst_index);
             const result = clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .{s} = {s} }});\n", .{ inst_index, altName(tag), tag_payload }, null);
             break :blk result;
         },
@@ -1952,31 +1986,71 @@ fn payloadStore(info: *const FnInfo, datum: Data) []const u8 {
     return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s}, .src = {s} }}", .{ ptr_str, src_str }, null);
 }
 
-fn payloadLoad(info: *const FnInfo, datum: Data) []const u8 {
+fn payloadLoad(info: *const FnInfo, datum: Data, inst_index: usize) []const u8 {
     // ty_op.ty is a Ref to the result type (used for fallback type)
     const fallback_ty_str = if (datum.ty_op.ty.toInterned()) |ty_idx|
         typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
     else
         ".{ .unimplemented = {} }";
 
+    // Detect packed struct RMW pattern: load is part of read-modify-write if
+    // there's a subsequent store to the same pointer with bit_or as source.
+    const is_packed_rmw = detectPackedRmw(info, datum, inst_index);
+    const rmw_str: []const u8 = if (is_packed_rmw) ", .is_packed_rmw = true" else "";
+
     // Check for .none first (toIndex asserts on .none)
     if (datum.ty_op.operand == .none) {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }} }}", .{fallback_ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }}{s} }}", .{ fallback_ty_str, rmw_str }, null);
     }
     if (datum.ty_op.operand.toIndex()) |idx| {
         // Runtime instruction index
         const ptr = @intFromEnum(idx);
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .inst = {d} }} }}", .{ptr}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .inst = {d} }}{s} }}", .{ ptr, rmw_str }, null);
     } else if (datum.ty_op.operand.toInterned()) |interned_idx| {
         // Register globals (side effect)
         _ = tryGlobalRef(info, interned_idx);
         const ip_idx: u32 = @intFromEnum(interned_idx);
         const ty = info.ip.typeOf(interned_idx);
         const ty_str = typeToString(null, null, info.arena, info.ip, ty);
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = {d}, .ty = {s} }} }} }}", .{ ip_idx, ty_str }, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = {d}, .ty = {s} }} }}{s} }}", .{ ip_idx, ty_str, rmw_str }, null);
     } else {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }} }}", .{fallback_ty_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }}{s} }}", .{ fallback_ty_str, rmw_str }, null);
     }
+}
+
+/// Detect if this load is part of a packed struct RMW (read-modify-write) pattern.
+/// The pattern is: bitcast -> load -> ... -> bit_or -> store(same ptr)
+/// The bit_or → store pattern is specific to packed struct field assignment.
+fn detectPackedRmw(info: *const FnInfo, datum: Data, inst_index: usize) bool {
+    // Load must be from an instruction (not interned)
+    const ptr_idx = datum.ty_op.operand.toIndex() orelse return false;
+    const ptr_inst: usize = @intFromEnum(ptr_idx);
+
+    // The pointer must be from a bitcast (packed field access casts to backing type)
+    if (ptr_inst >= info.tags.len) return false;
+    if (info.tags[ptr_inst] != .bitcast) return false;
+
+    // Look ahead for store to same pointer with bit_or source
+    // Search within a reasonable range (RMW pattern is usually within ~10 instructions)
+    const search_limit = @min(inst_index + 20, info.tags.len);
+    for (inst_index + 1..search_limit) |i| {
+        const tag = info.tags[i];
+        if (tag == .store or tag == .store_safe) {
+            const store_data = info.data[i];
+            // Check if store targets the same pointer (the bitcast result)
+            const store_ptr = store_data.bin_op.lhs.toIndex() orelse continue;
+            if (@intFromEnum(store_ptr) != ptr_inst) continue;
+
+            // Check if store source is a bit_or
+            const store_src = store_data.bin_op.rhs.toIndex() orelse continue;
+            const src_inst: usize = @intFromEnum(store_src);
+            if (src_inst >= info.tags.len) continue;
+            if (info.tags[src_inst] == .bit_or) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 /// ret_ptr returns a pointer to the return value storage.

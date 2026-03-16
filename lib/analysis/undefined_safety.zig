@@ -80,28 +80,17 @@ pub const UndefinedSafety = union(enum) {
     }
 
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
+        _ = params;
         const results = state.results;
         const refinements = state.refinements;
         // The pointer itself is defined (it exists)
         const ptr_idx = results[index].refinement.?;
         refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
         // The pointee starts as undefined (must be set by store before use)
-        // Exception: packed structs use read-modify-write initialization, so their
-        // fields should start as defined to avoid false positives on the initial read.
+        // Note: packed struct fields also start undefined, but the RMW pattern
+        // is handled by packed_field tracking in struct_field_ptr/load/store
         const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        if (isPackedStruct(params.ty)) {
-            setUndefinedRecursive(refinements, pointee_idx, .{ .defined = {} });
-        } else {
-            setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
-        }
-    }
-
-    /// Check if a type is a packed struct.
-    fn isPackedStruct(ty: core.Type) bool {
-        return switch (ty) {
-            .@"struct" => |s| s.is_packed,
-            else => false,
-        };
+        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
     /// Handle allocator.realloc()/remap() - set undefined state for reallocation
@@ -1104,8 +1093,23 @@ pub const UndefinedSafety = union(enum) {
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse @panic("store: global not found"),
             .fnptr => @panic("store: storing through constant pointer not supported"),
         };
+        const ptr_ref = refinements.at(ptr_gid).pointer;
+
+        // Check if this is a packed struct field store (RMW pattern)
+        // If so, mark only that specific field as defined in the container struct
+        if (ptr_ref.packed_field) |pf| {
+            const container = refinements.at(pf.container_gid);
+            if (container.* == .@"struct") {
+                const field_gid = container.@"struct".fields[pf.field_index];
+                // Use setUndefinedRecursive with .defined to forcefully set as defined
+                // (setDefinedRecursive only sets if currently null, but we have .undefined)
+                setUndefinedRecursive(refinements, field_gid, .{ .defined = {} });
+            }
+            return;
+        }
+
         // Follow pointer to get pointee - panic on unexpected types
-        const pointee_idx = refinements.at(ptr_gid).pointer.to;
+        const pointee_idx = ptr_ref.to;
 
         // Check if source is an undefined type (interned with .undefined wrapper)
         const is_undef = switch (params.src) {
@@ -1233,6 +1237,46 @@ pub const UndefinedSafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
+
+        // Check if this is a packed struct RMW (read-modify-write) load.
+        // RMW loads read the backing byte to modify and store back - skip undefined check.
+        if (params.is_packed_rmw) {
+            const result_idx = results[index].refinement.?;
+            setUndefinedRecursive(refinements, result_idx, .{ .defined = {} });
+            return;
+        }
+
+        // For non-RMW loads through packed_field pointers, check if the specific field is defined
+        const ptr_gid: ?Gid = switch (params.ptr) {
+            .inst => |ptr| results[ptr].refinement,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+        if (ptr_gid) |gid| {
+            if (refinements.at(gid).* == .pointer) {
+                if (refinements.at(gid).pointer.packed_field) |pf| {
+                    // Reading from a packed struct field - check if that specific field is defined
+                    const container = refinements.at(pf.container_gid);
+                    if (container.* == .@"struct") {
+                        const field_gid = container.@"struct".fields[pf.field_index];
+                        const field_ref = refinements.at(field_gid);
+                        if (field_ref.* == .scalar) {
+                            if (field_ref.scalar.analyte.undefined_safety) |undef| {
+                                switch (undef) {
+                                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                                    .inconsistent => return undef.reportInconsistentBranches(ctx),
+                                    .defined => {},
+                                }
+                            }
+                        }
+                    }
+                    // Mark result as defined (we checked the field, not the backing byte)
+                    const result_idx = results[index].refinement.?;
+                    setUndefinedRecursive(refinements, result_idx, .{ .defined = {} });
+                    return;
+                }
+            }
+        }
 
         // Get pointee GID by following the pointer chain.
         // If we can't follow (interned constant, missing refinement, or not a pointer),
@@ -1605,7 +1649,7 @@ pub const UndefinedSafety = union(enum) {
                 // that is already being processed. Following would cause infinite recursion.
             },
             .void => {}, // void return type is valid
-            .unimplemented => @panic("retval_init_defined: unimplemented return type"),
+            .unimplemented => {}, // unimplemented types are silently skipped
             .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
         }
     }

@@ -584,3 +584,150 @@ test "get_union_tag on union with active variant succeeds" {
     try std.testing.expectEqual(.scalar, std.meta.activeTag(result_ref.*));
     try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.scalar.analyte.undefined_safety.?));
 }
+
+// =============================================================================
+// Packed struct field tests - RMW pattern handling
+// =============================================================================
+
+test "load with is_packed_rmw skips undefined check and marks result defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Alloc creates pointer to undefined scalar (simulating packed struct backing byte)
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+
+    // Verify pointee is undefined
+    const ptr_gid = results[0].refinement.?;
+    const pointee_gid = refinements.at(ptr_gid).pointer.to;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(pointee_gid).scalar.analyte.undefined_safety.?));
+
+    // Load with is_packed_rmw=true should NOT error even though pointee is undefined
+    try Inst.apply(state, 1, .{ .load = .{ .ptr = .{ .inst = 0 }, .is_packed_rmw = true } });
+
+    // Result should be marked as defined
+    const result_gid = results[1].refinement.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(result_gid).scalar.analyte.undefined_safety.?));
+}
+
+test "load through packed_field pointer errors on undefined field" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a packed struct with undefined fields
+    const fields = try std.testing.allocator.alloc(Gid, 2);
+    fields[0] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = fields,
+        .type_id = 100,
+    } });
+
+    // Create a packed_field pointer to field 1 (which is undefined)
+    const ptr_gid = try refinements.createPointerToPackedField(fields[1], .{}, .{
+        .container_gid = struct_gid,
+        .field_index = 1,
+    });
+    results[0].refinement = ptr_gid;
+
+    // Load through packed_field pointer should error because field 1 is undefined
+    const result = Inst.apply(state, 1, .{ .load = .{ .ptr = .{ .inst = 0 } } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
+test "load through packed_field pointer succeeds on defined field" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a packed struct with field 1 defined
+    const fields = try std.testing.allocator.alloc(Gid, 2);
+    fields[0] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = fields,
+        .type_id = 100,
+    } });
+
+    // Create a packed_field pointer to field 1 (which is defined)
+    const ptr_gid = try refinements.createPointerToPackedField(fields[1], .{}, .{
+        .container_gid = struct_gid,
+        .field_index = 1,
+    });
+    results[0].refinement = ptr_gid;
+
+    // Load through packed_field pointer should succeed because field 1 is defined
+    try Inst.apply(state, 1, .{ .load = .{ .ptr = .{ .inst = 0 } } });
+
+    // Result should be marked as defined
+    const result_gid = results[1].refinement.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(result_gid).scalar.analyte.undefined_safety.?));
+}
+
+test "store through packed_field pointer marks only that field as defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 4;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a packed struct with all undefined fields
+    const fields = try std.testing.allocator.alloc(Gid, 3);
+    fields[0] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    fields[1] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    fields[2] = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = fields,
+        .type_id = 100,
+    } });
+
+    // Create a packed_field pointer to field 1
+    const ptr_gid = try refinements.createPointerToPackedField(fields[1], .{}, .{
+        .container_gid = struct_gid,
+        .field_index = 1,
+    });
+    results[0].refinement = ptr_gid;
+
+    // Create a defined scalar as the source value
+    const src_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    results[1].refinement = src_gid;
+
+    // Store through packed_field pointer
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
+
+    // Field 0 should still be undefined
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(fields[0]).scalar.analyte.undefined_safety.?));
+
+    // Field 1 should now be defined
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(fields[1]).scalar.analyte.undefined_safety.?));
+
+    // Field 2 should still be undefined
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(fields[2]).scalar.analyte.undefined_safety.?));
+}

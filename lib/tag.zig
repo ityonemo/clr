@@ -574,6 +574,9 @@ pub const DbgVarVal = struct {
 pub const Load = struct {
     /// Source pointer - instruction, interned variable, or interned constant
     ptr: Src,
+    /// True if this load is part of a packed struct RMW (read-modify-write) pattern.
+    /// When true, skip undefined checks - the subsequent store will define the field.
+    is_packed_rmw: bool = false,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get the pointer's refinement GID based on source type
@@ -633,6 +636,9 @@ pub const StructFieldPtr = struct {
     ty: Type,
     /// Container type_id for fieldParentPtr validation
     type_id: u32 = 0,
+    /// True if this is a packed struct field access.
+    /// Packed structs use read-modify-write patterns that need special handling.
+    is_packed: bool = false,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get the base pointer's refinement based on source type
@@ -670,7 +676,17 @@ pub const StructFieldPtr = struct {
         switch (container) {
             .@"struct" => |data| {
                 const field_idx = data.fields[self.field_index];
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = field_idx } });
+                if (self.is_packed) {
+                    // For packed structs, track the field reference for RMW elision
+                    const packed_ref = Refinements.Refinement.PackedFieldRef{
+                        .container_gid = container_idx,
+                        .field_index = self.field_index,
+                    };
+                    const ptr_gid = try state.refinements.createPointerToPackedField(field_idx, .{}, packed_ref);
+                    state.results[index].refinement = ptr_gid;
+                } else {
+                    _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = field_idx } });
+                }
             },
             .@"union" => |data| {
                 const field_idx = idx: {
