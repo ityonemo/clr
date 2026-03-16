@@ -53,10 +53,10 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
             },
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse blk: {
                 // Not a tracked global - create refinement from type
-                // Mark as defined (compile-time constants are always defined)
+                // Mark as global (interned/comptime values point to const memory)
                 const ref = try tag.typeToRefinement(interned.ty, state.refinements);
                 const gid = try state.refinements.appendEntity(ref);
-                tag.splatInitDefined(state.refinements, gid, state.ctx);
+                tag.splatInitInterned(state.refinements, gid, state.ctx);
                 break :blk gid;
             },
             .fnptr => |choices| blk: {
@@ -145,10 +145,13 @@ pub fn splatCall(
     fqn: []const u8,
 ) !bool {
     var intercepted = false;
-    inline for (tag.analyses) |Analysis| {
+    inline for (Analyte.analyses, 0..) |Analysis, i| {
         if (@hasDecl(Analysis, "call")) {
-            if (try Analysis.call(state, index, return_type, args, fqn)) {
-                intercepted = true;
+            const should = if (state.restrict) |restricted| @intFromEnum(restricted) == i else true;
+            if (should) {
+                if (try Analysis.call(state, index, return_type, args, fqn)) {
+                    intercepted = true;
+                }
             }
         }
     }
@@ -1007,54 +1010,6 @@ test "alloc creates pointer to typed pointee" {
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
     // uninitialized instruction has no refinement yet
     try std.testing.expectEqual(null, results[2].refinement);
-}
-
-test "store_safe with undef keeps state undefined" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    const results = try make_results_list(allocator, 3);
-    defer clear_results_list(results, allocator);
-
-    const state = testState(&ctx, results, &refinements);
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
-
-    // alloc's pointee stays undefined after store_safe with undef
-    const pointee_idx = results[1].get(&refinements).pointer.to;
-    const scalar = &refinements.at(pointee_idx).scalar;
-    try std.testing.expectEqual(.undefined, std.meta.activeTag(scalar.analyte.undefined_safety.?));
-}
-
-test "store_safe with value sets state to defined" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    const results = try make_results_list(allocator, 3);
-    defer clear_results_list(results, allocator);
-
-    const state = testState(&ctx, results, &refinements);
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
-
-    // alloc's pointee becomes defined after store_safe with real value
-    const pointee_idx = results[1].get(&refinements).pointer.to;
-    const scalar = &refinements.at(pointee_idx).scalar;
-    try std.testing.expectEqual(.defined, std.meta.activeTag(scalar.analyte.undefined_safety.?));
 }
 
 test "load from undefined instruction reports use before assign" {

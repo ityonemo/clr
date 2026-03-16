@@ -272,9 +272,11 @@ When a false positive is identified, follow this cycle **exactly**. Do NOT skip 
 
 ## Architecture: Tag Handlers vs Analysis Modules
 
-**IMPORTANT**: The following files must NEVER contain `.analyte.xxx_safety` patterns (except in tests):
+**IMPORTANT**: The following files must NEVER contain `.analyte.xxx_safety` patterns:
 - `lib/tag.zig` - Tag handlers set up refinement STRUCTURE only
 - `lib/Refinements.zig` - Refinement table management only
+- `lib/Inst.zig` - Inst struct and results list management only
+- `lib/dump.zig` - Debug formatting (uses accessor functions from analysis modules)
 
 Analyte manipulation (`.analyte.undefined_safety`, `.analyte.memory_safety`, `.analyte.null_safety`, `.analyte.variant_safety`, `.analyte.fieldparentptr_safety`) is the EXCLUSIVE responsibility of analysis modules in `lib/analysis/`.
 
@@ -669,8 +671,6 @@ fn someCondition() bool {
 ## Known Issues / Future Work
 
 **InternPool type inspection**: See `zig/src/InternPool.zig` for `indexToKey()` which returns type information that can be pattern-matched to determine the category.
-
-**Returned pointers shouldn't trigger leak detection**: When a function returns a pointer, the local leak detection (in `onFinish`) incorrectly reports a leak because the allocation is "not freed" in the returning function. The caller takes ownership, so the return should exempt the pointer from local leak checks.
 
 ## AIR Backend Overview
 

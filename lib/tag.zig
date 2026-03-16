@@ -1257,24 +1257,25 @@ pub const WrapErrunionPayload = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create errorunion structure based on the result type
         // payload_gid is the GID of the payload entity
+        // IMPORTANT: We SHARE the source entity (not copy) so that memory_safety
+        // tracking (like .returned flag) affects the original allocation.
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
-                // Get payload refinement from source instruction
+                // Get payload refinement from source instruction - share it
                 const src_gid = state.results[src].refinement orelse {
                     // Source has no refinement - create based on type
                     const ref = try typeToRefinement(self.ty.errorunion.*, state.refinements);
                     break :blk try state.refinements.appendEntity(ref);
                 };
-                // Deep copy the payload so we have our own entity
-                const src_ref = state.refinements.at(src_gid).*;
-                break :blk try Refinement.copyTo(src_ref, state.refinements, state.refinements);
+                // Share the payload entity - when ret_safe marks allocations as
+                // returned, it affects the original allocation, not a copy
+                break :blk src_gid;
             },
             .interned => |interned| blk: {
                 // Try to look up as tracked global first
                 if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
-                    // Deep copy the global so we have our own entity
-                    const global_ref = state.refinements.at(global_gid).*;
-                    break :blk try Refinement.copyTo(global_ref, state.refinements, state.refinements);
+                    // Share the global
+                    break :blk global_gid;
                 } else {
                     // Not tracked - create from type
                     const ref = try typeToRefinement(interned.ty, state.refinements);
@@ -1282,7 +1283,7 @@ pub const WrapErrunionPayload = struct {
                 }
             },
             .fnptr => |choices| blk: {
-                // Create fnptr refinement with choices - deep copy
+                // Create fnptr refinement with choices - need to copy for ownership
                 const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
                 const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
                     .choices = owned_choices,
@@ -1313,6 +1314,8 @@ pub const WrapOptional = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get payload GID from source
+        // IMPORTANT: We SHARE the source entity (not copy) so that memory_safety
+        // tracking (like .returned flag) affects the original allocation.
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
                 const src_gid = state.results[src].refinement orelse {
@@ -1321,15 +1324,15 @@ pub const WrapOptional = struct {
                     const ref = try typeToRefinement(inner_ty, state.refinements);
                     break :blk try state.refinements.appendEntity(ref);
                 };
-                // Deep copy the payload so we have our own entity
-                const src_ref = state.refinements.at(src_gid).*;
-                break :blk try Refinement.copyTo(src_ref, state.refinements, state.refinements);
+                // Share the payload entity - when ret_safe marks allocations as
+                // returned, it affects the original allocation, not a copy
+                break :blk src_gid;
             },
             .interned => |interned| blk: {
                 // Try to look up as tracked global first
                 if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
-                    const global_ref = state.refinements.at(global_gid).*;
-                    break :blk try Refinement.copyTo(global_ref, state.refinements, state.refinements);
+                    // Share the global
+                    break :blk global_gid;
                 } else {
                     const ref = try typeToRefinement(interned.ty, state.refinements);
                     break :blk try state.refinements.appendEntity(ref);
@@ -2129,8 +2132,8 @@ pub const AnyTag = union(enum) {
 
     // Pointer/slice operations
     ptr_elem_val: ArrayElemVal, // Same structure as array_elem_val
-    ptr_slice_len_ptr: TransferOp, // Get slice length through pointer
-    ptr_slice_ptr_ptr: TransferOp, // Get slice pointer through pointer
+    ptr_slice_len_ptr: SliceFieldPtr, // Get pointer to slice length through pointer
+    ptr_slice_ptr_ptr: SliceFieldPtr, // Get pointer to slice ptr through pointer
 
     // Error/optional operations
     is_err: UnOp(.is_err),
@@ -2260,7 +2263,7 @@ pub fn BinOp(comptime tag: anytype) type {
 }
 
 /// Transfer operation - creates scalar result, lets analyses handle transfer
-/// Used for operations like ptr_slice_len_ptr, fpext, etc.
+/// Used for operations like fpext, etc.
 pub const TransferOp = struct {
     src: Src,
 
@@ -2271,6 +2274,23 @@ pub const TransferOp = struct {
         splatInitDefined(state.refinements, gid, state.ctx);
         // Let each analysis decide how to handle this operation
         try splat(.transfer_op, state, index, self);
+    }
+};
+
+/// Slice field pointer operations - gets pointer to a slice component (ptr or len).
+/// Used for ptr_slice_ptr_ptr and ptr_slice_len_ptr.
+/// These create pointer refinements, not scalars.
+pub const SliceFieldPtr = struct {
+    src: Src,
+    ty: core.Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Create the refinement structure based on the result type
+        const gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        // The result is defined (the operation executed successfully)
+        splatInitDefined(state.refinements, gid, state.ctx);
+        // Let each analysis decide how to handle this operation
+        try splat(.slice_field_ptr, state, index, self);
     }
 };
 
@@ -2314,6 +2334,21 @@ pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: *Context) void {
 pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "retval_init_defined")) {
+            Analysis.retval_init_defined(refinements, gid);
+        } else if (@hasDecl(Analysis, "retval_init")) {
+            Analysis.retval_init(refinements, gid, ctx);
+        }
+    }
+}
+
+/// Initialize analysis state for interned/comptime values that are NOT tracked globals.
+/// These are compile-time constants (e.g., &global_value) and should have .global memory_safety.
+/// Different from splatInitGlobal which sets up tracked global variables.
+pub fn splatInitInterned(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "interned_init")) {
+            Analysis.interned_init(refinements, gid);
+        } else if (@hasDecl(Analysis, "retval_init_defined")) {
             Analysis.retval_init_defined(refinements, gid);
         } else if (@hasDecl(Analysis, "retval_init")) {
             Analysis.retval_init(refinements, gid, ctx);

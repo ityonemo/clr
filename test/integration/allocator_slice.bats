@@ -61,3 +61,11 @@ load test_helper
     [[ "$output" =~ "use after free in pass_to_callee_use_after_free.main" ]]
     [[ "$output" =~ "pass_to_callee_use_after_free.zig" ]]
 }
+
+@test "no false positive for freeing slice returned from function" {
+    # Tests that freeing a slice returned from a function doesn't report
+    # "free of global/comptime memory" - the returned slice may point to
+    # dynamically allocated memory, not global memory.
+    run compile_and_run "$TEST_CASES/allocator/slice/free_returned_slice.zig"
+    [ "$status" -eq 0 ]
+}

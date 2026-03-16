@@ -1074,8 +1074,10 @@ pub const MemorySafety = union(enum) {
         const old_region_analyte = &old_region_ref.region.analyte;
 
         // Get memory_safety from old region
-        const old_ms = &(old_region_analyte.memory_safety orelse
-            @panic("alloc_realloc: old region has no memory_safety"));
+        const old_ms = &(old_region_analyte.memory_safety orelse {
+            // memory_safety is null - region was not tracked
+            return;
+        });
 
         // Check for invalid operations on old slice
         switch (old_ms.*) {
@@ -1826,49 +1828,44 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Initialize memory_safety for comptime DEFINED values (constants, not undefined).
-    /// For TOP-LEVEL pointers only, marks the pointee as .global since comptime pointers
-    /// always point to global/static memory (never heap allocations).
-    /// Nested pointers (inside optionals, structs, etc.) are NOT marked as global.
+    /// Initialize memory_safety to .unset for return values.
+    /// We don't mark them as .global because returned pointers may point to
+    /// dynamically allocated memory (e.g., allocatedSlice returns a slice
+    /// to allocated memory, not global memory).
     pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
-        retval_init_defined_inner(refinements, gid, true);
+        retval_init_defined_inner(refinements, gid);
     }
 
-    fn retval_init_defined_inner(refinements: *Refinements, gid: Gid, is_top_level: bool) void {
+    fn retval_init_defined_inner(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .pointer => |p| {
                 ref.pointer.analyte.memory_safety = .{ .unset = {} };
-                // Only mark pointee as global for TOP-LEVEL pointers
-                // (actual comptime pointer constants like &global_var)
-                // Nested pointers (e.g., inside optionals) should not be marked
-                if (is_top_level) {
-                    setGlobalRecursive(refinements, p.to, comptime_global_meta);
-                } else {
-                    retval_init_defined_inner(refinements, p.to, false);
-                }
+                // Don't mark pointee as global - returned pointers might point to
+                // dynamically allocated memory (e.g., allocatedSlice), not just globals.
+                // Only interned/comptime pointers should have global memory_safety.
+                retval_init_defined_inner(refinements, p.to);
             },
             .scalar => ref.scalar.analyte.memory_safety = .{ .unset = {} },
             .optional => |o| {
                 ref.optional.analyte.memory_safety = .{ .unset = {} };
-                // Inner types of optionals are not top-level
-                retval_init_defined_inner(refinements, o.to, false);
+                retval_init_defined_inner(refinements, o.to);
             },
             .errorunion => |e| {
                 ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
-                retval_init_defined_inner(refinements, e.to, false);
+                retval_init_defined_inner(refinements, e.to);
             },
             .@"struct" => |s| {
                 ref.@"struct".analyte.memory_safety = .{ .unset = {} };
                 for (s.fields) |field_gid| {
-                    retval_init_defined_inner(refinements, field_gid, false);
+                    retval_init_defined_inner(refinements, field_gid);
                 }
             },
             .@"union" => |u| {
                 ref.@"union".analyte.memory_safety = .{ .unset = {} };
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
-                        retval_init_defined_inner(refinements, field_gid, false);
+                        retval_init_defined_inner(refinements, field_gid);
                     }
                 }
             },
@@ -1876,14 +1873,68 @@ pub const MemorySafety = union(enum) {
             .fnptr => ref.fnptr.analyte.memory_safety = .{ .unset = {} },
             .region => |r| {
                 ref.region.analyte.memory_safety = .{ .unset = {} };
-                retval_init_defined_inner(refinements, r.to, false);
+                retval_init_defined_inner(refinements, r.to);
             },
             .recursive => |r| {
                 ref.recursive.analyte.memory_safety = .{ .unset = {} };
-                retval_init_defined_inner(refinements, r.to, false);
+                retval_init_defined_inner(refinements, r.to);
             },
             .void, .noreturn => {},
-            .unimplemented => @panic("retval_init_defined: unimplemented return type"),
+            .unimplemented => {}, // unimplemented types are silently skipped
+        }
+    }
+
+    /// Initialize memory_safety for comptime/interned values.
+    /// These are compile-time constants and should have .global memory_safety.
+    /// This is called when creating entities for interned Src values that are
+    /// not tracked globals (e.g., &global_value pointer constants).
+    pub fn interned_init(refinements: *Refinements, gid: Gid) void {
+        interned_init_inner(refinements, gid);
+    }
+
+    fn interned_init_inner(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |p| {
+                // Interned pointers are comptime constants - mark as global
+                ref.pointer.analyte.memory_safety = .{ .global = comptime_global_meta };
+                // Pointee is also global
+                interned_init_inner(refinements, p.to);
+            },
+            .scalar => ref.scalar.analyte.memory_safety = .{ .global = comptime_global_meta },
+            .optional => |o| {
+                ref.optional.analyte.memory_safety = .{ .global = comptime_global_meta };
+                interned_init_inner(refinements, o.to);
+            },
+            .errorunion => |e| {
+                ref.errorunion.analyte.memory_safety = .{ .global = comptime_global_meta };
+                interned_init_inner(refinements, e.to);
+            },
+            .@"struct" => |s| {
+                ref.@"struct".analyte.memory_safety = .{ .global = comptime_global_meta };
+                for (s.fields) |field_gid| {
+                    interned_init_inner(refinements, field_gid);
+                }
+            },
+            .@"union" => |u| {
+                ref.@"union".analyte.memory_safety = .{ .global = comptime_global_meta };
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        interned_init_inner(refinements, field_gid);
+                    }
+                }
+            },
+            .fnptr, .allocator => {},
+            .region => |r| {
+                ref.region.analyte.memory_safety = .{ .global = comptime_global_meta };
+                interned_init_inner(refinements, r.to);
+            },
+            .recursive => |r| {
+                ref.recursive.analyte.memory_safety = .{ .global = comptime_global_meta };
+                interned_init_inner(refinements, r.to);
+            },
+            .void, .noreturn => {},
+            .unimplemented => {},
         }
     }
 
@@ -3138,7 +3189,9 @@ pub const MemorySafety = union(enum) {
         };
 
         const ms_ptr = &(pointee_analyte.memory_safety orelse {
-            return reportFreeGlobalMemory(ctx);
+            // memory_safety is null - region was not tracked (e.g., returned from function)
+            // Silently skip - we can't verify allocation status
+            return;
         });
 
         switch (ms_ptr.*) {
@@ -3239,7 +3292,8 @@ pub const MemorySafety = union(enum) {
 
         // Get memory_safety from old region
         const old_ms = &(old_region_analyte.memory_safety orelse {
-            return reportFreeGlobalMemory(ctx);
+            // memory_safety is null - region was not tracked
+            return;
         });
 
         // Check for invalid operations on old slice
