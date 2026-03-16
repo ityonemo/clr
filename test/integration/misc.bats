@@ -45,7 +45,7 @@ load test_helper
     # Tests that block bodies execute inline before subsequent instructions.
     # In AIR, switch expression blocks have bodies at high indices that must
     # execute before the block result is used.
-    run compile_and_run "$TEST_CASES/undefined/block_body_order.zig"
+    run compile_and_run "$TEST_CASES/misc/block_body_order.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -53,6 +53,6 @@ load test_helper
     # Packed structs use read-modify-write patterns that load undefined bits
     # before masking and storing. Fields should start as defined to avoid
     # false positives on the initial read.
-    run compile_and_run "$TEST_CASES/undefined/packed_struct_init.zig"
+    run compile_and_run "$TEST_CASES/undefined/structs/packed_struct_init.zig"
     [ "$status" -eq 0 ]
 }
