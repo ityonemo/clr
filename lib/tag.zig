@@ -977,7 +977,9 @@ pub const RetSafe = struct {
         cloned.* = try state.refinements.clone(allocator);
 
         // Set the return value in the CLONED table (not the original)
+        // Free the existing return slot value first to avoid leaking struct/union fields
         const return_gid = state.return_gid;
+        cloned.freeValue(cloned.at(return_gid));
         switch (self.src) {
             .inst => |src| {
                 const src_gid = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
@@ -1093,7 +1095,9 @@ pub const RetLoad = struct {
         cloned.* = try state.refinements.clone(allocator);
 
         // Set return value in the CLONED table (deep copy of pointee)
+        // Free the existing return slot value first to avoid leaking struct/union fields
         const return_gid = state.return_gid;
+        cloned.freeValue(cloned.at(return_gid));
         cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(pointee_idx).*);
 
         // Append cloned state to early_returns (merging happens at function end)

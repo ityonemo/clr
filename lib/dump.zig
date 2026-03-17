@@ -110,8 +110,8 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
     return switch (ref) {
         .scalar => |s| std.fmt.bufPrint(buf, "({d}) scalar(undef={s}, mem={s})", .{
             gid,
-            formatUndefined(s.analyte.undefined_safety),
-            formatMemSafety(s.analyte.memory_safety),
+            s.analyte.formatUndefined(),
+            s.analyte.formatMemSafety(),
         }) catch "scalar(?)",
         .pointer => |p| blk: {
             var inner_buf: [1024]u8 = undefined;
@@ -119,8 +119,8 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const pointee_desc = formatRefinementDeep(&inner_buf, p.to, pointee.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) pointer(undef={s}, mem={s}) → {s}", .{
                 gid,
-                formatUndefined(p.analyte.undefined_safety),
-                formatMemSafety(p.analyte.memory_safety),
+                p.analyte.formatUndefined(),
+                p.analyte.formatMemSafety(),
                 pointee_desc,
             }) catch "pointer(?)";
             break :blk result;
@@ -131,8 +131,8 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const payload_desc = formatRefinementDeep(&inner_buf, o.to, payload.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) optional(undef={s}, mem={s}) → {s}", .{
                 gid,
-                formatUndefined(o.analyte.undefined_safety),
-                formatMemSafety(o.analyte.memory_safety),
+                o.analyte.formatUndefined(),
+                o.analyte.formatMemSafety(),
                 payload_desc,
             }) catch "optional(?)";
             break :blk result;
@@ -143,8 +143,8 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             const payload_desc = formatRefinementDeep(&inner_buf, e.to, payload.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) errorunion(undef={s}, mem={s}) → {s}", .{
                 gid,
-                formatUndefined(e.analyte.undefined_safety),
-                formatMemSafety(e.analyte.memory_safety),
+                e.analyte.formatUndefined(),
+                e.analyte.formatMemSafety(),
                 payload_desc,
             }) catch "errorunion(?)";
             break :blk result;
@@ -173,26 +173,3 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
     };
 }
 
-fn formatUndefined(undef: ?@import("analysis/undefined_safety.zig").UndefinedSafety) []const u8 {
-    if (undef) |u| {
-        return switch (u) {
-            .undefined => "UNDEF",
-            .defined => "defined",
-            .inconsistent => "CONFLICT",
-        };
-    }
-    return "null";
-}
-
-fn formatMemSafety(ms: ?@import("analysis/memory_safety.zig").MemorySafety) []const u8 {
-    if (ms) |m| {
-        return switch (m) {
-            .allocated => |a| if (a.freed != null) "freed" else "allocated",
-            .stack => "stack",
-            .global => "global",
-            .unset => "unset",
-            .error_stub => "error_stub",
-        };
-    }
-    return "null";
-}

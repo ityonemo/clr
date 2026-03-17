@@ -339,3 +339,33 @@ test "memcpy succeeds with valid pointers" {
     // Should succeed
     try Inst.apply(state, 2, .{ .memcpy = .{ .dest = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
 }
+
+test "free on region with null memory_safety does not error" {
+    // When a function returns a slice, the region may not have memory_safety tracking.
+    // Freeing such a slice should not report "free of global/comptime memory".
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create allocator refinement
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+
+    // Create a region with NO memory_safety (null) - simulates returned slice
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = elem_gid,
+        // analyte.memory_safety is null by default
+    } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = alloc_gid;
+    results[1].refinement = ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    // Free the slice - should NOT error with FreeGlobalMemory
+    const free_args = &[_]tag.Src{ .{ .inst = 0 }, .{ .inst = 1 } };
+    // Currently this fails with FreeGlobalMemory, but it should succeed
+    try Inst.call(state, 2, null, .{ .void = {} }, free_args, "std.mem.Allocator.free");
+}

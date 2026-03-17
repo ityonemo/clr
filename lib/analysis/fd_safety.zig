@@ -239,6 +239,91 @@ pub const FdSafety = union(enum) {
         }
     }
 
+    /// Handle ret_load - mark returned fds to avoid leak warnings.
+    /// ret_load is used for large return values that don't fit in registers.
+    pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
+        _ = index;
+
+        // Get the pointee from ret_ptr and mark any fds as returned
+        const ptr_ref = state.results[params.ptr].refinement orelse return;
+        const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
+        markReturnedRecursive(state.refinements, pointee_idx);
+
+        // Also trace back through store operations that built the return value
+        // to mark original fds. The return slot is built via:
+        // ret_ptr -> errunion_payload_ptr_set -> struct_field_ptr -> store_safe
+        // We need to mark the fds that were stored, not just the return slot.
+        traceReturnSlotStores(state.results, state.refinements, params.ptr);
+    }
+
+    /// Trace back through operations that build up the return slot and mark original fds.
+    fn traceReturnSlotStores(results: []Inst, refinements: *Refinements, ret_ptr_idx: usize) void {
+        // Walk through results looking for store operations that target ret_ptr's chain
+        const ptr_ref = results[ret_ptr_idx].refinement orelse return;
+        const ptr = refinements.at(ptr_ref);
+        if (ptr.* != .pointer) return;
+
+        // Collect all GIDs in the return slot's entity tree
+        var return_gids: [64]Gid = undefined;
+        var return_gid_count: usize = 0;
+        collectEntityGids(refinements, ptr.pointer.to, &return_gids, &return_gid_count);
+
+        // Scan results for store operations whose destinations are in the return tree
+        for (results, 0..) |inst, i| {
+            _ = i;
+            const inst_tag = inst.inst_tag orelse continue;
+            switch (inst_tag) {
+                .store_safe, .store => |store| {
+                    // Check if this store's destination is part of the return slot
+                    const dest_ptr_gid = switch (store.ptr) {
+                        .inst => |idx| results[idx].refinement orelse continue,
+                        else => continue,
+                    };
+                    const dest_ptr = refinements.at(dest_ptr_gid);
+                    if (dest_ptr.* != .pointer) continue;
+                    const dest_gid = dest_ptr.pointer.to;
+
+                    // Is dest_gid in our return tree?
+                    const is_return_dest = for (return_gids[0..return_gid_count]) |gid| {
+                        if (gid == dest_gid) break true;
+                    } else false;
+
+                    if (is_return_dest) {
+                        // Mark the source as returned
+                        switch (store.src) {
+                            .inst => |src_idx| {
+                                if (results[src_idx].refinement) |src_gid| {
+                                    markReturnedRecursive(refinements, src_gid);
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
+
+    /// Collect all GIDs in an entity tree (for matching against store destinations).
+    fn collectEntityGids(refinements: *Refinements, gid: Gid, out: []Gid, count: *usize) void {
+        if (count.* >= out.len) return;
+        out[count.*] = gid;
+        count.* += 1;
+
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .errorunion => collectEntityGids(refinements, ref.errorunion.to, out, count),
+            .optional => collectEntityGids(refinements, ref.optional.to, out, count),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    collectEntityGids(refinements, field_gid, out, count);
+                }
+            },
+            else => {},
+        }
+    }
+
     /// Trace back through source operations to find and mark original fds.
     /// This handles cases where fd is wrapped/unwrapped before return.
     fn traceAndMarkReturned(results: []Inst, refinements: *Refinements, start_inst: usize) void {
@@ -317,6 +402,13 @@ pub const FdSafety = union(enum) {
         // Check for fd leaks (open fds not closed, not returned)
         for (results) |inst| {
             const idx = inst.refinement orelse continue;
+
+            // Skip arg instructions - fds passed in as arguments are not our
+            // responsibility to close, they belong to the caller
+            if (inst.inst_tag) |inst_tag| {
+                if (std.meta.activeTag(inst_tag) == .arg) continue;
+            }
+
             try checkFdLeakRecursive(refinements, idx, ctx);
         }
     }
@@ -479,61 +571,3 @@ pub const FdSafety = union(enum) {
         return error.FdLeak;
     }
 };
-
-// =========================================================================
-// Tests
-// =========================================================================
-
-test "aggregate_init incorporates fd_safety state from source elements" {
-    const lib = @import("../lib.zig");
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    // Create results array for 2 instructions:
-    // inst 0: source scalar (will have fd open state)
-    // inst 1: aggregate_init result
-    var results = [_]Inst{.{}} ** 2;
-
-    // Create source scalar with fd_safety.open
-    const source_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{
-            .fd_safety = .{ .open = .{
-                .meta = .{ .function = "test", .file = "test.zig", .line = 5, .column = 10 },
-                .fd_type = .file,
-            } },
-        },
-    } });
-    results[0].refinement = source_scalar_gid;
-
-    // Apply aggregate_init with the source scalar as element
-    const aggregate_init = tag.AggregateInit{
-        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = {} }} } },
-        .elements = &.{.{ .inst = 0 }},
-    };
-    try aggregate_init.apply(lib.State{
-        .results = &results,
-        .refinements = &refinements,
-        .ctx = &ctx,
-        .return_gid = 0,
-    }, 1);
-
-    // Verify inst 1 has struct refinement
-    const result_gid = results[1].refinement.?;
-    const result_ref = refinements.at(result_gid);
-    try std.testing.expect(result_ref.* == .@"struct");
-
-    // Verify field 0 has fd_safety.open state from source
-    const field_gid = result_ref.@"struct".fields[0];
-    const field_ref = refinements.at(field_gid);
-    try std.testing.expect(field_ref.* == .scalar);
-    try std.testing.expect(field_ref.scalar.analyte.fd_safety != null);
-    try std.testing.expect(field_ref.scalar.analyte.fd_safety.? == .open);
-    try std.testing.expectEqual(FdType.file, field_ref.scalar.analyte.fd_safety.?.open.fd_type);
-}

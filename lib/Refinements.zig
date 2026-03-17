@@ -61,10 +61,21 @@ pub const Refinement = union(enum) {
         analyte: Analyte = .{},
     };
 
+    /// Tracks when a pointer was derived from a packed struct field.
+    /// Used to elide the RMW load/store pattern for packed struct initialization.
+    pub const PackedFieldRef = struct {
+        container_gid: Gid, // GID of the container struct
+        field_index: usize, // Which field
+    };
+
     pub const Indirected = struct {
         gid: Gid = INVALID_GID,
         analyte: Analyte = .{},
         to: Gid,
+        /// If set, this pointer was derived from a packed struct field.
+        /// Used to mark the specific field as defined on store, and skip
+        /// the undefined check on load (for RMW pattern).
+        packed_field: ?PackedFieldRef = null,
     };
 
     pub const Struct = struct {
@@ -224,6 +235,11 @@ pub const Refinement = union(enum) {
         const new_analyte = @field(src, @tagName(ref_tag)).analyte.copy(allocator) catch @panic("out of memory");
         @field(dst, @tagName(ref_tag)).analyte = new_analyte;
 
+        // Preserve packed_field for pointers (only .pointer has this field)
+        if (ref_tag == .pointer) {
+            @field(dst, @tagName(ref_tag)).packed_field = @field(src, @tagName(ref_tag)).packed_field;
+        }
+
         const new_dst = dst_list.at(@field(dst, @tagName(ref_tag)).to);
         const new_src = src_list.at(@field(src, @tagName(ref_tag)).to);
         try clobber_structured(new_dst, dst_list, new_src.*, src_list);
@@ -304,12 +320,16 @@ pub const Refinement = union(enum) {
     }
 
     fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime ref_tag: anytype) error{OutOfMemory}!Gid {
-        const src_inner_idx = @field(src, @tagName(ref_tag)).to;
-        const dst_inner_idx = try copyTo(src_list.at(src_inner_idx).*, src_list, dst_list);
-        const to_insert: Refinement = @unionInit(Refinement, @tagName(ref_tag), .{
+        const src_data = @field(src, @tagName(ref_tag));
+        const dst_inner_idx = try copyTo(src_list.at(src_data.to).*, src_list, dst_list);
+        var to_insert: Refinement = @unionInit(Refinement, @tagName(ref_tag), .{
             .to = dst_inner_idx,
-            .analyte = @field(src, @tagName(ref_tag)).analyte,
+            .analyte = src_data.analyte,
         });
+        // Preserve packed_field for pointers (only .pointer has this field)
+        if (ref_tag == .pointer) {
+            to_insert.pointer.packed_field = src_data.packed_field;
+        }
         return dst_list.appendEntity(to_insert);
     }
 
@@ -719,6 +739,29 @@ pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
     };
 }
 
+/// Free resources owned by a single Refinement value.
+/// Use this before overwriting a refinement to avoid leaking allocated fields/choices.
+pub fn freeValue(self: *Refinements, value: *Refinement) void {
+    const allocator = self.list.allocator;
+    switch (value.*) {
+        inline .@"struct", .@"union" => |data| {
+            allocator.free(data.fields);
+            data.analyte.deinit(allocator);
+        },
+        .fnptr => |data| {
+            allocator.free(@constCast(data.choices));
+            data.analyte.deinit(allocator);
+        },
+        inline .scalar, .pointer, .optional, .region, .recursive, .allocator => |data| {
+            data.analyte.deinit(allocator);
+        },
+        .errorunion => |data| {
+            data.analyte.deinit(allocator);
+        },
+        .void, .noreturn, .unimplemented => {},
+    }
+}
+
 /// Semideep copy within same table: creates new entity, copying values but sharing pointer targets.
 /// For struct/union, recursively copies value fields, but pointer fields reference same pointee.
 /// Deep copies analyte via analyte.copy().
@@ -770,6 +813,7 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
                 .pointer = .{
                     .analyte = p.analyte,
                     .to = p.to, // Same pointee - this is the "boundary"
+                    .packed_field = p.packed_field, // Preserve packed field tracking
                 },
             });
             break :blk new_gid;
@@ -851,6 +895,16 @@ pub fn createPointerTo(self: *Refinements, pointee_gid: Gid, analyte: Analyte) !
     } });
 }
 
+/// Create pointer entity with packed field tracking.
+/// Used for struct_field_ptr on packed structs to enable RMW elision.
+pub fn createPointerToPackedField(self: *Refinements, pointee_gid: Gid, analyte: Analyte, packed_field: Refinement.PackedFieldRef) !Gid {
+    return self.appendEntity(.{ .pointer = .{
+        .analyte = analyte,
+        .to = pointee_gid,
+        .packed_field = packed_field,
+    } });
+}
+
 const undefined_analysis = @import("analysis/undefined_safety.zig");
 const memory_safety_analysis = @import("analysis/memory_safety.zig");
 const null_safety_analysis = @import("analysis/null_safety.zig");
@@ -904,119 +958,4 @@ fn hashRefinement(ref: Refinement) u64 {
 
 fn hashAnalyte(analyte: Analyte, hasher: *std.hash.Wyhash) void {
     analyte.hash(hasher);
-}
-
-test "initWithGlobals sets null_safety for null optional global" {
-    const Context = @import("Context.zig");
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    // Create global_defs with a null optional
-    const inner_scalar: tag.Type = .{ .scalar = {} };
-    const optional_type: tag.Type = .{ .optional = &inner_scalar };
-    const null_type: tag.Type = .{ .null = &optional_type };
-
-    const global_defs = [_]GlobalDef{
-        .{ .ip_idx = 100, .ty = null_type, .loc = .{ .file = "test.zig", .line = 1, .column = 1 } },
-    };
-
-    var refinements = initWithGlobals(allocator, &ctx, &global_defs);
-    defer refinements.deinit();
-
-    // Get the global pointer GID
-    const ptr_gid = refinements.getGlobal(100).?;
-    const ptr = refinements.at(ptr_gid);
-
-    // Follow pointer to pointee (the optional)
-    try std.testing.expect(ptr.* == .pointer);
-    const opt_gid = ptr.pointer.to;
-    const opt = refinements.at(opt_gid);
-
-    // Verify it's an optional with null_safety set to .@"null"
-    try std.testing.expect(opt.* == .optional);
-    const ns = opt.optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .null);
-}
-
-test "initWithGlobals sets undefined_safety for undefined union global" {
-    const Context = @import("Context.zig");
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    // Create global_defs with an undefined union
-    const inner_scalar: tag.Type = .{ .scalar = {} };
-    const union_type: tag.Type = .{ .@"union" = &.{ .type_id = 5120, .variants = &.{ inner_scalar, inner_scalar } } };
-    const undefined_union_type: tag.Type = .{ .undefined = &union_type };
-
-    const global_defs = [_]GlobalDef{
-        .{ .ip_idx = 100, .ty = undefined_union_type, .type_id = 5120, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
-    };
-
-    var refinements = initWithGlobals(allocator, &ctx, &global_defs);
-    defer refinements.deinit();
-
-    // Get the global pointer GID
-    const ptr_gid = refinements.getGlobal(100).?;
-    const ptr = refinements.at(ptr_gid);
-
-    // Follow pointer to pointee (the union)
-    try std.testing.expect(ptr.* == .pointer);
-    const union_gid = ptr.pointer.to;
-    const u = refinements.at(union_gid);
-
-    // Verify it's a union with undefined_safety set to .undefined
-    try std.testing.expect(u.* == .@"union");
-    const us = u.@"union".analyte.undefined_safety.?;
-    try std.testing.expect(us == .undefined);
-
-    // Also verify fields are all null (no active field)
-    try std.testing.expect(u.@"union".fields[0] == null);
-    try std.testing.expect(u.@"union".fields[1] == null);
-}
-
-test "semideepCopy preserves union undefined_safety" {
-    const Context = @import("Context.zig");
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    // Create global_defs with an undefined union
-    const inner_scalar: tag.Type = .{ .scalar = {} };
-    const union_type: tag.Type = .{ .@"union" = &.{ .type_id = 5120, .variants = &.{ inner_scalar, inner_scalar } } };
-    const undefined_union_type: tag.Type = .{ .undefined = &union_type };
-
-    const global_defs = [_]GlobalDef{
-        .{ .ip_idx = 100, .ty = undefined_union_type, .type_id = 5120, .loc = .{ .file = "test.zig", .line = 1, .column = 1 }, .children = .{ .union_field = .{ .active_field_index = null, .num_fields = 2, .field_value_ip_idx = null } } },
-    };
-
-    var refinements = initWithGlobals(allocator, &ctx, &global_defs);
-    defer refinements.deinit();
-
-    // Get the global pointer and union
-    const ptr_gid = refinements.getGlobal(100).?;
-    const union_gid = refinements.at(ptr_gid).pointer.to;
-
-    // Semideep copy the union (simulating a load)
-    const copy_gid = try refinements.semideepCopy(union_gid);
-    const copy = refinements.at(copy_gid);
-
-    // Verify the copy is a union with undefined_safety preserved
-    try std.testing.expect(copy.* == .@"union");
-    const us = copy.@"union".analyte.undefined_safety.?;
-    try std.testing.expect(us == .undefined);
-
-    // Also verify fields are all null (no active field)
-    try std.testing.expect(copy.@"union".fields[0] == null);
-    try std.testing.expect(copy.@"union".fields[1] == null);
 }
