@@ -2758,6 +2758,13 @@ pub const MemorySafety = union(enum) {
             return true;
         }
 
+        // GeneralPurposeAllocator.deinit: skip analysis, stdlib uses safe @ptrCast patterns
+        // that trigger false positives (pointer arithmetic on single-item after @ptrCast to [*])
+        if (gates.isGpaDeinit(fqn)) {
+            setResultUnset(state, index);
+            return true;
+        }
+
         // MkAllocator: call returns std.mem.Allocator
         // The allocator refinement is already created by typeToRefinement.
         // We just need to link it to the arena if this is ArenaAllocator.allocator().

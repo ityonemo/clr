@@ -66,6 +66,14 @@ pub fn isArenaDeinit(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "ArenaAllocator.deinit") != null;
 }
 
+/// Match GeneralPurposeAllocator/DebugAllocator.deinit calls
+/// GPA wraps DebugAllocator internally, so the FQN is:
+/// heap.debug_allocator.DebugAllocator(.{...}).deinit
+pub fn isGpaDeinit(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "DebugAllocator(") != null and
+        std.mem.indexOf(u8, fqn, ").deinit") != null;
+}
+
 /// Match ArenaAllocator.allocator calls (returns std.mem.Allocator)
 pub fn isArenaAllocator(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "ArenaAllocator.allocator") != null;

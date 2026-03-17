@@ -69,12 +69,12 @@ Currently implemented:
   - Undefined fd argument detection (close/read/write with undefined fd)
 
 Planned (see LIMITATIONS.md for details):
-- Interned constants (int_const values like string literals, comptime pointers)
 - Moving provenance
 - Recursive functions
 - async/await
 - Aliasing safety (detecting conflicting mutable references)
 - Allocator lifecycle safety (init/deinit for all allocator types, leak detection at deinit for GPA/MemoryPool, bulk-free semantics for Arena/FBA)
+- Full interception of allocator deinits (currently GPA.deinit is stubbed to avoid false positives from stdlib @ptrCast patterns)
 - Mutex safety (lock/unlock pairing, deadlock detection)
 - Custom coercion capability (user-defined refinement rules)
 
