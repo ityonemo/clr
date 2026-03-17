@@ -75,3 +75,10 @@ load test_helper
     run compile_and_run "$TEST_CASES/misc/error_path_clear_metadata.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for GPA with error path" {
+    # GeneralPurposeAllocator's detectLeaks uses array_elem_val with interned sources.
+    # This must be handled correctly.
+    run compile_and_run "$TEST_CASES/misc/gpa_error_path.zig"
+    [ "$status" -eq 0 ]
+}

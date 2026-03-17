@@ -1918,14 +1918,49 @@ pub const ArrayElemVal = struct {
     base: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const base = switch (self.base) {
-            .inst => |idx| idx,
-            .interned, .fnptr => @panic("interned source not implemented"),
+        const base_ref: ?Gid = switch (self.base) {
+            .inst => |idx| state.results[idx].refinement,
+            .interned => |interned| blk: {
+                // Try to look up as tracked global first
+                if (state.refinements.getGlobal(interned.ip_idx)) |gid| {
+                    break :blk gid;
+                }
+                // Not tracked - comptime constant array, create element from type
+                // The type is .region containing the element type
+                const element_type = switch (interned.ty) {
+                    .region => |elem| elem.*,
+                    .pointer => |inner| switch (inner.*) {
+                        .region => |elem| elem.*,
+                        else => @panic("ArrayElemVal: interned pointer must point to region"),
+                    },
+                    else => @panic("ArrayElemVal: interned type must be region or pointer to region"),
+                };
+                const element_ref = try typeToRefinement(element_type, state.refinements);
+                const element_gid = try state.refinements.appendEntity(element_ref);
+                // Mark as defined since comptime values are always defined
+                splatInitDefined(state.refinements, element_gid, state.ctx);
+                state.results[index].refinement = element_gid;
+                try splat(.array_elem_val, state, index, self);
+                return;
+            },
+            .fnptr => {
+                // Function pointer - no tracking needed, return scalar
+                const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+                splatInitDefined(state.refinements, gid, state.ctx);
+                try splat(.array_elem_val, state, index, self);
+                return;
+            },
         };
-        // base must have a refinement - it's the slice/array value
-        const base_ref = state.results[base].refinement.?;
 
-        const base_refinement = state.refinements.at(base_ref).*;
+        const effective_base_ref = base_ref orelse {
+            // No refinement - create scalar and mark defined
+            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            splatInitDefined(state.refinements, gid, state.ctx);
+            try splat(.array_elem_val, state, index, self);
+            return;
+        };
+
+        const base_refinement = state.refinements.at(effective_base_ref).*;
         switch (base_refinement) {
             .region => |r| {
                 // Array: region → element. Semideep copy the element.
