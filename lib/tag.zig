@@ -1215,6 +1215,23 @@ pub const Store = struct {
                         e.to = src.errorunion.to;
                     }
                 },
+                .@"struct" => {
+                    // Storing struct into struct slot - make pointer reference the source struct.
+                    // This is critical for patterns like:
+                    //   var self = Self.init(gpa);  // store returned struct into alloc'd storage
+                    // Without this, the destination struct's pointer fields retain stale metadata
+                    // (e.g., .stack from alloc's setStackRecursive) instead of the source's actual
+                    // metadata (e.g., .allocated for heap memory, or argument-derived pointers).
+                    if (src.* == .@"struct") {
+                        ptr_ref.pointer.to = src_ref;
+                    }
+                },
+                .region => |*r| {
+                    // Storing region into region slot - share the element
+                    if (src.* == .region) {
+                        r.to = src.region.to;
+                    }
+                },
                 else => {},
             }
         }

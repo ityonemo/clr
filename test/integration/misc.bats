@@ -56,3 +56,12 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined/structs/packed_struct_init.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for struct store propagation" {
+    # Tests that storing a struct into stack storage properly propagates pointer metadata.
+    # Pattern from ArrayList.initCapacity: var self = init(); return self;
+    # Without struct-to-struct store handling, returned pointer fields would incorrectly
+    # retain stack metadata instead of the source's actual metadata.
+    run compile_and_run "$TEST_CASES/memory/struct_store_propagation.zig"
+    [ "$status" -eq 0 ]
+}
