@@ -633,22 +633,23 @@ pub const MemorySafety = union(enum) {
 
     /// Recursively clear allocation metadata from a refinement and its children.
     /// Used on error path to mark phantom allocations as not actually allocated.
+    /// Sets memory_safety to .unset (not null) to maintain testValid invariants.
     fn clearAllocationMetadata(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .pointer => |*p| {
-                p.analyte.memory_safety = null;
+                p.analyte.memory_safety = .{ .unset = {} };
                 clearAllocationMetadata(refinements, p.to);
             },
-            .scalar => |*s| s.analyte.memory_safety = null,
+            .scalar => |*s| s.analyte.memory_safety = .{ .unset = {} },
             .@"struct" => |*st| {
-                st.analyte.memory_safety = null;
+                st.analyte.memory_safety = .{ .unset = {} };
                 for (st.fields) |field_gid| {
                     clearAllocationMetadata(refinements, field_gid);
                 }
             },
             .@"union" => |*u| {
-                u.analyte.memory_safety = null;
+                u.analyte.memory_safety = .{ .unset = {} };
                 for (u.fields) |field_opt| {
                     if (field_opt) |field_gid| {
                         clearAllocationMetadata(refinements, field_gid);
@@ -656,21 +657,22 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .region => |*r| {
-                r.analyte.memory_safety = null;
+                r.analyte.memory_safety = .{ .unset = {} };
                 clearAllocationMetadata(refinements, r.to);
             },
             .optional => |*o| {
-                o.analyte.memory_safety = null;
+                o.analyte.memory_safety = .{ .unset = {} };
                 clearAllocationMetadata(refinements, o.to);
             },
             .errorunion => |*e| {
-                e.analyte.memory_safety = null;
+                // errorunion uses error_stub to indicate it's a container
+                e.analyte.memory_safety = .{ .error_stub = {} };
                 clearAllocationMetadata(refinements, e.to);
             },
-            .allocator => |*a| a.analyte.memory_safety = null,
+            .allocator => |*a| a.analyte.memory_safety = .{ .unset = {} },
             .fnptr => |*f| f.analyte.memory_safety = .{ .unset = {} },
             .recursive => |*r| {
-                r.analyte.memory_safety = null;
+                r.analyte.memory_safety = .{ .unset = {} };
                 clearAllocationMetadata(refinements, r.to);
             },
             .void, .noreturn, .unimplemented => {},

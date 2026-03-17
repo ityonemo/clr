@@ -68,3 +68,10 @@ load test_helper
     run compile_and_run "$TEST_CASES/misc/error_return_merge.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for error path clearing allocation metadata" {
+    # When an allocation fails (error path), phantom allocation metadata must be
+    # cleared while maintaining valid refinement state (memory_safety set to .unset).
+    run compile_and_run "$TEST_CASES/misc/error_path_clear_metadata.zig"
+    [ "$status" -eq 0 ]
+}
