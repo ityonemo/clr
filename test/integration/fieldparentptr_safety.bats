@@ -3,14 +3,14 @@
 load test_helper
 
 @test "detects fieldParentPtr on standalone variable" {
-    run compile_and_run "$TEST_CASES/field_safety/invalid_standalone.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/invalid_standalone.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr on non-field pointer in" ]]
     [[ "$output" =~ "invalid_standalone.main" ]]
 }
 
 @test "detects fieldParentPtr with wrong container type" {
-    run compile_and_run "$TEST_CASES/field_safety/invalid_wrong_type.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/invalid_wrong_type.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr type mismatch in" ]]
     [[ "$output" =~ "invalid_wrong_type.main" ]]
@@ -20,7 +20,7 @@ load test_helper
 }
 
 @test "detects fieldParentPtr with wrong field" {
-    run compile_and_run "$TEST_CASES/field_safety/invalid_wrong_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/invalid_wrong_field.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr field mismatch in" ]]
     [[ "$output" =~ "invalid_wrong_field.main" ]]
@@ -29,12 +29,12 @@ load test_helper
 }
 
 @test "no error when fieldParentPtr on actual struct field" {
-    run compile_and_run "$TEST_CASES/field_safety/valid_struct_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/valid_struct_field.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "no error when fieldParentPtr on actual union field" {
-    run compile_and_run "$TEST_CASES/field_safety/valid_union_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/valid_union_field.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -45,19 +45,19 @@ load test_helper
 # Global field pointers are interned at compile time (no struct_field_ptr generated),
 # but we now track them via initWithGlobals with field_info.
 @test "no error when fieldParentPtr on global struct field" {
-    run compile_and_run "$TEST_CASES/field_safety/globals/valid_struct_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/valid_struct_field.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects fieldParentPtr on global standalone variable" {
-    run compile_and_run "$TEST_CASES/field_safety/globals/invalid_standalone.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/invalid_standalone.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr on non-field pointer" ]]
     [[ "$output" =~ "invalid_standalone.get_parent" ]]
 }
 
 @test "no error when fieldParentPtr on global union field" {
-    run compile_and_run "$TEST_CASES/field_safety/globals/valid_union_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/valid_union_field.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -66,7 +66,7 @@ load test_helper
 # =============================================================================
 
 @test "detects ambiguous fieldParentPtr after branch merge" {
-    run compile_and_run "$TEST_CASES/fieldparentptr/merge_conflict.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/merge_conflict.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr" ]]
 }

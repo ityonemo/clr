@@ -3575,12 +3575,12 @@ const debug = @import("builtin").mode == .Debug;
 ///   MUST have memory_safety set
 /// - errorunion can ONLY have error_stub set (or null)
 /// - Trivial types (void, unimplemented, noreturn): no analyte, no memory_safety
-pub fn testValid(refinement: Refinements.Refinement) void {
+pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
     switch (refinement) {
         .scalar => |s| {
             if (s.analyte.memory_safety == null) {
-                std.debug.panic("memory_safety must be set on scalars", .{});
+                std.debug.panic("memory_safety must be set on scalars (gid={})", .{idx});
             }
         },
         inline .pointer, .optional, .region, .recursive => |data, t| {

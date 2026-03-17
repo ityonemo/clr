@@ -2848,6 +2848,8 @@ pub fn splatMergeByGid(
 }
 
 /// Follow .to field for each branch's gid, updating branch_gids in place.
+/// When a branch has .unimplemented at that GID (e.g., error union error-state payload),
+/// we skip it by setting gid to null - there's nothing valid to follow.
 fn followBranchGids(
     comptime ref_tag: std.meta.Tag(Refinement),
     branches: []const ?State,
@@ -2856,7 +2858,13 @@ fn followBranchGids(
     for (branches, branch_gids) |branch_opt, *gid| {
         const branch = branch_opt orelse continue;
         const current_gid = gid.* orelse continue;
-        gid.* = @field(branch.refinements.at(current_gid).*, @tagName(ref_tag)).to;
+        const ref = branch.refinements.at(current_gid).*;
+        // Skip .unimplemented - this happens for error union payloads in error state
+        if (ref == .unimplemented) {
+            gid.* = null;
+            continue;
+        }
+        gid.* = @field(ref, @tagName(ref_tag)).to;
     }
 }
 

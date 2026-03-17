@@ -913,7 +913,7 @@ const variant_safety_analysis = @import("analysis/variant_safety.zig");
 pub fn testValid(self: *Refinements) void {
     for (self.list.items, 0..) |refinement, i| {
         undefined_analysis.testValid(refinement, i);
-        memory_safety_analysis.testValid(refinement);
+        memory_safety_analysis.testValid(refinement, i);
         null_safety_analysis.testValid(refinement);
         variant_safety_analysis.testValid(refinement);
     }

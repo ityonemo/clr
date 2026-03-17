@@ -401,10 +401,19 @@ fn payloadTry(info: *const FnInfo, datum: Data) []const u8 {
 fn payloadBitcast(info: *const FnInfo, datum: Data) []const u8 {
     const operand = datum.ty_op.operand;
     const src_str = srcString(info, operand);
-    const ty_str = if (datum.ty_op.ty.toInternedAllowNone()) |ty_idx|
-        typeToString(info.name_map, info.field_map, info.arena, info.ip, ty_idx)
-    else
-        ".{ .unimplemented = {} }";
+
+    // First try direct interned type, then fall back to instruction result type
+    const result_type = datum.ty_op.ty.toInternedAllowNone() orelse blk: {
+        // Type is an instruction reference - look up its result type
+        const inst_idx = datum.ty_op.ty.toIndex() orelse {
+            return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = .{{ .unimplemented = {{}} }} }}", .{src_str}, null);
+        };
+        break :blk getInstResultType(info.ip, info.tags, info.data, @intFromEnum(inst_idx)) orelse {
+            return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = .{{ .unimplemented = {{}} }} }}", .{src_str}, null);
+        };
+    };
+
+    const ty_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, result_type);
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .ty = {s} }}", .{ src_str, ty_str }, null);
 }
 
@@ -510,7 +519,20 @@ fn payloadAlloc(info: *const FnInfo, datum: Data) []const u8 {
 
 /// Payload for aggregate_init (creates struct/array/tuple)
 fn payloadAggregateInit(info: *const FnInfo, datum: Data) []const u8 {
-    const result_type = datum.ty_pl.ty.toInterned() orelse return ".{ .ty = .{ .unimplemented = {} }, .elements = &.{} }";
+    // First try direct interned type, then fall back to instruction result type
+    const result_type = datum.ty_pl.ty.toInterned() orelse blk: {
+        // Type is an instruction reference - look up its result type
+        const inst_idx = datum.ty_pl.ty.toIndex() orelse {
+            const ref_int = @intFromEnum(datum.ty_pl.ty);
+            debug.print("aggregate_init: ty_pl.ty raw=0x{x}, toInterned=null, toIndex=null\n", .{ref_int});
+            return ".{ .ty = .{ .unimplemented = {} }, .elements = &.{} }";
+        };
+        debug.print("aggregate_init: falling back to inst_idx={}\n", .{@intFromEnum(inst_idx)});
+        break :blk getInstResultType(info.ip, info.tags, info.data, @intFromEnum(inst_idx)) orelse {
+            debug.print("aggregate_init: getInstResultType returned null\n", .{});
+            return ".{ .ty = .{ .unimplemented = {} }, .elements = &.{} }";
+        };
+    };
     const type_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, result_type);
 
     // Get element count from the type
@@ -1571,10 +1593,25 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
         },
         // Enums, ints, and error sets are scalars (we don't track them individually)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type, .error_set_type => ".{ .scalar = {} }",
+        .enum_type, .int_type, .error_set_type, .inferred_error_set_type => ".{ .scalar = {} }",
+        // Vector types (SIMD) are scalars - we don't track elements individually
+        .vector_type => ".{ .scalar = {} }",
+        // Opaque types are treated as scalars (we can't inspect their internals)
+        .opaque_type => ".{ .scalar = {} }",
+        // Tuples are treated like structs
+        .tuple_type => |t| blk: {
+            if (visited.contains(ty)) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
+            }
+            visited.put(arena, ty, {}) catch @panic("out of memory");
+            break :blk tupleTypeToStringSimple(arena, ip, t, ty, visited);
+        },
         // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
         .func_type => ".{ .unimplemented = {} }",
-        else => ".{ .unimplemented = {} }",
+        else => blk: {
+            debug.print("typeToStringLookupNoNames: unhandled type_key tag = {s}\n", .{@tagName(type_key)});
+            break :blk ".{ .unimplemented = {} }";
+        },
     };
 }
 
@@ -1615,6 +1652,68 @@ fn unionTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, type
 fn structTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
     const loaded = ip.loadStructType(type_index);
     const field_types = loaded.field_types.get(ip);
+    const type_id: u32 = @intFromEnum(type_index);
+
+    if (field_types.len == 0) {
+        return clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{}} }} }}", .{type_id}, null);
+    }
+
+    // Limit recursion depth - type too deeply nested
+    if (visited.count() > 20) {
+        return ".{ .unimplemented = {} }";
+    }
+
+    var result = std.ArrayListUnmanaged(u8){};
+    const header = clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{ ", .{type_id}, null);
+    result.appendSlice(arena, header) catch @panic("out of memory");
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        const field_type_str = typeToStringInner(null, null, arena, ip, field_type, visited);
+        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
+    }
+
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    return result.items;
+}
+
+/// Convert a tuple type to a Type string (tuple is like a struct without field names)
+/// Format: .{ .@"struct" = &.{ .type_id = ID, .fields = &.{ TYPE_1, TYPE_2, ... } } }
+fn tupleTypeToString(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), field_map: ?*clr.FieldHashMap, arena: std.mem.Allocator, ip: *const InternPool, t: InternPool.Key.TupleType, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    const field_types = t.types.get(ip);
+    const type_id: u32 = @intFromEnum(type_index);
+
+    if (field_types.len == 0) {
+        return clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{}} }} }}", .{type_id}, null);
+    }
+
+    // Limit recursion depth - type too deeply nested
+    if (visited.count() > 20) {
+        return ".{ .unimplemented = {} }";
+    }
+
+    var result = std.ArrayListUnmanaged(u8){};
+    const header = clr_allocator.allocPrint(arena, ".{{ .@\"struct\" = &.{{ .type_id = {d}, .fields = &.{{ ", .{type_id}, null);
+    result.appendSlice(arena, header) catch @panic("out of memory");
+
+    for (field_types, 0..) |field_type, i| {
+        if (i > 0) {
+            result.appendSlice(arena, ", ") catch @panic("out of memory");
+        }
+        const field_type_str = typeToStringInner(name_map, field_map, arena, ip, field_type, visited);
+        result.appendSlice(arena, field_type_str) catch @panic("out of memory");
+    }
+
+    result.appendSlice(arena, " } } }") catch @panic("out of memory");
+    return result.items;
+}
+
+/// Simple tuple type string without name registration (for global variables)
+/// Format: .{ .@"struct" = &.{ .type_id = ID, .fields = &.{ TYPE_1, ... } } }
+fn tupleTypeToStringSimple(arena: std.mem.Allocator, ip: *const InternPool, t: InternPool.Key.TupleType, type_index: InternPool.Index, visited: *VisitedTypes) []const u8 {
+    const field_types = t.types.get(ip);
     const type_id: u32 = @intFromEnum(type_index);
 
     if (field_types.len == 0) {
@@ -1764,10 +1863,25 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         },
         // Enums, ints, and error sets are scalars (we don't track them individually)
         // (floats come through .simple_type as f32_type, f64_type, etc.)
-        .enum_type, .int_type, .error_set_type => ".{ .scalar = {} }",
+        .enum_type, .int_type, .error_set_type, .inferred_error_set_type => ".{ .scalar = {} }",
+        // Vector types (SIMD) are scalars - we don't track elements individually
+        .vector_type => ".{ .scalar = {} }",
+        // Opaque types are treated as scalars (we can't inspect their internals)
+        .opaque_type => ".{ .scalar = {} }",
+        // Tuples are treated like structs
+        .tuple_type => |t| blk: {
+            if (visited.contains(ty)) {
+                break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
+            }
+            visited.put(arena, ty, {}) catch @panic("out of memory");
+            break :blk tupleTypeToString(name_map, field_map, arena, ip, t, ty, visited);
+        },
         // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
         .func_type => ".{ .unimplemented = {} }",
-        else => ".{ .unimplemented = {} }",
+        else => blk: {
+            debug.print("typeToStringLookup: unhandled type_key tag = {s}\n", .{@tagName(type_key)});
+            break :blk ".{ .unimplemented = {} }";
+        },
     };
 }
 

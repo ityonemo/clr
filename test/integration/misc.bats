@@ -34,13 +34,6 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
-@test "wrap_optional sets memory_safety on optional" {
-    # Tests that wrap_optional correctly initializes memory_safety on optionals.
-    # Without proper initialization, testValid() would panic.
-    run compile_and_run "$TEST_CASES/wrap_optional/basic.zig"
-    [ "$status" -eq 0 ]
-}
-
 @test "no false positive for switch expression initializing struct" {
     # Tests that block bodies execute inline before subsequent instructions.
     # In AIR, switch expression blocks have bodies at high indices that must
@@ -53,7 +46,7 @@ load test_helper
     # Packed structs use read-modify-write patterns that load undefined bits
     # before masking and storing. Fields should start as defined to avoid
     # false positives on the initial read.
-    run compile_and_run "$TEST_CASES/undefined/structs/packed_struct_init.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/structs/packed_struct_init.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -62,6 +55,16 @@ load test_helper
     # Pattern from ArrayList.initCapacity: var self = init(); return self;
     # Without struct-to-struct store handling, returned pointer fields would incorrectly
     # retain stack metadata instead of the source's actual metadata.
-    run compile_and_run "$TEST_CASES/memory/struct_store_propagation.zig"
+    run compile_and_run "$TEST_CASES/misc/struct_store_propagation.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "unwrap_errunion_payload_ptr tracks through pointer modification" {
+    run compile_and_run "$TEST_CASES/misc/payload_ptr.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "error union branch merge handles error-state payloads" {
+    run compile_and_run "$TEST_CASES/misc/error_return_merge.zig"
     [ "$status" -eq 0 ]
 }

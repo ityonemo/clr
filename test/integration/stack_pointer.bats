@@ -3,7 +3,7 @@
 load test_helper
 
 @test "detects stack pointer escape from local variable" {
-    run compile_and_run "$TEST_CASES/stack_pointer/basic/stack_ptr_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/basic/stack_ptr_escape.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape in stack_ptr_escape.escaped_ptr" ]]
     [[ "$output" =~ "stack_ptr_escape.zig:4:4)" ]]
@@ -12,7 +12,7 @@ load test_helper
 }
 
 @test "detects stack pointer escape from parameter" {
-    run compile_and_run "$TEST_CASES/stack_pointer/basic/param_ptr_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/basic/param_ptr_escape.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape in param_ptr_escape.escaped_param_ptr" ]]
     [[ "$output" =~ "param_ptr_escape.zig:2:4)" ]]
@@ -21,7 +21,7 @@ load test_helper
 }
 
 @test "detects indirect stack pointer escape" {
-    run compile_and_run "$TEST_CASES/stack_pointer/basic/indirect_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/basic/indirect_escape.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape in indirect_escape.indirect_escape" ]]
     [[ "$output" =~ "indirect_escape.zig:4:4)" ]]
@@ -30,12 +30,12 @@ load test_helper
 }
 
 @test "no false positive when returning passed-in pointer" {
-    run compile_and_run "$TEST_CASES/stack_pointer/basic/no_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/basic/no_escape.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects stack pointer escape via pointer argument" {
-    run compile_and_run "$TEST_CASES/stack_pointer/basic/escape_via_ptr_arg.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/basic/escape_via_ptr_arg.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_via_ptr_arg.zig" ]]
@@ -46,33 +46,33 @@ load test_helper
 # =============================================================================
 
 @test "detects stack pointer escape in union return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/union/stack_ptr_in_union.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/union/stack_ptr_in_union.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "stack_ptr_in_union.zig" ]]
 }
 
 @test "detects stack pointer escape via union field" {
-    run compile_and_run "$TEST_CASES/stack_pointer/union/stack_ptr_escaped_via_field.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/union/stack_ptr_escaped_via_field.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "stack_ptr_escaped_via_field.zig" ]]
 }
 
 @test "detects parameter pointer escape in union return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/union/param_ptr_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/union/param_ptr_escape.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "param_ptr_escape.zig" ]]
 }
 
 @test "no false positive for passed-in pointer in union return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/union/no_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/union/no_escape.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects stack pointer escape via union argument" {
-    run compile_and_run "$TEST_CASES/stack_pointer/union/escape_via_union_arg.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/union/escape_via_union_arg.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_via_union_arg.zig" ]]
@@ -83,33 +83,33 @@ load test_helper
 # =============================================================================
 
 @test "detects stack pointer escape in struct return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/struct/stack_ptr_in_struct.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/struct/stack_ptr_in_struct.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "stack_ptr_in_struct.zig" ]]
 }
 
 @test "detects parameter pointer escape in struct return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/struct/param_ptr_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/struct/param_ptr_escape.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "param_ptr_escape.zig" ]]
 }
 
 @test "detects stack pointer escape via struct field" {
-    run compile_and_run "$TEST_CASES/stack_pointer/struct/stack_ptr_escaped_via_field.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/struct/stack_ptr_escaped_via_field.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "stack_ptr_escaped_via_field.zig" ]]
 }
 
 @test "no false positive for passed-in pointer in struct return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/struct/no_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/struct/no_escape.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects stack pointer escape via struct argument" {
-    run compile_and_run "$TEST_CASES/stack_pointer/struct/escape_via_struct_arg.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/struct/escape_via_struct_arg.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_via_struct_arg.zig" ]]
@@ -120,33 +120,33 @@ load test_helper
 # =============================================================================
 
 @test "detects stack pointer escape in array return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/region/stack_ptr_in_array.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/region/stack_ptr_in_array.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "stack_ptr_in_array.zig" ]]
 }
 
 @test "detects stack pointer escape via array element" {
-    run compile_and_run "$TEST_CASES/stack_pointer/region/stack_ptr_escaped_via_element.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/region/stack_ptr_escaped_via_element.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "stack_ptr_escaped_via_element.zig" ]]
 }
 
 @test "detects parameter pointer escape in array return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/region/param_ptr_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/region/param_ptr_escape.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "param_ptr_escape.zig" ]]
 }
 
 @test "no false positive for passed-in pointer in array return" {
-    run compile_and_run "$TEST_CASES/stack_pointer/region/no_escape.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/region/no_escape.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects stack pointer escape via array argument" {
-    run compile_and_run "$TEST_CASES/stack_pointer/region/escape_via_array_arg.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/region/escape_via_array_arg.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_via_array_arg.zig" ]]
@@ -157,19 +157,19 @@ load test_helper
 # =============================================================================
 
 @test "detects stack pointer escape to global variable" {
-    run compile_and_run "$TEST_CASES/stack_pointer/globals/escape_to_global.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/globals/escape_to_global.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_to_global" ]]
 }
 
 @test "no false positive for heap pointer in global" {
-    run compile_and_run "$TEST_CASES/stack_pointer/globals/no_escape_heap.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/globals/no_escape_heap.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects parameter stack pointer escape to global" {
-    run compile_and_run "$TEST_CASES/stack_pointer/globals/escape_param_to_global.zig"
+    run compile_and_run "$TEST_CASES/stack_pointer_safety/globals/escape_param_to_global.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "stack pointer escape" ]]
     [[ "$output" =~ "escape_param_to_global" ]]

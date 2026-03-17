@@ -7,24 +7,24 @@ load test_helper
 # =============================================================================
 
 @test "simple loop compiles and runs" {
-    run compile_and_run "$TEST_CASES/undefined/loops/simple_loop.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/simple_loop.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "variable defined before loop can be used after loop" {
-    run compile_and_run "$TEST_CASES/undefined/loops/defined_before_loop.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/defined_before_loop.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects undefined variable used inside loop body" {
-    run compile_and_run "$TEST_CASES/undefined/loops/undefined_in_loop.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/undefined_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in undefined_in_loop.main" ]]
     [[ "$output" =~ "undefined_in_loop.zig" ]]
 }
 
 @test "detects inconsistent value - defined only in loop that may not execute" {
-    run compile_and_run "$TEST_CASES/undefined/loops/defined_in_loop.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/defined_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "may be undefined" ]]
     [[ "$output" =~ "defined_in_loop.zig" ]]
@@ -33,14 +33,14 @@ load test_helper
 @test "variable defined in loop with break - inconsistent without value tracking" {
     # Without value tracking, analysis doesn't know i=0 < 10 is true,
     # so it considers both "loop runs" and "loop doesn't run" paths.
-    run compile_and_run "$TEST_CASES/undefined/loops/loop_with_break.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/loop_with_break.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "may be undefined" ]]
     [[ "$output" =~ "loop_with_break.zig" ]]
 }
 
 @test "infinite loop with conditional break - variable defined" {
-    run compile_and_run "$TEST_CASES/undefined/loops/infinite_loop_break.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/infinite_loop_break.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -49,7 +49,7 @@ load test_helper
 # =============================================================================
 
 @test "for with index capture - both paths define variable" {
-    run compile_and_run "$TEST_CASES/undefined/loops/for_else_with_index.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/for_else_with_index.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -58,26 +58,26 @@ load test_helper
 # =============================================================================
 
 @test "for..else - variable defined in both break and else paths" {
-    run compile_and_run "$TEST_CASES/undefined/loops/for_else_defines_var.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/for_else_defines_var.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "for..else - detects undefined when only else defines variable" {
-    run compile_and_run "$TEST_CASES/undefined/loops/for_else_only_else_defines.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/for_else_only_else_defines.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "may be undefined" ]]
     [[ "$output" =~ "for_else_only_else_defines.zig" ]]
 }
 
 @test "while..else - detects leak when only else frees" {
-    run compile_and_run "$TEST_CASES/allocator/loops/while_else_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/while_else_free.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "while_else_free.zig" ]]
 }
 
 @test "while..else - no error when both paths free" {
-    run compile_and_run "$TEST_CASES/allocator/loops/while_else_both_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/while_else_both_free.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -86,24 +86,24 @@ load test_helper
 # =============================================================================
 
 @test "simple nested loop compiles and runs" {
-    run compile_and_run "$TEST_CASES/undefined/loops/nested_loop_simple.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/nested_loop_simple.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "variable defined before nested loops can be used after" {
-    run compile_and_run "$TEST_CASES/undefined/loops/nested_defined_outer.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/nested_defined_outer.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects inconsistent value - defined in inner loop with break" {
-    run compile_and_run "$TEST_CASES/undefined/loops/nested_break_inner.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/nested_break_inner.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "may be undefined" ]]
     [[ "$output" =~ "nested_break_inner.zig" ]]
 }
 
 @test "detects inconsistent value - defined in outer loop before inner break" {
-    run compile_and_run "$TEST_CASES/undefined/loops/nested_break_outer.zig"
+    run compile_and_run "$TEST_CASES/undefined_safety/loops/nested_break_outer.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "may be undefined" ]]
     [[ "$output" =~ "nested_break_outer.zig" ]]
@@ -114,14 +114,14 @@ load test_helper
 # =============================================================================
 
 @test "detects memory leak in loop" {
-    run compile_and_run "$TEST_CASES/allocator/loops/leak_in_loop.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/leak_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "leak_in_loop.zig" ]]
 }
 
 @test "detects double-free when freeing same pointer in loop" {
-    run compile_and_run "$TEST_CASES/allocator/loops/double_free_loop.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/double_free_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double free" ]]
     [[ "$output" =~ "double_free_loop.main" ]]
@@ -131,31 +131,31 @@ load test_helper
 }
 
 @test "no error when allocating and freeing in same iteration" {
-    run compile_and_run "$TEST_CASES/allocator/loops/alloc_free_each_iteration.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/alloc_free_each_iteration.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "no error when allocating before loop and freeing after" {
-    run compile_and_run "$TEST_CASES/allocator/loops/alloc_before_free_after.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/alloc_before_free_after.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects leak when breaking without freeing" {
-    run compile_and_run "$TEST_CASES/allocator/loops/break_without_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/break_without_free.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "break_without_free.zig" ]]
 }
 
 @test "detects double-free in nested loops" {
-    run compile_and_run "$TEST_CASES/allocator/loops/nested_alloc_inner_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/nested_alloc_inner_free.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double free" ]]
     [[ "$output" =~ "nested_alloc_inner_free.zig" ]]
 }
 
 @test "detects use-after-free across loop iterations" {
-    run compile_and_run "$TEST_CASES/allocator/loops/use_after_free_loop.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/use_after_free_loop.zig"
     [ "$status" -ne 0 ]
     # Could be double-free (destroy on iteration 1) or use-after-free (access on iteration 2)
     # depending on which is detected first
@@ -163,19 +163,19 @@ load test_helper
 }
 
 @test "no error with correct nested loop cleanup" {
-    run compile_and_run "$TEST_CASES/allocator/loops/nested_correct_cleanup.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/nested_correct_cleanup.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects leak when inner allocation fails without cleanup" {
-    run compile_and_run "$TEST_CASES/allocator/loops/nested_inner_error_leak.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/nested_inner_error_leak.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "memory leak" ]]
     [[ "$output" =~ "nested_inner_error_leak.zig" ]]
 }
 
 @test "no error with errdefer cleanup in nested loops" {
-    run compile_and_run "$TEST_CASES/allocator/loops/nested_errdefer_cleanup.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/nested_errdefer_cleanup.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -184,19 +184,19 @@ load test_helper
 # =============================================================================
 
 @test "no error when null-checking optional in loop" {
-    run compile_and_run "$TEST_CASES/null/loops/null_check_in_loop.zig"
+    run compile_and_run "$TEST_CASES/null_safety/loops/null_check_in_loop.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects unchecked unwrap in loop" {
-    run compile_and_run "$TEST_CASES/null/loops/unchecked_unwrap_in_loop.zig"
+    run compile_and_run "$TEST_CASES/null_safety/loops/unchecked_unwrap_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "null" ]]
     [[ "$output" =~ "unchecked_unwrap_in_loop.zig" ]]
 }
 
 @test "detects may-be-null after loop sets null" {
-    run compile_and_run "$TEST_CASES/null/loops/set_null_in_loop.zig"
+    run compile_and_run "$TEST_CASES/null_safety/loops/set_null_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "null" ]]
     [[ "$output" =~ "set_null_in_loop.zig" ]]
@@ -207,19 +207,19 @@ load test_helper
 # =============================================================================
 
 @test "no error when switching on union in loop" {
-    run compile_and_run "$TEST_CASES/variant/loops/switch_in_loop.zig"
+    run compile_and_run "$TEST_CASES/variant_safety/loops/switch_in_loop.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects wrong variant access in loop" {
-    run compile_and_run "$TEST_CASES/variant/loops/wrong_variant_in_loop.zig"
+    run compile_and_run "$TEST_CASES/variant_safety/loops/wrong_variant_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "variant" ]]
     [[ "$output" =~ "wrong_variant_in_loop.zig" ]]
 }
 
 @test "detects ambiguous variant after loop changes it" {
-    run compile_and_run "$TEST_CASES/variant/loops/variant_change_in_loop.zig"
+    run compile_and_run "$TEST_CASES/variant_safety/loops/variant_change_in_loop.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "variant" ]]
     [[ "$output" =~ "variant_change_in_loop.zig" ]]
