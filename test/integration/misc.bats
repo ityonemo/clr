@@ -82,3 +82,11 @@ load test_helper
     run compile_and_run "$TEST_CASES/misc/gpa_error_path.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for storing struct into struct field" {
+    # When storing a struct value into a struct field (e.g., return .{ .inner = inner }),
+    # the undefined_safety state must be copied from source to destination BEFORE
+    # the Store tag handler updates ptr.to to point to the source struct.
+    run compile_and_run "$TEST_CASES/store_struct_field_preserves_state.zig"
+    [ "$status" -eq 0 ]
+}

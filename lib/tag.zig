@@ -1209,6 +1209,18 @@ pub const Store = struct {
             .fnptr => null,
         };
 
+        // IMPORTANT: Call splat BEFORE structural updates!
+        // Analysis handlers (like undefined_safety.store) read ptr_ref.pointer.to
+        // to find the destination. If we modify it first, they would copy from
+        // source to source instead of source to destination.
+        //
+        // Special case for allocator: call splat after, as we modify ptr_ref.pointer.to
+        // differently there (direct reference instead of structural update).
+        const is_allocator = if (src_gid) |gid| state.refinements.at(gid).* == .allocator else false;
+        if (!is_allocator) {
+            try splat(.store, state, index, self);
+        }
+
         // Update structural .to fields when storing compatible types
         // This ensures that loads through the destination reach the correct target
         if (src_gid) |src_ref| {
@@ -1271,8 +1283,6 @@ pub const Store = struct {
                 else => {},
             }
         }
-
-        try splat(.store, state, index, self);
     }
 };
 
@@ -1818,13 +1828,15 @@ pub const Slice = struct {
     }
 };
 
-/// Entity operation: UNIMPLEMENTED
-/// DbgInlineBlock represents an inlined function call.
-/// TODO: Full support requires codegen to emit the inlined function body.
+/// Entity operation: CREATE
+/// DbgInlineBlock represents an inlined function call that produces a value.
+/// Like Block, the actual value is passed via br instructions.
+/// We create a void refinement initially; br will overwrite with the actual value.
 pub const DbgInlineBlock = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = self;
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .unimplemented);
+        // Create void refinement initially - br will overwrite with actual value
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
     }
 };
 
