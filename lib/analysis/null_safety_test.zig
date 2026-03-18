@@ -177,7 +177,7 @@ test "store to optional with null sets null state" {
     // Store null to the optional
     const scalar_type: tag.Type = .{ .scalar = {} };
     const null_type: tag.Type = .{ .@"null" = &scalar_type };
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .@"null");
@@ -197,7 +197,7 @@ test "store to optional with value sets non_null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store a runtime value to the optional
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .non_null);

@@ -391,7 +391,9 @@ fn convertNameMapToSlice(map: *std.AutoHashMapUnmanaged(u32, []const u8)) []cons
     var i: usize = 0;
     var it = map.iterator();
     while (it.next()) |entry| {
-        result[i] = .{ entry.key_ptr.*, entry.value_ptr.* };
+        // Dupe the string to persistent allocator since arena will be freed
+        const name_copy = allocator.dupe(u8, entry.value_ptr.*) catch continue;
+        result[i] = .{ entry.key_ptr.*, name_copy };
         i += 1;
     }
     return result;

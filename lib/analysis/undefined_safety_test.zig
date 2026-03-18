@@ -59,7 +59,7 @@ test "store with undefined type wrapper keeps state undefined" {
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
     const scalar_type: tag.Type = .{ .scalar = {} };
     const undef_type: tag.Type = .{ .undefined = &scalar_type };
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = undef_type } } } });
+    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = undef_type } } } });
 
     // Check the pointee's undefined state
     const pointee_gid = refinements.at(results[1].refinement.?).pointer.to;
@@ -77,7 +77,7 @@ test "store with defined value sets state to defined" {
 
     // First alloc at instruction 1, then store a defined value
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
 
     // Check the pointee's undefined state
     const pointee_gid = refinements.at(results[1].refinement.?).pointer.to;
@@ -111,7 +111,7 @@ test "load from defined value succeeds" {
 
     // Alloc and store a defined value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
 
     // Load from defined should succeed
     try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
@@ -181,7 +181,7 @@ test "store with .null to optional sets inner to defined" {
 
     // Store null to the optional - inner should be defined (null is a valid defined value)
     const null_type: tag.Type = .{ .@"null" = &scalar_type };
-    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     // Check the pointee is an optional
     const pointee_gid = refinements.at(results[0].refinement.?).pointer.to;

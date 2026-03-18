@@ -251,7 +251,7 @@ pub const FdSafety = union(enum) {
 
         // Also trace back through store operations that built the return value
         // to mark original fds. The return slot is built via:
-        // ret_ptr -> errunion_payload_ptr_set -> struct_field_ptr -> store_safe
+        // ret_ptr -> errunion_payload_ptr_set -> struct_field_ptr -> store
         // We need to mark the fds that were stored, not just the return slot.
         traceReturnSlotStores(state.results, state.refinements, params.ptr);
     }
@@ -273,7 +273,7 @@ pub const FdSafety = union(enum) {
             _ = i;
             const inst_tag = inst.inst_tag orelse continue;
             switch (inst_tag) {
-                .store_safe, .store => |store| {
+                .store => |store| {
                     // Check if this store's destination is part of the return slot
                     const dest_ptr_gid = switch (store.ptr) {
                         .inst => |idx| results[idx].refinement orelse continue,

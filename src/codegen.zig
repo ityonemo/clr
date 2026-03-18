@@ -90,6 +90,8 @@ fn altName(tag: Tag) []const u8 {
         // Vector op variants map to base operations
         .reduce_optimized => "reduce",
         .cmp_vector_optimized => "cmp_vector",
+        // Lower store_safe to store (semantically identical for analysis)
+        .store_safe => "store",
         else => @tagName(tag),
     };
 }
@@ -523,13 +525,9 @@ fn payloadAggregateInit(info: *const FnInfo, datum: Data) []const u8 {
     const result_type = datum.ty_pl.ty.toInterned() orelse blk: {
         // Type is an instruction reference - look up its result type
         const inst_idx = datum.ty_pl.ty.toIndex() orelse {
-            const ref_int = @intFromEnum(datum.ty_pl.ty);
-            debug.print("aggregate_init: ty_pl.ty raw=0x{x}, toInterned=null, toIndex=null\n", .{ref_int});
             return ".{ .ty = .{ .unimplemented = {} }, .elements = &.{} }";
         };
-        debug.print("aggregate_init: falling back to inst_idx={}\n", .{@intFromEnum(inst_idx)});
         break :blk getInstResultType(info.ip, info.tags, info.data, @intFromEnum(inst_idx)) orelse {
-            debug.print("aggregate_init: getInstResultType returned null\n", .{});
             return ".{ .ty = .{ .unimplemented = {} }, .elements = &.{} }";
         };
     };
@@ -978,6 +976,17 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                         if (type_key == .ptr_type and info.ip.indexToKey(type_key.ptr_type.child) == .func_type) {
                             // Function pointer constant - use storeFnptr
                             if (extractFunctionFromPointer(info.ip, interned_idx)) |func_idx| {
+                                // Add to call targets so the function is included in tree shaking
+                                const func_type = info.ip.indexToKey(func_idx).func;
+                                const func_type_key = info.ip.indexToKey(func_type.ty);
+                                const arity: u32 = if (func_type_key == .func_type)
+                                    @intCast(func_type_key.func_type.param_types.len)
+                                else
+                                    0;
+                                info.call_targets.append(clr_allocator.allocator(), .{
+                                    .index = @intFromEnum(func_idx),
+                                    .arity = arity,
+                                }) catch {};
                                 // Get ptr string
                                 const ptr_str: []const u8 = if (datum.bin_op.lhs.toIndex()) |idx|
                                     clr_allocator.allocPrint(info.arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null)
@@ -1286,7 +1295,7 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
     else
         ".{ .unimplemented = {} }";
 
-    // Wrap in .undefined or .null if global is undefined/null (consistent with store_safe approach)
+    // Wrap in .undefined or .null if global is undefined/null (consistent with store approach)
     // Use global allocator (not arena) because this string must persist until epilogue runs
     const type_str = if (is_undefined)
         clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .undefined = &{s} }}", .{inner_type_str}, null)
@@ -1608,10 +1617,7 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
         },
         // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
         .func_type => ".{ .unimplemented = {} }",
-        else => blk: {
-            debug.print("typeToStringLookupNoNames: unhandled type_key tag = {s}\n", .{@tagName(type_key)});
-            break :blk ".{ .unimplemented = {} }";
-        },
+        else => ".{ .unimplemented = {} }",
     };
 }
 
@@ -1878,10 +1884,7 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         },
         // Bare function types (not behind a pointer) - function pointers are handled in .ptr_type
         .func_type => ".{ .unimplemented = {} }",
-        else => blk: {
-            debug.print("typeToStringLookup: unhandled type_key tag = {s}\n", .{@tagName(type_key)});
-            break :blk ".{ .unimplemented = {} }";
-        },
+        else => ".{ .unimplemented = {} }",
     };
 }
 
@@ -3335,6 +3338,24 @@ fn extractBlockBody(block_idx: u32, data: []const Data, extra: []const u32) ?[]c
     return extra[body_indices_start..][0..body_len];
 }
 
+/// Extract body indices from a dbg_inline_block instruction
+/// Returns null if extraction fails
+/// DbgInlineBlock layout in extra: [func: u32, body_len: u32, body_indices...]
+fn extractDbgInlineBlockBody(idx: u32, data: []const Data, extra: []const u32) ?[]const u32 {
+    if (idx >= data.len) return null;
+    const block_data = data[idx];
+    const payload_index = block_data.ty_pl.payload;
+    if (payload_index + 2 > extra.len) return null;
+    // extra[payload_index] = func (InternPool.Index)
+    // extra[payload_index + 1] = body_len
+    const body_len = extra[payload_index + 1];
+    if (body_len == 0) return null;
+
+    const body_indices_start = payload_index + 2;
+    if (body_indices_start + body_len > extra.len) return null;
+    return extra[body_indices_start..][0..body_len];
+}
+
 /// Extract then and else body indices from a cond_br instruction
 /// Returns null if extraction fails
 fn extractCondBrBodies(cond_br_idx: usize, data: []const Data, extra: []const u32) ?struct { then: []const u32, @"else": []const u32 } {
@@ -3720,9 +3741,15 @@ fn generateOneFunction(
         if (body_set.contains(idx)) continue;
         body_set.put(info.arena, idx, {}) catch @panic("out of memory");
 
-        // If this is a block, add its body to pending (blocks are inlined)
+        // If this is a block or dbg_inline_block, add its body to pending (blocks are inlined)
         if (info.tags[idx] == .block) {
             if (extractBlockBody(idx, info.data, info.extra)) |block_body| {
+                for (block_body) |body_idx| {
+                    pending.append(info.arena, body_idx) catch @panic("out of memory");
+                }
+            }
+        } else if (info.tags[idx] == .dbg_inline_block) {
+            if (extractDbgInlineBlockBody(idx, info.data, info.extra)) |block_body| {
                 for (block_body) |body_idx| {
                     pending.append(info.arena, body_idx) catch @panic("out of memory");
                 }
@@ -4450,6 +4477,8 @@ pub fn emitGetName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8)) []const
     }
 
     // Build final function
+    // Size hint: arms length + function boilerplate (~100 bytes)
+    const size_hint = arms.items.len + 200;
     return clr_allocator.allocPrint(allocator,
         \\pub fn getName(id: u32) []const u8 {{
         \\    return switch (id) {{
@@ -4457,7 +4486,7 @@ pub fn emitGetName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8)) []const
         \\    }};
         \\}}
         \\
-    , .{arms.items}, null);
+    , .{arms.items}, size_hint);
 }
 
 /// Field entry for grouping in emitGetFieldId

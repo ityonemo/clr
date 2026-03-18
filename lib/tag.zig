@@ -32,7 +32,7 @@
 //         unwrap_errunion_payload_ptr (TODO)
 //
 // MODIFY - Update pre-existing entity
-//   Tags: store, store_safe, ret_safe, ret_load, ret_ptr, set_union_tag,
+//   Tags: store, ret_safe, ret_load, ret_ptr, set_union_tag,
 //         memset_safe
 //
 // NO-OP / METADATA - No entity impact
@@ -272,7 +272,7 @@ pub const ArenaInit = struct {
 /// - AIR arg instructions contain VALUES directly, not pointers to stack locations.
 /// - If the parameter type is `*u8`, the instruction contains the pointer value.
 /// - If the parameter type is `u8`, the instruction contains the scalar value.
-/// - Taking `&param` in source code generates explicit `alloc` + `store_safe` in AIR.
+/// - Taking `&param` in source code generates explicit `alloc` + `store` in AIR.
 ///
 /// Global Refinements Architecture:
 /// - With a single global refinements table, the caller's GID IS the callee's GID.
@@ -282,7 +282,7 @@ pub const ArenaInit = struct {
 /// Example for `fn set_value(ptr: *u8) { ptr.* = 5; }`:
 /// - Caller passes pointer entity P1 -> scalar S1 (undefined) at some GID
 /// - Arg stores that same GID in results[index].refinement
-/// - store_safe(ptr=0) follows P1 to S1, marks S1 as defined (direct modification)
+/// - store(ptr=0) follows P1 to S1, marks S1 as defined (direct modification)
 pub const Arg = struct {
     name_id: u32, // Parameter name ID, resolved via ctx.getName()
     /// GID of the argument value from the caller's refinements.
@@ -563,6 +563,40 @@ pub const DbgVarVal = struct {
         const inst = self.ptr orelse return;
         state.results[inst].name_id = self.name_id;
         try splat(.dbg_var_val, state, index, DbgVarValParams{ .ptr = self.ptr, .name_id = self.name_id });
+    }
+};
+
+/// Parameters for dbg_arg_inline handler.
+pub const DbgArgInlineParams = struct {
+    ptr: ?usize,
+    name_id: u32,
+    is_pointer: bool,
+};
+
+/// DbgArgInline associates a variable name with an inlined function argument.
+/// Unlike dbg_var_ptr/dbg_var_val, inlined arguments can be either pointers or values,
+/// so this handler checks the refinement type and dispatches accordingly.
+pub const DbgArgInline = struct {
+    /// Index into results[] array for the argument. Null when comptime.
+    ptr: ?usize,
+    /// Name ID for the variable (looked up via ctx.getName)
+    name_id: u32,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        const inst = self.ptr orelse return;
+        state.results[inst].name_id = self.name_id;
+
+        // Check if the refinement is a pointer or a value
+        const gid = state.results[inst].refinement orelse return;
+        const ref = state.refinements.at(gid).*;
+        const is_pointer = (ref == .pointer);
+
+        try splat(.dbg_arg_inline, state, index, DbgArgInlineParams{
+            .ptr = self.ptr,
+            .name_id = self.name_id,
+            .is_pointer = is_pointer,
+        });
     }
 };
 
@@ -1123,8 +1157,6 @@ pub const RetLoad = struct {
 /// Modifies the pointee entity with the stored value's state.
 ///
 /// Store writes a value through a pointer. The store instruction itself is void.
-/// Used for both `store` and `store_safe` AIR instructions (semantically identical
-/// for our analysis - the difference is only runtime safety checks).
 ///
 /// AIR Semantics:
 /// - `ptr` is the instruction containing a pointer entity (from alloc, arg, etc.)
@@ -1138,7 +1170,7 @@ pub const RetLoad = struct {
 /// Interprocedural Pointer Args:
 /// For `fn set_value(ptr: *u8) { ptr.* = 5; }`:
 /// - After arg, instruction 0 contains P1' (copy of caller's pointer) -> S1' (copy of pointee)
-/// - store_safe(ptr=0) follows P1' to S1' and marks S1'.undefined = defined
+/// - store(ptr=0) follows P1' to S1' and marks S1'.undefined = defined
 /// - On function close, backPropagate propagates S1's state back to caller via caller_ref
 ///
 /// We do NOT modify the ptr instruction's refinement - it still points to the same
@@ -2095,14 +2127,13 @@ pub const AnyTag = union(enum) {
     dbg_stmt: DbgStmt,
     dbg_var_ptr: DbgVarPtr, // Names a pointer variable (for stack pointer tracking)
     dbg_var_val: DbgVarVal, // Names a value variable (no pointer tracking needed)
-    dbg_arg_inline: DbgVarPtr, // Same structure as dbg_var_ptr
+    dbg_arg_inline: DbgArgInline, // Names an inlined function argument (can be pointer or value)
     load: Load,
     optional_payload: OptionalPayload,
     optional_payload_ptr: OptionalPayloadPtr,
     field_parent_ptr: FieldParentPtr,
     ret_safe: RetSafe,
     store: Store,
-    store_safe: Store, // Same as store, just with runtime safety checks
     unwrap_errunion_payload: UnwrapErrunionPayload,
 
     // Binary operations (bin_op) - two operands, scalar result

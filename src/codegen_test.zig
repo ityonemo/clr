@@ -242,7 +242,7 @@ test "instLine for alloc" {
     try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });\n", result);
 }
 
-test "instLine for store_safe" {
+test "instLine for store" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -256,9 +256,9 @@ test "instLine for store_safe" {
     const val_ref: Ref = @enumFromInt(@as(u32, 4) | (1 << 31));
     const datum: Data = .{ .bin_op = .{ .lhs = ptr_ref, .rhs = val_ref } };
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
-    const result = codegen._instLine(&info, .store_safe, datum, 0, null);
+    const result = codegen._instLine(&info, .store, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store_safe = .{ .ptr = .{ .inst = 3 }, .src = .{ .inst = 4 } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 3 }, .src = .{ .inst = 4 } } });\n", result);
 }
 
 test "instLine for load" {
@@ -1006,7 +1006,7 @@ test "instLine for block" {
     try std.testing.expectEqualStrings("    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });\n", result);
 }
 
-test "instLine for store (same as store_safe)" {
+test "instLine for store (same as store)" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -1037,10 +1037,10 @@ test "generateFunction with simple cond_br block" {
     //
     // AIR structure:
     //   0: alloc              <- x
-    //   1: store_safe         <- x = undefined
+    //   1: store         <- x = undefined
     //   2: block              <- if block, body_len=5, body=[3,4,5,6,7]
     //   3: load (condition)
-    //   4: store_safe (x = 5) <- then body
+    //   4: store (x = 5) <- then body
     //   5: br                 <- then body
     //   6: br                 <- else body
     //   7: cond_br
@@ -1060,10 +1060,10 @@ test "generateFunction with simple cond_br block" {
     // Build instruction arrays
     const tags: []const Tag = &.{
         .alloc, // 0: alloc for x
-        .store_safe, // 1: store undef to x
+        .store, // 1: store undef to x
         .block, // 2: if block
         .load, // 3: load condition (inside block body)
-        .store_safe, // 4: store 5 to x (then branch)
+        .store, // 4: store 5 to x (then branch)
         .br, // 5: br block (then branch)
         .br, // 6: br block (else branch)
         .cond_br, // 7: cond_br
@@ -1137,7 +1137,7 @@ test "generateFunction with simple cond_br block" {
         \\
         \\fn fn_42_cond_br_true_7(state: State) anyerror!void {
         \\    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = 3 } });
-        \\    try Inst.apply(state, 4, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 3 } } });
+        \\    try Inst.apply(state, 4, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 3 } } });
         \\    try Inst.apply(state, 5, .{ .br = .{ .block = 2, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });
         \\}
         \\
@@ -1158,7 +1158,7 @@ test "generateFunction with simple cond_br block" {
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
         \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-        \\    try Inst.apply(state, 1, .{ .store_safe = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 104, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
+        \\    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 104, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
         \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });
         \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
         \\    try Inst.apply(state, 4, .{ .noop = .{} });

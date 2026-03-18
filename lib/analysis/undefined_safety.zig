@@ -837,6 +837,25 @@ pub const UndefinedSafety = union(enum) {
         forceNameOnUndefined(state.refinements, value_idx, name);
     }
 
+    /// Retroactively set variable name for inlined function arguments.
+    /// Dispatches to pointer or value handling based on the refinement type.
+    pub fn dbg_arg_inline(state: State, index: usize, params: tag.DbgArgInlineParams) !void {
+        _ = index;
+        const inst = params.ptr orelse return;
+        const gid = state.results[inst].refinement orelse return;
+
+        if (params.is_pointer) {
+            // Pointer argument: follow pointer to set name on pointee
+            const pointee_idx = state.refinements.at(gid).pointer.to;
+            const name = state.ctx.buildPathName(state.results, state.refinements, inst);
+            setNameOnUndefined(state.refinements, pointee_idx, name);
+        } else {
+            // Value argument: set name on the value directly
+            const name = state.ctx.getName(params.name_id);
+            forceNameOnUndefined(state.refinements, gid, name);
+        }
+    }
+
     pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
         _ = state;
         _ = index;
@@ -1738,8 +1757,12 @@ pub const UndefinedSafety = union(enum) {
         }
 
         if (gates.isPosixRead(fqn) or gates.isPosixPread(fqn)) {
-            // read(fd, buf, ...) - arg[0] is fd
+            // read(fd, buf, ...) - arg[0] is fd, arg[1] is buffer to fill
             try checkArgUndefined(state, args, 0);
+            // Mark buffer contents as defined (read fills the buffer)
+            if (args.len >= 2) {
+                markSliceAsDefined(state, args[1]);
+            }
             return false;
         }
 
@@ -1863,6 +1886,30 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             else => {},
+        }
+    }
+
+    /// Mark a slice argument's contents as defined.
+    /// Slices are pointer -> region -> element. We mark the element as defined.
+    fn markSliceAsDefined(state: State, src: tag.Src) void {
+        const refinements = state.refinements;
+        const results = state.results;
+
+        const slice_gid: ?Gid = switch (src) {
+            .inst => |idx| results[idx].refinement,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+
+        const gid = slice_gid orelse return;
+        const ref = refinements.at(gid);
+
+        // Slice: pointer -> region -> element
+        if (ref.* == .pointer) {
+            const region_ref = refinements.at(ref.pointer.to);
+            if (region_ref.* == .region) {
+                setDefinedRecursive(refinements, region_ref.region.to);
+            }
         }
     }
 

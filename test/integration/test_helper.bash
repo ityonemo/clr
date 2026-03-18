@@ -33,6 +33,7 @@ compile_air() {
         -fair-out="$LIBCLR" \
         -ofmt=air \
         -femit-bin="$output" \
+        -fno-valgrind \
         --global-cache-dir "$TEST_TEMP/.zig-cache" \
         -lc \
         "$input" 2>&1
