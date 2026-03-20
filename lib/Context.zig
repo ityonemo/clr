@@ -237,7 +237,17 @@ pub fn pop_fn(self: *Context) void {
 
 pub fn dumpStackTrace(self: *Context) void {
     var buf: [1024]u8 = undefined;
-    const rel_path = std.fs.path.relative(self.allocator, std.fs.cwd().realpathAlloc(self.allocator, ".") catch ".", self.meta.file) catch self.meta.file;
+
+    // Get relative path, being careful to free allocations
+    const cwd_path = std.fs.cwd().realpathAlloc(self.allocator, ".") catch null;
+    defer if (cwd_path) |p| self.allocator.free(p);
+
+    const rel_path = if (cwd_path) |cwd|
+        std.fs.path.relative(self.allocator, cwd, self.meta.file) catch self.meta.file
+    else
+        self.meta.file;
+    defer if (cwd_path != null and rel_path.ptr != self.meta.file.ptr) self.allocator.free(rel_path);
+
     self.writer.writeAll("Stack trace:\n") catch {};
     // Print frames in reverse order (most recent first)
     var i = self.stacktrace.items.len;
