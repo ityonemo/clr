@@ -63,10 +63,13 @@ test "call intercepts mem.Allocator.create and sets allocation metadata" {
     const args = &[_]tag.Src{.{ .inst = 0 }}; // allocator arg
     try Inst.call(state, 1, null, return_type, args, "std.mem.Allocator.create");
 
-    // Check the result was created and pointer has allocation metadata
+    // Check the result was created and POINTEE has allocation metadata
+    // Note: memory_safety is set on the POINTEE, not the pointer itself.
+    // The pointer is a return value (register/stack), the pointee is on the heap.
     const eu_gid = results[1].refinement.?;
     const ptr_gid = refinements.at(eu_gid).errorunion.to;
-    const ms = refinements.at(ptr_gid).pointer.analyte.memory_safety.?;
+    const pointee_gid = refinements.at(ptr_gid).pointer.to;
+    const ms = refinements.at(pointee_gid).scalar.analyte.memory_safety.?;
     try std.testing.expect(ms == .allocated);
 }
 
@@ -368,4 +371,61 @@ test "free on region with null memory_safety does not error" {
     const free_args = &[_]tag.Src{ .{ .inst = 0 }, .{ .inst = 1 } };
     // Currently this fails with FreeGlobalMemory, but it should succeed
     try Inst.call(state, 2, null, .{ .void = {} }, free_args, "std.mem.Allocator.free");
+}
+
+test "ret_safe does not report stack escape when pointer points to allocated memory" {
+    // Regression test: When loading a slice/pointer from a struct field, the loaded
+    // pointer VALUE gets memory_safety=.stack (it's a copy on the stack).
+    // But the POINTEE (region) still has .allocated memory_safety.
+    // ret_safe should check the POINTEE's memory_safety, not the pointer's.
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Use refinements' allocator for struct fields to avoid double-free
+    const allocator = refinements.list.allocator;
+
+    // Create allocator refinement for type tracking
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+
+    // Create a region with .allocated memory_safety (simulating heap allocation)
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = elem_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+
+    // Create a pointer with .stack memory_safety (simulating load from struct field)
+    // The pointer VALUE is on the stack, but it POINTS TO allocated memory
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+        } } },
+    } });
+
+    // Create a struct containing this pointer (like Container { .items = ... })
+    const fields = try allocator.dupe(Gid, &.{ptr_gid});
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = fields,
+        .type_id = 200,
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = struct_gid;
+
+    ctx.stacktrace.append(allocator, "test_func") catch unreachable;
+    const state = testState(&ctx, &results, &refinements);
+
+    // ret_safe should NOT report a stack escape - the pointee is .allocated, not .stack
+    try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
+
+    // Test passes if we get here without error
+    // refinements.deinit() handles cleanup of all fields
 }

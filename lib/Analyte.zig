@@ -87,7 +87,7 @@ pub fn formatMemSafety(self: Analyte) []const u8 {
         return switch (m) {
             .allocated => |a| if (a.freed != null) "freed" else "allocated",
             .stack => "stack",
-            .global => "global",
+            .interned => "interned",
             .unset => "unset",
             .error_stub => "error_stub",
         };

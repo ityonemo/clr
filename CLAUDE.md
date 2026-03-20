@@ -94,7 +94,11 @@ bats test/integration/allocator.bats -f "double-free"
 2. If the test cannot be fixed yet, ask before skipping it
 3. Skipped tests MUST have a comment explaining why and reference to tracking issue/doc
 
-**Important**: Do NOT report integration test failures as "pre-existing" unless you are CERTAIN the previous sprint left them as failures. Report failures without assuming they were already broken.
+**CRITICAL**: Do NOT dismiss or report integration test failures as "pre-existing" without verification. When tests fail:
+1. Investigate whether your changes caused the failure
+2. If uncertain, check git history or ask the user
+3. Never assume a failure existed before your changes - investigate properly
+4. Report failures accurately without assumptions about their origin
 
 **Important**: Integration tests MUST have comprehensive output checking. For error-detecting tests, verify:
 1. The exit status (`[ "$status" -ne 0 ]` for errors, `[ "$status" -eq 0 ]` for success)
@@ -792,3 +796,76 @@ const slice = allocator.alloc(u8, 10);  // root_gid = null
 const subslice = slice[2..5];           // slice_ptr creates new ptr with root_gid = region_gid
 allocator.free(subslice);               // ERROR: cannot free derived pointer
 ```
+
+## memory_safety Semantics (IMPORTANT)
+
+`memory_safety` on ANY data type indicates where **that data type ITSELF** lives (stack/heap/interned). It does NOT indicate what the data references or points to.
+
+- `.stack` = data lives on the stack
+- `.allocated` = data lives on the heap (via allocator)
+- `.interned` = comptime/interned data (globals, string literals, etc.)
+
+### Correct Semantics
+
+| Data Type | memory_safety indicates |
+|-----------|------------------------|
+| Pointer | Where the **pointer VALUE** lives |
+| Scalar | Where the **scalar** lives |
+| Region | Where the **array data** lives |
+| Struct | Where the **struct** lives |
+
+### Pointers: Value vs Pointee
+
+For pointers, there are two distinct locations:
+1. **Pointer value location**: Where the pointer itself is stored (its `memory_safety`)
+2. **Pointee location**: Where the data it points to is stored (follow `pointer.to`, check pointee's `memory_safety`)
+
+```zig
+// Example: allocator.create(u8)
+// Returns: error union → pointer → scalar
+//
+// After allocation:
+// - Pointer's memory_safety = (not set - it's a return value in registers)
+// - Scalar's memory_safety = .allocated (the data is on the heap)
+```
+
+To check if a pointer points to allocated/stack/interned memory, you MUST:
+1. Follow `pointer.to` to get the pointee
+2. Check the POINTEE's `memory_safety`
+
+### Common Mistakes to Avoid
+
+**WRONG**: Setting `.allocated` on the pointer returned by `create`/`alloc`
+```zig
+// BAD: The pointer is a return value, not heap data
+ptr.analyte.memory_safety = .{ .allocated = ... };
+```
+
+**WRONG**: Propagating source pointer's memory_safety when storing
+```zig
+// BAD: When storing ptr into struct.field, don't copy ptr's memory_safety
+// The field's location is determined by the struct, not the source
+dest_field.memory_safety = src_ptr.memory_safety;  // WRONG
+```
+
+**CORRECT**: Only set memory_safety on the actual DATA being allocated
+```zig
+// GOOD: Set memory_safety on the pointee (the actual heap data)
+setAllocatedRecursive(refinements, pointee_ref, alloc_base, ...);
+```
+
+### Leak Detection Implications
+
+When checking for memory leaks:
+- Iterate over pointers in scope
+- For each pointer, follow `pointer.to` to get the pointee
+- Check if the POINTEE has `.allocated` memory_safety with `freed=null` and `returned=false`
+- The pointer's own memory_safety is irrelevant for leak detection
+
+### Stack Escape Detection
+
+When checking if a stack pointer escapes:
+- Get the returned value
+- If it's a pointer, follow `pointer.to` to get the pointee
+- Check if the POINTEE has `.stack` memory_safety
+- If so, report stack escape (returning pointer to stack data)

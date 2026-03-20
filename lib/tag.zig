@@ -169,43 +169,6 @@ pub const Alloc = struct {
     }
 };
 
-/// Slice resize: allocator.resize(slice, new_n)
-/// Returns bool - true if in-place resize succeeded, false otherwise.
-/// No allocation tracking needed - just produces a scalar result.
-pub const AllocResize = struct {
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = self;
-        // resize returns a bool - create scalar result
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-        // The result is defined (the resize operation executed)
-        splatInitDefined(state.refinements, gid, state.ctx);
-        try splat(.alloc_resize, state, index, .{});
-    }
-};
-
-/// Slice reallocation: allocator.realloc(slice, new_n) or allocator.remap(slice, new_n)
-/// Frees the old slice and returns a new slice.
-/// realloc returns Allocator.Error![]T, remap returns ?[]T
-pub const AllocRealloc = struct {
-    /// Source of old slice being freed - instruction index or interned pointer
-    slice: Src,
-    type_id: u32, // Allocator type ID, resolved via ctx.getName() for error messages
-    allocator_inst: ?usize, // Optional instruction index for runtime allocator
-    ty: Type, // Element type T (not the slice type)
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        // AllocRealloc returns Allocator.Error![]T (for realloc) or ?[]T (for remap)
-        // For now, treat both as errorunion - the unwrap logic handles both
-        // Create: errorunion → pointer → region → element_type
-        const element_ref = try typeToRefinement(self.ty, state.refinements);
-        const element_idx = try state.refinements.appendEntity(element_ref);
-        const region_idx = try state.refinements.appendEntity(.{ .region = .{ .to = element_idx } });
-        const ptr_idx = try state.refinements.appendEntity(.{ .pointer = .{ .to = region_idx } });
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .errorunion = .{ .to = ptr_idx } });
-        try splat(.alloc_realloc, state, index, self);
-    }
-};
-
 /// Entity operation: CREATE
 /// Creates an .allocator refinement from a call to .allocator() method.
 /// The type_id uniquely identifies the allocator type (e.g., GPA vs PageAllocator).
@@ -1006,6 +969,10 @@ pub const RetSafe = struct {
             br.* = true;
         }
 
+        // Splat runs FIRST - analyses mark allocations as returned, detect stack escapes, etc.
+        // This must happen before cloning so the changes are captured in the cloned table.
+        try splat(.ret_safe, state, index, self);
+
         // Clone the current refinements table for early_returns
         const cloned = try allocator.create(Refinements);
         cloned.* = try state.refinements.clone(allocator);
@@ -1069,9 +1036,6 @@ pub const RetSafe = struct {
             cloned.deinit();
             allocator.destroy(cloned);
         }
-
-        // Splat runs last - analyses see state after copy is complete
-        try splat(.ret_safe, state, index, self);
     }
 };
 
@@ -2457,7 +2421,7 @@ pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void
 }
 
 /// Initialize analysis state for interned/comptime values that are NOT tracked globals.
-/// These are compile-time constants (e.g., &global_value) and should have .global memory_safety.
+/// These are compile-time constants (e.g., &global_value) and should have .interned memory_safety.
 /// Different from splatInitGlobal which sets up tracked global variables.
 pub fn splatInitInterned(refinements: *Refinements, gid: Gid, ctx: *Context) void {
     inline for (Analyte.analyses) |Analysis| {

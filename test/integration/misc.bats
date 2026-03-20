@@ -90,3 +90,12 @@ load test_helper
     run compile_and_run "$TEST_CASES/store_struct_field_preserves_state.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for loading allocated slice from struct field" {
+    # When loading a slice from a struct field and returning it in a new struct,
+    # the slice still points to allocated memory. The pointer VALUE is on the stack,
+    # but the POINTEE (the region) should retain its .allocated memory_safety.
+    # Stack escape detection checks the pointee, not the pointer itself.
+    run compile_and_run "$TEST_CASES/load_preserves_allocation_tracking.zig"
+    [ "$status" -eq 0 ]
+}
