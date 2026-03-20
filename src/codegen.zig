@@ -457,15 +457,22 @@ fn payloadSlicePtr(info: *const FnInfo, datum: Data) []const u8 {
 }
 
 /// Payload for slice - creates a slice from a pointer with bounds.
-/// ty_pl format: ty is the result slice type.
+/// ty_pl format: ty is the result slice type, payload is Bin (lhs=ptr, rhs=len).
 fn payloadSlice(info: *const FnInfo, datum: Data) []const u8 {
+    // Extract the pointer operand from Bin payload
+    // This is crucial: the slice should use the SAME region as the source pointer
+    const payload_index = datum.ty_pl.payload;
+    const ptr_raw = info.extra[payload_index];
+    const ptr_ref: Ref = @enumFromInt(ptr_raw);
+    const ptr_src = srcString(info, ptr_ref);
+
     // The result type is a slice (pointer to region)
     const ty_ref = datum.ty_pl.ty;
     if (ty_ref.toInterned()) |interned_idx| {
         const type_str = typeToString(info.name_map, info.field_map, info.arena, info.ip, interned_idx);
-        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{type_str}, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .ptr = {s} }}", .{ type_str, ptr_src }, null);
     }
-    return ".{}";
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s} }}", .{ptr_src}, null);
 }
 
 /// Payload for array_to_slice - converts array/many-pointer to slice.

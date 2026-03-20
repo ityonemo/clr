@@ -731,3 +731,128 @@ test "store through packed_field pointer marks only that field as defined" {
     // Field 2 should still be undefined
     try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(fields[2]).scalar.analyte.undefined_safety.?));
 }
+
+// =============================================================================
+// Slice tag tests - slice should share region with source pointer
+// =============================================================================
+
+test "slice from pointer shares region and preserves defined state" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a defined region element
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    // Create a region pointing to the defined element
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+
+    // Create a pointer to the region (like slice.ptr)
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a slice from the pointer - should share the same region
+    try Inst.apply(state, 1, .{ .slice = .{
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ptr = .{ .inst = 0 },
+    } });
+
+    // Check slice was created
+    const slice_gid = results[1].refinement.?;
+    const slice_ref = refinements.at(slice_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(slice_ref.*));
+
+    // Critical: the slice should point to the SAME region as the source pointer
+    try std.testing.expectEqual(region_gid, slice_ref.pointer.to);
+
+    // The region's element should still be defined
+    const slice_elem_gid = refinements.at(slice_ref.pointer.to).region.to;
+    const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
+}
+
+test "slice from ptr_add result shares region and preserves defined state" {
+    // This test simulates the sliceAsBytes pattern:
+    // 1. slice_ptr extracts pointer from input slice
+    // 2. pointer is stored into stack storage
+    // 3. bitcast on the stack storage pointer
+    // 4. pointer is loaded back through bitcast
+    // 5. ptr_add is applied
+    // 6. slice is created from ptr_add result
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a defined region element
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    // Create a region pointing to the defined element
+    const region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = elem_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    // Create a slice (pointer to region) - this is the input slice
+    const input_slice_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 8;
+    results[0].refinement = input_slice_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    // inst 1: slice_ptr - extract pointer from slice
+    try Inst.apply(state, 1, .{ .slice_ptr = .{ .slice = 0 } });
+
+    // inst 2: alloc - create stack storage for pointer (ptr-to-ptr-to-region)
+    try Inst.apply(state, 2, .{ .alloc = .{ .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } } } });
+
+    // inst 3: store - store the slice_ptr result into alloc
+    try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 2 }, .src = .{ .inst = 1 } } });
+
+    // inst 4: bitcast - cast the alloc pointer type
+    try Inst.apply(state, 4, .{ .bitcast = .{ .src = .{ .inst = 2 }, .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } } } });
+
+    // inst 5: load - load the pointer through the bitcast
+    try Inst.apply(state, 5, .{ .load = .{ .ptr = .{ .inst = 4 } } });
+
+    // Check that load gets the pointer that was stored
+    const loaded_gid = results[5].refinement.?;
+    const loaded_ref = refinements.at(loaded_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(loaded_ref.*));
+    // The loaded pointer should point to the same region
+    try std.testing.expectEqual(region_gid, loaded_ref.pointer.to);
+
+    // inst 6: ptr_add - pointer arithmetic (shares refinement)
+    try Inst.apply(state, 6, .{ .ptr_add = .{ .ptr = .{ .inst = 5 } } });
+
+    // inst 7: slice - create slice from ptr_add result
+    try Inst.apply(state, 7, .{ .slice = .{
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ptr = .{ .inst = 6 },
+    } });
+
+    // Check slice was created and shares the region
+    const slice_gid = results[7].refinement.?;
+    const slice_ref = refinements.at(slice_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(slice_ref.*));
+    try std.testing.expectEqual(region_gid, slice_ref.pointer.to);
+
+    // The region's element should still be defined
+    const slice_elem_gid = refinements.at(slice_ref.pointer.to).region.to;
+    const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
+}

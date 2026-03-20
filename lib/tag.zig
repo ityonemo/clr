@@ -1783,9 +1783,33 @@ pub const WrapErrunionErr = struct {
 pub const Slice = struct {
     /// The result type (slice type)
     ty: Type = .{ .unimplemented = {} },
+    /// Source pointer operand - the slice should use the SAME region as this pointer
+    ptr: Src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .unimplemented = {} } } },
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create refinement based on the type - slices are pointers to regions
+        // Get the source pointer's region
+        const ptr_gid: ?Gid = switch (self.ptr) {
+            .inst => |idx| state.results[idx].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null, // Function pointers don't have regions
+        };
+
+        if (ptr_gid) |src_ptr_gid| {
+            const src_ptr_ref = state.refinements.at(src_ptr_gid);
+            if (src_ptr_ref.* == .pointer) {
+                // Use the SAME region as the source pointer
+                // This is critical for sliceAsBytes - the data is the same, just reinterpreted
+                const region_gid = src_ptr_ref.pointer.to;
+                // Create new pointer pointing to the same region
+                const slice_gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
+                // Copy analyte state from source pointer to new slice pointer
+                const slice_ref = state.refinements.at(slice_gid);
+                slice_ref.pointer.analyte = src_ptr_ref.pointer.analyte;
+                return;
+            }
+        }
+
+        // Fallback: create new refinement from type (for cases without source ptr)
         const refinement = try typeToRefinement(self.ty, state.refinements);
         const gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
         splatInitDefined(state.refinements, gid, state.ctx);
@@ -3123,6 +3147,51 @@ fn mergeRefinementRecursive(
 
                 try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch);
             }
+        },
+        .region => |r| {
+            // Region: follow .to to the element and recurse
+            // Update branch_gids to follow region.to in each branch
+            followBranchGids(.region, branches, branch_gids);
+
+            // Check if branches have a consistent different .to than parent
+            var consistent_inner: ?Gid = null;
+            var all_same = true;
+            var first_branch: ?*Refinements = null;
+            for (branches, branch_gids) |branch_opt, gid_opt| {
+                const gid = gid_opt orelse continue;
+                if (first_branch == null) {
+                    if (branch_opt) |b| first_branch = b.refinements;
+                }
+                if (consistent_inner) |prev| {
+                    if (prev != gid) {
+                        all_same = false;
+                        break;
+                    }
+                } else {
+                    consistent_inner = gid;
+                }
+            }
+
+            // If all branches point to a different element, copy to parent if needed and update
+            const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != r.to) blk: {
+                const branch_inner = consistent_inner.?;
+                if (branch_inner >= refinements.list.items.len) {
+                    const branch_ref = first_branch.?;
+                    const src_ref = branch_ref.at(branch_inner).*;
+                    try copied_from_branch.put(branch_inner, {});
+                    try Refinement.collectReachableGids(src_ref, branch_ref, copied_from_branch);
+                    const copied_gid = try Refinement.copyTo(src_ref, branch_ref, refinements);
+                    // Re-fetch after copyTo and update
+                    refinements.at(orig_gid).region.to = copied_gid;
+                    break :blk copied_gid;
+                } else {
+                    // Update region to point to branch's element
+                    refinements.at(orig_gid).region.to = branch_inner;
+                    break :blk branch_inner;
+                }
+            } else r.to;
+
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
         },
         else => {},
     }

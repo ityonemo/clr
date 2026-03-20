@@ -99,3 +99,17 @@ load test_helper
     run compile_and_run "$TEST_CASES/load_preserves_allocation_tracking.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for slice created from pointer" {
+    # When creating a slice from a pointer (like in sliceAsBytes), the new slice
+    # should share the same region as the source. Elements should remain defined.
+    run compile_and_run "$TEST_CASES/slice_from_ptr_preserves_defined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no false positive for std.mem.eql with string literals" {
+    # Tests that std.mem.eql works on interned string literals without false positives.
+    # This exercises the sliceAsBytes path and early return merging for regions.
+    run compile_and_run "$TEST_CASES/std_mem_eql_strings.zig"
+    [ "$status" -eq 0 ]
+}
