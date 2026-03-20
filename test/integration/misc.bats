@@ -113,3 +113,15 @@ load test_helper
     run compile_and_run "$TEST_CASES/std_mem_eql_strings.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for memcpy marking destination as defined" {
+    # After @memcpy, the destination region should have the same defined state as the source.
+    run compile_and_run "$TEST_CASES/memcpy_marks_dest_defined.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no false positive for memset marking destination as defined" {
+    # After @memset, the destination region should be defined (set to the value).
+    run compile_and_run "$TEST_CASES/memset_marks_dest_defined.zig"
+    [ "$status" -eq 0 ]
+}

@@ -93,25 +93,6 @@ pub const UndefinedSafety = union(enum) {
         setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
-    /// Handle allocator.realloc()/remap() - set undefined state for reallocation
-    /// Result structure: errorunion → pointer → region → element
-    /// Since realloc preserves data from the original slice, elements are defined
-    pub fn alloc_realloc(state: State, index: usize, params: tag.AllocRealloc) !void {
-        _ = params;
-        const results = state.results;
-        const refinements = state.refinements;
-        // Result is errorunion -> pointer -> region -> element
-        const eu_idx = results[index].refinement.?;
-        const ptr_idx = refinements.at(eu_idx).errorunion.to;
-        // The pointer itself is defined (the slice exists)
-        refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
-        // The region is a container type - don't set undefined state on it
-        const region_idx = refinements.at(ptr_idx).pointer.to;
-        // The elements are defined since realloc preserves data from the original
-        const element_idx = refinements.at(region_idx).region.to;
-        setUndefinedRecursive(refinements, element_idx, .{ .defined = {} });
-    }
-
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
         _ = params;
         const results = state.results;
@@ -358,7 +339,6 @@ pub const UndefinedSafety = union(enum) {
     pub const is_non_err = markResultDefined;
     pub const unwrap_errunion_err = markResultDefined;
     pub const is_named_enum_value = markResultDefined;
-    pub const alloc_resize = markResultDefined; // resize returns a defined bool
 
     // Null checks produce defined boolean results
     pub const is_non_null = markResultDefined;
@@ -448,20 +428,55 @@ pub const UndefinedSafety = union(enum) {
     }
     pub const select = selectHandler;
 
-    // Memory operations - just check operands are defined
+    // Memory operations
     fn memsetHandler(state: State, _: usize, params: anytype) !void {
+        // Check that operands are not undefined
         try checkSrcUndefined(state, params.dest);
         try checkSrcUndefined(state, params.value);
+
+        // After memset, destination region elements are defined (they're set to value)
+        const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
+        forceDefinedRecursive(state.refinements, dest_elem_gid);
     }
     pub const memset = memsetHandler;
     pub const memset_safe = memsetHandler;
 
     fn memcpyHandler(state: State, _: usize, params: anytype) !void {
+        // Check that the pointers themselves are not undefined
         try checkSrcUndefined(state, params.dest);
         try checkSrcUndefined(state, params.src);
+
+        // Propagate defined state from source region element to dest region element
+        const src_elem_gid = getRegionElementGid(state, params.src) orelse return;
+        const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
+
+        // Copy undefined state from source to destination
+        copyUndefinedStateRecursive(state.refinements, dest_elem_gid, src_elem_gid);
     }
     pub const memcpy = memcpyHandler;
     pub const memmove = memcpyHandler;
+
+    /// Helper to get the region element GID from a Src that points to a region.
+    /// Returns null if the Src doesn't resolve to a pointer->region chain.
+    fn getRegionElementGid(state: State, src: tag.Src) ?Gid {
+        const ptr_gid: Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse return null,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return null,
+            .fnptr => return null,
+        };
+
+        const ptr_ref = state.refinements.at(ptr_gid);
+        const region_gid = switch (ptr_ref.*) {
+            .pointer => |p| p.to,
+            else => return null,
+        };
+
+        const region_ref = state.refinements.at(region_gid);
+        return switch (region_ref.*) {
+            .region => |r| r.to,
+            else => null,
+        };
+    }
 
     /// Check if a Src operand is undefined and error if so
     fn checkSrcUndefined(state: State, src: tag.Src) !void {
@@ -1744,8 +1759,18 @@ pub const UndefinedSafety = union(enum) {
             return false; // memory_safety.call() intercepts
         }
 
-        if (gates.isAllocatorAlloc(fqn)) {
+        if (gates.isAllocatorAlloc(fqn) or gates.isAllocatorAlignedAlloc(fqn)) {
             handleAllocatorAlloc(state, index);
+            return false; // memory_safety.call() intercepts
+        }
+
+        if (gates.isAllocatorRealloc(fqn) or gates.isAllocatorRemap(fqn)) {
+            handleAllocatorRealloc(state, index);
+            return false; // memory_safety.call() intercepts
+        }
+
+        if (gates.isAllocatorResize(fqn)) {
+            handleAllocatorResize(state, index);
             return false; // memory_safety.call() intercepts
         }
 
@@ -1968,6 +1993,47 @@ pub const UndefinedSafety = union(enum) {
         // The elements start as undefined (must be set before use)
         const element_idx = region_ref.region.to;
         setUndefinedRecursive(refinements, element_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+    }
+
+    /// Handle mem.Allocator.realloc/remap - mark elements as DEFINED.
+    /// Result structure: errorunion -> pointer -> region -> element
+    /// Since realloc preserves data from the original slice, elements are defined.
+    fn handleAllocatorRealloc(state: State, index: usize) void {
+        const results = state.results;
+        const refinements = state.refinements;
+
+        const eu_idx = results[index].refinement orelse return;
+        const eu_ref = refinements.at(eu_idx);
+        if (eu_ref.* != .errorunion) return;
+
+        const ptr_idx = eu_ref.errorunion.to;
+        const ptr_ref = refinements.at(ptr_idx);
+        if (ptr_ref.* != .pointer) return;
+
+        // The pointer itself is defined (the slice exists)
+        ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
+
+        // The region is a container type - don't set undefined state on it
+        const region_idx = ptr_ref.pointer.to;
+        const region_ref = refinements.at(region_idx);
+        if (region_ref.* != .region) return;
+
+        // The elements are DEFINED since realloc preserves data from the original
+        const element_idx = region_ref.region.to;
+        setUndefinedRecursive(refinements, element_idx, .{ .defined = {} });
+    }
+
+    /// Handle mem.Allocator.resize - result is defined bool
+    fn handleAllocatorResize(state: State, index: usize) void {
+        const results = state.results;
+        const refinements = state.refinements;
+
+        const gid = results[index].refinement orelse return;
+        const ref = refinements.at(gid);
+        if (ref.* != .scalar) return;
+
+        // resize returns a defined bool
+        ref.scalar.analyte.undefined_safety = .{ .defined = {} };
     }
 };
 

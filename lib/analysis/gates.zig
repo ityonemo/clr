@@ -136,6 +136,11 @@ pub fn isPosixRead(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "posix.read") != null;
 }
 
+/// Match File.readToEndAlloc and related calls
+pub fn isFileReadToEnd(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "File.readToEndAlloc") != null;
+}
+
 /// Match posix.write calls
 pub fn isPosixWrite(fqn: []const u8) bool {
     if (std.mem.indexOf(u8, fqn, "posix.pwrite") != null) return false;
