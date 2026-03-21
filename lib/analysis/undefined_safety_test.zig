@@ -856,3 +856,41 @@ test "slice from ptr_add result shares region and preserves defined state" {
     const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
 }
+
+test "struct_field_val with region field succeeds" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    const allocator = std.testing.allocator;
+
+    // Create a struct with a region field (e.g., struct { x: u32, arr: [4]u8 })
+    // Field 0: scalar, Field 1: region
+    const scalar_field_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const region_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const region_field_gid = try refinements.appendEntity(.{ .region = .{
+        .to = region_elem_gid,
+    } });
+
+    const fields = try allocator.alloc(Gid, 2);
+    // Note: fields is owned by the struct refinement and freed by refinements.deinit()
+    fields[0] = scalar_field_gid;
+    fields[1] = region_field_gid;
+
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = fields,
+        .type_id = 0,
+    } });
+
+    var results = [_]Inst{.{ .refinement = struct_gid }} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // struct_field_val on the region field should succeed (not panic)
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 1, .ty = .{ .region = &.{ .scalar = {} } } } });
+
+    // Result should have a refinement
+    try std.testing.expect(results[1].refinement != null);
+}

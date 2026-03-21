@@ -208,3 +208,31 @@ Also added a testable helper `formatAllocatorType()` that generates the allocato
 **Test Case:** `test/cases/misc/allocator_in_struct.zig`
 
 ---
+
+## Fix: struct_field_val must handle region fields
+
+**Date:** 2026-03-21
+
+**Symptom:**
+When running the ForestMQ vendor wrapper, panic occurred: `struct_field_val: unexpected field refinement type region` in `checkFieldUndefined`.
+
+**Root Cause:**
+The `checkFieldUndefined` function in `lib/analysis/undefined_safety.zig` handles undefined checking for struct field values. It handled `.scalar`, `.pointer`, `.optional`, `.@"struct"`, and `.@"union"` types, but not `.region` (array/slice) types.
+
+**When This Happens:**
+When a struct contains an array field (like `buf: [32]u8`), extracting that field generates a `struct_field_val` instruction with a `.region` type. The Wyhash struct in stdlib has such array fields.
+
+**The Fix:**
+Added `.region` to the list of container types that don't track undefined on themselves (their elements carry the undefined state):
+
+```zig
+// Before:
+.optional, .@"struct", .@"union" => {},
+
+// After:
+.optional, .@"struct", .@"union", .region => {},
+```
+
+**Test Case:** `test/cases/misc/struct_with_array_field.zig`
+
+---

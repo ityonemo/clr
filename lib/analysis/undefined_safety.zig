@@ -1497,9 +1497,9 @@ pub const UndefinedSafety = union(enum) {
                     .defined => {},
                 }
             },
-            // Optional and struct containers don't track undefined on themselves
+            // Container types don't track undefined on themselves
             // Their children carry the undefined state
-            .optional, .@"struct", .@"union" => {},
+            .optional, .@"struct", .@"union", .region => {},
             else => |t| std.debug.panic("struct_field_val: unexpected field refinement type {s}", .{@tagName(t)}),
         }
     }
