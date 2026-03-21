@@ -4,3 +4,6 @@
 [submodule "vendor/validate"]
 	path = vendor/validate
 	url = https://github.com/ityonemo/validate
+[submodule "vendor/forestmq"]
+	path = vendor/forestmq
+	url = https://github.com/ityonemo/forestmq
