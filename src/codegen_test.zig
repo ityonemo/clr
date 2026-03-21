@@ -625,7 +625,7 @@ test "instLine for dbg_var_ptr" {
     try std.testing.expect(nameMapContains(&name_map, "my_var"));
 }
 
-test "instLine for dbg_var_val" {
+test "instLine for dbg_var_val emits noop" {
     initTestAllocator();
     defer deinitTestAllocator();
 
@@ -641,9 +641,8 @@ test "instLine for dbg_var_val" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_var_val, datum, 6, null);
 
-    // Check prefix is correct and name was registered
-    try std.testing.expect(std.mem.startsWith(u8, result, "    try Inst.apply(state, 6, .{ .dbg_var_val = .{ .ptr = 5, .name_id = "));
-    try std.testing.expect(nameMapContains(&name_map, "value_var"));
+    // dbg_var_val is now a noop - naming is handled by load lookahead
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .noop = .{} });\n", result);
 }
 
 test "instLine for dbg_arg_inline" {
@@ -1174,5 +1173,25 @@ test "generateFunction with simple cond_br block" {
         \\
     ;
     try std.testing.expectEqualStrings(expected, result);
+}
+
+test "formatAllocatorType generates correct type string" {
+    initTestAllocator();
+    defer deinitTestAllocator();
+
+    var arena = clr_allocator.newArena();
+    defer arena.deinit();
+
+    // Test with type_id = 12345
+    const result1 = codegen.formatAllocatorType(arena.allocator(), 12345);
+    try std.testing.expectEqualStrings(".{ .allocator = 12345 }", result1);
+
+    // Test with type_id = 0
+    const result2 = codegen.formatAllocatorType(arena.allocator(), 0);
+    try std.testing.expectEqualStrings(".{ .allocator = 0 }", result2);
+
+    // Test with max u32
+    const result3 = codegen.formatAllocatorType(arena.allocator(), 4294967295);
+    try std.testing.expectEqualStrings(".{ .allocator = 4294967295 }", result3);
 }
 

@@ -486,8 +486,9 @@ pub const DbgVarPtrParams = struct {
 /// name_when_set, memory_safety updates stack_ptr.name). Without this, error
 /// messages would lack variable names.
 ///
-/// TODO: dbg_var_val may need similar handling if it affects analysis states.
-/// See LIMITATIONS.md for details.
+/// Note: dbg_var_val is now a noop - variable naming for loaded values is handled
+/// by load lookahead (load instructions scan ahead for dbg_var_val and include the
+/// name_id in their payload).
 pub const DbgVarPtr = struct {
     /// Index into results[] array for the pointer. Null when the pointer is comptime.
     ptr: ?usize,
@@ -510,7 +511,7 @@ pub const DbgArgInlineParams = struct {
 };
 
 /// DbgArgInline associates a variable name with an inlined function argument.
-/// Unlike dbg_var_ptr/dbg_var_val, inlined arguments can be either pointers or values,
+/// Unlike dbg_var_ptr, inlined arguments can be either pointers or values,
 /// so this handler checks the refinement type and dispatches accordingly.
 pub const DbgArgInline = struct {
     /// Index into results[] array for the argument. Null when comptime.
@@ -3238,31 +3239,6 @@ test "dbg_var_ptr with null ptr does nothing" {
 
     // dbg_var_ptr with null ptr should not crash
     try Inst.apply(state, 1, .{ .dbg_var_ptr = .{ .ptr = null, .name_id = 1 } });
-}
-
-test "dbg_var_val sets name on target instruction" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    ctx.getName = &testGetName;
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 3;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Set up a result at index 1
-    _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
-    try std.testing.expect(results[1].name_id == null);
-
-    // dbg_var_val should set the name_id on the target instruction
-    try Inst.apply(state, 2, .{ .dbg_var_val = .{ .ptr = 1, .name_id = 2 } });
-
-    try std.testing.expectEqual(@as(u32, 2), results[1].name_id.?);
 }
 
 test "arg shares eidx from caller (global refinements)" {

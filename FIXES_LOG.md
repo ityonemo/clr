@@ -147,3 +147,64 @@ Special case for allocator: the allocator path calls splat after because it uses
 **Test Case:** `test/cases/store_struct_field_preserves_state.zig`
 
 ---
+
+## Fix: Allocator struct fields must emit .allocator type, not .@"struct"
+
+**Date:** 2026-03-21
+
+**Symptom:**
+When running the ForestMQ vendor wrapper (or any code storing an allocator in a struct field), panic occurred: `access of union field 'struct' while field 'allocator' is active` in `copyUndefinedState`.
+
+**Root Cause:**
+In `src/codegen.zig`, the `typeToStringLookupNoNames` and `typeToStringLookup` functions generate type representations for struct fields. When a field's type is `std.mem.Allocator`, these functions were generating `.@"struct"` instead of `.allocator`.
+
+**When This Happens:**
+When a struct contains an `std.mem.Allocator` field (a very common Zig pattern):
+```zig
+const Container = struct {
+    allocator: std.mem.Allocator,
+    data: u32,
+};
+```
+
+The codegen would emit:
+```zig
+.{ .@"struct" = &.{ .type_id = X, .fields = &.{ .{ .@"struct" = ... }, .{ .scalar = {} } } } }
+//                                                   ^^^^^^^^^ WRONG
+```
+
+Instead of:
+```zig
+.{ .@"struct" = &.{ .type_id = X, .fields = &.{ .{ .allocator = Y }, .{ .scalar = {} } } } }
+//                                                   ^^^^^^^^^ CORRECT
+```
+
+**The Problem:**
+The `.struct_type` handling in both `typeToStringLookupNoNames` and `typeToStringLookup` immediately delegated to `structTypeToStringSimple` / `structTypeToString` without first checking if the struct type is the well-known `std.mem.Allocator` type.
+
+The `isAllocatorType` function existed and correctly identified allocator types by checking if the struct name is `"mem.Allocator"`, but it wasn't being called in the struct type conversion path.
+
+**The Fix:**
+Added `isAllocatorType(ip, ty)` check at the beginning of both `.struct_type` cases:
+
+```zig
+.struct_type => blk: {
+    // Check for well-known struct type: std.mem.Allocator
+    if (isAllocatorType(ip, ty)) {
+        break :blk formatAllocatorType(arena, @intFromEnum(ty));
+    }
+    // ... existing struct handling
+}
+```
+
+Also added a testable helper `formatAllocatorType()` that generates the allocator type string.
+
+**Files Changed:**
+- `src/codegen.zig` - Added `formatAllocatorType()` helper, added `isAllocatorType` checks in both type conversion functions
+- `src/codegen_test.zig` - Added test for `formatAllocatorType`, updated `dbg_var_val` test to expect noop
+- `lib/tag.zig` - Removed obsolete `dbg_var_val` test, updated comments
+- `lib/Inst.zig`, `lib/Context.zig` - Updated comments about dbg_var_val
+
+**Test Case:** `test/cases/misc/allocator_in_struct.zig`
+
+---

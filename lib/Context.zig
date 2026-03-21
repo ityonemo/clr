@@ -122,7 +122,7 @@ pub fn deinit(self: *Context) void {
 pub fn buildPathName(self: *Context, results: []const Inst, refinements: *Refinements, index: usize) ?[]const u8 {
     const inst = results[index];
 
-    // Check for root variable name (set by dbg_var_ptr/dbg_var_val)
+    // Check for root variable name (set by dbg_var_ptr or load lookahead)
     if (inst.name_id) |name_id| {
         return self.getName(name_id);
     }

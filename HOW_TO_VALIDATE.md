@@ -7,8 +7,7 @@ This document describes the scheme for validating third-party Zig projects using
 Vendor validation involves:
 1. Adding the project as a git submodule in `vendor/`
 2. Creating a `clr_wrapper.zig` file that exercises key patterns
-3. Adding integration tests in `test/integration/vendor.bats`
-4. Running CLR analysis to verify no false positives
+3. Running CLR analysis to verify no false positives
 
 ## Directory Structure
 
@@ -60,34 +59,10 @@ pub fn main() u8 {
 }
 ```
 
-## Step 3: Add Integration Tests
-
-Add tests to `test/integration/vendor.bats`:
+## Step 3: Run Validation
 
 ```bash
-@test "vendor/project: no false positives on basic usage" {
-    run compile_and_run "vendor/project/clr_wrapper.zig"
-    [ "$status" -eq 0 ]
-}
-
-@test "vendor/project: specific feature works" {
-    run compile_and_run "vendor/project/clr_wrapper.zig"
-    [ "$status" -eq 0 ]
-    # Additional checks if needed
-}
-```
-
-## Step 4: Run Validation
-
-```bash
-# Single project
 ./run_one.sh vendor/project/clr_wrapper.zig
-
-# All vendor tests
-bats test/integration/vendor.bats
-
-# Full integration suite
-./run_integration.sh
 ```
 
 ## Current Vendor Projects
@@ -134,7 +109,5 @@ If the wrapper fails to compile with CLR:
 Checklist:
 - [ ] Add submodule: `git submodule add <url> vendor/<name>`
 - [ ] Create `vendor/<name>/clr_wrapper.zig`
-- [ ] Add tests to `test/integration/vendor.bats`
 - [ ] Verify with `./run_one.sh vendor/<name>/clr_wrapper.zig`
-- [ ] Run full suite: `./run_integration.sh`
-- [ ] Commit wrapper and test changes
+- [ ] Commit wrapper changes

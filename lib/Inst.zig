@@ -17,7 +17,7 @@ refinement: ?Gid = null,
 /// Used by Context.buildPathName to walk the instruction chain statelessly.
 inst_tag: ?tag.AnyTag = null,
 
-/// Root variable name ID, set by dbg_var_ptr/dbg_var_val.
+/// Root variable name ID, set by dbg_var_ptr or load lookahead (name_id from dbg_var_val).
 /// Separate from inst_tag because dbg_var_ptr names a different instruction.
 /// Resolved via ctx.getName() at error time.
 name_id: ?u32 = null,

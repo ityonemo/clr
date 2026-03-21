@@ -1626,6 +1626,10 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
         },
         // Only struct/union types can cause cycles - check visited only for these
         .struct_type => blk: {
+            // Check for well-known struct type: std.mem.Allocator
+            if (isAllocatorType(ip, ty)) {
+                break :blk formatAllocatorType(arena, @intFromEnum(ty));
+            }
             if (visited.contains(ty)) {
                 break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
             }
@@ -1893,6 +1897,10 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
         },
         // Only struct/union types can cause cycles - check visited only for these
         .struct_type => blk: {
+            // Check for well-known struct type: std.mem.Allocator
+            if (isAllocatorType(ip, ty)) {
+                break :blk formatAllocatorType(arena, @intFromEnum(ty));
+            }
             if (visited.contains(ty)) {
                 break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
             }
@@ -3133,6 +3141,13 @@ fn getCallReturnType(info: *const FnInfo, datum: Data) []const u8 {
     const ip_idx = callee_ref.toInterned() orelse return ".{ .unimplemented = {} }";
     const resolved_func_idx = extractFunctionFromPointer(info.ip, ip_idx) orelse ip_idx;
     return extractFunctionReturnType(info.name_map, info.field_map, info.arena, info.ip, resolved_func_idx);
+}
+
+/// Format an allocator type string with the given type_id.
+/// Used for generating .allocator refinement types.
+/// Testable without InternPool.
+pub fn formatAllocatorType(arena: std.mem.Allocator, type_id: u32) []const u8 {
+    return clr_allocator.allocPrint(arena, ".{{ .allocator = {d} }}", .{type_id}, null);
 }
 
 /// Check if a type (by InternPool index) is std.mem.Allocator.
