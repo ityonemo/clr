@@ -53,7 +53,7 @@ fn registerName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), name: []co
     return id;
 }
 
-/// Get the FQN for a function from its InternPool index (can be func or ptr-to-func)
+/// Get the FQN for a function from its InternPool index (can be func or ptr-to-func or extern)
 fn getFunctionFqn(ip: *const InternPool, idx: InternPool.Index) []const u8 {
     const key = ip.indexToKey(idx);
     switch (key) {
@@ -70,6 +70,11 @@ fn getFunctionFqn(ip: *const InternPool, idx: InternPool.Index) []const u8 {
                 },
                 else => return "",
             }
+        },
+        .@"extern" => |e| {
+            // Extern C functions have a name field directly - prefix with (extern)
+            const name = e.name.toSlice(ip);
+            return clr_allocator.allocPrint(clr_allocator.allocator(), "(extern){s}", .{name}, null);
         },
         else => return "",
     }
@@ -2719,6 +2724,22 @@ fn getCallFqn(ip: *const InternPool, datum: Data) ?[]const u8 {
             const nav = ip.getNav(func_key.owner_nav);
             const fqn = nav.fqn.toSlice(ip);
             return stripAnonSuffix(fqn);
+        },
+        .ptr => |ptr| {
+            // Function pointer - try to get name from nav
+            switch (ptr.base_addr) {
+                .nav => |nav_idx| {
+                    const nav = ip.getNav(nav_idx);
+                    const fqn = nav.fqn.toSlice(ip);
+                    return stripAnonSuffix(fqn);
+                },
+                else => return null,
+            }
+        },
+        .@"extern" => |e| {
+            // Extern C functions have a name field directly - prefix with (extern)
+            const name = e.name.toSlice(ip);
+            return clr_allocator.allocPrint(clr_allocator.allocator(), "(extern){s}", .{name}, null);
         },
         else => return null,
     }
