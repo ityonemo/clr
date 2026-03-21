@@ -502,33 +502,6 @@ pub const DbgVarPtr = struct {
     }
 };
 
-/// Parameters for dbg_var_val handler (separate from struct for splat compatibility).
-pub const DbgVarValParams = struct {
-    ptr: ?usize,
-    name_id: u32,
-};
-
-/// DbgVarVal associates a variable name with a value (non-pointer) instruction.
-/// Sets the name on the instruction for use in error messages.
-///
-/// NOTE: We call splat() here because in AIR, dbg_var_val comes AFTER
-/// the load instruction. Analysis modules need to retroactively update
-/// their states with the variable name (e.g., undefined.setNameOnUndefined sets
-/// name_when_set on the loaded value's undefined state).
-pub const DbgVarVal = struct {
-    /// Index into results[] array for the value. Null when the value is comptime.
-    ptr: ?usize,
-    /// Name ID for the variable (looked up via ctx.getName)
-    name_id: u32,
-
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-        const inst = self.ptr orelse return;
-        state.results[inst].name_id = self.name_id;
-        try splat(.dbg_var_val, state, index, DbgVarValParams{ .ptr = self.ptr, .name_id = self.name_id });
-    }
-};
-
 /// Parameters for dbg_arg_inline handler.
 pub const DbgArgInlineParams = struct {
     ptr: ?usize,
@@ -574,6 +547,9 @@ pub const Load = struct {
     /// True if this load is part of a packed struct RMW (read-modify-write) pattern.
     /// When true, skip undefined checks - the subsequent store will define the field.
     is_packed_rmw: bool = false,
+    /// Optional variable name ID from lookahead for dbg_var_val.
+    /// When set, the load handler will use this name for error messages instead of origin.
+    name_id: ?u32 = null,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get the pointer's refinement GID based on source type
@@ -2126,7 +2102,6 @@ pub const AnyTag = union(enum) {
     br: Br,
     dbg_stmt: DbgStmt,
     dbg_var_ptr: DbgVarPtr, // Names a pointer variable (for stack pointer tracking)
-    dbg_var_val: DbgVarVal, // Names a value variable (no pointer tracking needed)
     dbg_arg_inline: DbgArgInline, // Names an inlined function argument (can be pointer or value)
     load: Load,
     optional_payload: OptionalPayload,

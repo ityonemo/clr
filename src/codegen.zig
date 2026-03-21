@@ -119,6 +119,8 @@ fn altName(tag: Tag) []const u8 {
         .cmp_vector_optimized => "cmp_vector",
         // Lower store_safe to store (semantically identical for analysis)
         .store_safe => "store",
+        // dbg_var_val is now a noop - load handles naming via lookahead
+        .dbg_var_val => "noop",
         else => @tagName(tag),
     };
 }
@@ -133,7 +135,8 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32, inst_
         .store, .store_safe => payloadStore(info, datum),
         .load => payloadLoad(info, datum, inst_index),
         .ret_safe => payloadRetSafe(info, datum),
-        .dbg_var_ptr, .dbg_var_val, .dbg_arg_inline => payloadDbg(info, datum),
+        .dbg_var_ptr, .dbg_arg_inline => payloadDbg(info, datum),
+        .dbg_var_val => ".{}", // noop - load handles naming via lookahead
         .bitcast => payloadBitcast(info, datum),
         .unwrap_errunion_payload, .optional_payload, .optional_payload_ptr, .unwrap_errunion_payload_ptr => payloadTransferOp(info, datum),
         .errunion_payload_ptr_set => payloadErrunionPayloadPtrSet(info, datum),
@@ -2151,24 +2154,53 @@ fn payloadLoad(info: *const FnInfo, datum: Data, inst_index: usize) []const u8 {
     const is_packed_rmw = detectPackedRmw(info, datum, inst_index);
     const rmw_str: []const u8 = if (is_packed_rmw) ", .is_packed_rmw = true" else "";
 
+    // Look ahead for dbg_var_val targeting this load to get the variable name
+    const name_str: []const u8 = if (lookupDbgVarValName(info, inst_index)) |name_id|
+        clr_allocator.allocPrint(info.arena, ", .name_id = {d}", .{name_id}, null)
+    else
+        "";
+
     // Check for .none first (toIndex asserts on .none)
     if (datum.ty_op.operand == .none) {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }}{s} }}", .{ fallback_ty_str, rmw_str }, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }}{s}{s} }}", .{ fallback_ty_str, rmw_str, name_str }, null);
     }
     if (datum.ty_op.operand.toIndex()) |idx| {
         // Runtime instruction index
         const ptr = @intFromEnum(idx);
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .inst = {d} }}{s} }}", .{ ptr, rmw_str }, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .inst = {d} }}{s}{s} }}", .{ ptr, rmw_str, name_str }, null);
     } else if (datum.ty_op.operand.toInterned()) |interned_idx| {
         // Register globals (side effect)
         _ = tryGlobalRef(info, interned_idx);
         const ip_idx: u32 = @intFromEnum(interned_idx);
         const ty = info.ip.typeOf(interned_idx);
         const ty_str = typeToString(null, null, info.arena, info.ip, ty);
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = {d}, .ty = {s} }} }}{s} }}", .{ ip_idx, ty_str, rmw_str }, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = {d}, .ty = {s} }} }}{s}{s} }}", .{ ip_idx, ty_str, rmw_str, name_str }, null);
     } else {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }}{s} }}", .{ fallback_ty_str, rmw_str }, null);
+        return clr_allocator.allocPrint(info.arena, ".{{ .ptr = .{{ .interned = .{{ .ip_idx = 0, .ty = {s} }} }}{s}{s} }}", .{ fallback_ty_str, rmw_str, name_str }, null);
     }
+}
+
+/// Look ahead to see if the next instruction is dbg_var_val targeting this load.
+/// If so, returns the name_id for the variable name. Otherwise returns null.
+fn lookupDbgVarValName(info: *const FnInfo, inst_index: usize) ?u32 {
+    // Check next instruction only - dbg_var_val immediately follows its target
+    const next_idx = inst_index + 1;
+    if (next_idx >= info.tags.len) return null;
+
+    const next_tag = info.tags[next_idx];
+    if (next_tag != .dbg_var_val) return null;
+
+    // Check if dbg_var_val's operand points to this instruction
+    const dbg_data = info.data[next_idx];
+    const operand_ref = dbg_data.pl_op.operand;
+    const operand_idx = operand_ref.toIndex() orelse return null;
+    if (@intFromEnum(operand_idx) != inst_index) return null;
+
+    // Extract and register the variable name
+    const name_index = dbg_data.pl_op.payload;
+    const name = extractString(info.extra, name_index);
+    const name_id = registerName(info.name_map, name);
+    return name_id;
 }
 
 /// Detect if this load is part of a packed struct RMW (read-modify-write) pattern.

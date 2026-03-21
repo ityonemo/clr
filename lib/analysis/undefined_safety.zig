@@ -838,20 +838,6 @@ pub const UndefinedSafety = union(enum) {
         setNameOnUndefined(state.refinements, pointee_idx, name);
     }
 
-    /// Retroactively set variable name on undefined states for value variables.
-    /// Unlike dbg_var_ptr which follows a pointer, this operates on the value directly.
-    /// Uses forceNameOnUndefined to overwrite any existing name since the value may have
-    /// flowed from another variable (e.g., `const y = x` - error should say 'y', not 'x').
-    pub fn dbg_var_val(state: State, index: usize, params: tag.DbgVarValParams) !void {
-        _ = index;
-        const inst = params.ptr orelse return;
-        const value_idx = state.results[inst].refinement orelse return;
-        // Use the name_id directly - don't use buildPathName which would follow
-        // the load back to its source pointer and get the wrong name
-        const name = state.ctx.getName(params.name_id);
-        forceNameOnUndefined(state.refinements, value_idx, name);
-    }
-
     /// Retroactively set variable name for inlined function arguments.
     /// Dispatches to pointer or value handling based on the refinement type.
     pub fn dbg_arg_inline(state: State, index: usize, params: tag.DbgArgInlineParams) !void {
@@ -1271,6 +1257,15 @@ pub const UndefinedSafety = union(enum) {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
+
+        // If we have a name_id from lookahead (dbg_var_val), apply it to the pointee
+        // BEFORE checking for undefined, so error messages show the current variable name.
+        if (params.name_id) |name_id| {
+            if (getPointeeFromSrc(params.ptr, results, refinements)) |pointee_gid| {
+                const name = ctx.getName(name_id);
+                forceNameOnUndefined(refinements, pointee_gid, name);
+            }
+        }
 
         // Check if this is a packed struct RMW (read-modify-write) load.
         // RMW loads read the backing byte to modify and store back - skip undefined check.
