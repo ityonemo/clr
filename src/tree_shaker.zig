@@ -41,19 +41,19 @@ pub fn shake(mir_list: []*const FuncMir, entrypoint_index: u32) FuncSet {
 }
 
 /// Collect all missing call targets (called but not defined)
-pub fn collectMissingTargets(mir_list: []*const FuncMir, reachable: FuncSet) std.AutoHashMapUnmanaged(u32, u32) {
+pub fn collectMissingTargets(mir_list: []*const FuncMir, reachable: FuncSet) std.AutoHashMapUnmanaged(u32, CallTarget) {
     const allocator = clr_allocator.allocator();
 
-    // Map of missing func_index -> arity
-    var missing = std.AutoHashMapUnmanaged(u32, u32){};
+    // Map of missing func_index -> CallTarget (includes arity and fqn)
+    var missing = std.AutoHashMapUnmanaged(u32, CallTarget){};
 
     for (mir_list) |mir| {
         if (!reachable.contains(mir.func_index)) continue;
 
         for (mir.call_targets) |target| {
             if (!reachable.contains(target.index)) {
-                // This target is called but doesn't exist - record with its arity
-                missing.put(allocator, target.index, target.arity) catch continue;
+                // This target is called but doesn't exist - record with its info
+                missing.put(allocator, target.index, target) catch continue;
             }
         }
     }

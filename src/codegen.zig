@@ -53,6 +53,28 @@ fn registerName(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), name: []co
     return id;
 }
 
+/// Get the FQN for a function from its InternPool index (can be func or ptr-to-func)
+fn getFunctionFqn(ip: *const InternPool, idx: InternPool.Index) []const u8 {
+    const key = ip.indexToKey(idx);
+    switch (key) {
+        .func => |f| {
+            const nav = ip.getNav(f.owner_nav);
+            return clr_allocator.allocator().dupe(u8, nav.fqn.toSlice(ip)) catch "";
+        },
+        .ptr => |ptr| {
+            // Try to get function name from pointer's nav
+            switch (ptr.base_addr) {
+                .nav => |nav_idx| {
+                    const nav = ip.getNav(nav_idx);
+                    return clr_allocator.allocator().dupe(u8, nav.fqn.toSlice(ip)) catch "";
+                },
+                else => return "",
+            }
+        },
+        else => return "",
+    }
+}
+
 /// Register a field name mapping: {type_id, field_index} -> name_id
 /// Only registers if name_id is non-zero (field has a name).
 fn registerFieldName(field_map: *clr.FieldHashMap, type_id: u32, field_index: u32, name_id: u32) void {
@@ -993,6 +1015,7 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
                                 info.call_targets.append(clr_allocator.allocator(), .{
                                     .index = @intFromEnum(func_idx),
                                     .arity = arity,
+                                    .fqn = getFunctionFqn(info.ip, func_idx),
                                 }) catch {};
                                 // Get ptr string
                                 const ptr_str: []const u8 = if (datum.bin_op.lhs.toIndex()) |idx|
@@ -1135,6 +1158,7 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
                         info.call_targets.append(clr_allocator.allocator(), .{
                             .index = @intFromEnum(func_idx),
                             .arity = arity,
+                            .fqn = getFunctionFqn(ip, func_idx),
                         }) catch {};
                         return clr_allocator.allocPrint(arena, ".{{ .fnptr = &.{{ &fn_{d} }} }}", .{@intFromEnum(func_idx)}, null);
                     }
@@ -2325,6 +2349,7 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
             info.call_targets.append(clr_allocator.allocator(), .{
                 .index = @intFromEnum(resolved_func_idx),
                 .arity = args_len,
+                .fqn = getFunctionFqn(info.ip, resolved_func_idx),
             }) catch {};
             // Direct call to known function - use InternPool index as func_index
             const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(resolved_func_idx)}, null);
@@ -2335,6 +2360,7 @@ fn payloadCallParts(info: *const FnInfo, datum: Data) CallParts {
             info.call_targets.append(clr_allocator.allocator(), .{
                 .index = @intFromEnum(ip_idx),
                 .arity = args_len,
+                .fqn = getFunctionFqn(info.ip, ip_idx),
             }) catch {};
             const called = clr_allocator.allocPrint(info.arena, "fn_{d}", .{@intFromEnum(ip_idx)}, null);
             // Try to get return type from pointer-to-function type
@@ -4705,7 +4731,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
 }
 
 /// Generate a stub function for a missing call target
-pub fn generateStub(func_index: u32, arity: u32) []u8 {
+pub fn generateStub(func_index: u32, arity: u32, fqn: []const u8) []u8 {
     _ = arity; // Unified signature always uses args slice
 
     // FnInterpreter signature: *Context, *Refinements, Gid, []const Gid
@@ -4713,13 +4739,14 @@ pub fn generateStub(func_index: u32, arity: u32) []u8 {
     // (syscall wrappers, etc.). Conservative assumption avoids false positives.
     return clr_allocator.allocPrint(clr_allocator.allocator(),
         \\fn fn_{d}(ctx: *Context, refinements: *Refinements, return_gid: Gid, _: []const Gid) anyerror!Gid {{
-        \\    std.debug.print("WARNING: call to unresolved function fn_{d}\\n", .{{}});
+        \\    // stubbed: {s}
+        \\    std.debug.print("WARNING: call to intercepted function {s}\\n", .{{}});
         \\    ctx.dumpStackTrace();
         \\    clr.splatInitDefined(refinements, return_gid, ctx);
         \\    return return_gid;
         \\}}
         \\
-    , .{ func_index, func_index }, null);
+    , .{ func_index, fqn, fqn }, null);
 }
 
 // =============================================================================

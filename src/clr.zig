@@ -27,6 +27,7 @@ const tree_shaker = @import("tree_shaker.zig");
 pub const CallTarget = struct {
     index: u32,
     arity: u32,
+    fqn: []const u8 = "",
 };
 
 /// Key for field name lookup: {type_id, field_index}
@@ -624,7 +625,8 @@ fn flush(lf_ptr: c_anyopaque_t, _: c_anyopaque_const_t, _: u32, _: c_anyopaque_c
     const missing = tree_shaker.collectMissingTargets(mir_list.items, reachable);
     var it = missing.iterator();
     while (it.next()) |entry| {
-        const stub = clr_codegen.generateStub(entry.key_ptr.*, entry.value_ptr.*);
+        const target = entry.value_ptr.*;
+        const stub = clr_codegen.generateStub(entry.key_ptr.*, target.arity, target.fqn);
         file.writeAll(stub) catch return;
         file.writeAll("\n") catch return;
     }
