@@ -93,3 +93,57 @@ Added handling for `.interned` sources in ArrayElemVal:
 **Test Case:** `test/cases/misc/gpa_error_path.zig`
 
 ---
+
+## Fix: Store handler must call splat BEFORE structural updates
+
+**Date:** 2026-03-18
+
+**Commit:** 6f5650a
+
+**Symptom:**
+False positive "use of undefined value" errors when storing a struct value into a struct field, specifically when using `return .{ .inner = inner }` patterns. Observed with `std.fs.File.deprecatedReader()` which stores a File struct into a GenericReader.context field.
+
+**Root Cause:**
+The `Store.apply` handler in `lib/tag.zig` was modifying `ptr_ref.pointer.to` to point to the source struct BEFORE calling `splat(.store)`. When `undefined_safety.store` ran, it would read the already-modified pointer and copy undefined state from source to source (a no-op), instead of from source to destination.
+
+**When This Happens:**
+When storing a struct value into a struct field via ret_ptr/struct_field_ptr pattern:
+1. `ret_ptr` creates a struct (e.g., GenericReader) with fields marked as undefined
+2. `struct_field_ptr` gets pointer to a field (e.g., GenericReader.context, a File struct)
+3. `store` should copy undefined state from arg (defined File) to the field (undefined File)
+
+**The Problem:**
+In `Store.apply`:
+```zig
+// Store tag handler modified ptr.to HERE (line 1262)
+if (src.* == .@"struct") {
+    ptr_ref.pointer.to = src_ref;  // Now points to SOURCE
+}
+// Then called splat (line 1275)
+try splat(.store, state, index, self);  // undefined_safety reads modified ptr.to
+```
+
+When `undefined_safety.store` ran:
+- It read `ptr_ref.pointer.to` which was now the source GID
+- Called `copyUndefinedStateRecursive(dst=source, src=source)` - a no-op!
+- The original destination (inside GenericReader) retained its undefined state
+
+**The Fix:**
+Call `splat(.store)` BEFORE the structural updates:
+```zig
+// Call splat FIRST (analyses see original destination)
+if (!is_allocator) {
+    try splat(.store, state, index, self);
+}
+
+// THEN update structural fields
+if (src.* == .@"struct") {
+    ptr_ref.pointer.to = src_ref;
+}
+```
+
+Special case for allocator: the allocator path calls splat after because it uses a different update pattern (direct reference).
+
+**Test Case:** `test/cases/store_struct_field_preserves_state.zig`
+
+---
