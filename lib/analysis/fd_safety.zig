@@ -117,6 +117,12 @@ pub const FdSafety = union(enum) {
             return true;
         }
 
+        // posix.flock uses fd for file locking - intercept to avoid syscall code
+        if (gates.isPosixFlock(fqn)) {
+            try checkFdUse(state, args);
+            return true;
+        }
+
         return false;
     }
 

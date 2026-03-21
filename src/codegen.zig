@@ -4820,6 +4820,7 @@ pub fn shouldIntercept(fqn: []const u8) bool {
     if (containsPattern(fqn, "posix.epoll_create")) return true;
     if (containsPattern(fqn, "posix.pread")) return true;
     if (containsPattern(fqn, "posix.pwrite")) return true;
+    if (containsPattern(fqn, "posix.flock")) return true;
     // Formatter functions (comptime format string pattern)
     if (containsPattern(fqn, "fmt.format")) return true;
     if (containsPattern(fqn, "fmt.bufPrint")) return true;

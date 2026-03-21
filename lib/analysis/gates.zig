@@ -157,6 +157,11 @@ pub fn isPosixPwrite(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "posix.pwrite") != null;
 }
 
+/// Match posix.flock calls
+pub fn isPosixFlock(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "posix.flock") != null;
+}
+
 // =========================================================================
 // Formatter Functions
 // =========================================================================

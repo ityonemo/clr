@@ -1810,6 +1810,13 @@ pub const UndefinedSafety = union(enum) {
             return false; // fd_safety.call() intercepts
         }
 
+        if (gates.isPosixFlock(fqn)) {
+            // flock(fd, operation) - arg[0] is fd, arg[1] is operation
+            try checkArgUndefined(state, args, 0);
+            try checkArgUndefined(state, args, 1);
+            return false; // fd_safety.call() intercepts
+        }
+
         // fd-opening functions - mark result as defined
         if (gates.isPosixOpen(fqn) or gates.isPosixOpenat(fqn) or
             gates.isPosixSocket(fqn) or gates.isPosixAccept(fqn) or
