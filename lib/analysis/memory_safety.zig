@@ -498,7 +498,13 @@ pub const MemorySafety = union(enum) {
         const parent_gid: ?Gid = switch (ms) {
             .stack => |s| s.root_gid,
             .allocated => |a| a.root_gid,
-            .interned => return, // Global pointer, no parent tracking
+            .interned => |meta| {
+                // Global pointer - result should also be .interned
+                if (state.results[index].refinement) |ref_idx| {
+                    setInternedRecursive(refinements, ref_idx, meta);
+                }
+                return;
+            },
             .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on pointers"),
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
