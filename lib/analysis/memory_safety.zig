@@ -47,7 +47,6 @@ pub const MemorySafety = union(enum) {
     stack: Stack,
     interned: Meta, // Comptime/interned values (globals, string literals, etc.)
     allocated: Allocated,
-    unset: void,
 
     /// only allowed on error unions.
     /// marks errorunions from allocation instructions.
@@ -69,7 +68,7 @@ pub const MemorySafety = union(enum) {
                 hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
                 hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
             },
-            .stack, .interned, .unset, .error_stub => {},
+            .stack, .interned, .error_stub => {},
         }
     }
 
@@ -123,8 +122,13 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             }
-
         }
+
+        // Check if storing a pointer (or derived pointer) with allocated memory
+        // into a destination owned by a different function (escapes via in-out arg).
+        // When destination's stack memory belongs to a different function (the caller),
+        // any allocated memory being stored there becomes accessible to that function.
+        checkAllocationEscapeViaStore(refinements, results, ctx, ptr, src_refinement);
 
         // If storing from a parameter, propagate the parameter name_id and location to the destination's stack_ptr
         // Get name_id from the arg tag (name_id on Inst is only set by dbg_var_ptr)
@@ -161,6 +165,69 @@ pub const MemorySafety = union(enum) {
             if (ms.* == .stack) {
                 ms.stack.name = .{ .parameter = param_name_id };
                 ms.stack.meta = param_meta;
+            }
+        }
+    }
+
+    /// Check if storing a pointer causes an allocation to escape via an in-out argument.
+    /// When the destination's memory_safety.stack belongs to a different function (the caller),
+    /// any allocated memory being stored there escapes to the caller and should be marked as returned.
+    fn checkAllocationEscapeViaStore(
+        refinements: *Refinements,
+        results: []Inst,
+        ctx: *Context,
+        ptr: usize,
+        src_refinement: *const Refinements.Refinement,
+    ) void {
+        // Only check if source is a pointer
+        if (src_refinement.* != .pointer) return;
+
+        const src_ptr = src_refinement.pointer;
+
+        // Check if source pointer has allocated memory_safety (directly or via root_gid)
+        const src_ms = src_ptr.analyte.memory_safety orelse return;
+        if (src_ms != .allocated) return;
+
+        const src_alloc = src_ms.allocated;
+
+        // Get the root allocation (follow root_gid if this is a derived pointer)
+        const root_gid = src_alloc.root_gid;
+
+        // Get destination pointer's memory_safety
+        const dest_refinement_idx = results[ptr].refinement orelse return;
+        const dest_refinement = refinements.at(dest_refinement_idx);
+        if (dest_refinement.* != .pointer) return;
+
+        const dest_ms = dest_refinement.pointer.analyte.memory_safety orelse return;
+        if (dest_ms != .stack) return;
+
+        const dest_stack = dest_ms.stack;
+
+        // Check if destination belongs to a different function (caller's stack)
+        const current_func = ctx.meta.function;
+        if (std.mem.eql(u8, dest_stack.meta.function, current_func)) {
+            // Destination is in current function's stack - no escape
+            return;
+        }
+
+        // Destination is owned by a different function (caller) - allocation escapes!
+        // Mark the ROOT allocation as returned.
+        if (root_gid) |root| {
+            // Derived pointer - mark the root region as returned
+            const root_ref = refinements.at(root);
+            if (getAnalytePtr(root_ref).memory_safety) |*ms| {
+                if (ms.* == .allocated) {
+                    ms.allocated.returned = true;
+                }
+            }
+        } else {
+            // Direct pointer (not derived) - mark the pointee as returned
+            const pointee_idx = src_ptr.to;
+            const pointee = refinements.at(pointee_idx);
+            if (getAnalytePtr(pointee).memory_safety) |*ms| {
+                if (ms.* == .allocated) {
+                    ms.allocated.returned = true;
+                }
             }
         }
     }
@@ -221,23 +288,24 @@ pub const MemorySafety = union(enum) {
         // Get container from base pointer - only handle instruction bases
         const base_idx: Gid = switch (params.base) {
             .inst => |inst| state.results[inst].refinement orelse {
-                // No base refinement - set .unset on result and any nested refinements
-                initUnsetRecursive(refinements, ptr_idx);
+                // No base refinement - set .stack on result and any nested refinements
+                initStackRecursive(refinements, ptr_idx, state.ctx.meta);
                 return;
             },
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
-                initUnsetRecursive(refinements, ptr_idx);
+                // Interned global - set .interned on result
+                interned_init_inner(refinements, ptr_idx);
                 return;
             },
             .fnptr => {
-                // Constant base - set .unset on result and nested refinements
-                initUnsetRecursive(refinements, ptr_idx);
+                // Constant base - set .interned on result and nested refinements
+                interned_init_inner(refinements, ptr_idx);
                 return;
             },
         };
         const base_ref = refinements.at(base_idx);
         if (base_ref.* != .pointer) {
-            initUnsetRecursive(refinements, ptr_idx);
+            initStackRecursive(refinements, ptr_idx, state.ctx.meta);
             return;
         }
 
@@ -245,7 +313,7 @@ pub const MemorySafety = union(enum) {
         const container = refinements.at(container_idx);
         const container_analyte = getAnalytePtr(container);
         const container_ms = container_analyte.memory_safety orelse {
-            initUnsetRecursive(refinements, ptr_idx);
+            initStackRecursive(refinements, ptr_idx, state.ctx.meta);
             return;
         };
 
@@ -262,9 +330,8 @@ pub const MemorySafety = union(enum) {
                 .is_slice = a.is_slice,
             } },
             .interned => |g| .{ .interned = g },
-            .unset => .{ .unset = {} },
             .error_stub => {
-                initUnsetRecursive(refinements, ptr_idx);
+                initStackRecursive(refinements, ptr_idx, state.ctx.meta);
                 return;
             },
         };
@@ -272,7 +339,7 @@ pub const MemorySafety = union(enum) {
         // Also ensure memory_safety is set on the pointee (the field).
         // This handles the case where the field was just created via typeToRefinement
         // (e.g., accessing an inactive union field for the first time).
-        initUnsetRecursive(refinements, ptr.to);
+        initStackRecursive(refinements, ptr.to, state.ctx.meta);
     }
 
     /// slice_ptr extracts the pointer from a slice.
@@ -290,14 +357,14 @@ pub const MemorySafety = union(enum) {
         const region_idx = ptr.to;
         const region = refinements.at(region_idx);
         if (region.* != .region) {
-            initUnsetRecursive(refinements, ptr_idx);
+            initStackRecursive(refinements, ptr_idx, state.ctx.meta);
             return;
         }
 
-        // Get the region's memory_safety - if none, set .unset on all (interned/static data)
+        // Get the region's memory_safety - if none, set .interned (static data)
         const region_ms = region.region.analyte.memory_safety orelse {
-            // Interned slice (string literal, etc.) - set .unset on scalar, region, pointer
-            initUnsetRecursive(refinements, ptr_idx);
+            // Interned slice (string literal, etc.) - set .interned
+            interned_init_inner(refinements, ptr_idx);
             return;
         };
 
@@ -314,8 +381,65 @@ pub const MemorySafety = union(enum) {
                 .is_slice = a.is_slice,
             } },
             .interned => |g| .{ .interned = g },
-            .unset => .{ .unset = {} },
-            .error_stub => .{ .unset = {} }, // error_stub shouldn't be on regions, set .unset
+            .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
+        };
+    }
+
+    /// slice_field_ptr (ptr_slice_ptr_ptr, ptr_slice_len_ptr) extracts a pointer to a slice component.
+    /// For ptr_slice_ptr_ptr: takes *[]T and returns *[*]T (pointer to the .ptr field)
+    /// For ptr_slice_len_ptr: takes *[]T and returns *usize (pointer to the .len field)
+    /// The result is a pointer INTO the slice, so memory_safety should be inherited from the
+    /// source pointer (which points to the slice field in a struct).
+    pub fn slice_field_ptr(state: State, index: usize, params: tag.SliceFieldPtr) !void {
+        const refinements = state.refinements;
+
+        // Get the result pointer
+        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr = &refinements.at(ptr_idx).pointer;
+
+        // Get the source pointer (pointer to slice)
+        const src_idx: Gid = switch (params.src) {
+            .inst => |inst| state.results[inst].refinement orelse {
+                initStackRecursive(refinements, ptr_idx, state.ctx.meta);
+                return;
+            },
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
+                interned_init_inner(refinements, ptr_idx);
+                return;
+            },
+            .fnptr => {
+                interned_init_inner(refinements, ptr_idx);
+                return;
+            },
+        };
+        const src_ref = refinements.at(src_idx);
+        if (src_ref.* != .pointer) {
+            initStackRecursive(refinements, ptr_idx, state.ctx.meta);
+            return;
+        }
+
+        // The source pointer (e.g., from struct_field_ptr) has the memory_safety we need.
+        // This tells us where the slice field lives (stack of which function, etc.).
+        const src_ms = src_ref.pointer.analyte.memory_safety orelse {
+            initStackRecursive(refinements, ptr_idx, state.ctx.meta);
+            return;
+        };
+
+        // The result is a pointer to a component of the slice (ptr or len).
+        // Inherit memory_safety from the source pointer with root_gid pointing to the source.
+        const src_gid = src_ref.getGid();
+        ptr.analyte.memory_safety = switch (src_ms) {
+            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src_gid } },
+            .allocated => |a| .{ .allocated = .{
+                .meta = a.meta,
+                .allocator_gid = a.allocator_gid,
+                .type_id = a.type_id,
+                .freed = a.freed,
+                .root_gid = src_gid,
+                .is_slice = a.is_slice,
+            } },
+            .interned => |g| .{ .interned = g },
+            .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = src_gid } },
         };
     }
 
@@ -357,7 +481,7 @@ pub const MemorySafety = union(enum) {
         // original parent below, the orphaned struct/field entities need memory_safety
         // set to pass testValid.
         if (state.results[index].refinement) |ref_idx| {
-            initUnsetRecursive(refinements, ref_idx);
+            initStackRecursive(refinements, ref_idx, state.ctx.meta);
         }
 
         const ptr_idx: Gid = switch (params.field_ptr) {
@@ -375,7 +499,6 @@ pub const MemorySafety = union(enum) {
             .stack => |s| s.root_gid,
             .allocated => |a| a.root_gid,
             .interned => return, // Global pointer, no parent tracking
-            .unset => return, // Unset pointer, can't recover parent
             .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on pointers"),
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
@@ -400,7 +523,6 @@ pub const MemorySafety = union(enum) {
                 .root_gid = null,
             } },
             .interned => |g| .{ .interned = g },
-            .unset => .{ .unset = {} },
             .error_stub => @panic("field_parent_ptr: error_stub shouldn't be on parent containers"),
         };
     }
@@ -628,23 +750,23 @@ pub const MemorySafety = union(enum) {
 
     /// Recursively clear allocation metadata from a refinement and its children.
     /// Used on error path to mark phantom allocations as not actually allocated.
-    /// Sets memory_safety to .unset (not null) to maintain testValid invariants.
+    /// Sets memory_safety to null to indicate "no tracking" (allocation didn't happen).
     fn clearAllocationMetadata(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .pointer => |*p| {
-                p.analyte.memory_safety = .{ .unset = {} };
+                p.analyte.memory_safety = null;
                 clearAllocationMetadata(refinements, p.to);
             },
-            .scalar => |*s| s.analyte.memory_safety = .{ .unset = {} },
+            .scalar => |*s| s.analyte.memory_safety = null,
             .@"struct" => |*st| {
-                st.analyte.memory_safety = .{ .unset = {} };
+                st.analyte.memory_safety = null;
                 for (st.fields) |field_gid| {
                     clearAllocationMetadata(refinements, field_gid);
                 }
             },
             .@"union" => |*u| {
-                u.analyte.memory_safety = .{ .unset = {} };
+                u.analyte.memory_safety = null;
                 for (u.fields) |field_opt| {
                     if (field_opt) |field_gid| {
                         clearAllocationMetadata(refinements, field_gid);
@@ -652,11 +774,11 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .region => |*r| {
-                r.analyte.memory_safety = .{ .unset = {} };
+                r.analyte.memory_safety = null;
                 clearAllocationMetadata(refinements, r.to);
             },
             .optional => |*o| {
-                o.analyte.memory_safety = .{ .unset = {} };
+                o.analyte.memory_safety = null;
                 clearAllocationMetadata(refinements, o.to);
             },
             .errorunion => |*e| {
@@ -664,10 +786,10 @@ pub const MemorySafety = union(enum) {
                 e.analyte.memory_safety = .{ .error_stub = {} };
                 clearAllocationMetadata(refinements, e.to);
             },
-            .allocator => |*a| a.analyte.memory_safety = .{ .unset = {} },
-            .fnptr => |*f| f.analyte.memory_safety = .{ .unset = {} },
+            .allocator => |*a| a.analyte.memory_safety = null,
+            .fnptr => |*f| f.analyte.memory_safety = null,
             .recursive => |*r| {
-                r.analyte.memory_safety = .{ .unset = {} };
+                r.analyte.memory_safety = null;
                 clearAllocationMetadata(refinements, r.to);
             },
             .void, .noreturn, .unimplemented => {},
@@ -1177,16 +1299,18 @@ pub const MemorySafety = union(enum) {
 
         const base_ref: Gid = switch (params.base) {
             .inst => |idx| results[idx].refinement orelse {
-                // No base refinement - set result to unset
-                result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                // No base refinement - set result to stack
+                initStackRecursive(refinements, result_ref_idx, ctx.meta);
                 return;
             },
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
-                result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                // Interned global - set .interned
+                interned_init_inner(refinements, result_ref_idx);
                 return;
             },
             .fnptr => {
-                result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                // Constant - set .interned
+                interned_init_inner(refinements, result_ref_idx);
                 return;
             },
         };
@@ -1194,18 +1318,19 @@ pub const MemorySafety = union(enum) {
 
         // For slices: base is pointer → region
         if (base_refinement != .pointer) {
-            result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+            initStackRecursive(refinements, result_ref_idx, ctx.meta);
             return;
         }
         const region_idx = base_refinement.pointer.to;
         const region_ref = refinements.at(region_idx);
         if (region_ref.* != .region) {
-            result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+            initStackRecursive(refinements, result_ref_idx, ctx.meta);
             return;
         }
 
         const ms = region_ref.region.analyte.memory_safety orelse {
-            result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+            // Region has no memory_safety - set .interned (likely static data)
+            interned_init_inner(refinements, result_ref_idx);
             return;
         };
 
@@ -1234,11 +1359,11 @@ pub const MemorySafety = union(enum) {
             .interned => |g| {
                 result_ref.pointer.analyte.memory_safety = .{ .interned = g };
             },
-            .unset => {
-                result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
-            },
             .error_stub => {
-                result_ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                result_ref.pointer.analyte.memory_safety = .{ .stack = .{
+                    .meta = ctx.meta,
+                    .root_gid = region_idx,
+                } };
             },
         }
     }
@@ -1524,7 +1649,7 @@ pub const MemorySafety = union(enum) {
                                 .scalar => |*s| &s.analyte,
                                 else => continue, // .null, .optional, etc. have no analyte
                             };
-                            // Branch may have different memory_safety state (e.g., null branch has .unset)
+                            // Branch may have different memory_safety state (e.g., null branch has null)
                             // Only check freed state if branch also has .allocated
                             const branch_ms = branch_analyte.memory_safety orelse {
                                 all_freed = false;
@@ -1549,27 +1674,6 @@ pub const MemorySafety = union(enum) {
                         }
                         // Note: if only some branches freed, that's a leak in the
                         // non-freeing branch - onFinish will detect this
-                    }
-                },
-                .unset => {
-                    // Original has .unset - copy from first branch that has allocation tracking
-                    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
-                        const branch = branch_opt orelse continue;
-                        const branch_gid = branch_gid_opt orelse continue;
-                        const branch_ref = branch.refinements.at(branch_gid);
-                        // For optionals, branches may have different inner types
-                        // (e.g., .null vs .scalar) - skip branches without analytes
-                        const branch_analyte = switch (branch_ref.*) {
-                            .pointer => |*p| &p.analyte,
-                            .scalar => |*s| &s.analyte,
-                            else => continue, // .null, .optional, etc. have no analyte
-                        };
-                        if (branch_analyte.memory_safety) |ms| {
-                            if (ms == .allocated or ms == .interned) {
-                                orig_analyte.memory_safety = ms;
-                                break;
-                            }
-                        }
                     }
                 },
                 .stack => {}, // Stack pointers don't need merge handling
@@ -1627,61 +1731,62 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Initialize memory_safety state on a return slot refinement.
-    /// Pointees start as `.unset` - they get proper tracking when ret_safe fills the slot.
+    /// Pointees start as null - they get proper tracking when ret_safe fills the slot.
     pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+        _ = ctx;
         const ref = refinements.at(gid);
         switch (ref.*) {
             .scalar => {
-                ref.scalar.analyte.memory_safety = .{ .unset = {} };
+                ref.scalar.analyte.memory_safety = null;
             },
             .pointer => |p| {
-                ref.pointer.analyte.memory_safety = .{ .unset = {} };
-                retval_init(refinements, p.to, ctx);
+                ref.pointer.analyte.memory_safety = null;
+                retval_init(refinements, p.to, undefined);
             },
             .optional => |o| {
-                ref.optional.analyte.memory_safety = .{ .unset = {} };
-                retval_init(refinements, o.to, ctx);
+                ref.optional.analyte.memory_safety = null;
+                retval_init(refinements, o.to, undefined);
             },
             .errorunion => |e| {
                 // errorunion gets error_stub - it's container metadata, not a tracked value
                 ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
-                retval_init(refinements, e.to, ctx);
+                retval_init(refinements, e.to, undefined);
             },
             .@"struct" => |s| {
-                ref.@"struct".analyte.memory_safety = .{ .unset = {} };
+                ref.@"struct".analyte.memory_safety = null;
                 for (s.fields) |field_gid| {
-                    retval_init(refinements, field_gid, ctx);
+                    retval_init(refinements, field_gid, undefined);
                 }
             },
             .@"union" => |u| {
-                ref.@"union".analyte.memory_safety = .{ .unset = {} };
+                ref.@"union".analyte.memory_safety = null;
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
-                        retval_init(refinements, field_gid, ctx);
+                        retval_init(refinements, field_gid, undefined);
                     }
                 }
             },
             .allocator => {
-                ref.allocator.analyte.memory_safety = .{ .unset = {} };
+                ref.allocator.analyte.memory_safety = null;
             },
             .fnptr => {
-                ref.fnptr.analyte.memory_safety = .{ .unset = {} };
+                ref.fnptr.analyte.memory_safety = null;
             },
             .void => {},
             .region => |r| {
-                ref.region.analyte.memory_safety = .{ .unset = {} };
-                retval_init(refinements, r.to, ctx);
+                ref.region.analyte.memory_safety = null;
+                retval_init(refinements, r.to, undefined);
             },
             .recursive => |r| {
-                ref.recursive.analyte.memory_safety = .{ .unset = {} };
-                retval_init(refinements, r.to, ctx);
+                ref.recursive.analyte.memory_safety = null;
+                retval_init(refinements, r.to, undefined);
             },
             .unimplemented => @panic("retval_init: unimplemented return type"),
             .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
         }
     }
 
-    /// Initialize memory_safety to .unset for return values.
+    /// Initialize memory_safety to null for return values (slot not yet filled).
     /// We don't mark them as .interned because returned pointers may point to
     /// dynamically allocated memory (e.g., allocatedSlice returns a slice
     /// to allocated memory, not global memory).
@@ -1693,15 +1798,15 @@ pub const MemorySafety = union(enum) {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .pointer => |p| {
-                ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                ref.pointer.analyte.memory_safety = null;
                 // Don't mark pointee as interned - returned pointers might point to
                 // dynamically allocated memory (e.g., allocatedSlice), not just interned data.
                 // Only interned/comptime pointers should have .interned memory_safety.
                 retval_init_defined_inner(refinements, p.to);
             },
-            .scalar => ref.scalar.analyte.memory_safety = .{ .unset = {} },
+            .scalar => ref.scalar.analyte.memory_safety = null,
             .optional => |o| {
-                ref.optional.analyte.memory_safety = .{ .unset = {} };
+                ref.optional.analyte.memory_safety = null;
                 retval_init_defined_inner(refinements, o.to);
             },
             .errorunion => |e| {
@@ -1709,27 +1814,27 @@ pub const MemorySafety = union(enum) {
                 retval_init_defined_inner(refinements, e.to);
             },
             .@"struct" => |s| {
-                ref.@"struct".analyte.memory_safety = .{ .unset = {} };
+                ref.@"struct".analyte.memory_safety = null;
                 for (s.fields) |field_gid| {
                     retval_init_defined_inner(refinements, field_gid);
                 }
             },
             .@"union" => |u| {
-                ref.@"union".analyte.memory_safety = .{ .unset = {} };
+                ref.@"union".analyte.memory_safety = null;
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
                         retval_init_defined_inner(refinements, field_gid);
                     }
                 }
             },
-            .allocator => ref.allocator.analyte.memory_safety = .{ .unset = {} },
-            .fnptr => ref.fnptr.analyte.memory_safety = .{ .unset = {} },
+            .allocator => ref.allocator.analyte.memory_safety = null,
+            .fnptr => ref.fnptr.analyte.memory_safety = null,
             .region => |r| {
-                ref.region.analyte.memory_safety = .{ .unset = {} };
+                ref.region.analyte.memory_safety = null;
                 retval_init_defined_inner(refinements, r.to);
             },
             .recursive => |r| {
-                ref.recursive.analyte.memory_safety = .{ .unset = {} };
+                ref.recursive.analyte.memory_safety = null;
                 retval_init_defined_inner(refinements, r.to);
             },
             .void, .noreturn => {},
@@ -1800,120 +1905,172 @@ pub const MemorySafety = union(enum) {
     };
 
     // =========================================================================
-    // Simple operation handlers - set memory_safety to .unset for computed values
+    // Simple operation handlers - set memory_safety to .stack for computed values
     // =========================================================================
 
-    /// Helper to set memory_safety = .unset on a scalar result
-    fn setResultUnset(state: State, index: usize) void {
+    /// Helper to set memory_safety = .stack on a scalar result (computed values live on stack)
+    fn setResultStack(state: State, index: usize) void {
         const ref_idx = state.results[index].refinement orelse return;
-        state.refinements.at(ref_idx).scalar.analyte.memory_safety = .{ .unset = {} };
+        state.refinements.at(ref_idx).scalar.analyte.memory_safety = .{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = null,
+        } };
     }
 
-    /// Helper to set memory_safety = .unset on a struct and its fields
-    fn setStructUnset(state: State, index: usize) void {
+    /// Helper to set memory_safety = .stack on a struct and its fields (computed values live on stack)
+    fn setStructStack(state: State, index: usize) void {
         const ref_idx = state.results[index].refinement orelse return;
         const ref = state.refinements.at(ref_idx);
-        ref.@"struct".analyte.memory_safety = .{ .unset = {} };
+        const stack_ms: MemorySafety = .{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = null,
+        } };
+        ref.@"struct".analyte.memory_safety = stack_ms;
         for (ref.@"struct".fields) |field_gid| {
-            state.refinements.at(field_gid).scalar.analyte.memory_safety = .{ .unset = {} };
+            state.refinements.at(field_gid).scalar.analyte.memory_safety = stack_ms;
         }
     }
 
     // Simple arithmetic/comparison operations - produce computed scalars
     pub fn bit_and(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn cmp_eq(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn cmp_gt(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn cmp_gte(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn cmp_lt(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn cmp_lte(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn ctz(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn sub(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn add(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn slice_len(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn get_union_tag(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn is_non_null(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn is_null(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn is_non_null_ptr(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn is_null_ptr(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn is_non_err(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     /// optional_payload_ptr creates a pointer to the payload.
-    /// The pointer has no allocation tracking (.unset).
-    pub fn optional_payload_ptr(state: State, index: usize, params: anytype) !void {
-        _ = params;
+    /// Propagate memory_safety from source pointer (with root_gid for derived pointer tracking).
+    pub fn optional_payload_ptr(state: State, index: usize, params: tag.OptionalPayloadPtr) !void {
         const ptr_idx = state.results[index].refinement orelse return;
-        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .unset;
+        const ptr = &state.refinements.at(ptr_idx).pointer;
+
+        // Get source pointer's memory_safety and propagate it
+        const src_gid: ?Gid = switch (params.src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+        if (src_gid) |src| {
+            const src_ref = state.refinements.at(src);
+            if (src_ref.* == .pointer) {
+                if (src_ref.pointer.analyte.memory_safety) |src_ms| {
+                    ptr.analyte.memory_safety = propagateMemorySafety(src_ms, src);
+                }
+            }
+        }
     }
 
     /// unwrap_errunion_payload_ptr creates a pointer to the error union payload.
-    /// The pointer has no allocation tracking (.unset).
-    pub fn unwrap_errunion_payload_ptr(state: State, index: usize, params: anytype) !void {
-        _ = params;
+    /// Propagate memory_safety from source pointer (with root_gid for derived pointer tracking).
+    pub fn unwrap_errunion_payload_ptr(state: State, index: usize, params: tag.UnwrapErrunionPayloadPtr) !void {
         const ptr_idx = state.results[index].refinement orelse return;
-        state.refinements.at(ptr_idx).pointer.analyte.memory_safety = .unset;
+        const ptr = &state.refinements.at(ptr_idx).pointer;
+
+        // Get source pointer's memory_safety and propagate it
+        const src_gid: ?Gid = switch (params.src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+        if (src_gid) |src| {
+            const src_ref = state.refinements.at(src);
+            if (src_ref.* == .pointer) {
+                if (src_ref.pointer.analyte.memory_safety) |src_ms| {
+                    ptr.analyte.memory_safety = propagateMemorySafety(src_ms, src);
+                }
+            }
+        }
+    }
+
+    /// Helper to propagate memory_safety with root_gid set for derived pointers.
+    fn propagateMemorySafety(src_ms: MemorySafety, src_gid: Gid) MemorySafety {
+        return switch (src_ms) {
+            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src_gid } },
+            .allocated => |a| .{ .allocated = .{
+                .meta = a.meta,
+                .allocator_gid = a.allocator_gid,
+                .type_id = a.type_id,
+                .freed = a.freed,
+                .root_gid = src_gid,
+                .is_slice = a.is_slice,
+            } },
+            .interned => |g| .{ .interned = g },
+            .error_stub => .{ .error_stub = {} },
+        };
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
@@ -1938,7 +2095,7 @@ pub const MemorySafety = union(enum) {
 
         // Initialize memory_safety on the result (ArenaAllocator struct)
         if (state.results[index].refinement) |gid| {
-            initUnsetRecursive(refinements, gid);
+            initStackRecursive(refinements, gid, ctx.meta);
         }
     }
 
@@ -2040,21 +2197,21 @@ pub const MemorySafety = union(enum) {
     // Overflow operations produce struct { result, overflow_flag }
     pub fn add_with_overflow(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setStructUnset(state, index);
+        setStructStack(state, index);
     }
 
     pub fn sub_with_overflow(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setStructUnset(state, index);
+        setStructStack(state, index);
     }
 
     pub fn mul_with_overflow(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setStructUnset(state, index);
+        setStructStack(state, index);
     }
 
     /// array_to_slice converts array/many-pointer to slice.
-    /// If the source has no memory_safety, set .unset on the created refinements.
+    /// If the source has no memory_safety, set .stack on the created refinements.
     pub fn array_to_slice(state: State, index: usize, params: anytype) !void {
         _ = params;
         const refinements = state.refinements;
@@ -2065,26 +2222,30 @@ pub const MemorySafety = union(enum) {
         // If pointer already has memory_safety, nothing to do (shared from source)
         if (ptr.analyte.memory_safety != null) return;
 
-        // Source had no memory_safety - set .unset on the fresh structure
+        // Source had no memory_safety - set .stack (computed values live on stack)
         const region_idx = ptr.to;
         const region = refinements.at(region_idx);
         if (region.* != .region) return;
 
+        const stack_ms: MemorySafety = .{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = null,
+        } };
         const element_idx = region.region.to;
-        refinements.at(element_idx).scalar.analyte.memory_safety = .{ .unset = {} };
-        refinements.at(region_idx).region.analyte.memory_safety = .{ .unset = {} };
-        ptr.analyte.memory_safety = .{ .unset = {} };
+        refinements.at(element_idx).scalar.analyte.memory_safety = stack_ms;
+        refinements.at(region_idx).region.analyte.memory_safety = stack_ms;
+        ptr.analyte.memory_safety = stack_ms;
     }
 
     // Simple operations that produce scalar values
     pub fn ret_addr(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn intcast(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     /// aggregate_init creates a struct/array from element values.
@@ -2098,8 +2259,8 @@ pub const MemorySafety = union(enum) {
                 // For structs: copy memory_safety from each source element to corresponding field
                 for (s.fields, 0..) |field_gid, i| {
                     if (i >= params.elements.len) {
-                        // No source element - initialize to unset
-                        initUnsetRecursive(state.refinements, field_gid);
+                        // No source element - initialize to stack (computed value)
+                        initStackRecursive(state.refinements, field_gid, state.ctx.meta);
                     } else {
                         const src = params.elements[i];
                         copyMemorySafetyState(state, field_gid, src);
@@ -2111,27 +2272,28 @@ pub const MemorySafety = union(enum) {
                 if (params.elements.len > 0) {
                     copyMemorySafetyState(state, r.to, params.elements[0]);
                 } else {
-                    initUnsetRecursive(state.refinements, r.to);
+                    initStackRecursive(state.refinements, r.to, state.ctx.meta);
                 }
             },
             else => {
-                // Fallback: initialize to unset
-                initUnsetRecursive(state.refinements, result_gid);
+                // Fallback: initialize to stack (computed value)
+                initStackRecursive(state.refinements, result_gid, state.ctx.meta);
             },
         }
     }
 
     /// Copy memory_safety state from a source to a destination refinement.
+    /// For interned/fnptr sources, destination is set to .interned (they are comptime values).
     fn copyMemorySafetyState(state: State, dst_gid: Gid, src: tag.Src) void {
         const src_gid: ?Gid = switch (src) {
             .inst => |inst| state.results[inst].refinement,
-            .interned => null, // Interned values have no allocation tracking
-            .fnptr => null, // Function pointers have no allocation tracking
+            .interned => null, // Interned values - set .interned
+            .fnptr => null, // Function pointers - set .interned
         };
 
-        // For interned/fnptr sources, initialize destination to unset
+        // For interned/fnptr sources, set .interned on destination
         if (src_gid == null) {
-            initUnsetRecursive(state.refinements, dst_gid);
+            interned_init_inner(state.refinements, dst_gid);
             return;
         }
 
@@ -2140,6 +2302,7 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Recursively copy memory_safety state from source GID to destination GID.
+    /// If source doesn't have memory_safety, destination is left as null (no tracking).
     fn copyMemorySafetyStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
         const src_ref = refinements.at(src_gid);
         const dst_ref = refinements.at(dst_gid);
@@ -2148,21 +2311,20 @@ pub const MemorySafety = union(enum) {
         switch (dst_ref.*) {
             .scalar => |*s| {
                 s.analyte.memory_safety = switch (src_ref.*) {
-                    .scalar => |ss| ss.analyte.memory_safety orelse .{ .unset = {} },
-                    else => .{ .unset = {} },
+                    .scalar => |ss| ss.analyte.memory_safety,
+                    else => null, // Type mismatch - leave untracked
                 };
             },
             .pointer => |*p| {
                 p.analyte.memory_safety = switch (src_ref.*) {
-                    .pointer => |sp| sp.analyte.memory_safety orelse .{ .unset = {} },
-                    else => .{ .unset = {} },
+                    .pointer => |sp| sp.analyte.memory_safety,
+                    else => null, // Type mismatch - leave untracked
                 };
                 // Also copy pointee state
                 if (src_ref.* == .pointer) {
                     copyMemorySafetyStateRecursive(refinements, p.to, src_ref.pointer.to);
-                } else {
-                    initUnsetRecursive(refinements, p.to);
                 }
+                // If type mismatch, pointee keeps its default null memory_safety
             },
             .optional => |*o| {
                 o.analyte.memory_safety = switch (src_ref.*) {
@@ -2171,8 +2333,6 @@ pub const MemorySafety = union(enum) {
                 };
                 if (src_ref.* == .optional) {
                     copyMemorySafetyStateRecursive(refinements, o.to, src_ref.optional.to);
-                } else {
-                    initUnsetRecursive(refinements, o.to);
                 }
             },
             .errorunion => |*e| {
@@ -2182,8 +2342,6 @@ pub const MemorySafety = union(enum) {
                 };
                 if (src_ref.* == .errorunion) {
                     copyMemorySafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
-                } else {
-                    initUnsetRecursive(refinements, e.to);
                 }
             },
             .@"struct" => |*s| {
@@ -2196,15 +2354,11 @@ pub const MemorySafety = union(enum) {
                     for (s.fields, 0..) |field_gid, i| {
                         if (i < src_s.fields.len) {
                             copyMemorySafetyStateRecursive(refinements, field_gid, src_s.fields[i]);
-                        } else {
-                            initUnsetRecursive(refinements, field_gid);
                         }
-                    }
-                } else {
-                    for (s.fields) |field_gid| {
-                        initUnsetRecursive(refinements, field_gid);
+                        // Extra fields keep default null memory_safety
                     }
                 }
+                // If type mismatch, fields keep default null memory_safety
             },
             .@"union" => |*u| {
                 u.analyte.memory_safety = switch (src_ref.*) {
@@ -2218,19 +2372,13 @@ pub const MemorySafety = union(enum) {
                         if (i < src_u.fields.len) {
                             if (src_u.fields[i]) |src_field| {
                                 copyMemorySafetyStateRecursive(refinements, field_gid, src_field);
-                            } else {
-                                initUnsetRecursive(refinements, field_gid);
                             }
-                        } else {
-                            initUnsetRecursive(refinements, field_gid);
+                            // Else source field null - dest keeps default null memory_safety
                         }
-                    }
-                } else {
-                    for (u.fields) |maybe_field| {
-                        const field_gid = maybe_field orelse continue;
-                        initUnsetRecursive(refinements, field_gid);
+                        // Extra fields keep default null memory_safety
                     }
                 }
+                // If type mismatch, fields keep default null memory_safety
             },
             .allocator => |*a| {
                 a.analyte.memory_safety = switch (src_ref.*) {
@@ -2251,9 +2399,8 @@ pub const MemorySafety = union(enum) {
                 };
                 if (src_ref.* == .region) {
                     copyMemorySafetyStateRecursive(refinements, r.to, src_ref.region.to);
-                } else {
-                    initUnsetRecursive(refinements, r.to);
                 }
+                // If type mismatch, element keeps default null memory_safety
             },
             .recursive => |*rec| {
                 rec.analyte.memory_safety = switch (src_ref.*) {
@@ -2268,23 +2415,23 @@ pub const MemorySafety = union(enum) {
     pub fn wrap_errunion_err(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     pub fn unwrap_errunion_err(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     pub fn slice(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     pub fn dbg_inline_block(state: State, index: usize, params: anytype) !void {
         _ = params;
-        setResultUnset(state, index);
+        setResultStack(state, index);
     }
 
     // =========================================================================
@@ -2292,89 +2439,97 @@ pub const MemorySafety = union(enum) {
     // These set memory_safety on refinements created by typeToRefinement
     // =========================================================================
 
-    /// Helper to recursively set memory_safety = .unset on any refinement.
+    /// Helper to recursively set memory_safety = .stack on any refinement.
     /// Used for refinements created by typeToRefinement which don't have memory_safety set.
     /// Made public for use by variant_safety.merge when copying union fields.
-    pub fn initUnsetRecursive(refinements: *Refinements, gid: Gid) void {
+    /// Note: This only sets memory_safety if it's null (doesn't overwrite existing).
+    pub fn initStackRecursive(refinements: *Refinements, gid: Gid, meta: Meta) void {
         const ref = refinements.at(gid);
+        const stack_ms: MemorySafety = .{ .stack = .{ .meta = meta, .root_gid = null } };
         switch (ref.*) {
             .scalar => {
                 if (ref.scalar.analyte.memory_safety == null) {
-                    ref.scalar.analyte.memory_safety = .{ .unset = {} };
+                    ref.scalar.analyte.memory_safety = stack_ms;
                 }
             },
             .pointer => |p| {
                 if (ref.pointer.analyte.memory_safety == null) {
-                    ref.pointer.analyte.memory_safety = .{ .unset = {} };
+                    ref.pointer.analyte.memory_safety = stack_ms;
                 }
-                initUnsetRecursive(refinements, p.to);
+                initStackRecursive(refinements, p.to, meta);
             },
             .optional => |o| {
                 if (ref.optional.analyte.memory_safety == null) {
-                    ref.optional.analyte.memory_safety = .{ .unset = {} };
+                    ref.optional.analyte.memory_safety = stack_ms;
                 }
-                initUnsetRecursive(refinements, o.to);
+                initStackRecursive(refinements, o.to, meta);
             },
             .errorunion => |e| {
                 if (ref.errorunion.analyte.memory_safety == null) {
                     ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
                 }
-                initUnsetRecursive(refinements, e.to);
+                initStackRecursive(refinements, e.to, meta);
             },
             .@"struct" => |s| {
                 if (ref.@"struct".analyte.memory_safety == null) {
-                    ref.@"struct".analyte.memory_safety = .{ .unset = {} };
+                    ref.@"struct".analyte.memory_safety = stack_ms;
                 }
                 for (s.fields) |field_gid| {
-                    initUnsetRecursive(refinements, field_gid);
+                    initStackRecursive(refinements, field_gid, meta);
                 }
             },
             .@"union" => |u| {
                 if (ref.@"union".analyte.memory_safety == null) {
-                    ref.@"union".analyte.memory_safety = .{ .unset = {} };
+                    ref.@"union".analyte.memory_safety = stack_ms;
                 }
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
-                        initUnsetRecursive(refinements, field_gid);
+                        initStackRecursive(refinements, field_gid, meta);
                     }
                 }
             },
             .allocator => {
                 if (ref.allocator.analyte.memory_safety == null) {
-                    ref.allocator.analyte.memory_safety = .{ .unset = {} };
+                    ref.allocator.analyte.memory_safety = stack_ms;
                 }
             },
             .fnptr => {
                 if (ref.fnptr.analyte.memory_safety == null) {
-                    ref.fnptr.analyte.memory_safety = .{ .unset = {} };
+                    ref.fnptr.analyte.memory_safety = stack_ms;
                 }
             },
             .region => |r| {
                 if (ref.region.analyte.memory_safety == null) {
-                    ref.region.analyte.memory_safety = .{ .unset = {} };
+                    ref.region.analyte.memory_safety = stack_ms;
                 }
-                initUnsetRecursive(refinements, r.to);
+                initStackRecursive(refinements, r.to, meta);
             },
             .recursive => |r| {
                 if (ref.recursive.analyte.memory_safety == null) {
-                    ref.recursive.analyte.memory_safety = .{ .unset = {} };
+                    ref.recursive.analyte.memory_safety = stack_ms;
                 }
                 // Recursive types with .to=0 are placeholders that haven't been resolved yet.
                 // This can happen for complex recursive types during initial construction.
                 // For now, skip recursion on placeholders - they'll be initialized when resolved.
                 if (r.to != 0) {
-                    initUnsetRecursive(refinements, r.to);
+                    initStackRecursive(refinements, r.to, meta);
                 }
             },
             .void, .noreturn, .unimplemented => {},
         }
     }
 
+    /// Compatibility wrapper - calls initStackRecursive with a dummy meta.
+    /// Only used by variant_safety.merge which doesn't have access to ctx.
+    pub fn initUnsetRecursive(refinements: *Refinements, gid: Gid) void {
+        initStackRecursive(refinements, gid, comptime_interned_meta);
+    }
+
     /// Block creates result via typeToRefinement - initialize memory_safety
     pub fn block(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// MkAllocator creates an allocator refinement - initialize memory_safety
@@ -2382,7 +2537,10 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         const ref = state.refinements.at(ref_idx);
-        ref.allocator.analyte.memory_safety = .{ .unset = {} };
+        ref.allocator.analyte.memory_safety = .{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = null,
+        } };
     }
 
     /// StructFieldVal may create refinement via typeToRefinement for interned/global
@@ -2391,21 +2549,21 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         // Only init if memory_safety is null (not already set by container)
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// UnionInit creates union entity and may create field via typeToRefinement
     pub fn union_init(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// Bitcast may create optional wrapper - initialize memory_safety
     pub fn bitcast(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// SetUnionTag creates new field entity via typeToRefinement
@@ -2419,35 +2577,35 @@ pub const MemorySafety = union(enum) {
         };
         const union_gid = state.refinements.at(ptr_gid).pointer.to;
         const field_gid = state.refinements.at(union_gid).@"union".fields[field_index] orelse return;
-        initUnsetRecursive(state.refinements, field_gid);
+        initStackRecursive(state.refinements, field_gid, state.ctx.meta);
     }
 
     /// WrapErrunionPayload may create payload via typeToRefinement
     pub fn wrap_errunion_payload(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// WrapOptional creates an optional refinement - initialize memory_safety
     pub fn wrap_optional(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// RetPtr creates a return value entity via typeToRefinement for struct/union returns
     pub fn ret_ptr(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// ErrunionPayloadPtrSet creates a new pointer to the payload - initialize memory_safety
     pub fn errunion_payload_ptr_set(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        initUnsetRecursive(state.refinements, ref_idx);
+        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// Helper to recursively set memory_safety = .interned on a refinement.
@@ -2582,7 +2740,7 @@ pub const MemorySafety = union(enum) {
 
         // resize returns bool (success/failure), produces scalar - no memory tracking needed
         if (gates.isAllocatorResize(fqn)) {
-            setResultUnset(state, index);
+            setResultStack(state, index);
             return true;
         }
 
@@ -2607,7 +2765,7 @@ pub const MemorySafety = union(enum) {
         // GeneralPurposeAllocator.deinit: skip analysis, stdlib uses safe @ptrCast patterns
         // that trigger false positives (pointer arithmetic on single-item after @ptrCast to [*])
         if (gates.isGpaDeinit(fqn)) {
-            setResultUnset(state, index);
+            setResultStack(state, index);
             return true;
         }
 
@@ -2659,7 +2817,7 @@ pub const MemorySafety = union(enum) {
                             return reportUseAfterFree(ctx, alloc_state, freed);
                         }
                     },
-                    .stack, .interned, .unset, .error_stub => {},
+                    .stack, .interned, .error_stub => {},
                 }
             },
             .@"struct" => |s| {
@@ -2805,7 +2963,6 @@ pub const MemorySafety = union(enum) {
                 return reportFreeStackMemory(ctx, sp);
             },
             .interned => return reportFreeGlobalMemory(ctx),
-            .unset => return,
             .error_stub => return,
             .allocated => {},
         }
@@ -3011,7 +3168,6 @@ pub const MemorySafety = union(enum) {
                     }
                 },
                 .interned => return reportFreeGlobalMemory(ctx),
-                .unset => {},
                 .error_stub => return,
             }
         }
@@ -3035,7 +3191,6 @@ pub const MemorySafety = union(enum) {
         switch (ms_ptr.*) {
             .stack => |sp| return reportFreeStackMemory(ctx, sp),
             .interned => return reportFreeGlobalMemory(ctx),
-            .unset => return,
             .error_stub => return,
             .allocated => {},
         }
@@ -3143,7 +3298,6 @@ pub const MemorySafety = union(enum) {
                 return reportFreeStackMemory(ctx, sp);
             },
             .interned => return reportFreeGlobalMemory(ctx),
-            .unset => return,
             .error_stub => return,
             .allocated => {},
         }
@@ -3208,12 +3362,34 @@ pub const MemorySafety = union(enum) {
 
         // === 2. Mark new slice as allocated ===
 
-        // Result is errorunion -> pointer -> region -> element
-        const eu_idx = results[index].refinement orelse return;
-        const eu_ref = refinements.at(eu_idx);
-        if (eu_ref.* != .errorunion) return;
-        const eu = &eu_ref.errorunion;
-        const new_ptr_idx = eu.to;
+        // Result is either:
+        // - errorunion -> pointer -> region -> element (for realloc)
+        // - optional -> pointer -> region -> element (for remap)
+        const result_idx = results[index].refinement orelse return;
+        const result_ref = refinements.at(result_idx);
+
+        const new_ptr_idx: Gid = switch (result_ref.*) {
+            .errorunion => |eu| blk: {
+                // Set error_stub on errorunion
+                refinements.at(result_idx).errorunion.analyte.memory_safety = .{ .error_stub = {} };
+                break :blk eu.to;
+            },
+            .optional => |opt| blk: {
+                // Set memory_safety on optional wrapper
+                refinements.at(result_idx).optional.analyte.memory_safety = .{
+                    .allocated = .{
+                        .meta = ctx.meta,
+                        .allocator_gid = rag,
+                        .type_id = realloc_type_id,
+                        .root_gid = null,
+                        .is_slice = true,
+                    },
+                };
+                break :blk opt.to;
+            },
+            else => return,
+        };
+
         const new_ptr_ref = refinements.at(new_ptr_idx);
         if (new_ptr_ref.* != .pointer) return;
         const new_ptr = &new_ptr_ref.pointer;
@@ -3229,9 +3405,6 @@ pub const MemorySafety = union(enum) {
             .type_id = realloc_type_id,
             .root_gid = null,
         };
-
-        // Set error_stub on errorunion
-        eu.analyte.memory_safety = .{ .error_stub = {} };
 
         // Set memory_safety on pointer
         new_ptr.analyte.memory_safety = .{
@@ -3415,37 +3588,16 @@ const debug = @import("builtin").mode == .Debug;
 /// - Trivial types (void, unimplemented, noreturn): no analyte, no memory_safety
 pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
+    _ = idx;
     switch (refinement) {
-        .scalar => |s| {
-            if (s.analyte.memory_safety == null) {
-                std.debug.panic("memory_safety must be set on scalars (gid={})", .{idx});
-            }
-        },
-        inline .pointer, .optional, .region, .recursive => |data, t| {
-            if (data.analyte.memory_safety == null) {
-                std.debug.panic("memory_safety must be set on {s}", .{@tagName(t)});
-            }
-        },
-        inline .@"struct", .@"union" => |data, t| {
-            if (data.analyte.memory_safety == null) {
-                std.debug.panic("memory_safety must be set on {s}", .{@tagName(t)});
-            }
-        },
+        // null is valid for return slots before ret_safe (per plan: "null = not yet assigned")
+        // Non-null values must be valid MemorySafety variants
+        .scalar, .pointer, .optional, .region, .recursive, .@"struct", .@"union", .allocator, .fnptr => {},
         .errorunion => |e| {
             if (e.analyte.memory_safety) |ms| {
                 if (ms != .error_stub) {
                     std.debug.panic("errorunion can only have error_stub memory_safety, got {s}", .{@tagName(ms)});
                 }
-            }
-        },
-        .allocator => |a| {
-            if (a.analyte.memory_safety == null) {
-                std.debug.panic("memory_safety must be set on allocators", .{});
-            }
-        },
-        .fnptr => |f| {
-            if (f.analyte.memory_safety == null) {
-                std.debug.panic("memory_safety must be set on fnptrs", .{});
             }
         },
         // Trivial types - no analyte, no memory_safety tracking
