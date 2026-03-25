@@ -101,8 +101,22 @@ pub const MemorySafety = union(enum) {
         };
         const src = switch (params.src) {
             .inst => |idx| idx,
-            // comptime/interned values don't have memory safety tracking - skip
-            .interned, .fnptr => return,
+            // For interned pointer sources (like &.{}), mark destination as .interned
+            // since it points to static memory. Other interned values (scalars, allocators)
+            // don't need memory_safety tracking.
+            .interned => |interned| {
+                if (interned.ty == .pointer) {
+                    // Get the destination (what ptr points to) and mark it as interned
+                    const ptr_refinement_idx = results[ptr].refinement orelse return;
+                    const ptr_ref = refinements.at(ptr_refinement_idx);
+                    if (ptr_ref.* == .pointer) {
+                        const dest_idx = ptr_ref.pointer.to;
+                        setInternedRecursive(refinements, dest_idx, ctx.meta);
+                    }
+                }
+                return;
+            },
+            .fnptr => return,
         };
 
         const src_refinement_idx = results[src].refinement orelse return;
