@@ -838,6 +838,17 @@ pub const UndefinedSafety = union(enum) {
         setNameOnUndefined(state.refinements, pointee_idx, name);
     }
 
+    /// Retroactively set variable name on a VALUE (not pointer).
+    /// Used for const bindings where dbg_var_val targets the value instruction directly.
+    pub fn dbg_var_val(state: State, index: usize, params: tag.DbgVarValParams) !void {
+        _ = index;
+        const inst = params.ptr orelse return;
+        const gid = state.results[inst].refinement orelse return;
+        // Set name directly on the value's undefined state
+        const name = state.ctx.getName(params.name_id);
+        forceNameOnUndefined(state.refinements, gid, name);
+    }
+
     /// Retroactively set variable name for inlined function arguments.
     /// Dispatches to pointer or value handling based on the refinement type.
     pub fn dbg_arg_inline(state: State, index: usize, params: tag.DbgArgInlineParams) !void {

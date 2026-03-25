@@ -486,9 +486,6 @@ pub const DbgVarPtrParams = struct {
 /// name_when_set, memory_safety updates stack_ptr.name). Without this, error
 /// messages would lack variable names.
 ///
-/// Note: dbg_var_val is now a noop - variable naming for loaded values is handled
-/// by load lookahead (load instructions scan ahead for dbg_var_val and include the
-/// name_id in their payload).
 pub const DbgVarPtr = struct {
     /// Index into results[] array for the pointer. Null when the pointer is comptime.
     ptr: ?usize,
@@ -500,6 +497,30 @@ pub const DbgVarPtr = struct {
         const inst = self.ptr orelse return;
         state.results[inst].name_id = self.name_id;
         try splat(.dbg_var_ptr, state, index, DbgVarPtrParams{ .ptr = self.ptr, .name_id = self.name_id });
+    }
+};
+
+/// Parameters for dbg_var_val handler.
+pub const DbgVarValParams = struct {
+    ptr: ?usize,
+    name_id: u32,
+};
+
+/// DbgVarVal associates a variable name with a VALUE (not a pointer).
+/// Used for const bindings where the value is named directly rather than via a pointer.
+/// Unlike dbg_var_ptr which targets alloc'd pointers, dbg_var_val targets the value
+/// instruction directly (e.g., block results, function returns).
+pub const DbgVarVal = struct {
+    /// Index into results[] array for the value. Null when the value is comptime.
+    ptr: ?usize,
+    /// Name ID for the variable (looked up via ctx.getName)
+    name_id: u32,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
+        const inst = self.ptr orelse return;
+        state.results[inst].name_id = self.name_id;
+        try splat(.dbg_var_val, state, index, DbgVarValParams{ .ptr = self.ptr, .name_id = self.name_id });
     }
 };
 
@@ -2103,6 +2124,7 @@ pub const AnyTag = union(enum) {
     br: Br,
     dbg_stmt: DbgStmt,
     dbg_var_ptr: DbgVarPtr, // Names a pointer variable (for stack pointer tracking)
+    dbg_var_val: DbgVarVal, // Names a value variable (for const bindings)
     dbg_arg_inline: DbgArgInline, // Names an inlined function argument (can be pointer or value)
     load: Load,
     optional_payload: OptionalPayload,

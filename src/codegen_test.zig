@@ -641,8 +641,9 @@ test "instLine for dbg_var_val emits noop" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, extra, &.{});
     const result = codegen._instLine(&info, .dbg_var_val, datum, 6, null);
 
-    // dbg_var_val is now a noop - naming is handled by load lookahead
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 6, .{ .noop = .{} });\n", result);
+    // dbg_var_val sets name on target value instruction
+    try std.testing.expect(std.mem.startsWith(u8, result, "    try Inst.apply(state, 6, .{ .dbg_var_val = .{ .ptr = 5, .name_id = "));
+    try std.testing.expect(nameMapContains(&name_map, "value_var"));
 }
 
 test "instLine for dbg_arg_inline" {

@@ -119,8 +119,8 @@ fn altName(tag: Tag) []const u8 {
         .cmp_vector_optimized => "cmp_vector",
         // Lower store_safe to store (semantically identical for analysis)
         .store_safe => "store",
-        // dbg_var_val is now a noop - load handles naming via lookahead
-        .dbg_var_val => "noop",
+        // dbg_var_val sets name on target value instruction
+        .dbg_var_val => "dbg_var_val",
         else => @tagName(tag),
     };
 }
@@ -135,8 +135,7 @@ fn payload(info: *const FnInfo, tag: Tag, datum: Data, arg_counter: ?*u32, inst_
         .store, .store_safe => payloadStore(info, datum),
         .load => payloadLoad(info, datum, inst_index),
         .ret_safe => payloadRetSafe(info, datum),
-        .dbg_var_ptr, .dbg_arg_inline => payloadDbg(info, datum),
-        .dbg_var_val => ".{}", // noop - load handles naming via lookahead
+        .dbg_var_ptr, .dbg_arg_inline, .dbg_var_val => payloadDbg(info, datum),
         .bitcast => payloadBitcast(info, datum),
         .unwrap_errunion_payload, .optional_payload, .optional_payload_ptr, .unwrap_errunion_payload_ptr => payloadTransferOp(info, datum),
         .errunion_payload_ptr_set => payloadErrunionPayloadPtrSet(info, datum),
@@ -4014,26 +4013,35 @@ fn generateOneFunction(
             var block_body_map: std.AutoHashMapUnmanaged(u32, []const u32) = .empty;
             var block_body_set: std.AutoHashMapUnmanaged(u32, void) = .empty;
 
-            // Use a pending list to recursively process nested blocks
+            // Use a pending list to recursively process nested blocks (both block and dbg_inline_block)
             var pending_blocks: std.ArrayListUnmanaged(u32) = .empty;
             var body_it = body_set.iterator();
             while (body_it.next()) |entry| {
                 const bidx = entry.key_ptr.*;
-                if (info.tags[bidx] == .block) {
+                if (info.tags[bidx] == .block or info.tags[bidx] == .dbg_inline_block) {
                     pending_blocks.append(info.arena, bidx) catch @panic("out of memory");
                 }
             }
 
-            // Process all blocks recursively
+            // Process all blocks recursively (both block and dbg_inline_block)
             while (pending_blocks.items.len > 0) {
                 const bidx = pending_blocks.pop().?;
                 if (block_body_map.contains(bidx)) continue; // Already processed
-                if (extractBlockBody(bidx, info.data, info.extra)) |body| {
+
+                // Extract body based on block type
+                const body_opt: ?[]const u32 = if (info.tags[bidx] == .block)
+                    extractBlockBody(bidx, info.data, info.extra)
+                else if (info.tags[bidx] == .dbg_inline_block)
+                    extractDbgInlineBlockBody(bidx, info.data, info.extra)
+                else
+                    null;
+
+                if (body_opt) |body| {
                     block_body_map.put(info.arena, bidx, body) catch @panic("out of memory");
                     for (body) |body_idx| {
                         block_body_set.put(info.arena, body_idx, {}) catch @panic("out of memory");
                         // If this body index is itself a block, add it to pending
-                        if (info.tags[body_idx] == .block) {
+                        if (info.tags[body_idx] == .block or info.tags[body_idx] == .dbg_inline_block) {
                             pending_blocks.append(info.arena, body_idx) catch @panic("out of memory");
                         }
                     }
@@ -4174,7 +4182,7 @@ fn generateOneFunction(
                 //
                 // Using explicit stack to simulate recursion:
                 // Each frame has: body slice, position, and optional pending_emit (block to emit after body)
-                if (tag == .block) {
+                if (tag == .block or tag == .dbg_inline_block) {
                     const Frame = struct {
                         body: []const u32,
                         pos: usize,
@@ -4273,8 +4281,8 @@ fn generateOneFunction(
                             }
                         }
 
-                        // If nested block, defer emit and push new frame for its body
-                        if (body_tag == .block) {
+                        // If nested block (including dbg_inline_block), defer emit and push new frame for its body
+                        if (body_tag == .block or body_tag == .dbg_inline_block) {
                             if (block_body_map.get(body_idx)) |nested_body| {
                                 frame.pending_emit = .{ .idx = body_idx, .is_dotq = body_is_dotq_pattern };
                                 call_stack.append(info.arena, .{ .body = nested_body, .pos = nested_body.len }) catch @panic("out of memory");

@@ -51,7 +51,18 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
             .inst => |idx| state.results[idx].refinement orelse {
                 std.debug.panic("srcSliceToGidSlice: instruction {} has no refinement", .{idx});
             },
-            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse blk: {
+            .interned => |interned| blk: {
+                if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
+                    // For allocators: global_map stores pointer -> allocator
+                    // We need the allocator itself, not the pointer
+                    if (interned.ty == .allocator) {
+                        const ref = state.refinements.at(global_gid);
+                        if (ref.* == .pointer) {
+                            break :blk ref.pointer.to;
+                        }
+                    }
+                    break :blk global_gid;
+                }
                 // Not a tracked global - create refinement from type
                 // Mark as global (interned/comptime values point to const memory)
                 const ref = try tag.typeToRefinement(interned.ty, state.refinements);
