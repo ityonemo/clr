@@ -1192,9 +1192,11 @@ pub const Store = struct {
             // point directly to the source allocator refinement. This preserves
             // allocator identity through store/load cycles. The Zig Allocator type
             // is a struct, but we track it as .allocator refinement for analysis.
+            // IMPORTANT: Call splat BEFORE identity update so undefined_safety.store
+            // marks the ORIGINAL pointee (struct field) as defined, not the source.
             if (src.* == .allocator) {
-                ptr_ref.pointer.to = src_ref;
                 try splat(.store, state, index, self);
+                ptr_ref.pointer.to = src_ref;
                 return;
             }
 

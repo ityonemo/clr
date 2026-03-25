@@ -147,6 +147,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no false positive for struct with allocator field returned from function" {
+    run compile_and_run "$TEST_CASES/undefined_safety/struct/struct_return_allocator.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "detects undefined field when callee misses setting it" {
     run compile_and_run "$TEST_CASES/undefined_safety/structs/struct_field_missed_when_passed.zig"
     [ "$status" -ne 0 ]

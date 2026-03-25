@@ -69,3 +69,11 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator_safety/slice/free_returned_slice.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive when storing slice_ptr into struct field via in-out arg" {
+    # Tests that extracting .ptr from allocated slice and storing into struct
+    # field via pointer argument doesn't report leak - the allocation escapes
+    # via the modified struct.
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_ptr_transfer.zig"
+    [ "$status" -eq 0 ]
+}

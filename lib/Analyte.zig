@@ -88,7 +88,6 @@ pub fn formatMemSafety(self: Analyte) []const u8 {
             .allocated => |a| if (a.freed != null) "freed" else "allocated",
             .stack => "stack",
             .interned => "interned",
-            .unset => "unset",
             .error_stub => "error_stub",
         };
     }

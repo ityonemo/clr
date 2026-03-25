@@ -1541,6 +1541,11 @@ pub const UndefinedSafety = union(enum) {
                     p.analyte.undefined_safety = merged;
                 }
             },
+            .allocator => |*a| {
+                if (mergeUndefinedFromBranches(ctx, branches, branch_gids, getAllocatorUndefined)) |merged| {
+                    a.analyte.undefined_safety = merged;
+                }
+            },
             // No undefined tracking on these container types - recursion handled by tag.zig
             else => {},
         }
@@ -1558,6 +1563,13 @@ pub const UndefinedSafety = union(enum) {
         const ref = branch.refinements.at(branch_gid);
         if (ref.* != .pointer) return null;
         return ref.pointer.analyte.undefined_safety;
+    }
+
+    /// Get undefined state from an allocator at given GID
+    fn getAllocatorUndefined(branch: State, branch_gid: Gid) ?UndefinedSafety {
+        const ref = branch.refinements.at(branch_gid);
+        if (ref.* != .allocator) return null;
+        return ref.allocator.analyte.undefined_safety;
     }
 
     /// Merge undefined states from all reachable branches.
