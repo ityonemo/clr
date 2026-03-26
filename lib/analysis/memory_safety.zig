@@ -1194,17 +1194,25 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // Set result pointer's memory_safety to .stack (one deep only)
-        // The loaded pointer VALUE is a copy living on the stack.
-        // The POINTEE's memory_safety (via ptr.to) is unchanged - semideepCopy
-        // shares the target, so allocated memory remains tracked as allocated.
+        // Set result pointer's memory_safety based on source:
+        // - Loading from interned global: result points to interned memory -> .interned
+        // - Loading from local/inst ptr: result is a copy on the stack -> .stack
         const result_idx = results[index].refinement orelse return;
         const result_ref = refinements.at(result_idx);
         if (result_ref.* == .pointer) {
-            result_ref.pointer.analyte.memory_safety = .{ .stack = .{
-                .meta = ctx.meta,
-                .root_gid = null,
-            } };
+            switch (params.ptr) {
+                .interned => {
+                    // Loading from interned global - result points to interned memory
+                    setInternedRecursive(refinements, result_idx, ctx.meta);
+                },
+                .inst, .fnptr => {
+                    // Loading from local pointer - result is a stack copy
+                    result_ref.pointer.analyte.memory_safety = .{ .stack = .{
+                        .meta = ctx.meta,
+                        .root_gid = null,
+                    } };
+                },
+            }
         }
 
         // Get ptr_idx from ptr - untracked interned loads have no memory safety tracking needed
