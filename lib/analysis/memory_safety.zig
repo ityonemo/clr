@@ -101,10 +101,10 @@ pub const MemorySafety = union(enum) {
         };
         const src = switch (params.src) {
             .inst => |idx| idx,
-            // For interned sources, mark the immediate destination as .interned.
-            // Don't recurse into children because bitcast can share GIDs between
-            // instructions, and modifying shared GIDs corrupts other refinements.
-            // Marking the top-level destination is sufficient for escape checking.
+            // For interned sources, mark the immediate destination as .interned ONLY if
+            // the destination doesn't already have memory_safety set. If the destination
+            // is already marked as .stack (e.g., from alloc), preserve that - the stack
+            // location is where the data lives, regardless of the initial value's type.
             .interned => |interned| {
                 switch (interned.ty) {
                     .pointer, .@"struct" => {
@@ -114,7 +114,10 @@ pub const MemorySafety = union(enum) {
                             const dest_idx = ptr_ref.pointer.to;
                             const dest_ref = refinements.at(dest_idx);
                             const dest_analyte = getAnalytePtr(dest_ref);
-                            dest_analyte.memory_safety = .{ .interned = ctx.meta };
+                            // Only set .interned if no memory_safety is already set
+                            if (dest_analyte.memory_safety == null) {
+                                dest_analyte.memory_safety = .{ .interned = ctx.meta };
+                            }
                         }
                     },
                     else => {},
