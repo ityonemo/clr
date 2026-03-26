@@ -2630,16 +2630,21 @@ pub const MemorySafety = union(enum) {
 
     /// WrapErrunionPayload may create payload via typeToRefinement
     pub fn wrap_errunion_payload(state: State, index: usize, params: anytype) !void {
+        // Don't call initStackRecursive - the refinement is SHARED with the source
+        // (see WrapErrunionPayload in tag.zig). Memory_safety was already set
+        // correctly by the source, e.g., aggregate_init or store.
+        _ = state;
+        _ = index;
         _ = params;
-        const ref_idx = state.results[index].refinement orelse return;
-        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// WrapOptional creates an optional refinement - initialize memory_safety
     pub fn wrap_optional(state: State, index: usize, params: anytype) !void {
+        // Don't call initStackRecursive - the refinement may be SHARED with source.
+        // Memory_safety was already set correctly by the source.
+        _ = state;
+        _ = index;
         _ = params;
-        const ref_idx = state.results[index].refinement orelse return;
-        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// RetPtr creates a return value entity via typeToRefinement for struct/union returns

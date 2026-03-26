@@ -698,6 +698,12 @@ pub const StructFieldPtr = struct {
                 };
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = field_idx } });
             },
+            .region, .scalar => {
+                // Type mismatch - refinement is region/scalar but instruction expects struct/union.
+                // This happens when bitcast changed the pointer type (e.g., from *Region(S1) to *S2).
+                // Fall back to type info since the refinement structure doesn't match.
+                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            },
             else => |t| std.debug.panic("struct_field_ptr: expected struct or union, got {s}", .{@tagName(t)}),
         }
 
