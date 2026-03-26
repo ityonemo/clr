@@ -2797,6 +2797,13 @@ pub const MemorySafety = union(enum) {
             return true;
         }
 
+        // bufPrint/bufPrintZ: returns slice into first arg (buffer)
+        // Propagate buffer's memory_safety to returned slice
+        if (gates.isFmtBufPrint(fqn) or gates.isFmtBufPrintZ(fqn)) {
+            try handleBufPrint(state, index, args);
+            return true;
+        }
+
         // Formatter functions - check tuple args for use-after-free
         if (gates.isFormatter(fqn)) {
             try handleFormatter(state, args);
@@ -2804,6 +2811,87 @@ pub const MemorySafety = union(enum) {
         }
 
         return false;
+    }
+
+    /// Handle bufPrint/bufPrintZ - returns slice into buffer (first arg)
+    /// Propagate buffer's memory_safety to returned slice
+    fn handleBufPrint(state: State, index: usize, args: []const tag.Src) !void {
+        const results = state.results;
+        const refinements = state.refinements;
+
+        // First check all args for use-after-free
+        try handleFormatter(state, args);
+
+        // Get the buffer's memory_safety from args[0]
+        // Buffer is a slice (pointer -> region)
+        if (args.len == 0) return;
+        const buf_gid: Gid = switch (args[0]) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .interned, .fnptr => return,
+        };
+        const buf_ref = refinements.at(buf_gid);
+        if (buf_ref.* != .pointer) return;
+        const buf_ms = buf_ref.pointer.analyte.memory_safety orelse return;
+
+        // Get the return value refinement (errorunion -> pointer)
+        const result_gid = results[index].refinement orelse return;
+        const result_ref = refinements.at(result_gid);
+        if (result_ref.* != .errorunion) return;
+
+        const payload_gid = result_ref.errorunion.to;
+        const payload_ref = refinements.at(payload_gid);
+        if (payload_ref.* != .pointer) return;
+
+        // Propagate buffer's memory_safety to the returned slice
+        switch (buf_ms) {
+            .stack => |stack| {
+                refinements.at(payload_gid).pointer.analyte.memory_safety = .{
+                    .stack = .{
+                        .meta = stack.meta,
+                        .name = stack.name,
+                        .root_gid = stack.root_gid,
+                    },
+                };
+            },
+            .allocated => |alloc_ms| {
+                refinements.at(payload_gid).pointer.analyte.memory_safety = .{
+                    .allocated = .{
+                        .meta = alloc_ms.meta,
+                        .allocator_gid = alloc_ms.allocator_gid,
+                        .type_id = alloc_ms.type_id,
+                        .root_gid = buf_gid, // Derived from buffer
+                        .is_slice = true,
+                        .freed = alloc_ms.freed,
+                        .returned = alloc_ms.returned,
+                        .name_at_alloc = alloc_ms.name_at_alloc,
+                    },
+                };
+            },
+            .interned => |meta| {
+                setInternedRecursive(refinements, payload_gid, meta);
+            },
+            .error_stub => {},
+        }
+
+        // Also propagate to the region if it exists
+        if (payload_ref.pointer.to != 0) {
+            const region_gid = payload_ref.pointer.to;
+            const region_ref = refinements.at(region_gid);
+            if (region_ref.* == .region) {
+                switch (buf_ms) {
+                    .stack => |stack| {
+                        region_ref.region.analyte.memory_safety = .{ .stack = stack };
+                    },
+                    .allocated => |alloc_ms| {
+                        region_ref.region.analyte.memory_safety = .{ .allocated = alloc_ms };
+                    },
+                    .interned => |meta| {
+                        setInternedRecursive(refinements, region_gid, meta);
+                    },
+                    .error_stub => {},
+                }
+            }
+        }
     }
 
     /// Handle formatter functions - check all args recursively for use-after-free
