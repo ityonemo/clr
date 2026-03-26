@@ -101,18 +101,23 @@ pub const MemorySafety = union(enum) {
         };
         const src = switch (params.src) {
             .inst => |idx| idx,
-            // For interned pointer sources (like &.{}), mark destination as .interned
-            // since it points to static memory. Other interned values (scalars, allocators)
-            // don't need memory_safety tracking.
+            // For interned sources, mark the immediate destination as .interned.
+            // Don't recurse into children because bitcast can share GIDs between
+            // instructions, and modifying shared GIDs corrupts other refinements.
+            // Marking the top-level destination is sufficient for escape checking.
             .interned => |interned| {
-                if (interned.ty == .pointer) {
-                    // Get the destination (what ptr points to) and mark it as interned
-                    const ptr_refinement_idx = results[ptr].refinement orelse return;
-                    const ptr_ref = refinements.at(ptr_refinement_idx);
-                    if (ptr_ref.* == .pointer) {
-                        const dest_idx = ptr_ref.pointer.to;
-                        setInternedRecursive(refinements, dest_idx, ctx.meta);
-                    }
+                switch (interned.ty) {
+                    .pointer, .@"struct" => {
+                        const ptr_refinement_idx = results[ptr].refinement orelse return;
+                        const ptr_ref = refinements.at(ptr_refinement_idx);
+                        if (ptr_ref.* == .pointer) {
+                            const dest_idx = ptr_ref.pointer.to;
+                            const dest_ref = refinements.at(dest_idx);
+                            const dest_analyte = getAnalytePtr(dest_ref);
+                            dest_analyte.memory_safety = .{ .interned = ctx.meta };
+                        }
+                    },
+                    else => {},
                 }
                 return;
             },
@@ -326,10 +331,9 @@ pub const MemorySafety = union(enum) {
         const container_idx = base_ref.pointer.to;
         const container = refinements.at(container_idx);
         const container_analyte = getAnalytePtr(container);
-        const container_ms = container_analyte.memory_safety orelse {
-            initStackRecursive(refinements, ptr_idx, state.ctx.meta);
-            return;
-        };
+        // If container has no memory_safety yet, leave result unset too.
+        // Store operations will set the correct memory_safety later.
+        const container_ms = container_analyte.memory_safety orelse return;
 
         // Create memory_safety for the pointer with root_gid pointing to container
         const container_gid = container.getGid();
@@ -353,7 +357,16 @@ pub const MemorySafety = union(enum) {
         // Also ensure memory_safety is set on the pointee (the field).
         // This handles the case where the field was just created via typeToRefinement
         // (e.g., accessing an inactive union field for the first time).
-        initStackRecursive(refinements, ptr.to, state.ctx.meta);
+        // Match the container's memory_safety type.
+        switch (container_ms) {
+            .stack => initStackRecursive(refinements, ptr.to, state.ctx.meta),
+            .interned => |g| setInternedRecursive(refinements, ptr.to, g),
+            .allocated => {
+                // For allocated containers, fields are part of the allocation
+                // Leave unset - the allocation tracking handles this
+            },
+            .error_stub => {},
+        }
     }
 
     /// slice_ptr extracts the pointer from a slice.
@@ -2631,9 +2644,13 @@ pub const MemorySafety = union(enum) {
 
     /// RetPtr creates a return value entity via typeToRefinement for struct/union returns
     pub fn ret_ptr(state: State, index: usize, params: anytype) !void {
+        // Don't initialize memory_safety here - let store operations propagate it.
+        // For inst sources, memory_safety is copied from the source.
+        // For interned sources, store sets .interned on the destination.
+        // For fields using defaults (not stored), aggregate_init handles them.
+        _ = state;
+        _ = index;
         _ = params;
-        const ref_idx = state.results[index].refinement orelse return;
-        initStackRecursive(state.refinements, ref_idx, state.ctx.meta);
     }
 
     /// ErrunionPayloadPtrSet creates a new pointer to the payload - initialize memory_safety
