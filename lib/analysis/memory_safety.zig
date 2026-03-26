@@ -2287,8 +2287,15 @@ pub const MemorySafety = union(enum) {
                 // For structs: copy memory_safety from each source element to corresponding field
                 for (s.fields, 0..) |field_gid, i| {
                     if (i >= params.elements.len) {
-                        // No source element - initialize to stack (computed value)
-                        initStackRecursive(state.refinements, field_gid, state.ctx.meta);
+                        // No source element - field uses default value.
+                        // Pointer fields default to comptime values (empty slice, null, etc.) -> .interned
+                        // Non-pointer fields are computed values -> .stack
+                        const field_ref = state.refinements.at(field_gid);
+                        if (field_ref.* == .pointer) {
+                            setInternedRecursive(state.refinements, field_gid, state.ctx.meta);
+                        } else {
+                            initStackRecursive(state.refinements, field_gid, state.ctx.meta);
+                        }
                     } else {
                         const src = params.elements[i];
                         copyMemorySafetyState(state, field_gid, src);
