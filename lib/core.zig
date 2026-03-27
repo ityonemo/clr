@@ -109,4 +109,26 @@ pub const Interned = struct {
     ty: Type,
 };
 
+/// Context for orphan detection - describes how/where an entity became unreachable.
+/// Used by splatOrphaned to provide rich error messages.
+pub const OrphanContext = union(enum) {
+    /// Entity became unreachable during branch merge (if/else, switch, loop)
+    branch_merge: struct {
+        meta: Meta,
+        branch_type: BranchType,
+    },
+    /// Entity unreachable at end of function
+    function_end: struct {
+        function_name: []const u8,
+        meta: Meta,
+        in_main: bool,
+    },
+};
 
+/// Type of branch that caused orphaning during merge
+pub const BranchType = enum {
+    cond_br, // if/else
+    switch_br, // switch
+    loop, // while/for loop
+    loop_switch_br, // labeled switch with continue
+};

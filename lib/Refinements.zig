@@ -694,7 +694,15 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                     .choices = new_choices,
                 } });
             },
-            else => try new.list.append(item),
+            // Deep copy analyte for types that have one - memory_safety state must be independent
+            inline .scalar, .pointer, .optional, .errorunion, .region, .recursive, .allocator => |data, ref_tag| {
+                const new_analyte = try data.analyte.copy(allocator);
+                var new_data = data;
+                new_data.analyte = new_analyte;
+                try new.list.append(@unionInit(Refinement, @tagName(ref_tag), new_data));
+            },
+            // Types without analyte - just copy
+            .noreturn, .void, .unimplemented => try new.list.append(item),
         }
     }
     // Copy global_map - GIDs are stable so we can just copy entries

@@ -569,6 +569,10 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
+        // Check for leaks at early return point BEFORE marking allocations as returned.
+        // This detects allocations that will become orphaned by this return.
+        try checkEarlyReturnLeaks(state, params);
+
         const src_idx: Gid = switch (params.src) {
             .inst => |idx| results[idx].refinement orelse return,
             // comptime/interned values don't have memory safety tracking - skip
@@ -577,6 +581,100 @@ pub const MemorySafety = union(enum) {
 
         // Recursively check for allocations to mark as returned
         try markAllocationsAsReturned(refinements, src_idx, ctx);
+    }
+
+    /// Check for memory leaks at an early return point.
+    /// Detects allocations made in this function that are not being returned
+    /// and will become unreachable after the return.
+    ///
+    /// Key insight: Only check allocations that are REACHABLE from local variables
+    /// (the results array), not all entities in the refinements table. Entities
+    /// inside null optionals or error payloads aren't accessible and shouldn't
+    /// be considered for leak detection.
+    fn checkEarlyReturnLeaks(state: State, params: tag.RetSafe) !void {
+        const refinements = state.refinements;
+        const results = state.results;
+        const ctx = state.ctx;
+
+        // Collect GIDs reachable from the return value (these will be marked as returned)
+        var returned_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer returned_reachable.deinit();
+
+        switch (params.src) {
+            .inst => |idx| {
+                if (results[idx].refinement) |src_gid| {
+                    collectReachableGids(refinements, src_gid, &returned_reachable);
+                }
+            },
+            // Interned/fnptr returns don't contain allocations
+            .interned, .fnptr => {},
+        }
+
+        // Collect GIDs reachable from arguments (these belong to caller, not leaks)
+        var arg_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer arg_reachable.deinit();
+
+        for (results) |inst| {
+            const any_tag = inst.inst_tag orelse continue;
+            if (any_tag != .arg) continue;
+            const arg_gid = inst.refinement orelse continue;
+            collectReachableGids(refinements, arg_gid, &arg_reachable);
+        }
+
+        // Collect GIDs reachable from globals (allocations stored there aren't leaks)
+        var global_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer global_reachable.deinit();
+
+        if (refinements.global_cutoff) |cutoff| {
+            for (0..cutoff) |gid_usize| {
+                const gid: Gid = @intCast(gid_usize);
+                collectReachableGids(refinements, gid, &global_reachable);
+            }
+        }
+
+        // Iterate over local variables (results array) and check for unfreed allocations.
+        // This ensures we only check reachable allocations, not ones inside null optionals.
+        for (results) |inst| {
+            const gid = inst.refinement orelse continue;
+            const ref = refinements.at(gid);
+
+            // Only check pointers - allocation state is on the pointee
+            if (ref.* != .pointer) continue;
+
+            const pointee_gid = ref.pointer.to;
+
+            // Skip if pointee is reachable from return value (will be marked as returned)
+            if (returned_reachable.contains(pointee_gid)) continue;
+
+            // Skip if pointee is reachable from args (belongs to caller)
+            if (arg_reachable.contains(pointee_gid)) continue;
+
+            // Skip if pointee is reachable from globals (stored in global, not a local leak)
+            if (global_reachable.contains(pointee_gid)) continue;
+
+            // Check pointee for unfreed allocation
+            const pointee = refinements.at(pointee_gid);
+            const ms = getAnalytePtr(pointee).memory_safety orelse continue;
+            if (ms != .allocated) continue;
+
+            const allocation = ms.allocated;
+
+            // Skip if already freed
+            if (allocation.freed != null) continue;
+
+            // Skip if already marked as returned (shouldn't happen, but be safe)
+            if (allocation.returned) continue;
+
+            // Check if allocator was deinited (for arena allocators)
+            const alloc_ref = refinements.at(allocation.allocator_gid).allocator;
+            if (alloc_ref.deinit != null) continue;
+
+            // Report leak - allocation is orphaned by this early return
+            if (alloc_ref.arena_gid != null) {
+                return reportArenaLeak(ctx, allocation);
+            }
+            return reportMemoryLeak(ctx, allocation);
+        }
     }
 
     /// Recursively mark all allocations in a refinement tree as returned (not leaks).
@@ -1747,19 +1845,38 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Handle orphaned entities detected during branch merge.
-    /// An orphaned entity was created in a branch but is no longer reachable after merge.
+    /// Handle orphaned entities detected during branch merge or function end.
+    /// An orphaned entity was created but is no longer reachable.
     /// If the orphaned entity is a pointer to an unfreed allocation, report a leak.
-    pub fn orphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, gid: Gid) !void {
+    ///
+    /// For branch_merge: entities that "fall off" during if/else/switch/loop merge
+    /// For function_end: entities not reachable from roots at function exit
+    pub fn orphaned(
+        ctx: *Context,
+        refinements: *Refinements,
+        orphan_refinements: *Refinements,
+        gid: Gid,
+        copied_from_branch: ?*const std.AutoHashMap(Gid, void),
+        orphan_ctx: core.OrphanContext,
+    ) !void {
         _ = refinements; // Main refinements not needed for immediate reporting
-        const ref = branch_refinements.at(gid);
+        const ref = orphan_refinements.at(gid);
 
         // Only check pointers - allocation state is on the pointee
         if (ref.* != .pointer) return;
 
         // Get the pointee entity via ptr.to
         const pointee_idx = ref.pointer.to;
-        const pointee = branch_refinements.at(pointee_idx);
+
+        // For branch_merge: If the pointee was copied to the parent table, the allocation is not truly orphaned.
+        // This happens when we store an allocation into a struct field - the field's .to gets
+        // updated to point to the allocation, and during merge we copy the allocation (pointee)
+        // but not the intermediate pointer. The pointer is "orphaned" but its allocation lives on.
+        if (copied_from_branch) |cfb| {
+            if (cfb.contains(pointee_idx)) return;
+        }
+
+        const pointee = orphan_refinements.at(pointee_idx);
         const pointee_analyte = getAnalytePtr(pointee);
 
         // Check pointee's memory_safety for allocation state
@@ -1768,10 +1885,48 @@ pub const MemorySafety = union(enum) {
 
         const allocation = ms.allocated;
 
-        // If allocation is not freed and not returned, it's a leak
-        if (allocation.freed == null and !allocation.returned) {
-            return reportMemoryLeak(ctx, allocation);
+        // If allocation is already freed or returned, not a leak
+        if (allocation.freed != null) return;
+        if (allocation.returned) return;
+
+        // Check if allocator was deinited (for arena allocators)
+        // The allocator GID is stable, so we can check directly.
+        const alloc_ref = orphan_refinements.at(allocation.allocator_gid).allocator;
+        if (alloc_ref.deinit != null) return;
+
+        // Report leak with context-appropriate message
+        const is_arena = alloc_ref.arena_gid != null;
+        return reportMemoryLeakWithContext(ctx, allocation, orphan_ctx, is_arena);
+    }
+
+    /// Report a memory leak with context about how/where it was detected.
+    fn reportMemoryLeakWithContext(ctx: *Context, allocation: Allocated, orphan_ctx: core.OrphanContext, is_arena: bool) anyerror {
+        const leak_type = if (is_arena) "arena leak" else "memory leak";
+
+        switch (orphan_ctx) {
+            .branch_merge => |bm| {
+                const branch_name = switch (bm.branch_type) {
+                    .cond_br => "if/else",
+                    .switch_br => "switch",
+                    .loop => "loop",
+                    .loop_switch_br => "labeled switch",
+                };
+                try bm.meta.print(ctx.writer, "{s} detected at {s} merge in ", .{ leak_type, branch_name });
+            },
+            .function_end => |fe| {
+                try fe.meta.print(ctx.writer, "{s} at end of {s} in ", .{ leak_type, fe.function_name });
+            },
         }
+
+        var buf: [256]u8 = undefined;
+        const name_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
+        if (name_prefix.len > 0) {
+            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{name_prefix});
+        } else {
+            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+        }
+
+        return if (is_arena) error.ArenaLeak else error.MemoryLeak;
     }
 
     /// Initialize memory_safety state on a return slot refinement.

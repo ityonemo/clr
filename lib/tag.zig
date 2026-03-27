@@ -1036,7 +1036,9 @@ pub const RetSafe = struct {
             });
         } else {
             // No early_returns tracking - fall back to writing directly to return slot
+            // Transfer ownership: copy value to original, then clear cloned's slot so deinit doesn't double-free
             state.refinements.at(return_gid).* = cloned.at(return_gid).*;
+            cloned.at(return_gid).* = .{ .scalar = .{} }; // Clear to prevent double-free in deinit
             cloned.deinit();
             allocator.destroy(cloned);
         }
@@ -1112,7 +1114,9 @@ pub const RetLoad = struct {
             });
         } else {
             // No early_returns tracking - fall back to writing directly to return slot
+            // Transfer ownership: copy value to original, then clear cloned's slot so deinit doesn't double-free
             state.refinements.at(return_gid).* = cloned.at(return_gid).*;
+            cloned.at(return_gid).* = .{ .scalar = .{} }; // Clear to prevent double-free in deinit
             cloned.deinit();
             allocator.destroy(cloned);
         }
@@ -2537,6 +2541,11 @@ pub fn splatMergeEarlyReturns(
 ) !void {
     const allocator = ctx.allocator;
 
+    // NOTE: Leak detection for early returns now happens at ret_safe time,
+    // via checkEarlyReturnLeaks in memory_safety.zig. This catches leaks
+    // at the point they occur (when the return executes) rather than here
+    // at merge time. See test 183 for an example.
+
     // Build clean States with current results and no dangling pointers
     // The early_returns may have stale results/branch_returns pointers
     const branches = try allocator.alloc(State, early_returns.len);
@@ -2642,16 +2651,43 @@ fn copyAnalytesRecursive(dst_refinements: *Refinements, src_refinements: *Refine
     }
 }
 
-/// Called for each orphaned entity detected during branch merge.
-/// An orphaned entity is one that was created during branch execution but
-/// is no longer reachable from any result slot after the branch completes.
+/// Called for each orphaned entity detected during branch merge or function end.
+/// An orphaned entity is one that was created but is no longer reachable.
 /// Analysis modules can implement `orphaned` to handle these (e.g., detect leaked allocations).
-fn splatOrphaned(ctx: *Context, refinements: *Refinements, branch_refinements: *Refinements, gid: Gid) !void {
+///
+/// Parameters:
+/// - ctx: Analysis context
+/// - refinements: Main refinements table
+/// - orphan_refinements: The refinements table containing the orphaned entity
+///   (may be same as refinements for function_end, or branch's table for branch_merge)
+/// - gid: The orphaned entity's GID
+/// - copied_from_branch: Set of GIDs that were copied to parent (for branch_merge context)
+/// - orphan_ctx: Rich context describing how/where the orphaning occurred
+pub fn splatOrphaned(
+    ctx: *Context,
+    refinements: *Refinements,
+    orphan_refinements: *Refinements,
+    gid: Gid,
+    copied_from_branch: ?*const std.AutoHashMap(Gid, void),
+    orphan_ctx: core.OrphanContext,
+) !void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "orphaned")) {
-            try Analysis.orphaned(ctx, refinements, branch_refinements, gid);
+            try Analysis.orphaned(ctx, refinements, orphan_refinements, gid, copied_from_branch, orphan_ctx);
         }
     }
+}
+
+/// Convert a merge tag to a BranchType for orphan context.
+/// Returns null for merge types that shouldn't trigger orphan detection (like early_return).
+fn mergeToBranchType(comptime merge_tag: anytype) ?core.BranchType {
+    const tag_name = @tagName(merge_tag);
+    if (comptime std.mem.eql(u8, tag_name, "cond_br")) return .cond_br;
+    if (comptime std.mem.eql(u8, tag_name, "switch_br")) return .switch_br;
+    if (comptime std.mem.eql(u8, tag_name, "loop")) return .loop;
+    if (comptime std.mem.eql(u8, tag_name, "loop_switch_br")) return .loop_switch_br;
+    // early_return and other merge types don't trigger orphan detection
+    return null;
 }
 
 /// Check if a branch is "unreachable" for post-branch code merge purposes.
@@ -2841,26 +2877,37 @@ pub fn splatMerge(
     }
 
     // Detect orphaned entities: created by branch but not reachable after merge
-    for (filtered) |branch_opt| {
-        const branch = branch_opt orelse continue;
-        const branch_len = branch.refinements.list.items.len;
+    // Skip orphan detection for early_return merges - those are handled by onFinish
+    const branch_type = mergeToBranchType(merge_tag);
+    if (branch_type) |bt| {
+        const orphan_ctx: core.OrphanContext = .{
+            .branch_merge = .{
+                .meta = ctx.meta,
+                .branch_type = bt,
+            },
+        };
 
-        // Check entities created by this branch (indices >= base_len)
-        // Skip if branch has no new entities (branch_len <= base_len)
-        if (branch_len <= base_len) continue;
+        for (filtered) |branch_opt| {
+            const branch = branch_opt orelse continue;
+            const branch_len = branch.refinements.list.items.len;
 
-        for (base_len..branch_len) |gid_usize| {
-            const gid: Gid = @intCast(gid_usize);
-            // Skip if this entity was copied to parent (not truly orphaned)
-            if (copied_from_branch.contains(gid)) continue;
-            // Skip if this entity was created by copyTo in a nested merge (stale copy)
-            // These are "merge products" that exist in the branch but represent already-handled allocations
-            if (parent_copied_gids) |pcg| {
-                if (pcg.contains(gid)) continue;
-            }
-            // If not in merged set, it's orphaned (unreachable from results)
-            if (!merged.contains(gid)) {
-                try splatOrphaned(ctx, refinements, branch.refinements, gid);
+            // Check entities created by this branch (indices >= base_len)
+            // Skip if branch has no new entities (branch_len <= base_len)
+            if (branch_len <= base_len) continue;
+
+            for (base_len..branch_len) |gid_usize| {
+                const gid: Gid = @intCast(gid_usize);
+                // Skip if this entity was copied to parent (not truly orphaned)
+                if (copied_from_branch.contains(gid)) continue;
+                // Skip if this entity was created by copyTo in a nested merge (stale copy)
+                // These are "merge products" that exist in the branch but represent already-handled allocations
+                if (parent_copied_gids) |pcg| {
+                    if (pcg.contains(gid)) continue;
+                }
+                // If not in merged set, it's orphaned (unreachable from results)
+                if (!merged.contains(gid)) {
+                    try splatOrphaned(ctx, refinements, branch.refinements, gid, &copied_from_branch, orphan_ctx);
+                }
             }
         }
     }
