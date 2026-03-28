@@ -571,6 +571,7 @@ pub const MemorySafety = union(enum) {
 
         // Check for leaks at early return point BEFORE marking allocations as returned.
         // This detects allocations that will become orphaned by this return.
+        // Note: function-end leaks are handled by onFinish.
         try checkEarlyReturnLeaks(state, params);
 
         const src_idx: Gid = switch (params.src) {
@@ -972,9 +973,22 @@ pub const MemorySafety = union(enum) {
             }
         }
 
-        // Check for memory leaks - allocation state is on the POINTEE
-        // In main (stack depth 1), also check allocations stored in globals
+        // Check for memory leaks via splatOrphaned.
+        // In main (stack depth 1), also check allocations stored in globals.
         const in_main = ctx.stacktrace.items.len == 1;
+
+        // Build OrphanContext for function_end leak detection
+        const orphan_ctx: core.OrphanContext = .{
+            .function_end = .{
+                .function_name = func_name,
+                .meta = ctx.meta,
+                .in_main = in_main,
+            },
+        };
+
+        // Track which pointees we've already checked to avoid duplicate reports
+        var checked_pointees = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer checked_pointees.deinit();
 
         for (results) |inst| {
             const idx = inst.refinement orelse continue;
@@ -983,46 +997,17 @@ pub const MemorySafety = union(enum) {
 
             // Get the pointee entity via ptr.to
             const pointee_idx = refinement.pointer.to;
-            const pointee = refinements.at(pointee_idx);
 
-            // Only check data types that can have memory_safety for leaks.
-            // Pointers CAN be allocated data (from `create(*T)`) so we check them too.
-            switch (pointee.*) {
-                .region, .scalar, .@"struct", .@"union", .pointer => {},
-                else => continue,
-            }
+            // Skip if we've already checked this pointee
+            if (checked_pointees.contains(pointee_idx)) continue;
+            try checked_pointees.put(pointee_idx, {});
 
-            const pointee_analyte = getAnalytePtr(pointee);
-
-            // Check pointee's memory_safety for allocation state
-            const ms = pointee_analyte.memory_safety orelse continue;
-            if (ms != .allocated) continue;
-
-            const allocation = ms.allocated;
-
-            // Skip if freed, returned to caller, or (in non-main) reachable from a global
+            // Skip if pointee is global-reachable (unless in main)
             // In main, even global-reachable allocations must be freed before program exit
-            const skip_global_reachable = !in_main and global_reachable.contains(pointee_idx);
+            if (!in_main and global_reachable.contains(pointee_idx)) continue;
 
-            // Check if allocator was deinited (for arena allocators)
-            // The allocator GID is stable (semideepCopy returns same GID for allocators),
-            // so we can directly check the allocator's deinit field.
-            // allocator_gid always points to an allocator refinement
-            const alloc_ref = refinements.at(allocation.allocator_gid).allocator;
-            if (alloc_ref.deinit != null) {
-                // Allocator was deinited - all its allocations are implicitly freed
-                continue;
-            }
-
-            // Check for leak (allocation not freed, not returned, not global-reachable)
-            if (allocation.freed == null and !allocation.returned and !skip_global_reachable) {
-                // Report as arena leak if it was from an arena allocator
-                // allocator_gid always points to an allocator refinement
-                if (refinements.at(allocation.allocator_gid).allocator.arena_gid != null) {
-                    return reportArenaLeak(ctx, allocation);
-                }
-                return reportMemoryLeak(ctx, allocation);
-            }
+            // splatOrphaned will check allocation state and report leaks
+            try tag.splatOrphaned(ctx, refinements, refinements, idx, null, orphan_ctx);
         }
 
         // In main, also check allocations stored directly in global entities
@@ -1030,42 +1015,45 @@ pub const MemorySafety = union(enum) {
             if (refinements.global_cutoff) |cutoff| {
                 for (0..cutoff) |gid_usize| {
                     const gid: Gid = @intCast(gid_usize);
-                    try checkGlobalAllocationLeaks(refinements, gid, ctx);
+                    try checkGlobalAllocationLeaks(refinements, gid, ctx, orphan_ctx, &checked_pointees);
                 }
             }
         }
     }
 
-    /// Check if a GID (or any reachable entity) contains an unfreed allocation
-    fn checkGlobalAllocationLeaks(refinements: *Refinements, gid: Gid, ctx: *Context) !void {
+    /// Check if a GID (or any reachable entity) contains an unfreed allocation.
+    /// Uses splatOrphaned for leak detection.
+    fn checkGlobalAllocationLeaks(
+        refinements: *Refinements,
+        gid: Gid,
+        ctx: *Context,
+        orphan_ctx: core.OrphanContext,
+        checked_pointees: *std.AutoHashMap(Gid, void),
+    ) !void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .pointer => |p| {
-                // Check if the pointer points to an allocated entity
-                const pointee = refinements.at(p.to);
-                if (getAnalytePtr(pointee).memory_safety) |ms| {
-                    if (ms == .allocated) {
-                        const allocation = ms.allocated;
-                        if (allocation.freed == null and !allocation.returned) {
-                            return reportMemoryLeak(ctx, allocation);
-                        }
-                    }
+                // Skip if we've already checked this pointee
+                if (!checked_pointees.contains(p.to)) {
+                    try checked_pointees.put(p.to, {});
+                    // Use splatOrphaned for this pointer
+                    try tag.splatOrphaned(ctx, refinements, refinements, gid, null, orphan_ctx);
                 }
                 // Recurse to nested pointers
-                try checkGlobalAllocationLeaks(refinements, p.to, ctx);
+                try checkGlobalAllocationLeaks(refinements, p.to, ctx, orphan_ctx, checked_pointees);
             },
-            .optional => |o| try checkGlobalAllocationLeaks(refinements, o.to, ctx),
-            .errorunion => |e| try checkGlobalAllocationLeaks(refinements, e.to, ctx),
-            .region => |r| try checkGlobalAllocationLeaks(refinements, r.to, ctx),
+            .optional => |o| try checkGlobalAllocationLeaks(refinements, o.to, ctx, orphan_ctx, checked_pointees),
+            .errorunion => |e| try checkGlobalAllocationLeaks(refinements, e.to, ctx, orphan_ctx, checked_pointees),
+            .region => |r| try checkGlobalAllocationLeaks(refinements, r.to, ctx, orphan_ctx, checked_pointees),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
-                    try checkGlobalAllocationLeaks(refinements, field_gid, ctx);
+                    try checkGlobalAllocationLeaks(refinements, field_gid, ctx, orphan_ctx, checked_pointees);
                 }
             },
             .@"union" => |u| {
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
-                        try checkGlobalAllocationLeaks(refinements, field_gid, ctx);
+                        try checkGlobalAllocationLeaks(refinements, field_gid, ctx, orphan_ctx, checked_pointees);
                     }
                 }
             },
@@ -1913,8 +1901,9 @@ pub const MemorySafety = union(enum) {
                 };
                 try bm.meta.print(ctx.writer, "{s} detected at {s} merge in ", .{ leak_type, branch_name });
             },
-            .function_end => |fe| {
-                try fe.meta.print(ctx.writer, "{s} at end of {s} in ", .{ leak_type, fe.function_name });
+            .function_end => {
+                // Use same format as old reportMemoryLeak for compatibility
+                try ctx.meta.print(ctx.writer, "{s} in ", .{leak_type});
             },
         }
 
