@@ -44,8 +44,9 @@ load test_helper
 @test "detects leak when callee doesn't free slice from caller" {
     run compile_and_run "$TEST_CASES/allocator_safety/slice/pass_to_callee_leak.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "memory leak in pass_to_callee_leak.consumer" ]]
-    [[ "$output" =~ "pass_to_callee_leak.zig" ]]
+    [[ "$output" =~ "memory leak in pass_to_callee_leak.main" ]]
+    [[ "$output" =~ "pass_to_callee_leak.zig:13:" ]]
+    [[ "$output" =~ "allocated in pass_to_callee_leak.main" ]]
 }
 
 @test "detects double-free across caller/callee for slice" {

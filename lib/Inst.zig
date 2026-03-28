@@ -261,12 +261,13 @@ pub fn cond_br(
     var false_early_returns = std.ArrayListUnmanaged(State){};
 
     // Build state for each branch - same ctx, cloned refinements
-    // Propagate dispatch_target and copied_gids so switch_dispatch works inside cond_br
+    // Propagate dispatch_target, copied_gids, and base_gid so switch_dispatch works inside cond_br
     const true_state = State{
         .ctx = ctx,
         .results = true_results,
         .refinements = &true_refinements,
         .return_gid = return_gid,
+        .base_gid = state.base_gid,
         .created_gids = &true_created,
         .modified_gids = &true_modified,
         .branch_returns = &true_returns,
@@ -279,6 +280,7 @@ pub fn cond_br(
         .results = false_results,
         .refinements = &false_refinements,
         .return_gid = return_gid,
+        .base_gid = state.base_gid,
         .created_gids = &false_created,
         .modified_gids = &false_modified,
         .branch_returns = &false_returns,

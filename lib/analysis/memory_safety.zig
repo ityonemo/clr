@@ -99,6 +99,7 @@ pub const MemorySafety = union(enum) {
             .inst => |idx| idx,
             .interned, .fnptr => return, // globals/constants - no memory safety tracking
         };
+
         const src = switch (params.src) {
             .inst => |idx| idx,
             // For interned sources, mark the immediate destination as .interned ONLY if
@@ -148,9 +149,9 @@ pub const MemorySafety = union(enum) {
 
         // Check if storing a pointer (or derived pointer) with allocated memory
         // into a destination owned by a different function (escapes via in-out arg).
-        // When destination's stack memory belongs to a different function (the caller),
+        // When destination derives from caller-owned memory (GID < base_gid),
         // any allocated memory being stored there becomes accessible to that function.
-        checkAllocationEscapeViaStore(refinements, results, ctx, ptr, src_refinement);
+        checkAllocationEscapeViaStore(refinements, ptr, src_refinement, state.base_gid);
 
         // If storing from a parameter, propagate the parameter name_id and location to the destination's stack_ptr
         // Get name_id from the arg tag (name_id on Inst is only set by dbg_var_ptr)
@@ -192,21 +193,20 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Check if storing a pointer causes an allocation to escape via an in-out argument.
-    /// When the destination's memory_safety.stack belongs to a different function (the caller),
-    /// any allocated memory being stored there escapes to the caller and should be marked as returned.
+    /// When the destination derives from caller-owned memory (GID < base_gid),
+    /// any allocated memory being stored there escapes to the caller.
     fn checkAllocationEscapeViaStore(
         refinements: *Refinements,
-        results: []Inst,
-        ctx: *Context,
         ptr: usize,
         src_refinement: *const Refinements.Refinement,
+        base_gid: Gid,
     ) void {
         // Only check if source is a pointer
         if (src_refinement.* != .pointer) return;
 
         const src_ptr = src_refinement.pointer;
 
-        // Check if source pointer has allocated memory_safety (directly or via root_gid)
+        // Check if source pointer has allocated memory_safety
         const src_ms = src_ptr.analyte.memory_safety orelse return;
         if (src_ms != .allocated) return;
 
@@ -215,24 +215,44 @@ pub const MemorySafety = union(enum) {
         // Get the root allocation (follow root_gid if this is a derived pointer)
         const root_gid = src_alloc.root_gid;
 
-        // Get destination pointer's memory_safety
-        const dest_refinement_idx = results[ptr].refinement orelse return;
-        const dest_refinement = refinements.at(dest_refinement_idx);
-        if (dest_refinement.* != .pointer) return;
+        // Trace dest's root_gid chain to see if it reaches a GID < base_gid.
+        // If so, the destination derives from caller-owned memory.
+        // struct_field_ptr/slice_field_ptr set root_gid to track derivation.
+        var dest_is_caller_owned = false;
+        var current_gid: ?Gid = @intCast(ptr);
+        var depth: usize = 0;
 
-        const dest_ms = dest_refinement.pointer.analyte.memory_safety orelse return;
-        if (dest_ms != .stack) return;
+        while (depth < 50) : (depth += 1) {
+            const gid = current_gid orelse break;
+            if (gid == core.INVALID_GID) break;
+            if (gid >= refinements.list.items.len) break;
 
-        const dest_stack = dest_ms.stack;
+            // If current GID < base_gid, it existed before function entry (caller-owned)
+            if (gid < base_gid) {
+                dest_is_caller_owned = true;
+                break;
+            }
 
-        // Check if destination belongs to a different function (caller's stack)
-        const current_func = ctx.meta.function;
-        if (std.mem.eql(u8, dest_stack.meta.function, current_func)) {
-            // Destination is in current function's stack - no escape
-            return;
+            // Get root_gid to continue chain
+            const cur_ref = refinements.at(gid);
+            const cur_ms = switch (cur_ref.*) {
+                .pointer => |p| p.analyte.memory_safety,
+                .scalar => |s| s.analyte.memory_safety,
+                .@"struct" => |s| s.analyte.memory_safety,
+                .region => |r| r.analyte.memory_safety,
+                else => null,
+            } orelse break;
+
+            current_gid = switch (cur_ms) {
+                .stack => |s| s.root_gid,
+                .allocated => |a| a.root_gid,
+                else => null,
+            };
         }
 
-        // Destination is owned by a different function (caller) - allocation escapes!
+        if (!dest_is_caller_owned) return;
+
+        // Destination is reachable from an argument - allocation escapes to caller!
         // Mark the ROOT allocation as returned.
         if (root_gid) |root| {
             // Derived pointer - mark the root region as returned
@@ -973,6 +993,16 @@ pub const MemorySafety = union(enum) {
             }
         }
 
+        // Build set of GIDs reachable from arguments (belong to caller, not leaks)
+        var arg_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer arg_reachable.deinit();
+        for (results) |inst| {
+            const any_tag = inst.inst_tag orelse continue;
+            if (any_tag != .arg) continue;
+            const arg_gid = inst.refinement orelse continue;
+            collectReachableGids(refinements, arg_gid, &arg_reachable);
+        }
+
         // Check for memory leaks via splatOrphaned.
         // In main (stack depth 1), also check allocations stored in globals.
         const in_main = ctx.stacktrace.items.len == 1;
@@ -1001,6 +1031,9 @@ pub const MemorySafety = union(enum) {
             // Skip if we've already checked this pointee
             if (checked_pointees.contains(pointee_idx)) continue;
             try checked_pointees.put(pointee_idx, {});
+
+            // Skip if pointee is reachable from args (belongs to caller)
+            if (arg_reachable.contains(pointee_idx)) continue;
 
             // Skip if pointee is global-reachable (unless in main)
             // In main, even global-reachable allocations must be freed before program exit
@@ -1059,6 +1092,45 @@ pub const MemorySafety = union(enum) {
             },
             else => {},
         }
+    }
+
+    /// Check if target_gid is reachable from source_gid by traversing refinement links.
+    fn isReachableFrom(refinements: *Refinements, target_gid: Gid, source_gid: Gid) bool {
+        return isReachableFromInner(refinements, target_gid, source_gid, 0);
+    }
+
+    fn isReachableFromInner(refinements: *Refinements, target_gid: Gid, current_gid: Gid, depth: usize) bool {
+        // Prevent infinite recursion
+        if (depth > 100) return false;
+
+        if (current_gid == target_gid) return true;
+
+        const ref = refinements.at(current_gid);
+        return switch (ref.*) {
+            .pointer => |p| isReachableFromInner(refinements, target_gid, p.to, depth + 1),
+            .optional => |o| isReachableFromInner(refinements, target_gid, o.to, depth + 1),
+            .errorunion => |e| isReachableFromInner(refinements, target_gid, e.to, depth + 1),
+            .region => |r| isReachableFromInner(refinements, target_gid, r.to, depth + 1),
+            .@"struct" => |s| blk: {
+                for (s.fields) |field_gid| {
+                    if (isReachableFromInner(refinements, target_gid, field_gid, depth + 1)) {
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            },
+            .@"union" => |u| blk: {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        if (isReachableFromInner(refinements, target_gid, field_gid, depth + 1)) {
+                            break :blk true;
+                        }
+                    }
+                }
+                break :blk false;
+            },
+            else => false,
+        };
     }
 
     /// Recursively collect all GIDs reachable via .to fields from a starting GID.

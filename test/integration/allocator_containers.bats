@@ -50,8 +50,8 @@ load test_helper
 @test "detects leak when callee doesn't free struct pointer field" {
     run compile_and_run "$TEST_CASES/allocator_safety/struct_pointer_field/pass_to_callee_leak.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "memory leak in pass_to_callee_leak.useContainer" ]]
-    [[ "$output" =~ "pass_to_callee_leak.zig:9:" ]]
+    [[ "$output" =~ "memory leak in pass_to_callee_leak.main" ]]
+    [[ "$output" =~ "pass_to_callee_leak.zig:20:" ]]
     [[ "$output" =~ "'container.ptr' allocated in pass_to_callee_leak.main" ]]
     [[ "$output" =~ "pass_to_callee_leak.zig:16:" ]]
 }
