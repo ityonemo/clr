@@ -14,7 +14,10 @@ pub fn main() u8 {
     item1.* = .{ .data = 1, .next = null };
 
     // Create item2, link to item1
-    const item2 = allocator.create(Item) catch return 1;
+    const item2 = allocator.create(Item) catch {
+        allocator.destroy(item1); // Free item1 on error path
+        return 1;
+    };
     item2.* = .{ .data = 2, .next = item1 };
 
     // Destroy in reverse order (like the recursive test)

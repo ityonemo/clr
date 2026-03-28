@@ -12,7 +12,10 @@ pub fn main() u8 {
     const inner = allocator.create(Expr) catch return 1;
     inner.* = .{ .number = 42 };
 
-    const outer = allocator.create(Expr) catch return 1;
+    const outer = allocator.create(Expr) catch {
+        allocator.destroy(inner); // Free inner on error path
+        return 1;
+    };
     outer.* = .{ .negate = inner };
 
     // Clean up in reverse order
