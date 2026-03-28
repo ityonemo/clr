@@ -2698,7 +2698,7 @@ fn mergeToBranchType(comptime merge_tag: anytype) ?core.BranchType {
 /// Note: When branch_returns is null (e.g., for early_returns merging),
 /// we skip the noreturn check since the results may not correspond to
 /// the branch's refinements table.
-fn branchIsUnreachable(branch: State) bool {
+pub fn branchIsUnreachable(branch: State) bool {
     // Check if branch returned
     if (branch.branch_returns) |br| {
         if (br.*) return true;

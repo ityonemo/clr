@@ -419,8 +419,26 @@ pub fn switch_br(
     // Record base_len BEFORE creating void - branches may have created entities at same indices
     const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
 
-    // Mark the switch instruction as void
-    results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+    // Check if ALL switch branches are unreachable (returned or noreturn)
+    var all_branches_unreachable = true;
+    inline for (0..num_cases) |i| {
+        if (!tag.branchIsUnreachable(branch_states[i])) {
+            all_branches_unreachable = false;
+            break;
+        }
+    }
+
+    // If all branches are unreachable, mark switch result as noreturn and propagate to parent
+    if (all_branches_unreachable) {
+        results[index].refinement = try state.refinements.appendEntity(.{ .noreturn = {} });
+        // Also propagate to parent's branch_returns if available
+        if (state.branch_returns) |br| {
+            br.* = true;
+        }
+    } else {
+        // Mark the switch instruction as void
+        results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+    }
 
     // Merge all branches using splatMerge
     // Pass null for merge_base_gid - regular branch merges should merge all entities

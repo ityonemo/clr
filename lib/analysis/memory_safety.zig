@@ -2719,11 +2719,13 @@ pub const MemorySafety = union(enum) {
                     ref.scalar.analyte.memory_safety = stack_ms;
                 }
             },
-            .pointer => |p| {
+            .pointer => {
+                // Only set memory_safety on the pointer itself, NOT the pointee.
+                // A pointer on the stack can point to heap-allocated memory.
                 if (ref.pointer.analyte.memory_safety == null) {
                     ref.pointer.analyte.memory_safety = stack_ms;
                 }
-                initStackRecursive(refinements, p.to, meta);
+                // Do NOT recurse into p.to - pointee's memory_safety is independent
             },
             .optional => |o| {
                 if (ref.optional.analyte.memory_safety == null) {
