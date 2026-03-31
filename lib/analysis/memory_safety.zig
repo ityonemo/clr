@@ -39,8 +39,11 @@ pub const Allocated = struct {
     allocator_gid: Gid, // GID of the allocator used for this allocation (for mismatch detection)
     type_id: u32, // Type ID for error messages (from allocator refinement's type_id)
     name_at_alloc: ?[]const u8 = null, // Full path name when allocated (e.g., "container.ptr")
-    returned: bool = false, // true if this allocation was returned to caller (not a local leak)
-    is_slice: bool = false, // true if allocated with alloc (slice), false if create (single item)
+    // NOTE: Whether this is a slice (alloc) or single-item (create) allocation is determined
+    // by WHERE the Allocated metadata lives:
+    // - On a region → slice allocation (from alloc)
+    // - On an element (scalar/struct) with no region above → single-item (from create)
+    // - On an element wrapped in a region (from bitcast) → single-item (region has no .allocated)
 };
 
 pub const MemorySafety = union(enum) {
@@ -66,7 +69,6 @@ pub const MemorySafety = union(enum) {
         switch (self) {
             .allocated => |a| {
                 hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
-                hasher.update(&.{@as(u8, if (a.returned) 1 else 0)});
             },
             .stack, .interned, .error_stub => {},
         }
@@ -147,11 +149,9 @@ pub const MemorySafety = union(enum) {
             }
         }
 
-        // Check if storing a pointer (or derived pointer) with allocated memory
-        // into a destination owned by a different function (escapes via in-out arg).
-        // When destination derives from caller-owned memory (GID < base_gid),
-        // any allocated memory being stored there becomes accessible to that function.
-        checkAllocationEscapeViaStore(refinements, ptr, src_refinement, state.base_gid);
+        // NOTE: Allocation escape via in-out arguments is now handled by connectivity
+        // tracking - allocations reachable from caller-owned memory are not detected
+        // as local leaks.
 
         // If storing from a parameter, propagate the parameter name_id and location to the destination's stack_ptr
         // Get name_id from the arg tag (name_id on Inst is only set by dbg_var_ptr)
@@ -173,7 +173,7 @@ pub const MemorySafety = union(enum) {
         };
 
         // Set parameter name on BOTH the pointer and pointee's memory_safety.
-        // markAllocationsAsReturned checks the pointee's memory_safety for stack escape.
+        // checkReturnedStackEscape checks the pointee's memory_safety for stack escape.
         if (tgt_ptr.analyte.memory_safety) |*ms| {
             if (ms.* == .stack) {
                 ms.stack.name = .{ .parameter = param_name_id };
@@ -188,88 +188,6 @@ pub const MemorySafety = union(enum) {
             if (ms.* == .stack) {
                 ms.stack.name = .{ .parameter = param_name_id };
                 ms.stack.meta = param_meta;
-            }
-        }
-    }
-
-    /// Check if storing a pointer causes an allocation to escape via an in-out argument.
-    /// When the destination derives from caller-owned memory (GID < base_gid),
-    /// any allocated memory being stored there escapes to the caller.
-    fn checkAllocationEscapeViaStore(
-        refinements: *Refinements,
-        ptr: usize,
-        src_refinement: *const Refinements.Refinement,
-        base_gid: Gid,
-    ) void {
-        // Only check if source is a pointer
-        if (src_refinement.* != .pointer) return;
-
-        const src_ptr = src_refinement.pointer;
-
-        // Check if source pointer has allocated memory_safety
-        const src_ms = src_ptr.analyte.memory_safety orelse return;
-        if (src_ms != .allocated) return;
-
-        const src_alloc = src_ms.allocated;
-
-        // Get the root allocation (follow root_gid if this is a derived pointer)
-        const root_gid = src_alloc.root_gid;
-
-        // Trace dest's root_gid chain to see if it reaches a GID < base_gid.
-        // If so, the destination derives from caller-owned memory.
-        // struct_field_ptr/slice_field_ptr set root_gid to track derivation.
-        var dest_is_caller_owned = false;
-        var current_gid: ?Gid = @intCast(ptr);
-        var depth: usize = 0;
-
-        while (depth < 50) : (depth += 1) {
-            const gid = current_gid orelse break;
-            if (gid == core.INVALID_GID) break;
-            if (gid >= refinements.list.items.len) break;
-
-            // If current GID < base_gid, it existed before function entry (caller-owned)
-            if (gid < base_gid) {
-                dest_is_caller_owned = true;
-                break;
-            }
-
-            // Get root_gid to continue chain
-            const cur_ref = refinements.at(gid);
-            const cur_ms = switch (cur_ref.*) {
-                .pointer => |p| p.analyte.memory_safety,
-                .scalar => |s| s.analyte.memory_safety,
-                .@"struct" => |s| s.analyte.memory_safety,
-                .region => |r| r.analyte.memory_safety,
-                else => null,
-            } orelse break;
-
-            current_gid = switch (cur_ms) {
-                .stack => |s| s.root_gid,
-                .allocated => |a| a.root_gid,
-                else => null,
-            };
-        }
-
-        if (!dest_is_caller_owned) return;
-
-        // Destination is reachable from an argument - allocation escapes to caller!
-        // Mark the ROOT allocation as returned.
-        if (root_gid) |root| {
-            // Derived pointer - mark the root region as returned
-            const root_ref = refinements.at(root);
-            if (getAnalytePtr(root_ref).memory_safety) |*ms| {
-                if (ms.* == .allocated) {
-                    ms.allocated.returned = true;
-                }
-            }
-        } else {
-            // Direct pointer (not derived) - mark the pointee as returned
-            const pointee_idx = src_ptr.to;
-            const pointee = refinements.at(pointee_idx);
-            if (getAnalytePtr(pointee).memory_safety) |*ms| {
-                if (ms.* == .allocated) {
-                    ms.allocated.returned = true;
-                }
             }
         }
     }
@@ -368,7 +286,6 @@ pub const MemorySafety = union(enum) {
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = container_gid,
-                .is_slice = a.is_slice,
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => {
@@ -428,7 +345,6 @@ pub const MemorySafety = union(enum) {
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = region_gid,
-                .is_slice = a.is_slice,
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
@@ -486,7 +402,6 @@ pub const MemorySafety = union(enum) {
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = src_gid,
-                .is_slice = a.is_slice,
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = src_gid } },
@@ -599,9 +514,8 @@ pub const MemorySafety = union(enum) {
             // comptime/interned values don't have memory safety tracking - skip
             .interned, .fnptr => return,
         };
-
-        // Recursively check for allocations to mark as returned
-        try markAllocationsAsReturned(refinements, src_idx, ctx);
+        // Check for stack pointer escapes in the return value
+        try checkReturnedStackEscape(refinements, src_idx, ctx);
     }
 
     /// Check for memory leaks at an early return point.
@@ -683,9 +597,6 @@ pub const MemorySafety = union(enum) {
             // Skip if already freed
             if (allocation.freed != null) continue;
 
-            // Skip if already marked as returned (shouldn't happen, but be safe)
-            if (allocation.returned) continue;
-
             // Check if allocator was deinited (for arena allocators)
             const alloc_ref = refinements.at(allocation.allocator_gid).allocator;
             if (alloc_ref.deinit != null) continue;
@@ -698,13 +609,15 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Recursively mark all allocations in a refinement tree as returned (not leaks).
+    /// Recursively check for stack pointer escapes in a refinement tree being returned.
     /// This handles pointers, optionals containing pointers, unions containing pointers, and structs.
-    fn markAllocationsAsReturned(refinements: *Refinements, idx: Gid, ctx: *Context) !void {
+    /// Note: Allocation tracking uses connectivity - allocations reachable from returned
+    /// values are automatically not detected as leaks (no explicit marking needed).
+    fn checkReturnedStackEscape(refinements: *Refinements, idx: Gid, ctx: *Context) !void {
         const refinement = refinements.at(idx);
         switch (refinement.*) {
             .pointer => |*p| {
-                // Check pointee's memory_safety for stack pointer escape and allocation tracking.
+                // Check pointee's memory_safety for stack pointer escape.
                 // A stack escape occurs when a pointer POINTS TO stack memory, not when the
                 // pointer VALUE is on the stack. Loading a pointer from a struct field puts
                 // the pointer value on the stack (.stack memory_safety), but if it points to
@@ -718,91 +631,51 @@ pub const MemorySafety = union(enum) {
                         if (std.mem.eql(u8, sp.meta.function, func_name)) {
                             return reportStackEscape(ms.*, ctx);
                         }
-                    } else if (ms.* == .allocated) {
-                        // Mark the allocation as returned - not a leak in this function
-                        ms.allocated.returned = true;
                     }
                 }
+                // Also recurse into the pointee to check nested structures
+                // (e.g., slices/regions containing pointers)
+                try checkReturnedStackEscape(refinements, pointee_idx, ctx);
             },
             .optional => |o| {
                 // Check inner for pointers
-                try markAllocationsAsReturned(refinements, o.to, ctx);
+                try checkReturnedStackEscape(refinements, o.to, ctx);
             },
             .errorunion => |e| {
                 // Check payload for pointers
-                try markAllocationsAsReturned(refinements, e.to, ctx);
+                try checkReturnedStackEscape(refinements, e.to, ctx);
             },
             .@"struct" => |s| {
                 // Check all fields for pointers
                 for (s.fields) |field_idx| {
-                    try markAllocationsAsReturned(refinements, field_idx, ctx);
+                    try checkReturnedStackEscape(refinements, field_idx, ctx);
                 }
             },
             .@"union" => |u| {
                 // Check all fields for pointers
                 for (u.fields) |field_idx_opt| {
                     if (field_idx_opt) |field_idx| {
-                        try markAllocationsAsReturned(refinements, field_idx, ctx);
+                        try checkReturnedStackEscape(refinements, field_idx, ctx);
                     }
                 }
             },
-            .region => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
-            .recursive => |r| try markAllocationsAsReturned(refinements, r.to, ctx),
+            .region => |r| try checkReturnedStackEscape(refinements, r.to, ctx),
+            .recursive => |r| try checkReturnedStackEscape(refinements, r.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
     }
 
-    /// Clear the `returned` flag on allocations in a received return value.
-    /// Called by the caller after receiving a value from a function call.
-    /// This transfers ownership: the callee marked it as "returned" (its responsibility ends),
-    /// but the caller now owns it and must either free it or return it.
-    pub fn clearAllocationsReturned(refinements: *Refinements, idx: Gid) void {
-        const refinement = refinements.at(idx);
-        switch (refinement.*) {
-            .pointer => |*p| {
-                // Check pointee's memory_safety for allocation state
-                const pointee_idx = p.to;
-                const pointee = refinements.at(pointee_idx);
-                const pointee_analyte = getAnalytePtr(pointee);
-                if (pointee_analyte.memory_safety) |*ms| {
-                    if (ms.* == .allocated) {
-                        // Clear returned flag - caller now owns this allocation
-                        ms.allocated.returned = false;
-                    }
-                }
-            },
-            .optional => |o| {
-                clearAllocationsReturned(refinements, o.to);
-            },
-            .errorunion => |e| {
-                clearAllocationsReturned(refinements, e.to);
-            },
-            .@"struct" => |s| {
-                for (s.fields) |field_idx| {
-                    clearAllocationsReturned(refinements, field_idx);
-                }
-            },
-            .@"union" => |u| {
-                for (u.fields) |field_idx_opt| {
-                    if (field_idx_opt) |field_idx| {
-                        clearAllocationsReturned(refinements, field_idx);
-                    }
-                }
-            },
-            .region => |r| clearAllocationsReturned(refinements, r.to),
-            .recursive => |r| clearAllocationsReturned(refinements, r.to),
-            .scalar, .fnptr, .void, .noreturn, .unimplemented, .allocator => {},
-        }
-    }
-
     /// Called after receiving a return value from a function call.
-    /// Clears the "returned" flag on allocations to transfer ownership from callee to caller.
+    /// With connectivity tracking, no action is needed - allocations reachable from
+    /// the return value are automatically not detected as leaks by the caller.
     pub fn call_return(refinements: *Refinements, return_gid: Gid) void {
-        clearAllocationsReturned(refinements, return_gid);
+        _ = refinements;
+        _ = return_gid;
     }
 
-    /// Check ret_load for stack pointer escapes and mark allocations as returned.
+    /// Check ret_load for stack pointer escapes.
     /// ret_load returns a value through ret_ptr storage - used for large returns (structs, unions).
+    /// Allocation tracking uses connectivity - allocations reachable from return value are not leaks.
     pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
         _ = index;
         const results = state.results;
@@ -819,9 +692,8 @@ pub const MemorySafety = union(enum) {
 
         // Check for stack pointers escaping via struct/union fields
         try checkStackEscapeRecursive(refinements, pointee_idx, ctx, func_name);
-
-        // Mark any heap allocations in the returned value as "returned" (not leaks)
-        try markAllocationsAsReturned(refinements, pointee_idx, ctx);
+        // Note: allocation tracking is handled via connectivity - allocations reachable
+        // from the returned value are automatically not detected as leaks.
     }
 
     /// Recursively check refinement tree for escaping stack pointers.
@@ -954,7 +826,7 @@ pub const MemorySafety = union(enum) {
     /// Called on function close to check for memory leaks and stack pointer escapes.
     /// With global refinements, args share entities directly with caller.
     /// Stack pointer escapes through args are detected by checking arg pointees.
-    pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
+    pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements, return_gid: Gid) !void {
         const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
 
         // Check for stack pointer escapes via pointer arguments
@@ -1003,6 +875,13 @@ pub const MemorySafety = union(enum) {
             collectReachableGids(refinements, arg_gid, &arg_reachable);
         }
 
+        // Build set of allocation identities reachable from return value (transferred to caller, not leaks)
+        // We use allocation identity (meta) instead of GID because ret_safe deep-copies values,
+        // so the return_gid contains copied entities with different GIDs than the results table.
+        var return_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
+        defer return_alloc_metas.deinit();
+        collectReachableAllocations(refinements, return_gid, &return_alloc_metas);
+
         // Check for memory leaks via splatOrphaned.
         // In main (stack depth 1), also check allocations stored in globals.
         const in_main = ctx.stacktrace.items.len == 1;
@@ -1034,6 +913,16 @@ pub const MemorySafety = union(enum) {
 
             // Skip if pointee is reachable from args (belongs to caller)
             if (arg_reachable.contains(pointee_idx)) continue;
+
+            // Skip if this allocation is reachable from return value (transferred to caller)
+            // Check by allocation identity since ret_safe deep-copies values
+            const pointee = refinements.at(pointee_idx);
+            if (getAnalytePtrConst(pointee).memory_safety) |ms| {
+                if (ms == .allocated) {
+                    const alloc_id = AllocationIdentity.fromAllocated(ms.allocated);
+                    if (return_alloc_metas.contains(alloc_id)) continue;
+                }
+            }
 
             // Skip if pointee is global-reachable (unless in main)
             // In main, even global-reachable allocations must be freed before program exit
@@ -1161,6 +1050,111 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Allocation identity based on where/when it was allocated.
+    /// Used instead of GID for connectivity tracking because ret_safe deep-copies values.
+    const AllocationIdentity = struct {
+        file: []const u8,
+        line: u32,
+        column: ?u32,
+        allocator_gid: Gid,
+
+        pub fn fromAllocated(a: Allocated) AllocationIdentity {
+            return .{
+                .file = a.meta.file,
+                .line = a.meta.line,
+                .column = a.meta.column,
+                .allocator_gid = a.allocator_gid,
+            };
+        }
+
+        pub fn eql(self: AllocationIdentity, other: AllocationIdentity) bool {
+            return std.mem.eql(u8, self.file, other.file) and
+                self.line == other.line and
+                self.column == other.column and
+                self.allocator_gid == other.allocator_gid;
+        }
+
+        pub fn hash(self: AllocationIdentity) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(self.file);
+            h.update(std.mem.asBytes(&self.line));
+            if (self.column) |c| h.update(std.mem.asBytes(&c));
+            h.update(std.mem.asBytes(&self.allocator_gid));
+            return h.final();
+        }
+    };
+
+    const AllocationIdentityContext = struct {
+        pub fn hash(_: AllocationIdentityContext, key: AllocationIdentity) u64 {
+            return key.hash();
+        }
+        pub fn eql(_: AllocationIdentityContext, a: AllocationIdentity, b: AllocationIdentity) bool {
+            return a.eql(b);
+        }
+    };
+
+    /// Recursively collect allocation identities from a refinement tree.
+    fn collectReachableAllocations(refinements: *Refinements, gid: Gid, allocs: *std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80)) void {
+        collectReachableAllocationsInner(refinements, gid, allocs, 0);
+    }
+
+    fn collectReachableAllocationsInner(
+        refinements: *Refinements,
+        gid: Gid,
+        allocs: *std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80),
+        depth: usize,
+    ) void {
+        if (depth > 100) return; // Prevent infinite recursion
+        if (gid >= refinements.list.items.len) return;
+
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |p| {
+                // Check pointee for allocation
+                const pointee = refinements.at(p.to);
+                const pointee_analyte = getAnalytePtrConst(pointee);
+                if (pointee_analyte.memory_safety) |ms| {
+                    if (ms == .allocated) {
+                        allocs.put(AllocationIdentity.fromAllocated(ms.allocated), {}) catch return;
+                    }
+                }
+                collectReachableAllocationsInner(refinements, p.to, allocs, depth + 1);
+            },
+            .optional => |o| collectReachableAllocationsInner(refinements, o.to, allocs, depth + 1),
+            .errorunion => |e| collectReachableAllocationsInner(refinements, e.to, allocs, depth + 1),
+            .region => |r| collectReachableAllocationsInner(refinements, r.to, allocs, depth + 1),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    collectReachableAllocationsInner(refinements, field_gid, allocs, depth + 1);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        collectReachableAllocationsInner(refinements, field_gid, allocs, depth + 1);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Get a const pointer to the Analyte for any refinement type that has one.
+    fn getAnalytePtrConst(ref: *const Refinements.Refinement) *const Analyte {
+        return switch (ref.*) {
+            .scalar => |*s| &s.analyte,
+            .pointer => |*p| &p.analyte,
+            .optional => |*o| &o.analyte,
+            .errorunion => |*e| &e.analyte,
+            .@"struct" => |*st| &st.analyte,
+            .region => |*r| &r.analyte,
+            .recursive => |*rec| &rec.analyte,
+            .@"union" => |*un| &un.analyte,
+            .allocator => |*a| &a.analyte,
+            .void, .noreturn, .unimplemented, .fnptr => @panic("no analyte on this type"),
+        };
+    }
+
     // =========================================================================
     // Allocation tracking (use-after-free, double-free, memory leak detection)
     // =========================================================================
@@ -1263,14 +1257,13 @@ pub const MemorySafety = union(enum) {
     /// Recursively set .allocated memory_safety on all members of a refinement.
     /// Root gets root_gid from base (typically null), children get root_gid = root's gid.
     /// Pointers STOP recursion (they point to separate memory).
-    fn setAllocatedRecursive(refinements: *Refinements, idx: Gid, base: AllocatedBase, root_gid: ?Gid, is_slice: bool) void {
+    fn setAllocatedRecursive(refinements: *Refinements, idx: Gid, base: AllocatedBase, root_gid: ?Gid) void {
         const ref = refinements.at(idx);
         const ms: MemorySafety = .{ .allocated = .{
             .meta = base.meta,
             .allocator_gid = base.allocator_gid,
             .type_id = base.type_id,
             .root_gid = root_gid,
-            .is_slice = is_slice,
         } };
         // Children point to actual root (null for root, else the root's gid)
         const child_root = root_gid orelse ref.getGid();
@@ -1280,24 +1273,24 @@ pub const MemorySafety = union(enum) {
             .@"struct" => |*st| {
                 st.analyte.memory_safety = ms;
                 for (st.fields) |field_idx| {
-                    setAllocatedRecursive(refinements, field_idx, base, child_root, is_slice);
+                    setAllocatedRecursive(refinements, field_idx, base, child_root);
                 }
             },
             .@"union" => |*u| {
                 u.analyte.memory_safety = ms;
                 for (u.fields) |field_idx_opt| {
                     if (field_idx_opt) |field_idx| {
-                        setAllocatedRecursive(refinements, field_idx, base, child_root, is_slice);
+                        setAllocatedRecursive(refinements, field_idx, base, child_root);
                     }
                 }
             },
             .optional => |*o| {
                 o.analyte.memory_safety = ms;
-                setAllocatedRecursive(refinements, o.to, base, child_root, is_slice);
+                setAllocatedRecursive(refinements, o.to, base, child_root);
             },
             .errorunion => |*e| {
                 e.analyte.memory_safety = ms;
-                setAllocatedRecursive(refinements, e.to, base, child_root, is_slice);
+                setAllocatedRecursive(refinements, e.to, base, child_root);
             },
             .pointer => |*p| {
                 // Set memory_safety on the pointer and recurse into its .to
@@ -1305,17 +1298,17 @@ pub const MemorySafety = union(enum) {
                 // that may become orphaned when store updates it to the actual target.
                 // We still need to set memory_safety on placeholders for testValid.
                 p.analyte.memory_safety = ms;
-                setAllocatedRecursive(refinements, p.to, base, child_root, is_slice);
+                setAllocatedRecursive(refinements, p.to, base, child_root);
             },
             .region => |*r| {
                 r.analyte.memory_safety = ms;
-                setAllocatedRecursive(refinements, r.to, base, child_root, is_slice);
+                setAllocatedRecursive(refinements, r.to, base, child_root);
             },
             .recursive => |*rec| {
                 rec.analyte.memory_safety = ms;
                 // Skip placeholders (.to == 0) that haven't been resolved yet
                 if (rec.to != 0) {
-                    setAllocatedRecursive(refinements, rec.to, base, child_root, is_slice);
+                    setAllocatedRecursive(refinements, rec.to, base, child_root);
                 }
             },
             .fnptr => |*f| {
@@ -1546,7 +1539,7 @@ pub const MemorySafety = union(enum) {
                         .type_id = a.type_id,
                         .freed = a.freed,
                         .root_gid = region_idx, // derived pointer - can't be freed directly
-                    },
+                            },
                 };
                 if (a.freed) |free_site| {
                     return reportUseAfterFree(ctx, a, free_site);
@@ -1945,9 +1938,8 @@ pub const MemorySafety = union(enum) {
 
         const allocation = ms.allocated;
 
-        // If allocation is already freed or returned, not a leak
+        // If allocation is already freed, not a leak
         if (allocation.freed != null) return;
-        if (allocation.returned) return;
 
         // Check if allocator was deinited (for arena allocators)
         // The allocator GID is stable, so we can check directly.
@@ -2326,7 +2318,6 @@ pub const MemorySafety = union(enum) {
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = src_gid,
-                .is_slice = a.is_slice,
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .error_stub = {} },
@@ -3118,9 +3109,7 @@ pub const MemorySafety = union(enum) {
                         .allocator_gid = alloc_ms.allocator_gid,
                         .type_id = alloc_ms.type_id,
                         .root_gid = buf_gid, // Derived from buffer
-                        .is_slice = true,
                         .freed = alloc_ms.freed,
-                        .returned = alloc_ms.returned,
                         .name_at_alloc = alloc_ms.name_at_alloc,
                     },
                 };
@@ -3283,7 +3272,7 @@ pub const MemorySafety = union(enum) {
         // Set allocation state recursively on the pointee
         // Note: We only set memory_safety on the POINTEE, not the pointer itself.
         // The pointer is a return value (register/stack), the pointee is on the heap.
-        setAllocatedRecursive(state.refinements, pointee_ref, alloc_base, null, false);
+        setAllocatedRecursive(state.refinements, pointee_ref, alloc_base, null);
     }
 
     /// Handle mem.Allocator.destroy calls.
@@ -3380,7 +3369,8 @@ pub const MemorySafety = union(enum) {
         }
 
         // destroy expects single item (create), not slice (alloc)
-        if (a.is_slice) {
+        // Slice allocations have metadata ON the region; single-item have metadata on scalar/struct
+        if (pointee.* == .region) {
             return reportMethodMismatch(ctx, a, true, false);
         }
 
@@ -3481,19 +3471,18 @@ pub const MemorySafety = union(enum) {
         // Note: We only set memory_safety on the REGION and ELEMENT, not the pointer itself.
         // The pointer is a return value (register/stack), the region/element are on the heap.
 
-        // Set memory_safety on region
+        // Set memory_safety on region (alloc allocations have metadata ON the region)
         region.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
                 .allocator_gid = alloc_base.allocator_gid,
                 .type_id = type_id,
                 .root_gid = null,
-                .is_slice = true,
             },
         };
 
         // Set allocation state recursively on the element
-        setAllocatedRecursive(state.refinements, element_ref, alloc_base, null, true);
+        setAllocatedRecursive(state.refinements, element_ref, alloc_base, null);
     }
 
     /// Handle mem.Allocator.free calls.
@@ -3542,9 +3531,45 @@ pub const MemorySafety = union(enum) {
         const pointee_idx = ptr_refinement.pointer.to;
         const pointee_ref = refinements.at(pointee_idx);
 
+        // For free, we expect a region (slice allocation).
+        // If pointee is not a region, it's a single-item allocation → mismatch.
+        // If pointee is a region:
+        //   - If region has .allocated, it's a real alloc allocation → OK
+        //   - If region has NO .allocated but element does, it's create wrapped by bitcast → mismatch
         const pointee_analyte: *Analyte = switch (pointee_ref.*) {
-            .region => |*r| &r.analyte,
-            .scalar => |*s| &s.analyte,
+            .region => |*r| blk: {
+                // Check if region has allocation metadata
+                if (r.analyte.memory_safety) |*ms| {
+                    switch (ms.*) {
+                        .allocated => break :blk &r.analyte, // Real alloc allocation
+                        .stack => |sp| return reportFreeStackMemory(ctx, sp),
+                        .interned => return reportFreeGlobalMemory(ctx),
+                        .error_stub => return,
+                    }
+                }
+                // Region has no metadata - check if element has allocation metadata
+                // (This happens when create allocation is bitcast to [*]T)
+                const element_ref = refinements.at(r.to);
+                const element_analyte = getAnalytePtr(element_ref);
+                if (element_analyte.memory_safety) |element_ms| {
+                    if (element_ms == .allocated) {
+                        // Element has allocation metadata but region doesn't
+                        // This means it was a create allocation wrapped by bitcast → mismatch
+                        return reportMethodMismatch(ctx, element_ms.allocated, false, true);
+                    }
+                }
+                // No allocation metadata found - can't verify
+                return;
+            },
+            .scalar => |*s| blk: {
+                // Scalar pointee means single-item allocation → mismatch for free
+                if (s.analyte.memory_safety) |ms| {
+                    if (ms == .allocated) {
+                        return reportMethodMismatch(ctx, ms.allocated, false, true);
+                    }
+                }
+                break :blk &s.analyte;
+            },
             else => return,
         };
 
@@ -3600,10 +3625,7 @@ pub const MemorySafety = union(enum) {
             }
         }
 
-        // free expects slice (alloc), not single item (create)
-        if (!a.is_slice) {
-            return reportMethodMismatch(ctx, a, false, true);
-        }
+        // Note: Method mismatch is already checked above when getting pointee_analyte
 
         // Mark as freed
         const slice_inst: ?usize = switch (args[1]) {
@@ -3748,7 +3770,6 @@ pub const MemorySafety = union(enum) {
                         .allocator_gid = rag,
                         .type_id = realloc_type_id,
                         .root_gid = null,
-                        .is_slice = true,
                     },
                 };
                 break :blk opt.to;
@@ -3779,23 +3800,21 @@ pub const MemorySafety = union(enum) {
                 .allocator_gid = alloc_base.allocator_gid,
                 .type_id = realloc_type_id,
                 .root_gid = null,
-                .is_slice = true,
             },
         };
 
-        // Set memory_safety on region
+        // Set memory_safety on region (realloc is for slices, metadata on region)
         new_region.analyte.memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
                 .allocator_gid = alloc_base.allocator_gid,
                 .type_id = realloc_type_id,
                 .root_gid = null,
-                .is_slice = true,
             },
         };
 
         // Set allocation state recursively on the element
-        setAllocatedRecursive(refinements, new_element_ref, alloc_base, null, true);
+        setAllocatedRecursive(refinements, new_element_ref, alloc_base, null);
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.

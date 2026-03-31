@@ -986,7 +986,7 @@ pub fn mergeEarlyReturns(state: State) !void {
 }
 
 pub fn onFinish(state: State) !void {
-    try tag.splatFinish(state.results, state.ctx, state.refinements);
+    try tag.splatFinish(state.results, state.ctx, state.refinements, state.return_gid);
 }
 
 /// Assert all refinements are valid (non-null for all results that have one).

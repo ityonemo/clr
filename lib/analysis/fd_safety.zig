@@ -30,7 +30,7 @@ pub const Open = struct {
     meta: Meta, // Where fd was opened
     fd_type: FdType, // Type of fd (file, socket, pipe, etc.)
     closed: ?Close = null, // null = still open
-    returned: bool = false, // Exempts from leak detection
+    // Note: returned field removed - use connectivity tracking instead
 };
 
 pub const FdSafety = union(enum) {
@@ -49,7 +49,6 @@ pub const FdSafety = union(enum) {
         switch (self) {
             .open => |o| {
                 hasher.update(&.{@as(u8, if (o.closed != null) 1 else 0)});
-                hasher.update(&.{@as(u8, if (o.returned) 1 else 0)});
             },
             .untracked => {},
         }
@@ -226,185 +225,82 @@ pub const FdSafety = union(enum) {
         }
     }
 
-    /// Handle ret_safe - mark returned fds to avoid leak warnings.
+    /// Handle ret_safe - with connectivity tracking, no action needed.
+    /// FDs reachable from return value are automatically not detected as leaks.
     pub fn ret_safe(state: State, index: usize, params: tag.RetSafe) !void {
+        _ = state;
         _ = index;
-
-        // Mark the returned value and trace back through source chain
-        // to mark original fds as returned (handles wrap_errunion_payload copies)
-        switch (params.src) {
-            .inst => |inst| {
-                // Mark the direct source
-                if (state.results[inst].refinement) |src_idx| {
-                    markReturnedRecursive(state.refinements, src_idx);
-                }
-                // Trace back through wrap/unwrap operations to find original fd
-                traceAndMarkReturned(state.results, state.refinements, inst);
-            },
-            .interned, .fnptr => return,
-        }
+        _ = params;
     }
 
-    /// Handle ret_load - mark returned fds to avoid leak warnings.
-    /// ret_load is used for large return values that don't fit in registers.
+    /// Handle ret_load - with connectivity tracking, no action needed.
+    /// FDs reachable from return value are automatically not detected as leaks.
     pub fn ret_load(state: State, index: usize, params: tag.RetLoad) !void {
+        _ = state;
         _ = index;
-
-        // Get the pointee from ret_ptr and mark any fds as returned
-        const ptr_ref = state.results[params.ptr].refinement orelse return;
-        const pointee_idx = state.refinements.at(ptr_ref).pointer.to;
-        markReturnedRecursive(state.refinements, pointee_idx);
-
-        // Also trace back through store operations that built the return value
-        // to mark original fds. The return slot is built via:
-        // ret_ptr -> errunion_payload_ptr_set -> struct_field_ptr -> store
-        // We need to mark the fds that were stored, not just the return slot.
-        traceReturnSlotStores(state.results, state.refinements, params.ptr);
-    }
-
-    /// Trace back through operations that build up the return slot and mark original fds.
-    fn traceReturnSlotStores(results: []Inst, refinements: *Refinements, ret_ptr_idx: usize) void {
-        // Walk through results looking for store operations that target ret_ptr's chain
-        const ptr_ref = results[ret_ptr_idx].refinement orelse return;
-        const ptr = refinements.at(ptr_ref);
-        if (ptr.* != .pointer) return;
-
-        // Collect all GIDs in the return slot's entity tree
-        var return_gids: [64]Gid = undefined;
-        var return_gid_count: usize = 0;
-        collectEntityGids(refinements, ptr.pointer.to, &return_gids, &return_gid_count);
-
-        // Scan results for store operations whose destinations are in the return tree
-        for (results, 0..) |inst, i| {
-            _ = i;
-            const inst_tag = inst.inst_tag orelse continue;
-            switch (inst_tag) {
-                .store => |store| {
-                    // Check if this store's destination is part of the return slot
-                    const dest_ptr_gid = switch (store.ptr) {
-                        .inst => |idx| results[idx].refinement orelse continue,
-                        else => continue,
-                    };
-                    const dest_ptr = refinements.at(dest_ptr_gid);
-                    if (dest_ptr.* != .pointer) continue;
-                    const dest_gid = dest_ptr.pointer.to;
-
-                    // Is dest_gid in our return tree?
-                    const is_return_dest = for (return_gids[0..return_gid_count]) |gid| {
-                        if (gid == dest_gid) break true;
-                    } else false;
-
-                    if (is_return_dest) {
-                        // Mark the source as returned
-                        switch (store.src) {
-                            .inst => |src_idx| {
-                                if (results[src_idx].refinement) |src_gid| {
-                                    markReturnedRecursive(refinements, src_gid);
-                                }
-                            },
-                            else => {},
-                        }
-                    }
-                },
-                else => {},
-            }
-        }
-    }
-
-    /// Collect all GIDs in an entity tree (for matching against store destinations).
-    fn collectEntityGids(refinements: *Refinements, gid: Gid, out: []Gid, count: *usize) void {
-        if (count.* >= out.len) return;
-        out[count.*] = gid;
-        count.* += 1;
-
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .errorunion => collectEntityGids(refinements, ref.errorunion.to, out, count),
-            .optional => collectEntityGids(refinements, ref.optional.to, out, count),
-            .@"struct" => |s| {
-                for (s.fields) |field_gid| {
-                    collectEntityGids(refinements, field_gid, out, count);
-                }
-            },
-            else => {},
-        }
-    }
-
-    /// Trace back through source operations to find and mark original fds.
-    /// This handles cases where fd is wrapped/unwrapped before return.
-    fn traceAndMarkReturned(results: []Inst, refinements: *Refinements, start_inst: usize) void {
-        var current = start_inst;
-        while (true) {
-            const inst_tag = results[current].inst_tag orelse break;
-            const src_inst = switch (inst_tag) {
-                .wrap_errunion_payload => |w| switch (w.src) {
-                    .inst => |i| i,
-                    else => break,
-                },
-                .unwrap_errunion_payload, .@"try" => |u| switch (u.src) {
-                    .inst => |i| i,
-                    else => break,
-                },
-                else => break,
-            };
-            // Mark this source's refinement as returned
-            if (results[src_inst].refinement) |src_idx| {
-                markReturnedRecursive(refinements, src_idx);
-            }
-            current = src_inst;
-        }
+        _ = params;
     }
 
     /// Mark fd as returned (ownership transferred to caller).
-    fn markReturnedRecursive(refinements: *Refinements, gid: Gid) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .scalar => {
-                if (ref.scalar.analyte.fd_safety) |*fd| {
-                    if (fd.* == .open) {
-                        fd.open.returned = true;
-                    }
-                }
-            },
-            .errorunion => markReturnedRecursive(refinements, ref.errorunion.to),
-            .optional => markReturnedRecursive(refinements, ref.optional.to),
-            .@"struct" => |s| {
-                for (s.fields) |field_gid| {
-                    markReturnedRecursive(refinements, field_gid);
-                }
-            },
-            else => {},
-        }
-    }
-
-    /// Called after receiving a return value - clear returned flag for caller ownership.
+    /// Called after receiving a return value from a function call.
+    /// With connectivity tracking, no action is needed - fd's reachable from
+    /// the return value are automatically not detected as leaks by the caller.
     pub fn call_return(refinements: *Refinements, return_gid: Gid) void {
-        clearReturnedRecursive(refinements, return_gid);
+        _ = refinements;
+        _ = return_gid;
     }
 
-    fn clearReturnedRecursive(refinements: *Refinements, gid: Gid) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .scalar => {
-                if (ref.scalar.analyte.fd_safety) |*fd| {
-                    if (fd.* == .open) {
-                        fd.open.returned = false;
-                    }
-                }
-            },
-            .errorunion => clearReturnedRecursive(refinements, ref.errorunion.to),
-            .optional => clearReturnedRecursive(refinements, ref.optional.to),
-            .@"struct" => |s| {
-                for (s.fields) |field_gid| {
-                    clearReturnedRecursive(refinements, field_gid);
-                }
-            },
-            else => {},
+    /// FD identity based on where/when it was opened.
+    /// Used instead of GID for connectivity tracking because ret_safe deep-copies values.
+    const FdIdentity = struct {
+        file: []const u8,
+        line: u32,
+        column: ?u32,
+        fd_type: FdType,
+
+        pub fn fromOpen(open: Open) FdIdentity {
+            return .{
+                .file = open.meta.file,
+                .line = open.meta.line,
+                .column = open.meta.column,
+                .fd_type = open.fd_type,
+            };
         }
-    }
+
+        pub fn eql(self: FdIdentity, other: FdIdentity) bool {
+            return std.mem.eql(u8, self.file, other.file) and
+                self.line == other.line and
+                self.column == other.column and
+                self.fd_type == other.fd_type;
+        }
+
+        pub fn hash(self: FdIdentity) u64 {
+            var h = std.hash.Wyhash.init(0);
+            h.update(self.file);
+            h.update(std.mem.asBytes(&self.line));
+            if (self.column) |c| h.update(std.mem.asBytes(&c));
+            h.update(std.mem.asBytes(&self.fd_type));
+            return h.final();
+        }
+    };
+
+    const FdIdentityContext = struct {
+        pub fn hash(_: FdIdentityContext, key: FdIdentity) u64 {
+            return key.hash();
+        }
+        pub fn eql(_: FdIdentityContext, a: FdIdentity, b: FdIdentity) bool {
+            return a.eql(b);
+        }
+    };
 
     /// End-of-function checks - detect fd leaks.
-    pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
+    pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements, return_gid: Gid) !void {
+        // Build set of FD identities reachable from return value (transferred to caller, not leaks)
+        // We use FD identity (meta) instead of GID because ret_safe deep-copies values.
+        var return_fd_metas = std.HashMap(FdIdentity, void, FdIdentityContext, 80).init(ctx.allocator);
+        defer return_fd_metas.deinit();
+        collectReachableFds(refinements, return_gid, &return_fd_metas);
+
         // Check for fd leaks (open fds not closed, not returned)
         for (results) |inst| {
             const idx = inst.refinement orelse continue;
@@ -415,26 +311,73 @@ pub const FdSafety = union(enum) {
                 if (std.meta.activeTag(inst_tag) == .arg) continue;
             }
 
-            try checkFdLeakRecursive(refinements, idx, ctx);
+            try checkFdLeakRecursive(refinements, idx, ctx, &return_fd_metas);
         }
     }
 
-    fn checkFdLeakRecursive(refinements: *Refinements, gid: Gid, ctx: *Context) !void {
+    fn checkFdLeakRecursive(refinements: *Refinements, gid: Gid, ctx: *Context, return_fd_metas: *std.HashMap(FdIdentity, void, FdIdentityContext, 80)) !void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .scalar => {
                 const fd = ref.scalar.analyte.fd_safety orelse return;
                 if (fd != .open) return;
                 if (fd.open.closed != null) return;
-                if (fd.open.returned) return;
+
+                // Skip if this FD identity is reachable from return value
+                const fd_id = FdIdentity.fromOpen(fd.open);
+                if (return_fd_metas.contains(fd_id)) return;
 
                 return reportFdLeak(ctx, fd.open);
             },
-            .errorunion => try checkFdLeakRecursive(refinements, ref.errorunion.to, ctx),
-            .optional => try checkFdLeakRecursive(refinements, ref.optional.to, ctx),
+            .errorunion => try checkFdLeakRecursive(refinements, ref.errorunion.to, ctx, return_fd_metas),
+            .optional => try checkFdLeakRecursive(refinements, ref.optional.to, ctx, return_fd_metas),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
-                    try checkFdLeakRecursive(refinements, field_gid, ctx);
+                    try checkFdLeakRecursive(refinements, field_gid, ctx, return_fd_metas);
+                }
+            },
+            else => {},
+        }
+    }
+
+    /// Recursively collect FD identities from a refinement tree.
+    fn collectReachableFds(refinements: *Refinements, gid: Gid, fds: *std.HashMap(FdIdentity, void, FdIdentityContext, 80)) void {
+        collectReachableFdsInner(refinements, gid, fds, 0);
+    }
+
+    fn collectReachableFdsInner(
+        refinements: *Refinements,
+        gid: Gid,
+        fds: *std.HashMap(FdIdentity, void, FdIdentityContext, 80),
+        depth: usize,
+    ) void {
+        if (depth > 100) return;
+        if (gid >= refinements.list.items.len) return;
+
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => {
+                // Check for FD state
+                if (ref.scalar.analyte.fd_safety) |fd| {
+                    if (fd == .open) {
+                        fds.put(FdIdentity.fromOpen(fd.open), {}) catch return;
+                    }
+                }
+            },
+            .pointer => |p| collectReachableFdsInner(refinements, p.to, fds, depth + 1),
+            .optional => |o| collectReachableFdsInner(refinements, o.to, fds, depth + 1),
+            .errorunion => |e| collectReachableFdsInner(refinements, e.to, fds, depth + 1),
+            .region => |r| collectReachableFdsInner(refinements, r.to, fds, depth + 1),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    collectReachableFdsInner(refinements, field_gid, fds, depth + 1);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        collectReachableFdsInner(refinements, field_gid, fds, depth + 1);
+                    }
                 }
             },
             else => {},

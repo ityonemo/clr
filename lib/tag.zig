@@ -152,6 +152,50 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
     };
 }
 
+/// Copy analyte state from a source scalar to all fields of a target struct.
+/// Used when bitcasting [*]u8 to [*]Struct - the scalar's undefined_safety and
+/// memory_safety should propagate to all struct fields.
+fn copyAnalyteStateFromScalarToStruct(refinements: *Refinements, struct_gid: Gid, scalar_gid: Gid) void {
+    const scalar_ref = refinements.at(scalar_gid);
+    const src_analyte = if (scalar_ref.* == .scalar)
+        scalar_ref.scalar.analyte
+    else
+        return;
+
+    const struct_ref = refinements.at(struct_gid);
+    if (struct_ref.* != .@"struct") return;
+
+    // Copy only memory_safety to the struct itself (structs can't have undefined_safety)
+    struct_ref.@"struct".analyte.memory_safety = src_analyte.memory_safety;
+
+    // Recursively set analyte state on all struct fields
+    for (struct_ref.@"struct".fields) |field_gid| {
+        const field_ref = refinements.at(field_gid);
+        switch (field_ref.*) {
+            .scalar => |*s| {
+                s.analyte.undefined_safety = src_analyte.undefined_safety;
+                s.analyte.memory_safety = src_analyte.memory_safety;
+            },
+            .pointer => |*p| {
+                p.analyte.undefined_safety = src_analyte.undefined_safety;
+                p.analyte.memory_safety = src_analyte.memory_safety;
+            },
+            .@"struct" => copyAnalyteStateFromScalarToStruct(refinements, field_gid, scalar_gid),
+            else => {},
+        }
+    }
+}
+
+/// Clear the memory_safety on a region after its allocation tracking has been
+/// transferred to a new region (via bitcast type conversion). The new region
+/// now owns the allocation tracking, so the source should not be tracked.
+fn clearAllocationTracking(refinements: *Refinements, region_gid: Gid) void {
+    const region_ref = refinements.at(region_gid);
+    if (region_ref.* != .region) return;
+
+    region_ref.region.analyte.memory_safety = null;
+}
+
 // Tag payload types
 
 /// Entity operation: CREATE
@@ -278,13 +322,135 @@ pub const Bitcast = struct {
                 const src_gid = state.results[src].refinement orelse return;
                 const src_ref = state.refinements.at(src_gid);
 
-                // Check if we're converting pointer to optional (e.g., *T to ?*T)
+                // Check if we're converting pointer to optional (e.g., *T to ?*T or [*]u8 to ?[*]Struct)
                 if (self.ty == .optional and src_ref.* == .pointer) {
-                    // Create optional wrapper that points to the existing pointer entity
+                    // Check if inner pointer needs region element conversion
+                    const inner_ptr_type = self.ty.optional;
+                    if (inner_ptr_type.* == .pointer) {
+                        const dest_inner = inner_ptr_type.pointer;
+                        if (dest_inner.* == .region) {
+                            // Check if source pointer has region with different element type
+                            const src_pointee_gid = src_ref.pointer.to;
+                            const src_pointee = state.refinements.at(src_pointee_gid);
+                            if (src_pointee.* == .region) {
+                                const dest_elem_type = dest_inner.region;
+                                const src_elem_gid = src_pointee.region.to;
+                                const src_elem = state.refinements.at(src_elem_gid);
+
+                                // If source is scalar but dest wants struct, convert
+                                if (src_elem.* == .scalar and dest_elem_type.* == .@"struct") {
+                                    // Capture analytes before typeToRefinement (may reallocate)
+                                    const src_ptr_analyte = state.refinements.at(src_gid).pointer.analyte;
+                                    const src_region_analyte = state.refinements.at(src_pointee_gid).region.analyte;
+
+                                    // Create new struct element
+                                    const new_elem_ref = try typeToRefinement(dest_elem_type.*, state.refinements);
+                                    const new_elem_gid = try state.refinements.appendEntity(new_elem_ref);
+                                    copyAnalyteStateFromScalarToStruct(state.refinements, new_elem_gid, src_elem_gid);
+
+                                    // Create new region pointing to new element
+                                    const new_region_gid = try state.refinements.appendEntity(.{
+                                        .region = .{ .analyte = src_region_analyte, .to = new_elem_gid },
+                                    });
+
+                                    // Clear source region's allocation tracking - ownership transferred to new region
+                                    clearAllocationTracking(state.refinements, src_pointee_gid);
+
+                                    // Create new pointer pointing to new region
+                                    const new_ptr_gid = try state.refinements.appendEntity(.{
+                                        .pointer = .{ .analyte = src_ptr_analyte, .to = new_region_gid },
+                                    });
+
+                                    // Wrap in optional
+                                    const opt_gid = try state.refinements.appendEntity(.{
+                                        .optional = .{ .to = new_ptr_gid },
+                                    });
+                                    state.results[index].refinement = opt_gid;
+                                    try splat(.bitcast, state, index, self);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                    // Default: just wrap existing pointer in optional
                     const opt_gid = try state.refinements.appendEntity(.{
                         .optional = .{ .to = src_gid },
                     });
                     state.results[index].refinement = opt_gid;
+                } else if (self.ty == .pointer and src_ref.* == .pointer) {
+                    // Bitcasting pointer to pointer - check if dest has region wrapper
+                    const dest_child = self.ty.pointer;
+                    if (dest_child.* == .region) {
+                        // Check if source already has region structure
+                        const src_pointee_gid = src_ref.pointer.to;
+                        const src_pointee = state.refinements.at(src_pointee_gid);
+
+                        if (src_pointee.* == .region) {
+                            // Source already has region (pointer → region → element)
+                            // Check if destination element type differs (e.g., [*]u8 to [*]Metadata)
+                            const dest_elem_type = dest_child.region;
+                            const src_elem_gid = src_pointee.region.to;
+                            const src_region_analyte = src_pointee.region.analyte;
+                            const src_elem = state.refinements.at(src_elem_gid);
+
+                            // If source is scalar but dest wants struct, convert the region element
+                            if (src_elem.* == .scalar and dest_elem_type.* == .@"struct") {
+                                // Capture analytes before typeToRefinement (may reallocate)
+                                const src_ptr_analyte = state.refinements.at(src_gid).pointer.analyte;
+
+                                // Create new region element with the correct struct type
+                                // NOTE: typeToRefinement may reallocate, invalidating pointers
+                                const new_elem_ref = try typeToRefinement(dest_elem_type.*, state.refinements);
+                                const new_elem_gid = try state.refinements.appendEntity(new_elem_ref);
+
+                                // Copy analyte state (undefined_safety, memory_safety) from source scalar to new struct
+                                copyAnalyteStateFromScalarToStruct(state.refinements, new_elem_gid, src_elem_gid);
+
+                                // Create new region pointing to new element
+                                const new_region_gid = try state.refinements.appendEntity(.{
+                                    .region = .{
+                                        .analyte = src_region_analyte,
+                                        .to = new_elem_gid,
+                                    },
+                                });
+
+                                // Clear source region's allocation tracking - ownership transferred to new region
+                                clearAllocationTracking(state.refinements, src_pointee_gid);
+
+                                // Create new pointer pointing to new region
+                                const new_ptr_gid = try state.refinements.appendEntity(.{
+                                    .pointer = .{
+                                        .analyte = src_ptr_analyte,
+                                        .to = new_region_gid,
+                                    },
+                                });
+                                state.results[index].refinement = new_ptr_gid;
+                            } else {
+                                // Element types compatible - share the existing refinement
+                                state.results[index].refinement = src_gid;
+                            }
+                        } else {
+                            // Converting *T to [*]T or []T - wrap pointee in region
+                            // The source pointee becomes the region's element type.
+                            // DON'T copy allocation metadata to region - the original
+                            // element keeps its metadata. This allows detecting create/free
+                            // mismatches: region has no .allocated but element does.
+                            const region_gid = try state.refinements.appendEntity(.{
+                                .region = .{ .to = src_pointee_gid },
+                            });
+                            // Copy the source pointer's analyte to the new pointer
+                            const ptr_gid = try state.refinements.appendEntity(.{
+                                .pointer = .{
+                                    .analyte = src_ref.pointer.analyte,
+                                    .to = region_gid,
+                                },
+                            });
+                            state.results[index].refinement = ptr_gid;
+                        }
+                    } else {
+                        // Default: share the source refinement directly
+                        state.results[index].refinement = src_gid;
+                    }
                 } else {
                     // Default: share the source refinement directly
                     state.results[index].refinement = src_gid;
@@ -1311,7 +1477,7 @@ pub const WrapErrunionPayload = struct {
         // Create errorunion structure based on the result type
         // payload_gid is the GID of the payload entity
         // IMPORTANT: We SHARE the source entity (not copy) so that memory_safety
-        // tracking (like .returned flag) affects the original allocation.
+        // tracking affects the original allocation.
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
                 // Get payload refinement from source instruction - share it
@@ -1368,7 +1534,7 @@ pub const WrapOptional = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Get payload GID from source
         // IMPORTANT: We SHARE the source entity (not copy) so that memory_safety
-        // tracking (like .returned flag) affects the original allocation.
+        // tracking affects the original allocation.
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
                 const src_gid = state.results[src].refinement orelse {
@@ -2422,10 +2588,10 @@ pub fn splat(comptime tag: anytype, state: State, index: usize, payload: anytype
 /// Called at the end of each function to allow analyses to perform final checks.
 /// Each analysis can implement `onFinish` to do end-of-function processing
 /// (e.g., memory leak detection after all paths have been processed).
-pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements) !void {
+pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements, return_gid: Gid) !void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "onFinish")) {
-            try Analysis.onFinish(results, ctx, refinements);
+            try Analysis.onFinish(results, ctx, refinements, return_gid);
         }
     }
 }
@@ -3836,4 +4002,202 @@ test "reallocation bug: assign typeToRefinement result to slot in same table" {
 
     // Should work now
     try std.testing.expectEqual(.optional, std.meta.activeTag(cloned.at(return_gid).*));
+}
+
+test "slice_ptr produces pointer to region (multi-item pointer)" {
+    // This test verifies that slice_ptr extracts a pointer to the region,
+    // not a pointer to a scalar. This is important because pointer arithmetic
+    // (ptr_add) is only valid on multi-item pointers (pointer to region).
+    // A slice is pointer -> region -> element, and slice.ptr should give
+    // a pointer to the region (the [*]T part), not a pointer to a single element.
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a slice structure: pointer -> region -> element (scalar)
+    const element_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+    const slice_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+    results[0].refinement = slice_gid;
+
+    // slice_ptr should extract the pointer to the region
+    try Inst.apply(state, 1, .{ .slice_ptr = .{ .slice = 0 } });
+
+    // Verify result is a pointer
+    try std.testing.expect(results[1].refinement != null);
+    const result_ref = refinements.at(results[1].refinement.?);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+
+    // CRITICAL: The pointer must point to a REGION (multi-item pointer),
+    // not to a scalar (single-item pointer). This allows ptr_add to work.
+    const pointee_gid = result_ref.pointer.to;
+    const pointee_ref = refinements.at(pointee_gid);
+    try std.testing.expectEqual(.region, std.meta.activeTag(pointee_ref.*));
+
+    // The region should point to the same element
+    try std.testing.expectEqual(element_gid, pointee_ref.region.to);
+}
+
+test "bitcast converts [*]u8 to [*]Struct region element type" {
+    // This test verifies that bitcasting a pointer to region of scalars ([*]u8)
+    // to a pointer to region of structs ([*]Struct) correctly converts the
+    // region element type from scalar to struct. This is important for HashMap
+    // which allocates raw bytes then bitcasts to [*]Metadata.
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create source: pointer → region → scalar (simulating [*]u8)
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = scalar_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+    results[0].refinement = ptr_gid;
+
+    // Create destination type: pointer → region → struct with 2 scalar fields
+    // (simulating [*]Metadata where Metadata = packed struct { fingerprint: u7, used: bool })
+    const struct_type = Type{ .@"struct" = &.{
+        .type_id = 1234,
+        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .is_packed = true,
+    } };
+    const region_type = Type{ .region = &struct_type };
+    const ptr_type = Type{ .pointer = &region_type };
+
+    // Bitcast from [*]u8 to [*]Struct
+    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .inst = 0 }, .ty = ptr_type } });
+
+    // Verify result is a pointer
+    try std.testing.expect(results[1].refinement != null);
+    const result_ref = refinements.at(results[1].refinement.?);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+
+    // Verify it points to a region
+    const result_region_ref = refinements.at(result_ref.pointer.to);
+    try std.testing.expectEqual(.region, std.meta.activeTag(result_region_ref.*));
+
+    // CRITICAL: The region element must now be a struct, not a scalar
+    const elem_gid = result_region_ref.region.to;
+    const elem_ref = refinements.at(elem_gid);
+    try std.testing.expectEqual(.@"struct", std.meta.activeTag(elem_ref.*));
+
+    // Verify struct has 2 fields
+    try std.testing.expectEqual(@as(usize, 2), elem_ref.@"struct".fields.len);
+
+    // Both fields should be scalars
+    const field0 = refinements.at(elem_ref.@"struct".fields[0]);
+    const field1 = refinements.at(elem_ref.@"struct".fields[1]);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(field0.*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(field1.*));
+}
+
+test "ptr_add on pointer to region returns pointer to same region" {
+    // When doing pointer arithmetic (ptr + N) on a pointer to a region,
+    // the result must still point to the SAME region entity.
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create: pointer → region → scalar
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+    results[0].refinement = ptr_gid;
+
+    // ptr_add should share the same refinement
+    try Inst.apply(state, 1, .{ .ptr_add = .{ .ptr = .{ .inst = 0 } } });
+
+    // Result must be the SAME gid (sharing refinement)
+    try std.testing.expectEqual(ptr_gid, results[1].refinement.?);
+}
+
+test "ptr_sub on pointer to region returns pointer to same region" {
+    // When doing pointer arithmetic (ptr - N) on a pointer to a region,
+    // the result must still point to the SAME region entity.
+    // This is critical for HashMap's header() pattern where metadata - 1
+    // recovers the original allocation.
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create: pointer → region → scalar
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+    results[0].refinement = ptr_gid;
+
+    // ptr_sub should share the same refinement
+    try Inst.apply(state, 1, .{ .ptr_sub = .{ .ptr = .{ .inst = 0 } } });
+
+    // Result must be the SAME gid (sharing refinement)
+    try std.testing.expectEqual(ptr_gid, results[1].refinement.?);
+}
+
+test "bitcast from [*]T to *T preserves region structure" {
+    // When bitcasting from multi-item pointer ([*]T) to single-item pointer (*T),
+    // the refinement must still point to the region. We're just changing the
+    // type view, not the underlying memory structure.
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create source: pointer → region → struct (simulating [*]Header)
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = &.{}, .type_id = 123 } });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = struct_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+    results[0].refinement = ptr_gid;
+
+    // Dest type: pointer → struct (single-item pointer, no region wrapper)
+    const struct_type = Type{ .@"struct" = &.{ .type_id = 123, .fields = &.{} } };
+    const ptr_type = Type{ .pointer = &struct_type };
+
+    // Bitcast from [*]Header to *Header
+    try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .inst = 0 }, .ty = ptr_type } });
+
+    // CRITICAL: Result must share the SAME refinement (preserving region structure)
+    try std.testing.expectEqual(ptr_gid, results[1].refinement.?);
 }

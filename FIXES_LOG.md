@@ -4,6 +4,49 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Create/free method mismatch not detected after bitcast
+
+**Date:** 2026-03-31
+
+**Symptom:**
+When allocating with `create(u8)` and freeing with `free(slice)` after a bitcast from `*u8` to `*[1]u8`, the analyzer reported "memory leak" instead of "allocation method mismatch".
+
+**Root Cause:**
+The `is_slice` check in `handleAllocDestroy` and `handleAllocFree` derived the allocation method from the current refinement structure (`pointee.* == .region` = slice). When bitcast converted `*u8` (pointer → scalar) to `*[1]u8` (pointer → region → scalar), the structure changed, making the analyzer think a single-item `create` allocation was now a slice allocation.
+
+**When This Happens:**
+- Allocate with `allocator.create(u8)` → returns `*u8`
+- Cast to `*[1]u8` via `@ptrCast` → bitcast wraps scalar in region
+- Convert to slice via array coercion → `[]u8`
+- Free with `allocator.free(slice)` → analyzer sees region, thinks it's slice allocation
+
+**Key Insight:**
+The allocation method is determined by the TYPE of allocation:
+- `create` ALWAYS returns pointer → scalar/struct (single item)
+- `alloc` ALWAYS returns pointer → region → element (slice)
+
+Therefore, WHERE the `.allocated` metadata lives tells us the allocation method:
+- `.allocated` on region → real `alloc` allocation
+- `.allocated` on element (scalar/struct) with no `.allocated` on region → `create` allocation (possibly wrapped by bitcast)
+
+**The Fix:**
+1. When bitcast wraps a scalar in a region (converting `*T` to `[*]T`), the region is created WITHOUT allocation metadata
+2. The original scalar keeps its `.allocated` metadata from `create`
+3. In `handleAllocFree`, detect mismatch by checking structure:
+   - If region has `.allocated` → it's a real `alloc` allocation → OK for `free`
+   - If region has NO `.allocated` but element does → it's a `create` allocation wrapped by bitcast → MISMATCH
+4. Same logic in `handleAllocDestroy` for the reverse case
+
+This approach requires no additional fields - the refinement structure itself encodes the allocation method.
+
+**Key Files Changed:**
+- `lib/analysis/memory_safety.zig` - Updated `handleAllocFree` and `handleAllocDestroy` to detect mismatch via structure
+- `lib/tag.zig` - Ensure bitcast does NOT copy allocation metadata to new region wrapper
+
+**Test Case:** `test/cases/allocator_safety/basic/create_free_mismatch.zig` (test #25)
+
+---
+
 ## Fix: clearAllocationMetadata must use .unset instead of null
 
 **Date:** 2026-03-17
@@ -209,6 +252,36 @@ Also added a testable helper `formatAllocatorType()` that generates the allocato
 
 ---
 
+## Fix: slice_ptr must produce pointer to region (multi-item pointer)
+
+**Date:** 2026-03-30
+
+**Symptom:**
+When running code that does pointer arithmetic on `slice.ptr` (e.g., `slice.ptr + 1`), the analysis incorrectly reported an error about pointer arithmetic on a single-item pointer.
+
+**Root Cause:**
+The `slice_ptr` handler was creating a pointer to a scalar instead of a pointer to a region. In Zig's type system:
+- `*T` (single-item pointer) → pointer to scalar
+- `[*]T` (multi-item pointer) → pointer to region
+
+A slice is `[]T` which is represented as `pointer → region → element`. When you access `slice.ptr`, you get a `[*]T` (multi-item pointer), which should be `pointer → region`.
+
+**When This Happens:**
+When code extracts the `.ptr` from a slice and performs pointer arithmetic:
+```zig
+const slice: []const u8 = &data;
+const ptr = slice.ptr;     // Should be [*]const u8 (multi-item)
+const second = ptr + 1;    // ptr_add - only valid on multi-item pointers
+```
+
+**The Fix:**
+The `slice_ptr` handler correctly creates a new pointer that points to the same region as the slice, not to the element. This was verified to be working correctly, but was missing a unit test.
+
+**Unit Test:** `tag.test.slice_ptr produces pointer to region (multi-item pointer)` in `lib/tag.zig`
+**Integration Test:** `test/cases/memory/slice_ptr_add.zig`
+
+---
+
 ## Fix: struct_field_val must handle region fields
 
 **Date:** 2026-03-21
@@ -234,5 +307,85 @@ Added `.region` to the list of container types that don't track undefined on the
 ```
 
 **Test Case:** `test/cases/misc/struct_with_array_field.zig`
+
+---
+
+## Fix: Bitcast from [*]u8 to [*]Struct must convert region element type
+
+**Date:** 2026-03-30
+
+**Symptom:**
+When running the HashMap vendor wrapper, false positive "use of undefined value" error occurred in `Metadata.isUsed` function even though the metadata had been initialized via `@memset`.
+
+**Root Cause:**
+HashMap allocates memory using `alignedAlloc(u8, ...)` which returns `[*]u8`, then bitcasts to `[*]Metadata`. The Bitcast handler was sharing the existing refinement when bitcasting between region pointers, which meant the region element type stayed as scalar instead of being converted to struct.
+
+When `@memset` was called on the region, it marked the scalar element as defined. But when code accessed `.used` field on a metadata element, the analysis looked for struct fields on what was still a scalar refinement, found nothing, and incorrectly reported an undefined value.
+
+**When This Happens:**
+When code allocates raw bytes and bitcasts to a structured type:
+```zig
+const slice = allocator.alignedAlloc(u8, @alignOf(Metadata), size);
+const metadata: [*]Metadata = @ptrCast(slice.ptr);
+@memset(metadata[0..count], .{ .fingerprint = 0, .used = false });
+if (metadata[0].used) { ... }  // False positive: "use of undefined value"
+```
+
+**The Fix:**
+Modified the `Bitcast.apply` handler in `lib/tag.zig` to detect when bitcasting a pointer to region of scalars to a pointer to region of structs. When this happens:
+1. Create a new struct element refinement with the correct field structure
+2. Copy the undefined state from the source scalar to all struct fields
+3. Create a new region pointing to the new struct element
+4. Create a new pointer pointing to the new region
+
+Added helper function `copyUndefinedStateFromScalarToStruct` to propagate undefined state from scalar to struct fields recursively.
+
+**Unit Test:** `tag.test.bitcast converts [*]u8 to [*]Struct region element type` in `lib/tag.zig`
+**Integration Test:** `test/cases/misc/bitcast_scalar_to_struct.zig`, `test/integration/misc.bats`
+
+---
+
+## Fix: Clear source allocation tracking when bitcast creates new region
+
+**Date:** 2026-03-30
+
+**Symptom:**
+False positive memory leak reported when using HashMap-style pointer arithmetic pattern. Allocating `[Header][Data]` as bytes, storing a derived pointer (`ptr + sizeof(Header)`) to an optional field, then freeing via reverse arithmetic (`ptr - sizeof(Header)`) incorrectly reported a memory leak.
+
+**Root Cause:**
+When bitcast converts `[*]u8` to `?[*]Metadata` (optional pointer to region of structs), it creates NEW refinement entities (pointer → region → struct) with memory_safety.allocated copied from the source. However, the SOURCE region still had memory_safety.allocated with freed=null.
+
+The leak detector found two regions with allocated state:
+1. Source region (from original slice_ptr/ptr_add) with allocated, freed=null
+2. New region (from bitcast type conversion) with allocated, freed=null
+
+Only the new region's pointer was stored to self.metadata. When the allocate function returned, the source region was detected as a leak because it had allocated state but wasn't stored anywhere.
+
+**When This Happens:**
+When code stores a bitcast'd pointer that required type conversion:
+```zig
+const slice = allocator.alloc(u8, total_size);
+const ptr: [*]u8 = slice.ptr;
+const data_ptr = ptr + @sizeOf(Header);  // Derived pointer
+self.metadata = @ptrCast(@alignCast(data_ptr));  // Bitcast to ?[*]Struct
+// Source region (data_ptr) still has allocated state → false positive leak
+```
+
+**The Fix:**
+After creating the new region with copied memory_safety during bitcast type conversion, clear the SOURCE region's memory_safety (set to null). The new region now owns the allocation tracking, so the source should not be tracked. This uses connectivity tracking - the allocation is only tracked via the new region which is reachable through self.metadata.
+
+Added helper function `clearAllocationTracking` in `lib/tag.zig` that sets memory_safety to null on a region.
+
+Also fixed `copyAnalyteStateFromScalarToStruct` to only copy memory_safety (not undefined_safety) to struct containers, since structs cannot have undefined_safety at the container level.
+
+**Unit Tests:** 
+- `tag.test.ptr_sub on pointer to region returns pointer to same region`
+- `tag.test.ptr_add on pointer to region returns pointer to same region`
+- `tag.test.bitcast from [*]T to *T preserves region structure`
+
+**Integration Tests:** 
+- `test/cases/memory/optional_ptr_arithmetic_free.zig`
+- `test/cases/memory/ptr_arithmetic_free.zig`
+- `test/integration/allocator_slice.bats`
 
 ---
