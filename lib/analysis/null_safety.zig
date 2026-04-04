@@ -113,7 +113,6 @@ pub const NullSafety = union(enum) {
 
     /// optional_payload errors on unchecked unwrap or known null unwrap
     pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
-        _ = index;
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
@@ -127,12 +126,47 @@ pub const NullSafety = union(enum) {
         // optional_payload can apply to optionals or pointers (for error union unwrapping)
         if (ref.* != .optional) return;
 
-        const ns = ref.optional.analyte.null_safety orelse return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
+        const ns = ref.optional.analyte.null_safety orelse {
+            // No null_safety set - check for preceding is_non_null assertion
+            // Zig generates is_non_null before optional_payload for .? operator
+            if (hasIsNonNullAssertion(results, index, params.src)) return;
+            return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
+        };
         switch (ns) {
-            .unknown => return reportUncheckedUnwrap(ctx, results[src_idx].name_id),
+            .unknown => {
+                // Unknown state means we tracked this optional and know it might be null
+                // (e.g., after branch merge). This is an error regardless of runtime checks.
+                return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
+            },
             .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name_id),
             .non_null => {}, // Safe
         }
+    }
+
+    /// Check if there's a preceding is_non_null assertion on the same source.
+    /// Zig generates is_non_null as a runtime safety check before .? (optional_payload).
+    ///
+    /// This is ONLY used when null_safety is NOT set (we have no tracking for this optional).
+    /// In that case, the runtime check prevents undefined behavior, so we allow it.
+    ///
+    /// This is NOT used when null_safety is .unknown - that means we tracked the optional
+    /// and know it might be null (e.g., after branch merge). That's a static analysis error.
+    fn hasIsNonNullAssertion(results: []const Inst, index: usize, target_src: tag.Src) bool {
+        // Look backward for is_non_null on the same source
+        var i: usize = index;
+        while (i > 0) {
+            i -= 1;
+            const inst_tag = results[i].inst_tag orelse continue;
+            switch (inst_tag) {
+                .is_non_null => |t| {
+                    if (std.meta.eql(t.src, target_src)) {
+                        return true; // Found matching is_non_null assertion
+                    }
+                },
+                else => {},
+            }
+        }
+        return false;
     }
 
     /// store tracks assignments to optionals

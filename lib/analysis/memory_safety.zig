@@ -431,6 +431,24 @@ pub const MemorySafety = union(enum) {
             try ctx.meta.print(ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
             return error.PtrArithmeticOnSingleItem;
         }
+
+        // Check if the region is a "fake" wrapper around a single-item allocation.
+        // This happens when bitcast converts *T to [*]T - the region is created
+        // but has no .allocated metadata (the element has it instead).
+        const region = &pointee_ref.region;
+        if (region.analyte.memory_safety == null) {
+            // Region has no memory_safety - check if element has allocation metadata
+            const element_ref = refinements.at(region.to);
+            const element_analyte = getAnalytePtr(element_ref);
+            if (element_analyte.memory_safety) |element_ms| {
+                if (element_ms == .allocated) {
+                    // Element has allocation metadata but region doesn't
+                    // This means it was a single-item allocation wrapped by bitcast
+                    try ctx.meta.print(ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
+                    return error.PtrArithmeticOnSingleItem;
+                }
+            }
+        }
     }
 
     /// ptr_sub has the same safety requirements as ptr_add

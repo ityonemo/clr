@@ -283,6 +283,34 @@ test "call is no-op for null_safety" {
     try std.testing.expect(intercepted == false);
 }
 
+test "optional_payload succeeds when preceded by is_non_null assertion on same source" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create an optional with NO null_safety set (unchecked)
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
+
+    // Set up results:
+    // inst 0 = the optional value
+    // inst 1 = is_non_null assertion (Zig's safety check for .?)
+    // inst 2 = optional_payload (the actual unwrap)
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = opt_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Apply is_non_null on inst 0 (this is what Zig generates for .?)
+    try Inst.apply(state, 1, .{ .is_non_null = .{ .src = .{ .inst = 0 } } });
+
+    // Now optional_payload should succeed because is_non_null guards it
+    // (is_non_null asserts non-null at runtime, so if we get here, it's non-null)
+    try Inst.apply(state, 2, .{ .optional_payload = .{ .src = .{ .inst = 0 } } });
+
+    // Result should have the inner entity
+    try std.testing.expectEqual(inner_gid, results[2].refinement.?);
+}
+
 test "aggregate_init incorporates null_safety from source elements" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
