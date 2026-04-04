@@ -78,3 +78,17 @@ load test_helper
     run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_ptr_transfer.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for freeing via pointer arithmetic with optional wrapper" {
+    # Tests the HashMap pattern: allocate [Header][Data], store derived pointer
+    # (pointing to Data), then free via reverse arithmetic (ptr - sizeof(Header)).
+    # The bitcast from [*]u8 to ?[*]Struct should not cause duplicate leak detection.
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/optional_ptr_arithmetic_free.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no false positive for freeing via simple pointer arithmetic" {
+    # Tests basic pointer arithmetic free pattern without optional wrapper.
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/ptr_arithmetic_free.zig"
+    [ "$status" -eq 0 ]
+}
