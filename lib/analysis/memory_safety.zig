@@ -821,49 +821,49 @@ pub const MemorySafety = union(enum) {
         if (payload_ms != .allocated and payload_ms != .error_stub) return;
 
         // On error path, the allocation didn't happen - mark the payload as phantom.
-        markPhantomAllocation(refinements, payload_gid);
+        markPayloadErrorStub(refinements, payload_gid);
     }
 
-    /// Recursively mark a payload subtree as phantom on an allocation error path.
-    fn markPhantomAllocation(refinements: *Refinements, gid: Gid) void {
+    /// Recursively mark a payload subtree with .error_stub.
+    /// `.error_stub` belongs on payload structure, not on errorunion wrappers.
+    fn markPayloadErrorStub(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .pointer => |*p| {
                 p.analyte.memory_safety = .{ .error_stub = {} };
-                markPhantomAllocation(refinements, p.to);
+                markPayloadErrorStub(refinements, p.to);
             },
             .scalar => |*s| s.analyte.memory_safety = .{ .error_stub = {} },
             .@"struct" => |*st| {
                 st.analyte.memory_safety = .{ .error_stub = {} };
                 for (st.fields) |field_gid| {
-                    markPhantomAllocation(refinements, field_gid);
+                    markPayloadErrorStub(refinements, field_gid);
                 }
             },
             .@"union" => |*u| {
                 u.analyte.memory_safety = .{ .error_stub = {} };
                 for (u.fields) |field_opt| {
                     if (field_opt) |field_gid| {
-                        markPhantomAllocation(refinements, field_gid);
+                        markPayloadErrorStub(refinements, field_gid);
                     }
                 }
             },
             .region => |*r| {
                 r.analyte.memory_safety = .{ .error_stub = {} };
-                markPhantomAllocation(refinements, r.to);
+                markPayloadErrorStub(refinements, r.to);
             },
             .optional => |*o| {
                 o.analyte.memory_safety = .{ .error_stub = {} };
-                markPhantomAllocation(refinements, o.to);
+                markPayloadErrorStub(refinements, o.to);
             },
-            .errorunion => |*e| {
-                e.analyte.memory_safety = .{ .error_stub = {} };
-                markPhantomAllocation(refinements, e.to);
+            .errorunion => |e| {
+                markPayloadErrorStub(refinements, e.to);
             },
             .allocator => |*a| a.analyte.memory_safety = .{ .error_stub = {} },
             .fnptr => |*f| f.analyte.memory_safety = .{ .error_stub = {} },
             .recursive => |*r| {
                 r.analyte.memory_safety = .{ .error_stub = {} };
-                if (r.to != 0) markPhantomAllocation(refinements, r.to);
+                if (r.to != 0) markPayloadErrorStub(refinements, r.to);
             },
             .void, .noreturn, .unimplemented => {},
         }
@@ -2014,48 +2014,17 @@ pub const MemorySafety = union(enum) {
         return if (is_arena) error.ArenaLeak else error.MemoryLeak;
     }
 
-    /// Initialize memory_safety state on a freshly created return slot refinement.
-    /// Fresh structure already starts with null memory_safety; the only container-specific
-    /// marker we need to establish eagerly is errorunion.error_stub.
+    /// Fresh return slots keep null memory_safety until real values are written into them.
     pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+        _ = refinements;
+        _ = gid;
         _ = ctx;
-        markReturnSlotErrorUnions(refinements, gid);
     }
 
-    /// Fresh defined return slots share the same memory-safety initialization rule:
-    /// leave fresh nodes untouched except for errorunion.error_stub markers.
+    /// Fresh defined return slots share the same initialization rule.
     pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
-        markReturnSlotErrorUnions(refinements, gid);
-    }
-
-    fn markReturnSlotErrorUnions(refinements: *Refinements, gid: Gid) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .pointer => |p| markReturnSlotErrorUnions(refinements, p.to),
-            .scalar => {},
-            .optional => |o| markReturnSlotErrorUnions(refinements, o.to),
-            .errorunion => |e| {
-                ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
-                markReturnSlotErrorUnions(refinements, e.to);
-            },
-            .@"struct" => |s| {
-                for (s.fields) |field_gid| {
-                    markReturnSlotErrorUnions(refinements, field_gid);
-                }
-            },
-            .@"union" => |u| {
-                for (u.fields) |maybe_field_gid| {
-                    if (maybe_field_gid) |field_gid| {
-                        markReturnSlotErrorUnions(refinements, field_gid);
-                    }
-                }
-            },
-            .allocator, .fnptr => {},
-            .region => |r| markReturnSlotErrorUnions(refinements, r.to),
-            .recursive => |r| if (r.to != 0) markReturnSlotErrorUnions(refinements, r.to),
-            .void, .noreturn => {},
-            .unimplemented => {}, // unimplemented types are silently skipped
-        }
+        _ = refinements;
+        _ = gid;
     }
 
     /// Initialize memory_safety for comptime/interned values.
@@ -2673,7 +2642,10 @@ pub const MemorySafety = union(enum) {
     pub fn wrap_errunion_err(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        const ref = state.refinements.at(ref_idx);
+        if (ref.* != .errorunion) return;
+        ref.errorunion.analyte.memory_safety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+        markPayloadErrorStub(state.refinements, ref.errorunion.to);
     }
 
     pub fn unwrap_errunion_err(state: State, index: usize, params: anytype) !void {
@@ -2702,9 +2674,6 @@ pub const MemorySafety = union(enum) {
     /// This traverses non-pointer structure and stops at pointer indirection.
     /// Callers must only use this on newly materialized result structure, never
     /// on shared preexisting nodes.
-    ///
-    /// Error unions are special: their wrapper node can only carry .error_stub,
-    /// so we preserve that invariant and paint only the payload with `ms`.
     pub fn paintSpatialMemory(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
@@ -2719,7 +2688,7 @@ pub const MemorySafety = union(enum) {
                 paintSpatialMemory(refinements, o.to, ms);
             },
             .errorunion => |e| {
-                ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
+                ref.errorunion.analyte.memory_safety = ms;
                 paintSpatialMemory(refinements, e.to, ms);
             },
             .@"struct" => |s| {
@@ -2843,7 +2812,7 @@ pub const MemorySafety = union(enum) {
             else => unreachable,
         }
 
-        result_ref.errorunion.analyte.memory_safety = .{ .error_stub = {} };
+        result_ref.errorunion.analyte.memory_safety = paint;
     }
 
     /// WrapOptional creates an optional refinement - initialize memory_safety
