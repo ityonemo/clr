@@ -1387,30 +1387,29 @@ pub const Store = struct {
                     }
                 },
                 .optional => |*o| {
-                    // Storing optional into optional slot - share the payload
+                    // Storing into an existing optional slot mutates the destination value.
+                    // Do not alias the source payload subtree directly.
                     if (src.* == .optional) {
-                        o.to = src.optional.to;
+                        o.to = try state.refinements.valueCopy(src.optional.to);
                     } else if (src.* == .pointer) {
                         // Storing pointer into optional<pointer> slot (e.g., `?*T = ptr`)
-                        // The optional's .to is a pointer - share the pointer's target
-                        // Note: memory_safety is copied by memory_safety.store handler
-                        const inner = state.refinements.at(o.to);
-                        if (inner.* == .pointer) {
-                            inner.pointer.to = src.pointer.to;
-                        }
+                        // installs a copied pointer value as the optional payload.
+                        o.to = try state.refinements.valueCopy(src_ref);
                     }
                 },
                 .errorunion => |*e| {
-                    // Storing errorunion into errorunion slot - share the payload
+                    // Storing into an existing errorunion slot mutates the destination value.
+                    // Do not alias the source payload subtree directly.
                     if (src.* == .errorunion) {
-                        e.to = src.errorunion.to;
+                        e.to = try state.refinements.valueCopy(src.errorunion.to);
                     }
                 },
                 .@"struct" => {},
                 .region => |*r| {
-                    // Storing region into region slot - share the element
+                    // Storing into an existing region slot mutates the destination value.
+                    // Do not alias the source element subtree directly.
                     if (src.* == .region) {
-                        r.to = src.region.to;
+                        r.to = try state.refinements.valueCopy(src.region.to);
                     }
                 },
                 else => {},
