@@ -140,7 +140,7 @@ test "init_global sets undefined state on union" {
     try std.testing.expectEqualStrings("test.zig", us.undefined.meta.file);
 }
 
-test "semideepCopy preserves union undefined_safety" {
+test "valueCopy preserves union undefined_safety" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
@@ -155,7 +155,7 @@ test "semideepCopy preserves union undefined_safety" {
     } });
 
     // Copy it
-    const copy_gid = try refinements.semideepCopy(union_gid);
+    const copy_gid = try refinements.valueCopy(union_gid);
 
     // Verify the copy has the same undefined_safety
     const us = refinements.at(copy_gid).@"union".analyte.undefined_safety.?;
@@ -180,7 +180,7 @@ test "store with .null to optional sets inner to defined" {
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .optional = &scalar_type } } });
 
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    const null_type: tag.Type = .{ .@"null" = &scalar_type };
+    const null_type: tag.Type = .{ .null = &scalar_type };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     // Check the pointee is an optional

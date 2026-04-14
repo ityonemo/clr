@@ -26,7 +26,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     };
 }
 
-test "ret_safe marks fd as returned to prevent leak warning" {
+test "ret_safe does not modify fd_safety state (connectivity tracking handles leaks)" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
@@ -42,14 +42,14 @@ test "ret_safe marks fd as returned to prevent leak warning" {
 
     const state = testState(&ctx, &results, &refinements);
 
-    // ret_safe should mark the fd as returned
+    // ret_safe should NOT modify fd_safety - connectivity tracking handles leak detection
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
 
-    // Check the fd is marked as returned
+    // Check the fd state is unchanged (still open, not closed)
     const fd_ref = refinements.at(fd_gid);
     const fd_safety = fd_ref.scalar.analyte.fd_safety.?;
     try std.testing.expect(fd_safety == .open);
-    try std.testing.expect(fd_safety.open.returned == true);
+    try std.testing.expect(fd_safety.open.closed == null);
 }
 
 test "call intercepts posix.open and sets fd_safety.open state" {

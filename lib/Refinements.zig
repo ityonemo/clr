@@ -39,7 +39,7 @@ pub const GlobalDef = struct {
 
     pub const ChildInfo = union(enum) {
         scalar: void,
-        @"null": void, // special value for optional types that start out null.
+        null: void, // special value for optional types that start out null.
         indirect: ?u32, // IP index for indirect targets, null if they start undefined.
         struct_fields: []const ?u32, // IP indices for struct field globals, null if they start undefined.
         union_field: struct {
@@ -161,6 +161,7 @@ pub const Refinement = union(enum) {
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
+            .recursive => try recurse_indirected(dst, dst_list, src, src_list, .recursive),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -212,6 +213,7 @@ pub const Refinement = union(enum) {
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             .region => try recurse_indirected(dst, dst_list, src, src_list, .region),
+            .recursive => try recurse_indirected(dst, dst_list, src, src_list, .recursive),
             .@"struct" => recurse_fields(dst, dst_list, src, src_list, .@"struct"),
             .@"union" => recurse_fields(dst, dst_list, src, src_list, .@"union"),
             // following types don't have any metadata associated with them.
@@ -289,7 +291,7 @@ pub const Refinement = union(enum) {
 
     /// Cross-table copy: copies refinement from src_list to dst_list.
     /// Uses noalias to assert tables are different.
-    /// Follows semideep copy rules - pointers reference same pointee across tables.
+    /// Follows value-copy rules - pointers reference same pointee across tables.
     pub fn copyTo(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !Gid {
         return switch (src) {
             .scalar => try dst_list.appendEntity(src),
@@ -317,6 +319,65 @@ pub const Refinement = union(enum) {
             .void => try dst_list.appendEntity(.{ .void = {} }),
             .noreturn => try dst_list.appendEntity(.{ .noreturn = {} }),
         };
+    }
+
+    /// Cross-table copy into an existing destination slot.
+    /// Rebuilds the destination refinement in place using copyTo for nested children.
+    /// This is intended for fixed slots like return_gid where the top-level GID must remain stable.
+    pub fn copyToSlot(dst_gid: Gid, src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !void {
+        const allocator = dst_list.list.allocator;
+        const dst = dst_list.at(dst_gid);
+        dst_list.freeValue(dst);
+
+        dst.* = switch (src) {
+            .scalar => src,
+            .allocator => src,
+            .fnptr => |f| blk: {
+                const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, f.choices.len);
+                @memcpy(new_choices, f.choices);
+                const new_analyte = try f.analyte.copy(allocator);
+                break :blk .{ .fnptr = .{
+                    .analyte = new_analyte,
+                    .choices = new_choices,
+                } };
+            },
+            inline .pointer, .optional, .errorunion, .region, .recursive => |data, ref_tag| blk: {
+                const copied_to = try copyTo(src_list.at(data.to).*, src_list, dst_list);
+                const new_analyte = try data.analyte.copy(allocator);
+                var new_data = data;
+                new_data.analyte = new_analyte;
+                new_data.to = copied_to;
+                break :blk @unionInit(Refinement, @tagName(ref_tag), new_data);
+            },
+            inline .@"struct", .@"union" => |data, ref_tag| blk: {
+                const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
+                for (data.fields, 0..) |field_opt, i| {
+                    if (ref_tag == .@"union") {
+                        if (field_opt) |field_gid| {
+                            new_fields[i] = try copyTo(src_list.at(field_gid).*, src_list, dst_list);
+                        } else {
+                            new_fields[i] = null;
+                        }
+                    } else {
+                        new_fields[i] = try copyTo(src_list.at(field_opt).*, src_list, dst_list);
+                    }
+                }
+                const new_analyte = try data.analyte.copy(allocator);
+                break :blk @unionInit(Refinement, @tagName(ref_tag), .{
+                    .analyte = new_analyte,
+                    .fields = new_fields,
+                    .type_id = data.type_id,
+                });
+            },
+            .unimplemented => .{ .unimplemented = {} },
+            .void => .{ .void = {} },
+            .noreturn => .{ .noreturn = {} },
+        };
+
+        switch (dst.*) {
+            .void, .noreturn, .unimplemented => {},
+            inline else => |*data| data.gid = dst_gid,
+        }
     }
 
     fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime ref_tag: anytype) error{OutOfMemory}!Gid {
@@ -493,7 +554,7 @@ fn createGlobalEntity(
                 pointee_gid = self.appendEntity(pointee_ref) catch @panic("appendEntity failed for global pointee");
             }
         },
-        .scalar, .@"null" => {
+        .scalar, .null => {
             // No target - create from type structure
             const pointee_ref = tag.typeToRefinement(def.ty, self) catch @panic("typeToRefinement failed for global");
             pointee_gid = self.appendEntity(pointee_ref) catch @panic("appendEntity failed for global pointee");
@@ -666,6 +727,9 @@ pub fn appendEntity(self: *Refinements, value: Refinement) !Gid {
 /// Deep clone the entire refinements table.
 /// GID references remain valid because indices are preserved.
 /// Struct and union field slices are deep copied so each refinements list owns its own memory.
+/// Clone the full refinements table for branch/state snapshotting.
+/// This is one of the only supported full-copy boundaries in the model.
+/// Opcode handlers should not use this as a general value-copy mechanism.
 pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     var new = Refinements.init(allocator);
     try new.list.ensureTotalCapacity(self.list.items.len);
@@ -715,38 +779,6 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
     return new;
 }
 
-/// Deep copy a Refinement value, allocating new memory for struct/union fields.
-/// Use this when copying a refinement to another slot to avoid double-free.
-pub fn deepCopyValue(self: *Refinements, src: Refinement) !Refinement {
-    const allocator = self.list.allocator;
-    return switch (src) {
-        inline .@"struct", .@"union" => |data, ref_tag| blk: {
-            // Deep copy fields
-            const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
-            @memcpy(new_fields, data.fields);
-            // Deep copy analyte (handles variant_safety.active_metas slice duplication)
-            const new_analyte = try data.analyte.copy(allocator);
-            break :blk @unionInit(Refinement, @tagName(ref_tag), .{
-                .analyte = new_analyte,
-                .fields = new_fields,
-                .type_id = data.type_id,
-            });
-        },
-        .fnptr => |data| blk: {
-            // Deep copy choices array
-            const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, data.choices.len);
-            @memcpy(new_choices, data.choices);
-            const new_analyte = try data.analyte.copy(allocator);
-            break :blk .{ .fnptr = .{
-                .gid = data.gid,
-                .analyte = new_analyte,
-                .choices = new_choices,
-            } };
-        },
-        else => src, // Non-container types can be shallow copied
-    };
-}
-
 /// Free resources owned by a single Refinement value.
 /// Use this before overwriting a refinement to avoid leaking allocated fields/choices.
 pub fn freeValue(self: *Refinements, value: *Refinement) void {
@@ -770,10 +802,11 @@ pub fn freeValue(self: *Refinements, value: *Refinement) void {
     }
 }
 
-/// Semideep copy within same table: creates new entity, copying values but sharing pointer targets.
-/// For struct/union, recursively copies value fields, but pointer fields reference same pointee.
-/// Deep copies analyte via analyte.copy().
-pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
+/// Value-copy within the same table: creates a new value entity while preserving
+/// pointer identity/provenance by sharing pointees.
+/// For struct/union, recursively copies value fields, but pointer fields keep
+/// referencing the same pointee.
+pub fn valueCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
     const src = self.at(src_gid).*;
     const allocator = self.list.allocator;
 
@@ -827,27 +860,27 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
             break :blk new_gid;
         },
 
-        // Optionals/errorunions: recurse into payload (semideep copy the inner value)
+        // Optionals/errorunions: recurse into payload (value-copy the inner value)
         .optional => |o| blk: {
-            const new_inner = try self.semideepCopy(o.to);
+            const new_inner = try self.valueCopy(o.to);
             break :blk try self.appendEntity(.{ .optional = .{
                 .analyte = o.analyte,
                 .to = new_inner,
             } });
         },
         .errorunion => |e| blk: {
-            const new_inner = try self.semideepCopy(e.to);
+            const new_inner = try self.valueCopy(e.to);
             break :blk try self.appendEntity(.{ .errorunion = .{
                 .analyte = e.analyte,
                 .to = new_inner,
             } });
         },
 
-        // Structs: new struct with semideep copied fields
+        // Structs: new struct with value-copied fields
         .@"struct" => |s| blk: {
             const new_fields = try allocator.alloc(Gid, s.fields.len);
             for (s.fields, 0..) |field_idx, i| {
-                new_fields[i] = try self.semideepCopy(field_idx);
+                new_fields[i] = try self.valueCopy(field_idx);
             }
             break :blk try self.appendEntity(.{ .@"struct" = .{
                 .analyte = s.analyte,
@@ -856,12 +889,12 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
             } });
         },
 
-        // Unions: new union with semideep copied active fields
+        // Unions: new union with value-copied active fields
         .@"union" => |u| blk: {
             const new_fields = try allocator.alloc(?Gid, u.fields.len);
             for (u.fields, 0..) |field_idx_opt, i| {
                 new_fields[i] = if (field_idx_opt) |field_idx|
-                    try self.semideepCopy(field_idx)
+                    try self.valueCopy(field_idx)
                 else
                     null;
             }
@@ -875,7 +908,7 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
         },
 
         .region => |r| blk: {
-            const new_inner = try self.semideepCopy(r.to);
+            const new_inner = try self.valueCopy(r.to);
             break :blk try self.appendEntity(.{ .region = .{
                 .analyte = r.analyte,
                 .to = new_inner,
@@ -883,10 +916,12 @@ pub fn semideepCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
         },
 
         // Recursive: preserve the reference (like pointers, don't follow recursively)
-        .recursive => |r| try self.appendEntity(.{ .recursive = .{
-            .analyte = r.analyte,
-            .to = r.to, // Keep pointing to same target
-        } }),
+        .recursive => |r| try self.appendEntity(.{
+            .recursive = .{
+                .analyte = r.analyte,
+                .to = r.to, // Keep pointing to same target
+            },
+        }),
 
         // Simple types: just copy
         .unimplemented => try self.appendEntity(.{ .unimplemented = {} }),

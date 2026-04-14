@@ -101,7 +101,7 @@ test "cond_br sets null on false branch after is_non_null check" {
     try Inst.apply(state, 2, .{ .cond_br = .{ .condition_idx = 1, .branch = false } });
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .@"null");
+    try std.testing.expect(ns == .null);
 }
 
 test "optional_payload errors on unchecked unwrap" {
@@ -127,7 +127,7 @@ test "optional_payload errors on known null unwrap" {
 
     // Create an optional with null_safety set to .@"null"
     const opt_gid = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .@"null" = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
+        .analyte = .{ .null_safety = .{ .null = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
         .to = 0,
     } });
 
@@ -176,11 +176,11 @@ test "store to optional with null sets null state" {
 
     // Store null to the optional
     const scalar_type: tag.Type = .{ .scalar = {} };
-    const null_type: tag.Type = .{ .@"null" = &scalar_type };
+    const null_type: tag.Type = .{ .null = &scalar_type };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .@"null");
+    try std.testing.expect(ns == .null);
 }
 
 test "store to optional with value sets non_null state" {
@@ -221,8 +221,8 @@ test "init_global sets null state on optional" {
     NullSafety.init_global(&refinements, ptr_gid, opt_gid, &ctx, false, true, loc, null);
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .@"null");
-    try std.testing.expectEqualStrings("test.zig", ns.@"null".file);
+    try std.testing.expect(ns == .null);
+    try std.testing.expectEqualStrings("test.zig", ns.null.file);
 }
 
 test "init_global sets non_null state on optional" {
@@ -246,7 +246,7 @@ test "init_global sets non_null state on optional" {
     try std.testing.expect(ns == .non_null);
 }
 
-test "semideepCopy preserves null_safety on optional" {
+test "valueCopy preserves null_safety on optional" {
     const allocator = std.testing.allocator;
 
     var refinements = Refinements.init(allocator);
@@ -257,17 +257,17 @@ test "semideepCopy preserves null_safety on optional" {
 
     // Create an optional with null_safety set to .@"null"
     const opt_gid = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .@"null" = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
+        .analyte = .{ .null_safety = .{ .null = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
         .to = inner_gid,
     } });
 
     // Copy it
-    const copy_gid = try refinements.semideepCopy(opt_gid);
+    const copy_gid = try refinements.valueCopy(opt_gid);
 
     // Verify the copy has the same null_safety
     const ns = refinements.at(copy_gid).optional.analyte.null_safety.?;
-    try std.testing.expect(ns == .@"null");
-    try std.testing.expectEqualStrings("test.zig", ns.@"null".file);
+    try std.testing.expect(ns == .null);
+    try std.testing.expectEqualStrings("test.zig", ns.null.file);
 }
 
 test "call is no-op for null_safety" {
@@ -319,7 +319,7 @@ test "aggregate_init incorporates null_safety from source elements" {
     // Create source optionals with known null_safety states
     const inner1 = try refinements.appendEntity(.{ .scalar = .{} });
     const null_opt = try refinements.appendEntity(.{ .optional = .{
-        .analyte = .{ .null_safety = .{ .@"null" = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
+        .analyte = .{ .null_safety = .{ .null = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
         .to = inner1,
     } });
 
@@ -352,7 +352,7 @@ test "aggregate_init incorporates null_safety from source elements" {
 
     // Field 0 should have null state
     const field0_ns = refinements.at(field0_gid).optional.analyte.null_safety.?;
-    try std.testing.expect(field0_ns == .@"null");
+    try std.testing.expect(field0_ns == .null);
 
     // Field 1 should have non_null state
     const field1_ns = refinements.at(field1_gid).optional.analyte.null_safety.?;

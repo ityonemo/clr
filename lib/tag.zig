@@ -22,7 +22,7 @@
 //         wrap_errunion_err, wrap_errunion_payload, block, br, cond_br,
 //         intcast, ptr_add, array_to_slice, slice, slice_len, aggregate_init
 //
-// CREATE-SEMIDEEP - Create new entity with semideep copy from source
+// CREATE-SEMIDEEP - Create new entity with value copy from source
 //   (Copy values recursively, but pointers reference same target)
 //   Tags: load, union_init, optional_payload, unwrap_errunion_payload,
 //         struct_field_val
@@ -725,10 +725,10 @@ pub const DbgArgInline = struct {
 };
 
 /// Entity operation: CREATE-SEMIDEEP
-/// Creates new entity via semideep copy from pointee.
+/// Creates new entity via value copy from pointee.
 ///
 /// Load dereferences a pointer and produces the value stored at that memory location.
-/// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
+/// Uses value-copy semantics: recursively copies values, but pointer targets are shared.
 pub const Load = struct {
     /// Source pointer - instruction, interned variable, or interned constant
     ptr: Src,
@@ -756,7 +756,7 @@ pub const Load = struct {
                 splatInitDefined(state.refinements, ptr_gid_temp, state.ctx);
                 // Now follow the pointer to get the pointee (same as tracked case)
                 const pointee_gid = state.refinements.at(ptr_gid_temp).pointer.to;
-                const new_gid = try state.refinements.semideepCopy(pointee_gid);
+                const new_gid = try state.refinements.valueCopy(pointee_gid);
                 state.results[index].refinement = new_gid;
                 try splat(.load, state, index, self);
                 return;
@@ -775,8 +775,8 @@ pub const Load = struct {
             else => @panic("Load: expected pointer refinement"),
         };
 
-        // Semideep copy: create new entity copying values, but pointers reference same target
-        const new_idx = try state.refinements.semideepCopy(pointee_idx);
+        // Value copy: create new entity copying values, but pointers reference same target
+        const new_idx = try state.refinements.valueCopy(pointee_idx);
         state.results[index].refinement = new_idx;
         try splat(.load, state, index, self);
     }
@@ -878,7 +878,7 @@ pub const StructFieldPtr = struct {
 };
 
 /// Entity operation: CREATE-SEMIDEEP
-/// Creates new entity via semideep copy from field.
+/// Creates new entity via value copy from field.
 ///
 /// StructFieldVal extracts a field value from a struct or union by value.
 /// This is used when accessing `s.field` where `s` is a struct/union value (not a pointer).
@@ -957,10 +957,10 @@ pub const FieldParentPtr = struct {
 };
 
 /// Entity operation: CREATE-SEMIDEEP
-/// Creates new entity via semideep copy from optional payload.
+/// Creates new entity via value copy from optional payload.
 ///
 /// OptionalPayload extracts the inner value from an optional (e.g., `x.?` or `x orelse`).
-/// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
+/// Uses value-copy semantics: recursively copies values, but pointer targets are shared.
 pub const OptionalPayload = struct {
     /// Source optional being unwrapped.
     src: Src,
@@ -1147,30 +1147,32 @@ pub const RetSafe = struct {
         const cloned = try allocator.create(Refinements);
         cloned.* = try state.refinements.clone(allocator);
 
-        // Set the return value in the CLONED table (not the original)
-        // Free the existing return slot value first to avoid leaking struct/union fields
+        // Set the return value in the cloned table by overwriting the existing
+        // return slot structure from the source table. clone() is the full-copy
+        // boundary; return handling should not deep-copy a single value ad hoc.
         const return_gid = state.return_gid;
-        cloned.freeValue(cloned.at(return_gid));
         switch (self.src) {
             .inst => |src| {
                 const src_gid = state.results[src].refinement orelse @panic("return function requested uninitialized instruction value");
-                // Deep copy to avoid double-free when struct/union fields are freed
-                cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(src_gid).*);
+                try Refinement.copyToSlot(return_gid, state.refinements.at(src_gid).*, state.refinements, cloned);
             },
             .interned => |interned| {
                 // Try to look up as tracked global first
                 if (cloned.getGlobal(interned.ip_idx)) |global_gid| {
-                    // Return an interned variable - copy its value to return slot
-                    cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(global_gid).*);
+                    // Return an interned variable by overwriting the cloned return slot
+                    // from the original global value.
+                    try Refinement.copyToSlot(return_gid, state.refinements.at(global_gid).*, state.refinements, cloned);
                 } else {
                     // Not tracked - comptime return value
                     if (interned.ty == .void) {
+                        cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = .void;
                     } else if (interned.ty == .undefined) {
                         // Explicitly undefined value - mark as undefined
                         // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
                         // dangling pointer if typeToRefinement causes list reallocation.
                         const ref = try typeToRefinement(interned.ty, cloned);
+                        cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = ref;
                         splatInit(cloned, return_gid, state.ctx);
                     } else {
@@ -1178,14 +1180,16 @@ pub const RetSafe = struct {
                         // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
                         // dangling pointer if typeToRefinement causes list reallocation.
                         const ref = try typeToRefinement(interned.ty, cloned);
+                        cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = ref;
                         splatInitDefined(cloned, return_gid, state.ctx);
                     }
                 }
             },
             .fnptr => |choices| {
-                // Return a function pointer constant - deep copy choices
+                // Return a function pointer constant by replacing the cloned slot.
                 const owned_choices = try allocator.dupe(FnInterpreter, choices);
+                cloned.freeValue(cloned.at(return_gid));
                 cloned.at(return_gid).* = .{ .fnptr = .{ .choices = owned_choices } };
                 // Initialize analytes (fnptrs are always defined)
                 splatInitDefined(cloned, return_gid, state.ctx);
@@ -1264,11 +1268,10 @@ pub const RetLoad = struct {
         const cloned = try allocator.create(Refinements);
         cloned.* = try state.refinements.clone(allocator);
 
-        // Set return value in the CLONED table (deep copy of pointee)
-        // Free the existing return slot value first to avoid leaking struct/union fields
+        // Set the return value in the cloned table by overwriting the existing
+        // return slot from the source table.
         const return_gid = state.return_gid;
-        cloned.freeValue(cloned.at(return_gid));
-        cloned.at(return_gid).* = try cloned.deepCopyValue(cloned.at(pointee_idx).*);
+        try Refinement.copyToSlot(return_gid, state.refinements.at(pointee_idx).*, state.refinements, cloned);
 
         // Append cloned state to early_returns (merging happens at function end)
         if (state.early_returns) |early_returns| {
@@ -1403,17 +1406,7 @@ pub const Store = struct {
                         e.to = src.errorunion.to;
                     }
                 },
-                .@"struct" => {
-                    // Storing struct into struct slot - make pointer reference the source struct.
-                    // This is critical for patterns like:
-                    //   var self = Self.init(gpa);  // store returned struct into alloc'd storage
-                    // Without this, the destination struct's pointer fields retain stale metadata
-                    // (e.g., .stack from alloc's setStackRecursive) instead of the source's actual
-                    // metadata (e.g., .allocated for heap memory, or argument-derived pointers).
-                    if (src.* == .@"struct") {
-                        ptr_ref.pointer.to = src_ref;
-                    }
-                },
+                .@"struct" => {},
                 .region => |*r| {
                     // Storing region into region slot - share the element
                     if (src.* == .region) {
@@ -1427,10 +1420,10 @@ pub const Store = struct {
 };
 
 /// Entity operation: CREATE-SEMIDEEP
-/// Creates new entity via semideep copy from error union payload.
+/// Creates new entity via value copy from error union payload.
 ///
 /// UnwrapErrunionPayload extracts the success value from an error union (e.g., `try x` or `x catch`).
-/// Uses semideep copy semantics: recursively copies values, but pointer targets are shared.
+/// Uses value-copy semantics: recursively copies values, but pointer targets are shared.
 pub const UnwrapErrunionPayload = struct {
     /// Source error union being unwrapped.
     src: Src,
@@ -2060,7 +2053,7 @@ pub const GetUnionTag = struct {
 };
 
 /// Entity operation: CREATE-SEMIDEEP
-/// Creates new union entity via semideep copy from operand.
+/// Creates new union entity via value copy from operand.
 ///
 /// UnionInit initializes a union with one active field.
 /// Only the specified field gets a real entity; others are null (inactive).
@@ -2171,14 +2164,14 @@ pub const ArrayElemVal = struct {
         const base_refinement = state.refinements.at(effective_base_ref).*;
         switch (base_refinement) {
             .region => |r| {
-                // Array: region → element. Semideep copy the element.
-                const new_gid = try state.refinements.semideepCopy(r.to);
+                // Array: region → element. Value-copy the element.
+                const new_gid = try state.refinements.valueCopy(r.to);
                 state.results[index].refinement = new_gid;
             },
             .pointer => |p| {
                 // Slice: pointer → region → element. Follow pointer to region.
                 const region = state.refinements.at(p.to).region;
-                const new_gid = try state.refinements.semideepCopy(region.to);
+                const new_gid = try state.refinements.valueCopy(region.to);
                 state.results[index].refinement = new_gid;
             },
             else => @panic("ArrayElemVal: expected region or pointer to region"),
@@ -3050,6 +3043,7 @@ pub fn splatMerge(
             .branch_merge = .{
                 .meta = ctx.meta,
                 .branch_type = bt,
+                .base_len = base_len,
             },
         };
 
@@ -3149,6 +3143,13 @@ fn followBranchGids(
             gid.* = null;
             continue;
         }
+        // Branches can diverge structurally after stores/aggregate construction.
+        // If a branch no longer has the expected tag at this position, drop it
+        // from this merge path instead of panicking on a mismatched union access.
+        if (std.meta.activeTag(ref) != ref_tag) {
+            gid.* = null;
+            continue;
+        }
         gid.* = @field(ref, @tagName(ref_tag)).to;
     }
 }
@@ -3189,7 +3190,6 @@ fn mergeRefinementRecursive(
     switch (orig_ref.*) {
         // Pointer: check rejection logic before following and merging
         .pointer => |*p| {
-            // TODO: pointer rejection logic (all same original OR all new, not mixed)
             followBranchGids(.pointer, branches, branch_gids);
 
             // Check if branches have a consistent different .to than parent
@@ -3212,7 +3212,9 @@ fn mergeRefinementRecursive(
                 }
             }
 
-            // If all branches point to a different target, copy to parent if needed and update
+            // If all branches point to a different target, copy to parent if needed and update.
+            // If branches disagree, preserve a changed target from one branch rather than
+            // falling back to the original parent target and orphaning the new subtree.
             const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != p.to) blk: {
                 const branch_inner = consistent_inner.?;
                 // If the inner GID doesn't exist in parent, copy entire subtree from branch
@@ -3230,7 +3232,30 @@ fn mergeRefinementRecursive(
                     p.to = branch_inner;
                     break :blk branch_inner;
                 }
-            } else p.to;
+            } else blk: {
+                // Branches disagree - find one that differs from the parent's original target.
+                // This mirrors optional/errorunion merge behavior and prevents branch-only
+                // allocations from being orphaned when a pointer is retargeted in only one branch.
+                for (branches, branch_gids) |branch_opt, gid_opt| {
+                    const branch = branch_opt orelse continue;
+                    const gid = gid_opt orelse continue;
+                    if (gid == p.to) continue;
+
+                    if (gid >= refinements.list.items.len) {
+                        const src_ref = branch.refinements.at(gid).*;
+                        try copied_from_branch.put(gid, {});
+                        try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
+                        const copied_gid = try Refinement.copyTo(src_ref, branch.refinements, refinements);
+                        refinements.at(orig_gid).pointer.to = copied_gid;
+                        break :blk copied_gid;
+                    } else {
+                        refinements.at(orig_gid).pointer.to = gid;
+                        break :blk gid;
+                    }
+                }
+
+                break :blk p.to;
+            };
 
             try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
         },
@@ -3279,14 +3304,42 @@ fn mergeRefinementRecursive(
                 }
                 break :blk copied_gid;
             } else blk: {
-                // Branches disagree - find one that differs from parent and copy it.
-                // This handles the case where one branch has a new value (e.g., allocation)
-                // while another keeps the parent's original (e.g., null branch).
+                // Branches disagree - prefer a branch whose inner structural tag matches the
+                // parent's original payload before falling back to the first differing branch.
+                // This avoids poisoning errorunion payloads with the error placeholder
+                // (.unimplemented) when another branch carries the real success payload.
+                const orig_inner_tag = std.meta.activeTag(refinements.at(data.to).*);
+
+                var fallback_branch: ?State = null;
+                var fallback_gid: ?Gid = null;
+
                 for (branches, branch_gids) |branch_opt, gid_opt| {
                     const branch = branch_opt orelse continue;
                     const gid = gid_opt orelse continue;
                     if (gid == data.to) continue; // Same as parent's original, skip
-                    // This branch has a different inner - copy it to parent
+
+                    if (fallback_branch == null) {
+                        fallback_branch = branch;
+                        fallback_gid = gid;
+                    }
+
+                    const branch_tag = std.meta.activeTag(branch.refinements.at(gid).*);
+                    if (branch_tag != orig_inner_tag) continue;
+
+                    const src_ref = branch.refinements.at(gid).*;
+                    try copied_from_branch.put(gid, {});
+                    try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
+                    const copied_gid = try Refinement.copyTo(src_ref, branch.refinements, refinements);
+                    switch (refinements.at(orig_gid).*) {
+                        .optional => |*o| o.to = copied_gid,
+                        .errorunion => |*e| e.to = copied_gid,
+                        else => unreachable,
+                    }
+                    break :blk copied_gid;
+                }
+
+                if (fallback_branch) |branch| {
+                    const gid = fallback_gid.?;
                     const src_ref = branch.refinements.at(gid).*;
                     try copied_from_branch.put(gid, {});
                     try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
@@ -3318,7 +3371,12 @@ fn mergeRefinementRecursive(
                         field_gids[i] = null;
                         continue;
                     };
-                    field_gids[i] = branch.refinements.at(branch_gid).@"struct".fields[field_i];
+                    const branch_ref = branch.refinements.at(branch_gid).*;
+                    if (std.meta.activeTag(branch_ref) != .@"struct") {
+                        field_gids[i] = null;
+                        continue;
+                    }
+                    field_gids[i] = branch_ref.@"struct".fields[field_i];
                 }
                 try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch);
             }
@@ -3338,7 +3396,12 @@ fn mergeRefinementRecursive(
                         field_gids[i] = null;
                         continue;
                     };
-                    field_gids[i] = branch.refinements.at(branch_gid).@"union".fields[field_i];
+                    const branch_ref = branch.refinements.at(branch_gid).*;
+                    if (std.meta.activeTag(branch_ref) != .@"union") {
+                        field_gids[i] = null;
+                        continue;
+                    }
+                    field_gids[i] = branch_ref.@"union".fields[field_i];
                 }
 
                 // Get or create field entity in original

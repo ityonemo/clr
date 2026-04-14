@@ -152,7 +152,7 @@ pub const VariantSafety = struct {
     ///
     /// **Global unions**: The compiler generates SEPARATE load instructions for each
     /// access. We must ALSO update the global's variant_safety so subsequent loads
-    /// (via semideepCopy) get the correct state within this branch.
+    /// (via valueCopy) get the correct state within this branch.
     pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
         _ = index;
         const results = state.results;
