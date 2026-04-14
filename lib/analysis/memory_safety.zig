@@ -570,14 +570,14 @@ pub const MemorySafety = union(enum) {
         // Collect GIDs reachable from the return value (these will be marked as returned)
         var returned_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
         defer returned_reachable.deinit();
-        var returned_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
-        defer returned_alloc_metas.deinit();
+        var returned_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer returned_alloc_ids.deinit();
 
         switch (params.src) {
             .inst => |idx| {
                 if (results[idx].refinement) |src_gid| {
                     collectReachableGids(refinements, src_gid, &returned_reachable);
-                    collectReachableAllocations(refinements, src_gid, &returned_alloc_metas);
+                    collectReachableAllocations(refinements, src_gid, &returned_alloc_ids);
                 }
             },
             // Interned/fnptr returns don't contain allocations
@@ -587,28 +587,28 @@ pub const MemorySafety = union(enum) {
         // Collect GIDs reachable from arguments (these belong to caller, not leaks)
         var arg_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
         defer arg_reachable.deinit();
-        var arg_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
-        defer arg_alloc_metas.deinit();
+        var arg_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer arg_alloc_ids.deinit();
 
         for (results) |inst| {
             const any_tag = inst.inst_tag orelse continue;
             if (any_tag != .arg) continue;
             const arg_gid = inst.refinement orelse continue;
             collectReachableGids(refinements, arg_gid, &arg_reachable);
-            collectReachableAllocations(refinements, arg_gid, &arg_alloc_metas);
+            collectReachableAllocations(refinements, arg_gid, &arg_alloc_ids);
         }
 
         // Collect GIDs reachable from globals (allocations stored there aren't leaks)
         var global_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
         defer global_reachable.deinit();
-        var global_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
-        defer global_alloc_metas.deinit();
+        var global_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer global_alloc_ids.deinit();
 
         if (refinements.global_cutoff) |cutoff| {
             for (0..cutoff) |gid_usize| {
                 const gid: Gid = @intCast(gid_usize);
                 collectReachableGids(refinements, gid, &global_reachable);
-                collectReachableAllocations(refinements, gid, &global_alloc_metas);
+                collectReachableAllocations(refinements, gid, &global_alloc_ids);
             }
         }
 
@@ -638,7 +638,7 @@ pub const MemorySafety = union(enum) {
             if (ms != .allocated) continue;
 
             const allocation = ms.allocated;
-            const alloc_id = AllocationIdentity.fromAllocated(allocation);
+            const alloc_id = allocation.allocator_gid;
 
             // Skip if already freed
             if (allocation.freed != null) continue;
@@ -647,9 +647,9 @@ pub const MemorySafety = union(enum) {
             const alloc_ref = refinements.at(allocation.allocator_gid).allocator;
             if (alloc_ref.deinit != null) continue;
 
-            if (returned_alloc_metas.contains(alloc_id)) continue;
-            if (arg_alloc_metas.contains(alloc_id)) continue;
-            if (global_alloc_metas.contains(alloc_id)) continue;
+            if (returned_alloc_ids.contains(alloc_id)) continue;
+            if (arg_alloc_ids.contains(alloc_id)) continue;
+            if (global_alloc_ids.contains(alloc_id)) continue;
 
             // Report leak - allocation is orphaned by this early return
             if (alloc_ref.arena_gid != null) {
@@ -904,35 +904,35 @@ pub const MemorySafety = union(enum) {
         // Build set of GIDs reachable from globals (allocations stored there aren't leaks)
         var global_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
         defer global_reachable.deinit();
-        var global_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
-        defer global_alloc_metas.deinit();
+        var global_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer global_alloc_ids.deinit();
         if (refinements.global_cutoff) |cutoff| {
             for (0..cutoff) |gid_usize| {
                 const gid: Gid = @intCast(gid_usize);
                 collectReachableGids(refinements, gid, &global_reachable);
-                collectReachableAllocations(refinements, gid, &global_alloc_metas);
+                collectReachableAllocations(refinements, gid, &global_alloc_ids);
             }
         }
 
         // Build set of GIDs reachable from arguments (belong to caller, not leaks)
         var arg_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
         defer arg_reachable.deinit();
-        var arg_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
-        defer arg_alloc_metas.deinit();
+        var arg_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer arg_alloc_ids.deinit();
         for (results) |inst| {
             const any_tag = inst.inst_tag orelse continue;
             if (any_tag != .arg) continue;
             const arg_gid = inst.refinement orelse continue;
             collectReachableGids(refinements, arg_gid, &arg_reachable);
-            collectReachableAllocations(refinements, arg_gid, &arg_alloc_metas);
+            collectReachableAllocations(refinements, arg_gid, &arg_alloc_ids);
         }
 
         // Build set of allocation identities reachable from return value (transferred to caller, not leaks)
         // We use allocation identity (meta) instead of GID because ret_safe deep-copies values,
         // so the return_gid contains copied entities with different GIDs than the results table.
-        var return_alloc_metas = std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80).init(ctx.allocator);
-        defer return_alloc_metas.deinit();
-        collectReachableAllocations(refinements, return_gid, &return_alloc_metas);
+        var return_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer return_alloc_ids.deinit();
+        collectReachableAllocations(refinements, return_gid, &return_alloc_ids);
 
         // Check for memory leaks via splatOrphaned.
         // In main (stack depth 1), also check allocations stored in globals.
@@ -971,10 +971,10 @@ pub const MemorySafety = union(enum) {
             const pointee = refinements.at(pointee_idx);
             if (getAnalytePtrConst(pointee).memory_safety) |ms| {
                 if (ms == .allocated) {
-                    const alloc_id = AllocationIdentity.fromAllocated(ms.allocated);
-                    if (arg_alloc_metas.contains(alloc_id)) continue;
-                    if (return_alloc_metas.contains(alloc_id)) continue;
-                    if (!in_main and global_alloc_metas.contains(alloc_id)) continue;
+                    const alloc_id = ms.allocated.allocator_gid;
+                    if (arg_alloc_ids.contains(alloc_id)) continue;
+                    if (return_alloc_ids.contains(alloc_id)) continue;
+                    if (!in_main and global_alloc_ids.contains(alloc_id)) continue;
                 }
             }
 
@@ -1130,58 +1130,15 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Allocation identity based on where/when it was allocated.
-    /// Used instead of GID for connectivity tracking because ret_safe deep-copies values.
-    const AllocationIdentity = struct {
-        file: []const u8,
-        line: u32,
-        column: ?u32,
-        allocator_gid: Gid,
-
-        pub fn fromAllocated(a: Allocated) AllocationIdentity {
-            return .{
-                .file = a.meta.file,
-                .line = a.meta.line,
-                .column = a.meta.column,
-                .allocator_gid = a.allocator_gid,
-            };
-        }
-
-        pub fn eql(self: AllocationIdentity, other: AllocationIdentity) bool {
-            return std.mem.eql(u8, self.file, other.file) and
-                self.line == other.line and
-                self.column == other.column and
-                self.allocator_gid == other.allocator_gid;
-        }
-
-        pub fn hash(self: AllocationIdentity) u64 {
-            var h = std.hash.Wyhash.init(0);
-            h.update(self.file);
-            h.update(std.mem.asBytes(&self.line));
-            if (self.column) |c| h.update(std.mem.asBytes(&c));
-            h.update(std.mem.asBytes(&self.allocator_gid));
-            return h.final();
-        }
-    };
-
-    const AllocationIdentityContext = struct {
-        pub fn hash(_: AllocationIdentityContext, key: AllocationIdentity) u64 {
-            return key.hash();
-        }
-        pub fn eql(_: AllocationIdentityContext, a: AllocationIdentity, b: AllocationIdentity) bool {
-            return a.eql(b);
-        }
-    };
-
-    /// Recursively collect allocation identities from a refinement tree.
-    fn collectReachableAllocations(refinements: *Refinements, gid: Gid, allocs: *std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80)) void {
+    /// Recursively collect allocator GIDs from reachable allocated values.
+    fn collectReachableAllocations(refinements: *Refinements, gid: Gid, allocs: *std.AutoHashMap(Gid, void)) void {
         collectReachableAllocationsInner(refinements, gid, allocs, 0);
     }
 
     fn collectReachableAllocationsInner(
         refinements: *Refinements,
         gid: Gid,
-        allocs: *std.HashMap(AllocationIdentity, void, AllocationIdentityContext, 80),
+        allocs: *std.AutoHashMap(Gid, void),
         depth: usize,
     ) void {
         if (depth > 100) return; // Prevent infinite recursion
@@ -1205,7 +1162,7 @@ pub const MemorySafety = union(enum) {
                 const pointee_analyte = getAnalytePtrConst(pointee);
                 if (pointee_analyte.memory_safety) |ms| {
                     if (ms == .allocated) {
-                        allocs.put(AllocationIdentity.fromAllocated(ms.allocated), {}) catch return;
+                        allocs.put(ms.allocated.allocator_gid, {}) catch return;
                     }
                 }
                 collectReachableAllocationsInner(refinements, p.to, allocs, depth + 1);
@@ -1229,14 +1186,14 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Check if a refinement at a given GID has an allocation matching the given identity.
+    /// Check if a refinement at a given GID has an allocation using the given allocator.
     /// This is used during branch merge to detect if an allocation is still reachable
     /// through another entity (avoiding false positive leak reports).
-    fn hasMatchingAllocation(refinements: *Refinements, gid: Gid, alloc_identity: AllocationIdentity) bool {
-        return hasMatchingAllocationInner(refinements, gid, alloc_identity, 0);
+    fn hasMatchingAllocation(refinements: *Refinements, gid: Gid, allocator_gid: Gid) bool {
+        return hasMatchingAllocationInner(refinements, gid, allocator_gid, 0);
     }
 
-    fn hasMatchingAllocationInner(refinements: *Refinements, gid: Gid, alloc_identity: AllocationIdentity, depth: usize) bool {
+    fn hasMatchingAllocationInner(refinements: *Refinements, gid: Gid, allocator_gid: Gid, depth: usize) bool {
         if (depth > 100) return false; // Prevent infinite recursion
         if (gid >= refinements.list.items.len) return false;
 
@@ -1250,7 +1207,7 @@ pub const MemorySafety = union(enum) {
                         .interned, .error_stub => null,
                     };
                     if (root_gid) |root| {
-                        if (hasMatchingAllocationInner(refinements, root, alloc_identity, depth + 1)) {
+                        if (hasMatchingAllocationInner(refinements, root, allocator_gid, depth + 1)) {
                             return true;
                         }
                     }
@@ -1260,19 +1217,19 @@ pub const MemorySafety = union(enum) {
                 const pointee_analyte = getAnalytePtrConst(pointee);
                 if (pointee_analyte.memory_safety) |ms| {
                     if (ms == .allocated) {
-                        if (AllocationIdentity.fromAllocated(ms.allocated).eql(alloc_identity)) {
+                        if (ms.allocated.allocator_gid == allocator_gid) {
                             return true;
                         }
                     }
                 }
-                return hasMatchingAllocationInner(refinements, p.to, alloc_identity, depth + 1);
+                return hasMatchingAllocationInner(refinements, p.to, allocator_gid, depth + 1);
             },
-            .optional => |o| return hasMatchingAllocationInner(refinements, o.to, alloc_identity, depth + 1),
-            .errorunion => |e| return hasMatchingAllocationInner(refinements, e.to, alloc_identity, depth + 1),
-            .region => |r| return hasMatchingAllocationInner(refinements, r.to, alloc_identity, depth + 1),
+            .optional => |o| return hasMatchingAllocationInner(refinements, o.to, allocator_gid, depth + 1),
+            .errorunion => |e| return hasMatchingAllocationInner(refinements, e.to, allocator_gid, depth + 1),
+            .region => |r| return hasMatchingAllocationInner(refinements, r.to, allocator_gid, depth + 1),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
-                    if (hasMatchingAllocationInner(refinements, field_gid, alloc_identity, depth + 1)) {
+                    if (hasMatchingAllocationInner(refinements, field_gid, allocator_gid, depth + 1)) {
                         return true;
                     }
                 }
@@ -1281,7 +1238,7 @@ pub const MemorySafety = union(enum) {
             .@"union" => |u| {
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
-                        if (hasMatchingAllocationInner(refinements, field_gid, alloc_identity, depth + 1)) {
+                        if (hasMatchingAllocationInner(refinements, field_gid, allocator_gid, depth + 1)) {
                             return true;
                         }
                     }
@@ -1966,25 +1923,25 @@ pub const MemorySafety = union(enum) {
         const alloc_ref = orphan_refinements.at(allocation.allocator_gid).allocator;
         if (alloc_ref.deinit != null) return;
 
-        // For branch_merge: Check if the same allocation identity exists in entities that are
+        // For branch_merge: Check if an allocation using the same allocator exists in entities that are
         // still reachable after merge. This includes:
         // 1. Entities in copied_from_branch (explicitly copied to parent)
         // 2. Entities with GID < base_len (existed before branch, still reachable)
         // 3. Entities reachable through pointers that were updated during branch
         //
         // When we copy entities during branch operations, the copies inherit .allocated memory_safety.
-        // If ANY entity with the same allocation identity is still reachable, it's not a leak.
+        // If ANY entity using the same allocator is still reachable, it's not a leak.
         if (orphan_ctx == .branch_merge) {
             const base_len = orphan_ctx.branch_merge.base_len;
-            const alloc_identity = AllocationIdentity.fromAllocated(allocation);
+            const allocator_gid = allocation.allocator_gid;
 
             std.debug.print("DEBUG orphaned: base_len={d}, pointee_idx={d}, alloc at {s}:{d}, parent_len={d}\n", .{ base_len, pointee_idx, allocation.meta.file, allocation.meta.line, refinements.list.items.len });
 
-            // Check if this allocation identity exists in any entity that was copied to parent
+            // Check if this allocator is represented in any entity that was copied to parent
             if (copied_from_branch) |cfb| {
                 var it = cfb.keyIterator();
                 while (it.next()) |copied_gid| {
-                    if (hasMatchingAllocation(orphan_refinements, copied_gid.*, alloc_identity)) {
+                    if (hasMatchingAllocation(orphan_refinements, copied_gid.*, allocator_gid)) {
                         std.debug.print("DEBUG: found in copied_from_branch at gid={d}\n", .{copied_gid.*});
                         return;
                     }
@@ -1995,7 +1952,7 @@ pub const MemorySafety = union(enum) {
             // When a branch stores an allocation into an argument struct, the parent's
             // refinements get updated. So we must check the parent, not the branch.
             for (0..base_len) |pre_gid| {
-                if (hasMatchingAllocation(refinements, @intCast(pre_gid), alloc_identity)) {
+                if (hasMatchingAllocation(refinements, @intCast(pre_gid), allocator_gid)) {
                     std.debug.print("DEBUG: found in pre-branch entities at gid={d}\n", .{pre_gid});
                     return;
                 }
@@ -2004,7 +1961,7 @@ pub const MemorySafety = union(enum) {
             // Also check in orphan_refinements (branch) - allocations stored through
             // argument pointers update the branch's copy of the argument entity
             for (0..base_len) |pre_gid| {
-                if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), alloc_identity)) {
+                if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), allocator_gid)) {
                     std.debug.print("DEBUG: found in orphan_refinements pre-branch at gid={d}\n", .{pre_gid});
                     return;
                 }
