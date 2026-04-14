@@ -3213,8 +3213,9 @@ fn mergeRefinementRecursive(
             }
 
             // If all branches point to a different target, copy to parent if needed and update.
-            // If branches disagree, preserve a changed target from one branch rather than
-            // falling back to the original parent target and orphaning the new subtree.
+            // If branches disagree, recurse into the parent's existing target so the
+            // disagreement is represented structurally by a merge rather than by choosing
+            // a winner branch based on iteration order.
             const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != p.to) blk: {
                 const branch_inner = consistent_inner.?;
                 // If the inner GID doesn't exist in parent, copy entire subtree from branch
@@ -3233,27 +3234,6 @@ fn mergeRefinementRecursive(
                     break :blk branch_inner;
                 }
             } else blk: {
-                // Branches disagree - find one that differs from the parent's original target.
-                // This mirrors optional/errorunion merge behavior and prevents branch-only
-                // allocations from being orphaned when a pointer is retargeted in only one branch.
-                for (branches, branch_gids) |branch_opt, gid_opt| {
-                    const branch = branch_opt orelse continue;
-                    const gid = gid_opt orelse continue;
-                    if (gid == p.to) continue;
-
-                    if (gid >= refinements.list.items.len) {
-                        const src_ref = branch.refinements.at(gid).*;
-                        try copied_from_branch.put(gid, {});
-                        try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
-                        const copied_gid = try Refinement.copyTo(src_ref, branch.refinements, refinements);
-                        refinements.at(orig_gid).pointer.to = copied_gid;
-                        break :blk copied_gid;
-                    } else {
-                        refinements.at(orig_gid).pointer.to = gid;
-                        break :blk gid;
-                    }
-                }
-
                 break :blk p.to;
             };
 
@@ -3285,9 +3265,9 @@ fn mergeRefinementRecursive(
                 }
             }
 
-            // If all branches point to a different inner, copy to parent if needed and update
-            // Note: We always copy because branch GIDs are in a different refinements table
-            // and cannot be directly assigned to parent's .to
+            // If all branches point to a different inner, copy to parent if needed and update.
+            // If branches disagree, recurse into the parent's existing child so the
+            // disagreement is merged structurally instead of selecting a winner branch.
             const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != data.to) blk: {
                 const branch_inner = consistent_inner.?;
                 const branch_ref = first_branch.?;
@@ -3304,54 +3284,6 @@ fn mergeRefinementRecursive(
                 }
                 break :blk copied_gid;
             } else blk: {
-                // Branches disagree - prefer a branch whose inner structural tag matches the
-                // parent's original payload before falling back to the first differing branch.
-                // This avoids poisoning errorunion payloads with the error placeholder
-                // (.unimplemented) when another branch carries the real success payload.
-                const orig_inner_tag = std.meta.activeTag(refinements.at(data.to).*);
-
-                var fallback_branch: ?State = null;
-                var fallback_gid: ?Gid = null;
-
-                for (branches, branch_gids) |branch_opt, gid_opt| {
-                    const branch = branch_opt orelse continue;
-                    const gid = gid_opt orelse continue;
-                    if (gid == data.to) continue; // Same as parent's original, skip
-
-                    if (fallback_branch == null) {
-                        fallback_branch = branch;
-                        fallback_gid = gid;
-                    }
-
-                    const branch_tag = std.meta.activeTag(branch.refinements.at(gid).*);
-                    if (branch_tag != orig_inner_tag) continue;
-
-                    const src_ref = branch.refinements.at(gid).*;
-                    try copied_from_branch.put(gid, {});
-                    try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
-                    const copied_gid = try Refinement.copyTo(src_ref, branch.refinements, refinements);
-                    switch (refinements.at(orig_gid).*) {
-                        .optional => |*o| o.to = copied_gid,
-                        .errorunion => |*e| e.to = copied_gid,
-                        else => unreachable,
-                    }
-                    break :blk copied_gid;
-                }
-
-                if (fallback_branch) |branch| {
-                    const gid = fallback_gid.?;
-                    const src_ref = branch.refinements.at(gid).*;
-                    try copied_from_branch.put(gid, {});
-                    try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
-                    const copied_gid = try Refinement.copyTo(src_ref, branch.refinements, refinements);
-                    switch (refinements.at(orig_gid).*) {
-                        .optional => |*o| o.to = copied_gid,
-                        .errorunion => |*e| e.to = copied_gid,
-                        else => unreachable,
-                    }
-                    break :blk copied_gid;
-                }
-                // All branches same as parent - use parent's original
                 break :blk data.to;
             };
 
