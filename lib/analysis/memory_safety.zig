@@ -1786,11 +1786,9 @@ pub const MemorySafety = union(enum) {
         _ = ctx;
         const orig_ref = refinements.at(orig_gid);
 
-        // Only pointer and scalar refinements have analytes
         const orig_analyte = switch (orig_ref.*) {
-            .pointer => |*p| &p.analyte,
-            .scalar => |*s| &s.analyte,
-            else => return, // No memory_safety on container types
+            .void, .noreturn, .unimplemented => return,
+            else => getAnalytePtr(orig_ref),
         };
 
         // Determine if this is a loop merge (where index 0 is the null case)
@@ -1815,12 +1813,9 @@ pub const MemorySafety = union(enum) {
                             // Entity may not exist in all branches during recursive merge traversal
                             const branch_gid = branch_gid_opt orelse continue;
                             const branch_ref = branch.refinements.at(branch_gid);
-                            // For optionals, branches may have different inner types
-                            // (e.g., .null vs .scalar) - skip branches without analytes
                             const branch_analyte = switch (branch_ref.*) {
-                                .pointer => |*p| &p.analyte,
-                                .scalar => |*s| &s.analyte,
-                                else => continue, // .null, .optional, etc. have no analyte
+                                .void, .noreturn, .unimplemented => continue,
+                                else => getAnalytePtr(branch_ref),
                             };
                             // Branch may have different memory_safety state (e.g., null branch has null)
                             // Only check freed state if branch also has .allocated
@@ -1861,12 +1856,9 @@ pub const MemorySafety = union(enum) {
                 // Entity may not exist in all branches during recursive merge traversal
                 const branch_gid = branch_gid_opt orelse continue;
                 const branch_ref = branch.refinements.at(branch_gid);
-                // For optionals, branches may have different inner types
-                // (e.g., .null vs .scalar) - skip branches without analytes
                 const branch_analyte = switch (branch_ref.*) {
-                    .pointer => |*p| &p.analyte,
-                    .scalar => |*s| &s.analyte,
-                    else => continue, // .null, .optional, etc. have no analyte
+                    .void, .noreturn, .unimplemented => continue,
+                    else => getAnalytePtr(branch_ref),
                 };
                 if (branch_analyte.memory_safety) |ms| {
                     orig_analyte.memory_safety = ms;

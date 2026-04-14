@@ -4195,3 +4195,91 @@ test "bitcast from [*]T to *T preserves region structure" {
     // CRITICAL: Result must share the SAME refinement (preserving region structure)
     try std.testing.expectEqual(ptr_gid, results[1].refinement.?);
 }
+
+test "splatMerge propagates optional wrapper memory_safety from branches" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.meta.function = "merge_test";
+    ctx.meta.file = "merge_test.zig";
+    ctx.meta.line = 10;
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
+
+    var results = [_]Inst{.{}} ** 1;
+    results[0].refinement = opt_gid;
+
+    var branch1_refinements = try refinements.clone(allocator);
+    defer branch1_refinements.deinit();
+    var branch2_refinements = try refinements.clone(allocator);
+    defer branch2_refinements.deinit();
+
+    branch1_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
+        .meta = ctx.meta,
+        .root_gid = null,
+    } };
+    branch2_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
+        .meta = ctx.meta,
+        .root_gid = null,
+    } };
+
+    var branch1_results = results;
+    var branch2_results = results;
+    const branches = [_]State{
+        testState(&ctx, &branch1_results, &branch1_refinements),
+        testState(&ctx, &branch2_results, &branch2_refinements),
+    };
+
+    try splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
+
+    try std.testing.expect(refinements.at(opt_gid).optional.analyte.memory_safety != null);
+    try std.testing.expect(refinements.at(opt_gid).optional.analyte.memory_safety.? == .stack);
+}
+
+test "splatMerge propagates region wrapper memory_safety from branches" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+    ctx.meta.function = "merge_test";
+    ctx.meta.file = "merge_test.zig";
+    ctx.meta.line = 20;
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+
+    var results = [_]Inst{.{}} ** 1;
+    results[0].refinement = region_gid;
+
+    var branch1_refinements = try refinements.clone(allocator);
+    defer branch1_refinements.deinit();
+    var branch2_refinements = try refinements.clone(allocator);
+    defer branch2_refinements.deinit();
+
+    branch1_refinements.at(region_gid).region.analyte.memory_safety = .{ .interned = ctx.meta };
+    branch2_refinements.at(region_gid).region.analyte.memory_safety = .{ .interned = ctx.meta };
+
+    var branch1_results = results;
+    var branch2_results = results;
+    const branches = [_]State{
+        testState(&ctx, &branch1_results, &branch1_refinements),
+        testState(&ctx, &branch2_results, &branch2_refinements),
+    };
+
+    try splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
+
+    try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety != null);
+    try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety.? == .interned);
+}

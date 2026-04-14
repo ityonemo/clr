@@ -503,9 +503,6 @@ pub const VariantSafety = struct {
                             const copied_gid = Refinements.Refinement.copyTo(branch_field_ref, branch.refinements, refinements) catch @panic("out of memory");
                             // Re-fetch after potential reallocation from copyTo
                             refinements.at(orig_gid).@"union".fields[i] = copied_gid;
-                            // Ensure memory_safety is set on the copied entity
-                            // (branch may have created it via typeToRefinement without memory_safety)
-                            memory_safety.MemorySafety.initUnsetRecursive(refinements, copied_gid);
                         }
                     }
                 }
