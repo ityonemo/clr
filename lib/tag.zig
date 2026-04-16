@@ -288,7 +288,7 @@ pub const Bitcast = struct {
                 if (self.ty == .optional and state.refinements.at(src_gid).* == .pointer and self.ty.optional.* == .pointer) {
                     const copied_ptr_gid = try state.refinements.valueCopy(src_gid);
                     const opt_gid = try state.refinements.appendEntity(.{
-                        .optional = .{ .to = copied_ptr_gid, .analyte = .{ .null_safety = .unknown } },
+                        .optional = .{ .to = copied_ptr_gid },
                     });
                     state.results[index].refinement = opt_gid;
                 } else {
@@ -1480,7 +1480,6 @@ pub const WrapOptional = struct {
         // Create the optional that points to the payload (non-null case)
         const optional_gid = try state.refinements.appendEntity(.{ .optional = .{
             .to = payload_gid,
-            .analyte = .{ .null_safety = .unknown },
         } });
 
         state.results[index].refinement = optional_gid;

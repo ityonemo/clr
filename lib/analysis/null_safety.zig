@@ -10,7 +10,9 @@ const State = @import("../lib.zig").State;
 
 /// NullSafety tracks null-checking state for optionals.
 pub const NullSafety = union(enum) {
-    unknown: void, // Checked but not yet resolved by cond_br
+    // the result of null and non_null merged, or 
+    // the result of a newly created nullable that hasn't been initialized.
+    unknown: void,
     non_null: Meta,
     @"null": Meta,
 
@@ -41,6 +43,34 @@ pub const NullSafety = union(enum) {
         _ = index;
         _ = params;
         // Pure operation - does nothing to the analyte
+    }
+
+    /// wrap_optional constructs a known non-null optional.
+    pub fn wrap_optional(state: State, index: usize, params: tag.WrapOptional) !void {
+        _ = params;
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+        if (result_ref.* != .optional) return;
+        result_ref.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
+    }
+
+    /// bitcast from a pointer to an optional-pointer preserves a definitely non-null value.
+    pub fn bitcast(state: State, index: usize, params: tag.Bitcast) !void {
+        if (params.ty != .optional or params.ty.optional.* != .pointer) return;
+
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+        if (result_ref.* != .optional) return;
+
+        const src_gid: ?Gid = switch (params.src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+        const src = src_gid orelse return;
+        if (state.refinements.at(src).* != .pointer) return;
+
+        result_ref.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
     }
 
     /// cond_br is emitted at branch start - look up the source optional directly
@@ -405,11 +435,19 @@ pub const NullSafety = union(enum) {
     }
 };
 
+/// Validate that a refinement conforms to null_safety rules:
+/// - MUST EXIST: .optional
+/// - MUST BE NULL: .scalar, .pointer, .errorunion, .struct, .union, .recursive, .fnptr, .allocator, .region
+/// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement) void {
     switch (refinement) {
-        // null_safety is valid on optionals
-        .optional => {},
-        // null_safety should not exist on non-optional types
+        // null_safety must exist on optionals
+        .optional => |o| {
+            if (o.analyte.null_safety == null) {
+                std.debug.panic("null_safety must be set on optionals", .{});
+            }
+        },
+        // null_safety must be null on non-optional types
         .scalar => |s| {
             if (s.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got scalar", .{});
@@ -420,11 +458,11 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("null_safety should only exist on optionals, got allocator", .{});
             }
         },
-        inline .pointer, .errorunion, .@"struct", .@"union", .recursive, .fnptr => |data, t| {
+        inline .pointer, .errorunion, .@"struct", .@"union", .recursive, .fnptr, .region => |data, t| {
             if (data.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got {s}", .{@tagName(t)});
             }
         },
-        .void, .noreturn, .unimplemented, .region => {},
+        .void, .noreturn, .unimplemented => {},
     }
 }
