@@ -360,18 +360,17 @@ pub const Br = struct {
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // For gid sources, share the source's refinement with the block.
-        // This ensures operations on the block (like alloc_destroy) affect the same entity.
-        // Clone preserves indices, so sharing propagates correctly through merge.
+        // A break materializes the block result value on this control-flow path.
+        // It should produce a new value, not alias the carried source entity.
         switch (self.src) {
             .inst => |src| {
                 const src_gid = state.results[src].refinement orelse return;
-                state.results[self.block].refinement = src_gid;
+                state.results[self.block].refinement = try state.refinements.valueCopy(src_gid);
             },
             .interned => |interned| {
                 // Try to look up as tracked global first
                 if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
-                    state.results[self.block].refinement = global_gid;
+                    state.results[self.block].refinement = try state.refinements.valueCopy(global_gid);
                 } else {
                     // Not tracked - comptime constant. Create refinement with .interned memory_safety.
                     const ref = try typeToRefinement(interned.ty, state.refinements);
@@ -769,8 +768,7 @@ pub const StructFieldVal = struct {
                     }
                 };
 
-                // Share the field entity (reading a field doesn't copy it)
-                state.results[index].refinement = field_idx;
+                state.results[index].refinement = try state.refinements.valueCopy(field_idx);
                 // Path derived from inst_tag (has operand and field_index) at error time
             },
             else => |t| std.debug.panic("struct_field_val: expected struct or union, got {s}", .{@tagName(t)}),
@@ -820,11 +818,11 @@ pub const OptionalPayload = struct {
 
                 if (src_ref.* == .optional) {
                     // Extract the payload from the optional (optional.to is the inner value)
-                    state.results[index].refinement = src_ref.optional.to;
+                    state.results[index].refinement = try state.refinements.valueCopy(src_ref.optional.to);
                 } else if (src_ref.* == .errorunion) {
                     // For remap which uses alloc_realloc but returns ?[]T not Error![]T,
                     // the AIR uses optional_payload but the refinement is errorunion
-                    state.results[index].refinement = src_ref.errorunion.to;
+                    state.results[index].refinement = try state.refinements.valueCopy(src_ref.errorunion.to);
                 } else {
                     // optional_payload should only receive optionals or errorunions
                     std.debug.panic("optional_payload: expected optional or errorunion, got {s}", .{@tagName(src_ref.*)});
@@ -836,9 +834,9 @@ pub const OptionalPayload = struct {
                     @panic("OptionalPayload: interned constant not supported");
                 const src_ref = state.refinements.at(global_gid);
                 if (src_ref.* == .optional) {
-                    state.results[index].refinement = src_ref.optional.to;
+                    state.results[index].refinement = try state.refinements.valueCopy(src_ref.optional.to);
                 } else if (src_ref.* == .errorunion) {
-                    state.results[index].refinement = src_ref.errorunion.to;
+                    state.results[index].refinement = try state.refinements.valueCopy(src_ref.errorunion.to);
                 } else {
                     std.debug.panic("optional_payload: expected optional or errorunion for global, got {s}", .{@tagName(src_ref.*)});
                 }
@@ -1346,7 +1344,7 @@ pub const UnwrapErrunionPayload = struct {
                 const src_ref = state.refinements.at(src_gid).*;
                 // errorunion's .to points to the payload entity
                 const payload_gid = src_ref.errorunion.to;
-                state.results[index].refinement = payload_gid;
+                state.results[index].refinement = try state.refinements.valueCopy(payload_gid);
             },
             .interned => |interned| {
                 // Try to look up as tracked global first
@@ -1354,7 +1352,7 @@ pub const UnwrapErrunionPayload = struct {
                     @panic("UnwrapErrunionPayload: interned constant not supported");
                 const src_ref = state.refinements.at(global_gid).*;
                 const payload_gid = src_ref.errorunion.to;
-                state.results[index].refinement = payload_gid;
+                state.results[index].refinement = try state.refinements.valueCopy(payload_gid);
             },
             .fnptr => {
                 std.debug.panic("unwrap_errunion_payload: fnptr sources not supported", .{});
@@ -1966,13 +1964,14 @@ pub const UnionInit = struct {
                 // Active field - create entity from init value
                 switch (self.init) {
                     .inst => |src| {
-                        // Runtime value - share the source entity
-                        fields[i] = state.results[src].refinement;
+                        const src_gid = state.results[src].refinement orelse
+                            std.debug.panic("union_init: source inst {d} has no refinement", .{src});
+                        fields[i] = try state.refinements.valueCopy(src_gid);
                     },
                     .interned => |interned| {
                         // Try to look up as tracked global first
                         if (state.refinements.getGlobal(interned.ip_idx)) |gid| {
-                            fields[i] = gid;
+                            fields[i] = try state.refinements.valueCopy(gid);
                         } else {
                             // Not tracked - comptime value, create entity from type
                             const field_ref = try typeToRefinement(interned.ty, state.refinements);
@@ -3408,7 +3407,7 @@ test "arg shares eidx from caller (global refinements)" {
     try std.testing.expectEqual(@as(u32, 3), results[0].inst_tag.?.arg.name_id);
 }
 
-test "br shares source refinement with block" {
+test "br valueCopies source refinement into block" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -3429,11 +3428,11 @@ test "br shares source refinement with block" {
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
     const src_gid = results[1].refinement.?;
 
-    // br should share the source refinement with the block
+    // br should value-copy the source refinement into the block
     try Inst.apply(state, 2, .{ .br = .{ .block = 0, .src = .{ .inst = 1 } } });
 
-    // Block should now have the same refinement as source
-    try std.testing.expectEqual(src_gid, results[0].refinement.?);
+    // Block should now hold a copied value, not the original entity
+    try std.testing.expect(results[0].refinement.? != src_gid);
 }
 
 test "dbg_stmt does nothing" {
@@ -3486,8 +3485,9 @@ test "optional_payload extracts inner value from optional" {
     // optional_payload should extract the inner value
     try Inst.apply(state, 1, .{ .optional_payload = .{ .src = .{ .inst = 0 } } });
 
-    // Result should point to the inner scalar
-    try std.testing.expectEqual(inner_gid, results[1].refinement.?);
+    // Result should be a value-copy of the inner scalar
+    try std.testing.expect(results[1].refinement.? != inner_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
 
 test "unwrap_errunion_payload extracts payload from error union" {
@@ -3517,8 +3517,44 @@ test "unwrap_errunion_payload extracts payload from error union" {
     // unwrap_errunion_payload should extract the payload
     try Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
 
-    // Result should point to the payload
-    try std.testing.expectEqual(payload_gid, results[1].refinement.?);
+    // Result should be a value-copy of the payload
+    try std.testing.expect(results[1].refinement.? != payload_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
+}
+
+test "struct_field_val valueCopies field" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const field_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .undefined_safety = .{ .defined = {} },
+        },
+    } });
+    const fields = try allocator.alloc(Gid, 1);
+    fields[0] = field_gid;
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = fields, .type_id = 0 } });
+    results[0].refinement = struct_gid;
+
+    try Inst.apply(state, 1, .{ .struct_field_val = .{
+        .operand = 0,
+        .field_index = 0,
+        .ty = .{ .scalar = {} },
+    } });
+
+    try std.testing.expect(results[1].refinement.? != field_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
 
 test "wrap_optional valueCopies inst payload" {
@@ -3834,8 +3870,8 @@ test "struct_field_val extracts field value from struct" {
     // struct_field_val should extract field 0
     try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } } });
 
-    // Result should share the field's entity
-    try std.testing.expectEqual(field0_eidx, results[1].refinement.?);
+    // Result should be a copied field value
+    try std.testing.expect(results[1].refinement.? != field0_eidx);
 }
 
 test "set_union_tag updates union variant" {
@@ -3946,6 +3982,38 @@ test "union_init creates union with active variant" {
     // Field 1 should be active (non-null), field 0 inactive (null)
     try std.testing.expect(union_ref.@"union".fields[0] == null);
     try std.testing.expect(union_ref.@"union".fields[1] != null);
+    try std.testing.expect(union_ref.@"union".fields[1].? != val_gid);
+}
+
+test "br valueCopies inst source into block result" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const src_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .undefined_safety = .{ .defined = {} },
+        },
+    } });
+    results[0].refinement = src_gid;
+
+    try Inst.apply(state, 1, .{ .br = .{
+        .block = 1,
+        .src = .{ .inst = 0 },
+    } });
+
+    try std.testing.expect(results[1].refinement.? != src_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
 
 test "ret_safe with deeply nested type (3 levels) with early_returns" {

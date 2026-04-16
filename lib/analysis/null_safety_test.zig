@@ -110,7 +110,8 @@ test "optional_payload errors on unchecked unwrap" {
     defer refinements.deinit();
 
     // Create an optional with NO null_safety set (unchecked)
-    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = 0 } });
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
 
     var results = [_]Inst{.{ .refinement = opt_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -126,9 +127,10 @@ test "optional_payload errors on known null unwrap" {
     defer refinements.deinit();
 
     // Create an optional with null_safety set to .@"null"
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const opt_gid = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .null = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } },
-        .to = 0,
+        .to = inner_gid,
     } });
 
     var results = [_]Inst{.{ .refinement = opt_gid }} ** 2;
@@ -157,8 +159,8 @@ test "optional_payload succeeds on checked non_null" {
     // optional_payload should succeed on checked non_null
     try Inst.apply(state, 1, .{ .optional_payload = .{ .src = .{ .inst = 0 } } });
 
-    // Result should share the inner entity
-    try std.testing.expectEqual(inner_gid, results[1].refinement.?);
+    // Result should be a value-copy of the inner entity
+    try std.testing.expect(results[1].refinement.? != inner_gid);
 }
 
 test "store to optional with null sets null state" {
@@ -307,8 +309,8 @@ test "optional_payload succeeds when preceded by is_non_null assertion on same s
     // (is_non_null asserts non-null at runtime, so if we get here, it's non-null)
     try Inst.apply(state, 2, .{ .optional_payload = .{ .src = .{ .inst = 0 } } });
 
-    // Result should have the inner entity
-    try std.testing.expectEqual(inner_gid, results[2].refinement.?);
+    // Result should be a value-copy of the inner entity
+    try std.testing.expect(results[2].refinement.? != inner_gid);
 }
 
 test "aggregate_init incorporates null_safety from source elements" {
