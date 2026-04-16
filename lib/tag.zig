@@ -2068,8 +2068,7 @@ pub const ArrayElemVal = struct {
 };
 
 /// Pointer arithmetic (ptr_add, ptr_sub).
-/// Passes through the pointer operand's refinement since the result is still a pointer
-/// to the same allocation.
+/// Creates a fresh pointer value to the same region as the source pointer.
 pub const PtrAdd = struct {
     /// Source pointer
     ptr: Src,
@@ -2079,17 +2078,23 @@ pub const PtrAdd = struct {
             .inst => |idx| idx,
             .interned, .fnptr => @panic("interned source not implemented"),
         };
-        // Share the pointer's refinement - result points to same allocation
         if (state.results[ptr_idx].refinement) |src_gid| {
-            state.results[index].refinement = src_gid;
+            const src_ref = state.refinements.at(src_gid);
+            if (src_ref.* != .pointer) @panic("PtrAdd: expected pointer source");
+            const pointee_gid = src_ref.pointer.to;
+            if (state.refinements.at(pointee_gid).* != .region) {
+                try state.ctx.meta.print(state.ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
+                return error.PtrArithmeticOnSingleItem;
+            }
+            const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{ .to = pointee_gid } });
+            state.results[index].refinement = new_ptr_gid;
         }
         try splat(.ptr_add, state, index, self);
     }
 };
 
 /// Convert array/many-pointer to slice.
-/// Since many-pointer and slice have the same structure (pointer→region→element),
-/// this just shares the source refinement to preserve memory_safety tracking.
+/// Creates a fresh slice pointer value to the same region as the source pointer.
 pub const ArrayToSlice = struct {
     /// Source (array or many-pointer)
     source: Src,
@@ -2099,9 +2104,12 @@ pub const ArrayToSlice = struct {
             .inst => |idx| idx,
             .interned, .fnptr => @panic("interned source not implemented"),
         };
-        // Share the source refinement - both many-pointer and slice are pointer→region
         if (state.results[src_idx].refinement) |src_gid| {
-            state.results[index].refinement = src_gid;
+            const src_ref = state.refinements.at(src_gid);
+            if (src_ref.* != .pointer) @panic("ArrayToSlice: expected pointer source");
+            const region_gid = src_ref.pointer.to;
+            const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+            state.results[index].refinement = new_ptr_gid;
         } else {
             // Source has no refinement - create fresh
             const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
@@ -4261,11 +4269,14 @@ test "ptr_add on pointer to region returns pointer to same region" {
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 
-    // ptr_add should share the same refinement
+    // ptr_add should produce a fresh pointer to the same region
     try Inst.apply(state, 1, .{ .ptr_add = .{ .ptr = .{ .inst = 0 } } });
 
-    // Result must be the SAME gid (sharing refinement)
-    try std.testing.expectEqual(ptr_gid, results[1].refinement.?);
+    const result_gid = results[1].refinement.?;
+    try std.testing.expect(result_gid != ptr_gid);
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(region_gid, result_ref.pointer.to);
 }
 
 test "ptr_sub on pointer to region returns pointer to same region" {
@@ -4292,11 +4303,64 @@ test "ptr_sub on pointer to region returns pointer to same region" {
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 
-    // ptr_sub should share the same refinement
+    // ptr_sub should produce a fresh pointer to the same region
     try Inst.apply(state, 1, .{ .ptr_sub = .{ .ptr = .{ .inst = 0 } } });
 
-    // Result must be the SAME gid (sharing refinement)
-    try std.testing.expectEqual(ptr_gid, results[1].refinement.?);
+    const result_gid = results[1].refinement.?;
+    try std.testing.expect(result_gid != ptr_gid);
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(region_gid, result_ref.pointer.to);
+}
+
+test "ptr_add on single-item pointer errors" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = scalar_gid } });
+    results[0].refinement = ptr_gid;
+
+    const result = Inst.apply(state, 1, .{ .ptr_add = .{ .ptr = .{ .inst = 0 } } });
+    try std.testing.expectError(error.PtrArithmeticOnSingleItem, result);
+}
+
+test "array_to_slice returns fresh pointer to same region" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+    results[0].refinement = ptr_gid;
+
+    try Inst.apply(state, 1, .{ .array_to_slice = .{ .source = .{ .inst = 0 } } });
+
+    const result_gid = results[1].refinement.?;
+    try std.testing.expect(result_gid != ptr_gid);
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(region_gid, result_ref.pointer.to);
 }
 
 test "bitcast from [*]T to *T preserves region structure" {

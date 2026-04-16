@@ -430,12 +430,10 @@ pub const MemorySafety = union(enum) {
         };
     }
 
-    /// ptr_add/ptr_sub performs pointer arithmetic.
-    /// This is only valid on pointers to regions (many-item pointers, slices).
-    /// Pointer arithmetic on single-item pointers (*T) is undefined behavior.
+    /// ptr_add/ptr_sub perform pointer arithmetic on an already-validated source pointer.
+    /// tag.PtrAdd is responsible for ensuring the source points to a region.
     pub fn ptr_add(state: State, index: usize, params: tag.PtrAdd) !void {
         const refinements = state.refinements;
-        const ctx = state.ctx;
 
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |idx| state.results[idx].refinement orelse return,
@@ -444,40 +442,8 @@ pub const MemorySafety = union(enum) {
         };
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
-
-        // Check what the pointer points to
-        const pointee_ref = refinements.at(ptr_ref.pointer.to);
-        if (pointee_ref.* != .region) {
-            // Pointer arithmetic on non-region pointer (single-item pointer)
-            try ctx.meta.print(ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
-            return error.PtrArithmeticOnSingleItem;
-        }
-
-        // Check if the region is a "fake" wrapper around a single-item allocation.
-        // This happens when bitcast converts *T to [*]T - the region is created
-        // but has no .allocated metadata (the element has it instead).
-        const region = &pointee_ref.region;
-        if (region.analyte.memory_safety == null) {
-            // Region has no memory_safety - check if element has allocation metadata
-            const element_ref = refinements.at(region.to);
-            const element_analyte = getAnalytePtr(element_ref);
-            if (element_analyte.memory_safety) |element_ms| {
-                if (element_ms == .allocated) {
-                    // Element has allocation metadata but region doesn't
-                    // This means it was a single-item allocation wrapped by bitcast
-                    try ctx.meta.print(ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
-                    return error.PtrArithmeticOnSingleItem;
-                }
-            }
-        }
-
-        // Pointer arithmetic yields another derived pointer into the same allocation/region.
-        // Preserve the source pointer's ownership/provenance so later stores retain the
-        // connection back to the underlying allocation via root_gid.
         const result_gid = state.results[index].refinement orelse return;
-        const result_ref = refinements.at(result_gid);
-        if (result_ref.* != .pointer) return;
-        result_ref.pointer.analyte.memory_safety = ptr_ref.pointer.analyte.memory_safety;
+        paintSpatialMemory(refinements, result_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
     }
 
     /// ptr_sub has the same safety requirements as ptr_add
