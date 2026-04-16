@@ -1783,11 +1783,9 @@ pub const UndefinedSafety = union(enum) {
         }
     }
 
-    /// Initialize undefined state on a refinement created by typeToRefinement.
-    /// Called when a Type is .undefined - marks scalars/pointers as undefined.
+    /// Initialize undefined state on a refinement created from a `.undefined` type wrapper.
     /// This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
-    pub fn init_from_type(ref: *Refinements.Refinement, is_undefined: bool, meta: Meta) void {
-        if (!is_undefined) return;
+    pub fn init_undefined(ref: *Refinements.Refinement, meta: Meta) void {
         switch (ref.*) {
             .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },

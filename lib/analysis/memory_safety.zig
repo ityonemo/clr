@@ -57,6 +57,10 @@ pub const MemorySafety = union(enum) {
     /// cond_br looks up the errorunion directly via is_non_err.src from inst_tag.
     error_stub: void,
 
+    /// pointer's gid is a placeholder and the pointer's value is actually
+    /// still undefined.
+    placeholder: void,
+
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         _ = allocator;
@@ -70,7 +74,7 @@ pub const MemorySafety = union(enum) {
             .allocated => |a| {
                 hasher.update(&.{@as(u8, if (a.freed != null) 1 else 0)});
             },
-            .stack, .interned, .error_stub => {},
+            .stack, .interned, .error_stub, .placeholder => {},
         }
     }
 
@@ -78,20 +82,14 @@ pub const MemorySafety = union(enum) {
         _ = params;
         // Inst contains .pointer = Indirected, set memory_safety on pointer and pointee
         const ptr_idx = state.results[index].refinement.?;
-        const ptr = &state.refinements.at(ptr_idx).pointer;
-        const pointee_idx = ptr.to;
-
-        // Set memory_safety on the pointer itself
-        ptr.analyte.memory_safety = .{ .stack = .{
+        const stack_ms: MemorySafety = .{ .stack = .{
             .meta = state.ctx.meta,
             .root_gid = null,
         } };
 
-        // Paint the freshly materialized pointee value tree.
-        paintSpatialMemory(state.refinements, pointee_idx, .{ .stack = .{
-            .meta = state.ctx.meta,
-            .root_gid = null,
-        } });
+        // Use paintReturnSlotMemory to traverse all nested structures including pointer.to
+        // since typeToRefinement creates the entire nested structure together.
+        paintReturnSlotMemory(state.refinements, ptr_idx, stack_ms);
     }
 
     pub fn store(state: State, index: usize, params: tag.Store) !void {
@@ -136,14 +134,9 @@ pub const MemorySafety = union(enum) {
         const src_refinement_idx = results[src].refinement orelse return;
         const src_refinement = refinements.at(src_refinement_idx);
 
-        // Propagate memory_safety from the stored value into the destination pointee.
-        // This is critical for whole-value stores like `a.* = b.*`, where the destination
-        // slot already exists but its previous stack provenance should be replaced by the
-        // source value's pointer/heap provenance.
         const ptr_refinement_idx = results[ptr].refinement orelse return;
         const ptr_ref = refinements.at(ptr_refinement_idx);
         if (ptr_ref.* != .pointer) return;
-        copyStoredValueMemorySafetyRecursive(refinements, ptr_ref.pointer.to, src_refinement_idx);
 
         // When storing a pointer with allocation tracking, set name_at_alloc on the pointee
         // This captures the access path (e.g., "container.ptr") for error messages
@@ -158,6 +151,20 @@ pub const MemorySafety = union(enum) {
                         ms.allocated.name_at_alloc = ctx.buildPathName(results, refinements, ptr);
                     }
                 }
+            }
+        }
+
+        // For struct stores, copy memory_safety state from source fields to destination fields.
+        // tag.Store updates .to references to share targets, but analyte state also needs copying.
+        // Without this, destination fields keep their original memory_safety (e.g., .stack from alloc)
+        // while pointing to source regions that may have different memory_safety (e.g., .allocated).
+        const dest_gid = ptr_ref.pointer.to;
+        const dest_ref = refinements.at(dest_gid);
+        if (dest_ref.* == .@"struct" and src_refinement.* == .@"struct") {
+            const dest_struct = dest_ref.@"struct";
+            const src_struct = src_refinement.@"struct";
+            for (dest_struct.fields, src_struct.fields) |dest_field_gid, src_field_gid| {
+                copyMemorySafetyRecursive(refinements, dest_field_gid, src_field_gid);
             }
         }
 
@@ -238,7 +245,7 @@ pub const MemorySafety = union(enum) {
     }
 
     /// With unified args, memory safety state is already set up by srcSliceToGidSlice.
-    /// For inst args, state was copied from caller. For int_const args, splatInitDefined
+    /// For inst args, state was copied from caller. For int_const args, splatInit
     /// sets the initial state. Global pointer tracking for int_const pointers would
     /// need to be added to srcSliceToGidSlice if needed.
     pub fn arg(state: State, index: usize, params: tag.Arg) !void {
@@ -303,6 +310,7 @@ pub const MemorySafety = union(enum) {
                 paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
                 return;
             },
+            .placeholder => std.debug.panic("placeholder in struct_field_ptr - container not initialized", .{}),
         };
 
         // Also ensure memory_safety is set on the pointee (the field).
@@ -317,6 +325,7 @@ pub const MemorySafety = union(enum) {
                 // Leave unset - the allocation tracking handles this
             },
             .error_stub => {},
+            .placeholder => {}, // Already panicked above
         }
     }
 
@@ -359,6 +368,7 @@ pub const MemorySafety = union(enum) {
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
+            .placeholder => std.debug.panic("placeholder in slice_ptr - region not initialized", .{}),
         };
     }
 
@@ -416,6 +426,7 @@ pub const MemorySafety = union(enum) {
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = src_gid } },
+            .placeholder => std.debug.panic("placeholder in slice_field_ptr - source not initialized", .{}),
         };
     }
 
@@ -507,6 +518,7 @@ pub const MemorySafety = union(enum) {
                 return;
             },
             .error_stub => return,
+            .placeholder => std.debug.panic("placeholder in field_parent_ptr - entity not initialized", .{}),
         };
         const root_gid = parent_gid orelse return; // null means this IS the root, no parent
         const parent_eidx = refinements.findByGid(root_gid) orelse return;
@@ -531,6 +543,7 @@ pub const MemorySafety = union(enum) {
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => return,
+            .placeholder => std.debug.panic("placeholder in field_parent_ptr - parent not initialized", .{}),
         };
     }
 
@@ -817,7 +830,15 @@ pub const MemorySafety = union(enum) {
         if (eu_ref.* != .errorunion) return;
 
         const payload_gid = eu_ref.errorunion.to;
-        const payload_ms = getAnalytePtr(refinements.at(payload_gid)).memory_safety orelse return;
+        const payload_ref = refinements.at(payload_gid);
+
+        // Skip payloads that don't have analytes (void, etc.)
+        switch (payload_ref.*) {
+            .void, .noreturn, .unimplemented, .fnptr => return,
+            else => {},
+        }
+
+        const payload_ms = getAnalytePtr(payload_ref).memory_safety orelse return;
         if (payload_ms != .allocated and payload_ms != .error_stub) return;
 
         // On error path, the allocation didn't happen - mark the payload as phantom.
@@ -969,6 +990,14 @@ pub const MemorySafety = union(enum) {
             // Skip if this allocation is reachable from return value (transferred to caller)
             // Check by allocation identity since ret_safe deep-copies values
             const pointee = refinements.at(pointee_idx);
+
+            // Skip pointees that don't have analytes (void, fnptr, etc.)
+            // These can't have memory allocations to leak
+            switch (pointee.*) {
+                .void, .noreturn, .unimplemented, .fnptr => continue,
+                else => {},
+            }
+
             if (getAnalytePtrConst(pointee).memory_safety) |ms| {
                 if (ms == .allocated) {
                     const alloc_id = ms.allocated.allocator_gid;
@@ -1103,7 +1132,7 @@ pub const MemorySafety = union(enum) {
                     const root_gid = switch (ms) {
                         .allocated => |a| a.root_gid,
                         .stack => |s| s.root_gid,
-                        .interned, .error_stub => null,
+                        .interned, .error_stub, .placeholder => null,
                     };
                     if (root_gid) |root| {
                         collectReachableGids(refinements, root, reachable);
@@ -1151,7 +1180,7 @@ pub const MemorySafety = union(enum) {
                     const root_gid = switch (ms) {
                         .allocated => |a| a.root_gid,
                         .stack => |s| s.root_gid,
-                        .interned, .error_stub => null,
+                        .interned, .error_stub, .placeholder => null,
                     };
                     if (root_gid) |root| {
                         collectReachableAllocationsInner(refinements, root, allocs, depth + 1);
@@ -1204,7 +1233,7 @@ pub const MemorySafety = union(enum) {
                     const root_gid = switch (ms) {
                         .allocated => |a| a.root_gid,
                         .stack => |s| s.root_gid,
-                        .interned, .error_stub => null,
+                        .interned, .error_stub, .placeholder => null,
                     };
                     if (root_gid) |root| {
                         if (hasMatchingAllocationInner(refinements, root, allocator_gid, depth + 1)) {
@@ -1226,7 +1255,18 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| return hasMatchingAllocationInner(refinements, o.to, allocator_gid, depth + 1),
             .errorunion => |e| return hasMatchingAllocationInner(refinements, e.to, allocator_gid, depth + 1),
-            .region => |r| return hasMatchingAllocationInner(refinements, r.to, allocator_gid, depth + 1),
+            .region => |r| {
+                // Check region's own memory_safety for allocation
+                if (r.analyte.memory_safety) |ms| {
+                    if (ms == .allocated) {
+                        if (ms.allocated.allocator_gid == allocator_gid) {
+                            return true;
+                        }
+                    }
+                }
+                // Also recurse into element type
+                return hasMatchingAllocationInner(refinements, r.to, allocator_gid, depth + 1);
+            },
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
                     if (hasMatchingAllocationInner(refinements, field_gid, allocator_gid, depth + 1)) {
@@ -1261,7 +1301,8 @@ pub const MemorySafety = union(enum) {
             .recursive => |*rec| &rec.analyte,
             .@"union" => |*un| &un.analyte,
             .allocator => |*a| &a.analyte,
-            .void, .noreturn, .unimplemented, .fnptr => @panic("no analyte on this type"),
+            .fnptr => |*f| &f.analyte,
+            .void, .noreturn, .unimplemented => @panic("no analyte on this type"),
         };
     }
 
@@ -1538,6 +1579,7 @@ pub const MemorySafety = union(enum) {
                     .root_gid = region_idx,
                 } };
             },
+            .placeholder => std.debug.panic("placeholder in slice_elem_ptr - region not initialized", .{}),
         }
     }
 
@@ -1798,6 +1840,7 @@ pub const MemorySafety = union(enum) {
         // If original has an unfreed allocation, check if branches freed it
         if (orig_analyte.memory_safety) |*orig_ms| {
             switch (orig_ms.*) {
+                .placeholder => std.debug.panic("placeholder in merge - entity not initialized", .{}),
                 .allocated => |*orig_alloc| {
                     if (orig_alloc.freed == null) {
                         // Both loop and normal branch merges use the same logic:
@@ -1844,8 +1887,24 @@ pub const MemorySafety = union(enum) {
                         // non-freeing branch - onFinish will detect this
                     }
                 },
-                .stack => {}, // Stack pointers don't need merge handling
-                .interned => {}, // Global pointers don't need merge handling
+                .stack, .interned => {
+                    // For return slot merges: the original may have placeholder .stack/.interned
+                    // from splatInit, while branches have the actual returned value's
+                    // memory_safety. Take the branch's value if it exists.
+                    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
+                        const branch = branch_opt orelse continue;
+                        const branch_gid = branch_gid_opt orelse continue;
+                        const branch_ref = branch.refinements.at(branch_gid);
+                        const branch_analyte = switch (branch_ref.*) {
+                            .void, .noreturn, .unimplemented => continue,
+                            else => getAnalytePtr(branch_ref),
+                        };
+                        if (branch_analyte.memory_safety) |ms| {
+                            orig_analyte.memory_safety = ms;
+                            break;
+                        }
+                    }
+                },
                 .error_stub => {}, // error_stub only on errorunions, shouldn't appear here
             }
         } else {
@@ -1927,14 +1986,11 @@ pub const MemorySafety = union(enum) {
             const base_len = orphan_ctx.branch_merge.base_len;
             const allocator_gid = allocation.allocator_gid;
 
-            std.debug.print("DEBUG orphaned: base_len={d}, pointee_idx={d}, alloc at {s}:{d}, parent_len={d}\n", .{ base_len, pointee_idx, allocation.meta.file, allocation.meta.line, refinements.list.items.len });
-
             // Check if this allocator is represented in any entity that was copied to parent
             if (copied_from_branch) |cfb| {
                 var it = cfb.keyIterator();
                 while (it.next()) |copied_gid| {
                     if (hasMatchingAllocation(orphan_refinements, copied_gid.*, allocator_gid)) {
-                        std.debug.print("DEBUG: found in copied_from_branch at gid={d}\n", .{copied_gid.*});
                         return;
                     }
                 }
@@ -1945,7 +2001,6 @@ pub const MemorySafety = union(enum) {
             // refinements get updated. So we must check the parent, not the branch.
             for (0..base_len) |pre_gid| {
                 if (hasMatchingAllocation(refinements, @intCast(pre_gid), allocator_gid)) {
-                    std.debug.print("DEBUG: found in pre-branch entities at gid={d}\n", .{pre_gid});
                     return;
                 }
             }
@@ -1954,20 +2009,9 @@ pub const MemorySafety = union(enum) {
             // argument pointers update the branch's copy of the argument entity
             for (0..base_len) |pre_gid| {
                 if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), allocator_gid)) {
-                    std.debug.print("DEBUG: found in orphan_refinements pre-branch at gid={d}\n", .{pre_gid});
                     return;
                 }
             }
-
-            // Debug: show what's in pre-branch entities
-            std.debug.print("DEBUG: entities 0..10:\n", .{});
-            const check_len = @min(base_len, 10);
-            for (0..check_len) |i| {
-                const r = orphan_refinements.at(@intCast(i));
-                const tag_name = @tagName(r.*);
-                std.debug.print("  GID {d}: {s}\n", .{ i, tag_name });
-            }
-            std.debug.print("DEBUG: NOT FOUND - reporting leak\n", .{});
         }
 
         // Report leak with context-appropriate message
@@ -2008,23 +2052,160 @@ pub const MemorySafety = union(enum) {
 
     /// Fresh return slots keep null memory_safety until real values are written into them.
     pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-        _ = refinements;
-        _ = gid;
-        _ = ctx;
+        // Return slots are stack-allocated local values.
+        // Use paintReturnSlotMemory to traverse the full structure including .to fields,
+        // since typeToRefinement creates nested entities that all need initialization.
+        const stack_ms: MemorySafety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
+        paintReturnSlotMemory(refinements, gid, stack_ms);
     }
 
-    /// Fresh defined return slots share the same initialization rule.
+    /// Initialize memory_safety for defined scalar values produced by operations.
+    /// These are local stack values (like SIMD reduce results) that need memory_safety
+    /// set to .stack so they can be wrapped in optionals, error unions, etc.
+    /// Unlike paintSpatialMemory, this ALSO traverses pointer.to since we're setting up
+    /// the entire return slot structure at once (pointee structures are part of the slot).
     pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
-        _ = refinements;
-        _ = gid;
+        // Set stack memory_safety for scalar values
+        // Note: No specific meta location since this is a computed result
+        const stack_ms: MemorySafety = .{ .stack = .{ .meta = .{
+            .function = "",
+            .file = "<computed>",
+            .line = 0,
+            .column = 0,
+        }, .root_gid = null } };
+        paintReturnSlotMemory(refinements, gid, stack_ms);
+    }
+
+    /// Like paintSpatialMemory but also traverses pointer.to fields.
+    /// Used for return slot initialization where the entire nested type structure
+    /// (including pointee placeholders) was created together and needs memory_safety.
+    fn paintReturnSlotMemory(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => {
+                ref.scalar.analyte.memory_safety = ms;
+            },
+            .pointer => |p| {
+                ref.pointer.analyte.memory_safety = ms;
+                // Unlike paintSpatialMemory, traverse .to for return slot structures
+                paintReturnSlotMemory(refinements, p.to, ms);
+            },
+            .optional => |o| {
+                ref.optional.analyte.memory_safety = ms;
+                paintReturnSlotMemory(refinements, o.to, ms);
+            },
+            .errorunion => |e| {
+                ref.errorunion.analyte.memory_safety = ms;
+                paintReturnSlotMemory(refinements, e.to, ms);
+            },
+            .@"struct" => |s| {
+                ref.@"struct".analyte.memory_safety = ms;
+                for (s.fields) |field_gid| {
+                    paintReturnSlotMemory(refinements, field_gid, ms);
+                }
+            },
+            .@"union" => |u| {
+                ref.@"union".analyte.memory_safety = ms;
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        paintReturnSlotMemory(refinements, field_gid, ms);
+                    }
+                }
+            },
+            .allocator => {
+                ref.allocator.analyte.memory_safety = ms;
+            },
+            .fnptr => {
+                ref.fnptr.analyte.memory_safety = ms;
+            },
+            .region => |r| {
+                ref.region.analyte.memory_safety = ms;
+                paintReturnSlotMemory(refinements, r.to, ms);
+            },
+            .recursive => |r| {
+                ref.recursive.analyte.memory_safety = ms;
+                if (r.to != 0) {
+                    paintReturnSlotMemory(refinements, r.to, ms);
+                }
+            },
+            .void, .noreturn, .unimplemented => {},
+        }
     }
 
     /// Initialize memory_safety for comptime/interned values.
     /// These are compile-time constants and should have .interned memory_safety.
     /// This is called when creating entities for interned Src values that are
     /// not tracked globals (e.g., &global_value pointer constants).
+    /// Uses paintReturnSlotMemoryForce to traverse pointer.to, since interned pointers
+    /// point to interned data (both the pointer value and pointee are comptime).
+    /// Force=true because this needs to override .stack set by splatInit which runs first.
     pub fn interned_init(refinements: *Refinements, gid: Gid) void {
-        paintSpatialMemory(refinements, gid, .{ .interned = comptime_interned_meta });
+        paintReturnSlotMemoryForce(refinements, gid, .{ .interned = comptime_interned_meta });
+    }
+
+    /// Initialize memory_safety on a refinement created from a `.undefined` type wrapper.
+    /// Undefined pointers are represented as placeholder pointer values until a real
+    /// runtime value is stored into them.
+    pub fn init_undefined(ref: *Refinements.Refinement, meta: Meta) void {
+        _ = meta;
+        switch (ref.*) {
+            .pointer => |*p| p.analyte.memory_safety = .{ .placeholder = {} },
+            else => {},
+        }
+    }
+
+    /// Like paintReturnSlotMemory but always overwrites existing values.
+    /// Used by interned_init which needs to override .stack set by splatInit.
+    fn paintReturnSlotMemoryForce(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => {
+                ref.scalar.analyte.memory_safety = ms;
+            },
+            .pointer => |p| {
+                ref.pointer.analyte.memory_safety = ms;
+                paintReturnSlotMemoryForce(refinements, p.to, ms);
+            },
+            .optional => |o| {
+                ref.optional.analyte.memory_safety = ms;
+                paintReturnSlotMemoryForce(refinements, o.to, ms);
+            },
+            .errorunion => |e| {
+                ref.errorunion.analyte.memory_safety = ms;
+                paintReturnSlotMemoryForce(refinements, e.to, ms);
+            },
+            .@"struct" => |s| {
+                ref.@"struct".analyte.memory_safety = ms;
+                for (s.fields) |field_gid| {
+                    paintReturnSlotMemoryForce(refinements, field_gid, ms);
+                }
+            },
+            .@"union" => |u| {
+                ref.@"union".analyte.memory_safety = ms;
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        paintReturnSlotMemoryForce(refinements, field_gid, ms);
+                    }
+                }
+            },
+            .allocator => {
+                ref.allocator.analyte.memory_safety = ms;
+            },
+            .fnptr => {
+                ref.fnptr.analyte.memory_safety = ms;
+            },
+            .region => |r| {
+                ref.region.analyte.memory_safety = ms;
+                paintReturnSlotMemoryForce(refinements, r.to, ms);
+            },
+            .recursive => |r| {
+                ref.recursive.analyte.memory_safety = ms;
+                if (r.to != 0) {
+                    paintReturnSlotMemoryForce(refinements, r.to, ms);
+                }
+            },
+            .void, .noreturn, .unimplemented => {},
+        }
     }
 
     /// Dummy Meta for comptime pointer constants (no real source location)
@@ -2196,6 +2377,7 @@ pub const MemorySafety = union(enum) {
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .error_stub = {} },
+            .placeholder => .{ .placeholder = {} },
         };
     }
 
@@ -2540,97 +2722,6 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Copy memory_safety for a store into an existing slot.
-    /// This is more conservative than aggregate_init/value construction:
-    /// stack storage should not inherit heap ownership just because it received
-    /// a by-value copy of a scalar/packed struct, but nested pointer-like fields
-    /// must still pick up the source's provenance.
-    fn copyStoredValueMemorySafetyRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
-        const src_ref = refinements.at(src_gid);
-        const dst_ref = refinements.at(dst_gid);
-
-        switch (dst_ref.*) {
-            .pointer => |*p| {
-                p.analyte.memory_safety = switch (src_ref.*) {
-                    .pointer => |sp| sp.analyte.memory_safety,
-                    else => p.analyte.memory_safety,
-                };
-                if (src_ref.* == .pointer) {
-                    copyStoredValueMemorySafetyRecursive(refinements, p.to, src_ref.pointer.to);
-                }
-            },
-            .optional => |*o| {
-                o.analyte.memory_safety = switch (src_ref.*) {
-                    .optional => |so| so.analyte.memory_safety,
-                    else => o.analyte.memory_safety,
-                };
-                if (src_ref.* == .optional) {
-                    copyStoredValueMemorySafetyRecursive(refinements, o.to, src_ref.optional.to);
-                }
-            },
-            .errorunion => |*e| {
-                e.analyte.memory_safety = switch (src_ref.*) {
-                    .errorunion => |se| se.analyte.memory_safety,
-                    else => e.analyte.memory_safety,
-                };
-                if (src_ref.* == .errorunion) {
-                    copyStoredValueMemorySafetyRecursive(refinements, e.to, src_ref.errorunion.to);
-                }
-            },
-            .region => |*r| {
-                r.analyte.memory_safety = switch (src_ref.*) {
-                    .region => |sr| sr.analyte.memory_safety,
-                    else => r.analyte.memory_safety,
-                };
-                if (src_ref.* == .region) {
-                    copyStoredValueMemorySafetyRecursive(refinements, r.to, src_ref.region.to);
-                }
-            },
-            .@"struct" => |s| {
-                if (src_ref.* == .@"struct") {
-                    const src_s = src_ref.@"struct";
-                    for (s.fields, 0..) |field_gid, i| {
-                        if (i < src_s.fields.len) {
-                            copyStoredValueMemorySafetyRecursive(refinements, field_gid, src_s.fields[i]);
-                        }
-                    }
-                }
-            },
-            .@"union" => |u| {
-                if (src_ref.* == .@"union") {
-                    const src_u = src_ref.@"union";
-                    for (u.fields, 0..) |maybe_field_gid, i| {
-                        const field_gid = maybe_field_gid orelse continue;
-                        if (i < src_u.fields.len) {
-                            if (src_u.fields[i]) |src_field_gid| {
-                                copyStoredValueMemorySafetyRecursive(refinements, field_gid, src_field_gid);
-                            }
-                        }
-                    }
-                }
-            },
-            .allocator => |*a| {
-                a.analyte.memory_safety = switch (src_ref.*) {
-                    .allocator => |sa| sa.analyte.memory_safety,
-                    else => a.analyte.memory_safety,
-                };
-            },
-            .fnptr => |*f| {
-                f.analyte.memory_safety = switch (src_ref.*) {
-                    .fnptr => |sf| sf.analyte.memory_safety,
-                    else => f.analyte.memory_safety,
-                };
-            },
-            .recursive => |*rec| {
-                rec.analyte.memory_safety = switch (src_ref.*) {
-                    .recursive => |sr| sr.analyte.memory_safety,
-                    else => rec.analyte.memory_safety,
-                };
-            },
-            .scalar, .void, .noreturn, .unimplemented => {},
-        }
-    }
-
     pub fn wrap_errunion_err(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
@@ -2717,6 +2808,112 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    /// Copy memory_safety from source refinement to destination refinement recursively.
+    /// Used when storing a struct value to copy the source's field memory_safety to the destination.
+    /// Unlike paintSpatialMemory which sets a uniform value, this copies from corresponding source fields.
+    pub fn copyMemorySafetyRecursive(refinements: *Refinements, dest_gid: Gid, src_gid: Gid) void {
+        const dest_ref = refinements.at(dest_gid);
+        const src_ref = refinements.at(src_gid);
+
+        switch (dest_ref.*) {
+            .scalar => {
+                if (src_ref.* == .scalar) {
+                    if (src_ref.scalar.analyte.memory_safety) |ms| {
+                        dest_ref.scalar.analyte.memory_safety = ms;
+                    }
+                }
+            },
+            .pointer => {
+                if (src_ref.* == .pointer) {
+                    if (src_ref.pointer.analyte.memory_safety) |ms| {
+                        dest_ref.pointer.analyte.memory_safety = ms;
+                    }
+                    // Also copy pointee state (added for struct stores)
+                    copyMemorySafetyRecursive(refinements, dest_ref.pointer.to, src_ref.pointer.to);
+                }
+            },
+            .optional => |dest_o| {
+                if (src_ref.* == .optional) {
+                    const src_o = src_ref.optional;
+                    if (src_o.analyte.memory_safety) |ms| {
+                        dest_ref.optional.analyte.memory_safety = ms;
+                    }
+                    copyMemorySafetyRecursive(refinements, dest_o.to, src_o.to);
+                }
+            },
+            .errorunion => |dest_e| {
+                if (src_ref.* == .errorunion) {
+                    const src_e = src_ref.errorunion;
+                    if (src_e.analyte.memory_safety) |ms| {
+                        dest_ref.errorunion.analyte.memory_safety = ms;
+                    }
+                    copyMemorySafetyRecursive(refinements, dest_e.to, src_e.to);
+                }
+            },
+            .@"struct" => |dest_s| {
+                if (src_ref.* == .@"struct") {
+                    const src_s = src_ref.@"struct";
+                    if (src_s.analyte.memory_safety) |ms| {
+                        dest_ref.@"struct".analyte.memory_safety = ms;
+                    }
+                    for (dest_s.fields, src_s.fields) |dest_field_gid, src_field_gid| {
+                        copyMemorySafetyRecursive(refinements, dest_field_gid, src_field_gid);
+                    }
+                }
+            },
+            .@"union" => |dest_u| {
+                if (src_ref.* == .@"union") {
+                    const src_u = src_ref.@"union";
+                    if (src_u.analyte.memory_safety) |ms| {
+                        dest_ref.@"union".analyte.memory_safety = ms;
+                    }
+                    for (dest_u.fields, src_u.fields) |maybe_dest_gid, maybe_src_gid| {
+                        if (maybe_dest_gid) |dest_field_gid| {
+                            if (maybe_src_gid) |src_field_gid| {
+                                copyMemorySafetyRecursive(refinements, dest_field_gid, src_field_gid);
+                            }
+                        }
+                    }
+                }
+            },
+            .allocator => {
+                if (src_ref.* == .allocator) {
+                    if (src_ref.allocator.analyte.memory_safety) |ms| {
+                        dest_ref.allocator.analyte.memory_safety = ms;
+                    }
+                }
+            },
+            .fnptr => {
+                if (src_ref.* == .fnptr) {
+                    if (src_ref.fnptr.analyte.memory_safety) |ms| {
+                        dest_ref.fnptr.analyte.memory_safety = ms;
+                    }
+                }
+            },
+            .region => |dest_r| {
+                if (src_ref.* == .region) {
+                    const src_r = src_ref.region;
+                    if (src_r.analyte.memory_safety) |ms| {
+                        dest_ref.region.analyte.memory_safety = ms;
+                    }
+                    copyMemorySafetyRecursive(refinements, dest_r.to, src_r.to);
+                }
+            },
+            .recursive => |dest_r| {
+                if (src_ref.* == .recursive) {
+                    const src_r = src_ref.recursive;
+                    if (src_r.analyte.memory_safety) |ms| {
+                        dest_ref.recursive.analyte.memory_safety = ms;
+                    }
+                    if (dest_r.to != 0 and src_r.to != 0) {
+                        copyMemorySafetyRecursive(refinements, dest_r.to, src_r.to);
+                    }
+                }
+            },
+            .void, .noreturn, .unimplemented => {},
+        }
+    }
+
     /// Block creates result via typeToRefinement - initialize memory_safety
     pub fn block(state: State, index: usize, params: anytype) !void {
         _ = params;
@@ -2794,15 +2991,14 @@ pub const MemorySafety = union(enum) {
             .void, .noreturn, .unimplemented => null,
         } orelse std.debug.panic("wrap_errunion_payload: payload has no memory_safety", .{});
 
+        // The errorunion WRAPPER is a new computed value on the stack (or interned if from comptime).
+        // The PAYLOAD can be anything - stack, allocated, or interned - it retains its own memory_safety.
+        // For example, toOwnedSlice returns errorunion!([]u8) where the payload is an allocated slice.
+        _ = payload_ms; // Payload's memory_safety is preserved, not overwritten
         const paint: MemorySafety = switch (params.src) {
             .interned, .fnptr => .{ .interned = comptime_interned_meta },
             .inst => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } },
         };
-        switch (paint) {
-            .stack => if (payload_ms != .stack) std.debug.panic("wrap_errunion_payload: expected stack payload, got {s}", .{@tagName(payload_ms)}),
-            .interned => if (payload_ms != .interned) std.debug.panic("wrap_errunion_payload: expected interned payload, got {s}", .{@tagName(payload_ms)}),
-            else => unreachable,
-        }
 
         result_ref.errorunion.analyte.memory_safety = paint;
     }
@@ -2829,28 +3025,32 @@ pub const MemorySafety = union(enum) {
             .void, .noreturn, .unimplemented => null,
         } orelse std.debug.panic("wrap_optional: payload has no memory_safety", .{});
 
+        // The optional WRAPPER is a new computed value on the stack (or interned if from comptime).
+        // The PAYLOAD can be anything - stack, allocated, or interned - it retains its own memory_safety.
+        // For example, an optional containing a pointer to allocated memory.
+        _ = payload_ms; // Payload's memory_safety is preserved, not overwritten
         const paint: MemorySafety = switch (params.src) {
             .interned, .fnptr => .{ .interned = comptime_interned_meta },
             .inst => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } },
         };
-        switch (paint) {
-            .stack => if (payload_ms != .stack) std.debug.panic("wrap_optional: expected stack payload, got {s}", .{@tagName(payload_ms)}),
-            .interned => if (payload_ms != .interned) std.debug.panic("wrap_optional: expected interned payload, got {s}", .{@tagName(payload_ms)}),
-            else => unreachable,
-        }
 
         result_ref.optional.analyte.memory_safety = paint;
     }
 
     /// RetPtr creates a return value entity via typeToRefinement for struct/union returns
     pub fn ret_ptr(state: State, index: usize, params: anytype) !void {
-        // Don't initialize memory_safety here - let store operations propagate it.
-        // For inst sources, memory_safety is copied from the source.
-        // For interned sources, store sets .interned on the destination.
-        // For fields using defaults (not stored), aggregate_init handles them.
-        _ = state;
-        _ = index;
+        // RetPtr creates a return value entity via typeToRefinement for struct/union returns.
+        // That entity starts with .placeholder memory_safety - set to .stack since it's a
+        // local stack value used to build the return value.
         _ = params;
+        const ptr_ref_idx = state.results[index].refinement orelse return;
+        const ptr_ref = state.refinements.at(ptr_ref_idx);
+        if (ptr_ref.* != .pointer) return;
+        const stack_ms: MemorySafety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+        // Set stack memory_safety on the pointer itself
+        ptr_ref.pointer.analyte.memory_safety = stack_ms;
+        // Set stack memory_safety on the pointee (the return value entity)
+        paintSpatialMemory(state.refinements, ptr_ref.pointer.to, stack_ms);
     }
 
     /// ErrunionPayloadPtrSet creates a new pointer to the payload - initialize memory_safety
@@ -2945,9 +3145,16 @@ pub const MemorySafety = union(enum) {
             return true;
         }
 
-        // realloc/remap: frees old slice, allocates new slice
-        if (gates.isAllocatorRealloc(fqn) or gates.isAllocatorRemap(fqn)) {
-            try handleAllocRealloc(state, index, args);
+        // realloc: frees old slice, allocates new slice
+        if (gates.isAllocatorRealloc(fqn)) {
+            try handleAllocRealloc(state, index, args, false);
+            return true;
+        }
+
+        // remap: attempts to resize in place, returns null on failure - doesn't free old memory
+        // For remap, we don't report errors for interned memory since it just returns null
+        if (gates.isAllocatorRemap(fqn)) {
+            try handleAllocRealloc(state, index, args, true);
             return true;
         }
 
@@ -3050,6 +3257,7 @@ pub const MemorySafety = union(enum) {
                 paintSpatialMemory(refinements, payload_gid, .{ .interned = meta });
             },
             .error_stub => {},
+            .placeholder => std.debug.panic("placeholder in memset - buffer not initialized", .{}),
         }
 
         // Also propagate to the region if it exists
@@ -3068,6 +3276,7 @@ pub const MemorySafety = union(enum) {
                         paintSpatialMemory(refinements, region_gid, .{ .interned = meta });
                     },
                     .error_stub => {},
+                    .placeholder => {}, // Already panicked above
                 }
             }
         }
@@ -3104,7 +3313,7 @@ pub const MemorySafety = union(enum) {
                             return reportUseAfterFree(ctx, alloc_state, freed);
                         }
                     },
-                    .stack, .interned, .error_stub => {},
+                    .stack, .interned, .error_stub, .placeholder => {},
                 }
             },
             .@"struct" => |s| {
@@ -3259,6 +3468,7 @@ pub const MemorySafety = union(enum) {
             },
             .interned => return reportFreeGlobalMemory(ctx),
             .error_stub => return,
+            .placeholder => std.debug.panic("placeholder in free - entity not initialized", .{}),
             .allocated => {},
         }
 
@@ -3302,9 +3512,19 @@ pub const MemorySafety = union(enum) {
         }
 
         // Check for allocator mismatch (only if destroy allocator GID is known)
+        // Skip check if both type_ids are 0 (unknown) - can't verify without type info.
+        // This happens when allocators are passed through function arguments without
+        // going through MkAllocator, causing each load to create a new GID.
         if (destroy_allocator_gid) |dag| {
             if (a.allocator_gid != dag) {
-                return reportMismatchedAllocator(ctx, a, destroy_type_id);
+                // GIDs differ - check if we can verify via type_id
+                // If both type_ids are 0, we can't determine mismatch (skip check)
+                // If both type_ids are non-zero and match, it's the same allocator type
+                if (a.type_id != 0 or destroy_type_id != 0) {
+                    if (a.type_id != destroy_type_id) {
+                        return reportMismatchedAllocator(ctx, a, destroy_type_id);
+                    }
+                }
             }
         }
 
@@ -3472,6 +3692,7 @@ pub const MemorySafety = union(enum) {
                 },
                 .interned => return reportFreeGlobalMemory(ctx),
                 .error_stub => return,
+                .placeholder => std.debug.panic("placeholder in free - pointer not initialized", .{}),
             }
         }
 
@@ -3491,8 +3712,16 @@ pub const MemorySafety = union(enum) {
                     switch (ms.*) {
                         .allocated => break :blk &r.analyte, // Real alloc allocation
                         .stack => |sp| return reportFreeStackMemory(ctx, sp),
-                        .interned => return reportFreeGlobalMemory(ctx),
+                        .interned => {
+                            // TODO: Ideally we'd distinguish between:
+                            // - Empty interned slices (like ArrayList.init items) - OK to free (no-op)
+                            // - Non-empty interned slices (like string literals) - error
+                            // For now, allow all interned free since empty slices are common
+                            // and freeing them is a no-op in most allocators.
+                            return;
+                        },
                         .error_stub => return,
+                        .placeholder => std.debug.panic("placeholder in free - region not initialized", .{}),
                     }
                 }
                 // Region has no metadata - check if element has allocation metadata
@@ -3531,6 +3760,7 @@ pub const MemorySafety = union(enum) {
             .stack => |sp| return reportFreeStackMemory(ctx, sp),
             .interned => return reportFreeGlobalMemory(ctx),
             .error_stub => return,
+            .placeholder => std.debug.panic("placeholder in free - pointee not initialized", .{}),
             .allocated => {},
         }
 
@@ -3567,9 +3797,17 @@ pub const MemorySafety = union(enum) {
         }
 
         // Check for mismatched allocator (only if free allocator GID is known)
+        // Skip check if both type_ids are 0 (unknown) - can't verify without type info.
+        // This happens when allocators are passed through function arguments without
+        // going through MkAllocator, causing each load to create a new GID.
         if (free_allocator_gid) |fag| {
             if (a.allocator_gid != fag) {
-                return reportMismatchedAllocator(ctx, a, free_type_id);
+                // GIDs differ - check if we can verify via type_id
+                if (a.type_id != 0 or free_type_id != 0) {
+                    if (a.type_id != free_type_id) {
+                        return reportMismatchedAllocator(ctx, a, free_type_id);
+                    }
+                }
             }
         }
 
@@ -3588,8 +3826,9 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Handle mem.Allocator.realloc/remap calls.
-    /// Marks the old slice as freed and the new slice as allocated.
-    fn handleAllocRealloc(state: State, index: usize, args: []const tag.Src) !void {
+    /// Marks the old slice as freed (for realloc) and the new slice as allocated.
+    /// For remap, old memory is not freed - it just attempts to resize in place.
+    fn handleAllocRealloc(state: State, index: usize, args: []const tag.Src, is_remap: bool) !void {
         const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
@@ -3597,15 +3836,19 @@ pub const MemorySafety = union(enum) {
         // realloc signature: realloc(self, slice, new_len) -> args[0]=allocator, args[1]=slice, args[2]=len
         if (args.len < 2) return;
 
-        // === 1. Mark old slice as freed ===
+        // === 1. Mark old slice as freed (unless it's remap, which doesn't free) ===
 
         // Resolve slice source to get the pointer's refinement index
         const old_ptr_idx: Gid = switch (args[1]) {
             .inst => |inst| results[inst].refinement orelse return,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
+                // For remap on interned memory, just skip - remap returns null
+                if (is_remap) return;
                 return reportFreeGlobalMemory(ctx);
             },
             .fnptr => {
+                // For remap on interned memory, just skip - remap returns null
+                if (is_remap) return;
                 return reportFreeGlobalMemory(ctx);
             },
         };
@@ -3620,10 +3863,7 @@ pub const MemorySafety = union(enum) {
         const old_region_analyte = &old_region_ref.region.analyte;
 
         // Get memory_safety from old region
-        const old_ms = &(old_region_analyte.memory_safety orelse {
-            // memory_safety is null - region was not tracked
-            return;
-        });
+        const old_ms = &(old_region_analyte.memory_safety orelse return);
 
         // Check for invalid operations on old slice
         switch (old_ms.*) {
@@ -3633,8 +3873,13 @@ pub const MemorySafety = union(enum) {
                 }
                 return reportFreeStackMemory(ctx, sp);
             },
-            .interned => return reportFreeGlobalMemory(ctx),
+            .interned => {
+                // For remap on interned memory, just skip - remap returns null
+                if (is_remap) return;
+                return reportFreeGlobalMemory(ctx);
+            },
             .error_stub => return,
+            .placeholder => std.debug.panic("placeholder in resize - region not initialized", .{}),
             .allocated => {},
         }
 
@@ -3922,19 +4167,30 @@ pub const MemorySafety = union(enum) {
 
 const debug = @import("builtin").mode == .Debug;
 
-/// Validate that a refinement conforms to memory_safety tracking rules.
-/// - Non-trivial types (scalar, pointer, struct, union, optional, region, recursive, allocator)
-///   MUST have memory_safety set
-/// - Non-trivial types may carry any MemorySafety variant appropriate to their path
-/// - Trivial types (void, unimplemented, noreturn): no analyte, no memory_safety
+/// Validates that memory_safety is correctly set on refinements.
+/// - MUST EXIST: .scalar, .pointer, .optional, .errorunion, .region, .recursive, .struct, .union, .fnptr, .allocator
+/// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
-    _ = idx;
+
     switch (refinement) {
-        // null is valid for return slots before ret_safe (per plan: "null = not yet assigned")
-        // Non-null values must be valid MemorySafety variants
-        .scalar, .pointer, .optional, .region, .recursive, .@"struct", .@"union", .allocator, .fnptr, .errorunion => {},
-        // Trivial types - no analyte, no memory_safety tracking
+        .scalar => |s| {
+            if (s.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on scalar (idx={d})", .{idx});
+        },
+        .pointer => |p| {
+            if (p.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on pointer (idx={d})", .{idx});
+        },
+        .fnptr => |f| {
+            if (f.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on fnptr (idx={d})", .{idx});
+        },
+        .allocator => |a| {
+            if (a.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on allocator (idx={d})", .{idx});
+        },
+        // Container types - no undefined_safety on themselves, just check memory_safety exists
+        inline .optional, .errorunion, .region, .recursive, .@"struct", .@"union" => |data, t| {
+            if (data.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on {s} (idx={d})", .{ @tagName(t), idx });
+        },
+        // NO ANALYTE - trivial types
         .void, .noreturn, .unimplemented => {},
     }
 }

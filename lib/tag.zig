@@ -76,6 +76,10 @@ pub const INVALID_GID = core.INVALID_GID;
 /// All analyte fields (undefined_safety, memory_safety, null_safety, etc.) are left as null.
 /// It is the responsibility of `splat` handlers in `lib/analysis/*.zig` to set analyte values.
 /// This ensures a clean separation: tag.zig handles structure, analysis modules handle semantics.
+///
+/// SPECIAL EXCEPTION: `.undefined` carries AIR semantic information that would otherwise
+/// be lost. In that one case, we still create structure here and then broadcast a dedicated
+/// `splatInitUndefined` so analyses can mark the fresh refinement appropriately.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
     return switch (ty) {
         .scalar => .{ .scalar = .{} },
@@ -104,13 +108,12 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             return .{ .optional = .{ .to = child_idx } };
         },
         .undefined => |child| {
-            // .undefined wraps a type - recurse into inner type and mark as undefined.
+            // .undefined wraps a type - recurse into the inner structural type, then
+            // broadcast the dedicated undefined-init exception described above.
             // This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
             var inner_ref = try typeToRefinement(child.*, refinements);
-            // Dispatch to analysis modules to set undefined state on the inner refinement.
-            // Note: Meta is empty here; source location will be set later by init_global.
             const empty_meta = Meta{ .file = "", .line = 0, .function = "" };
-            splatInitFromType(&inner_ref, true, empty_meta);
+            splatInitUndefined(&inner_ref, empty_meta);
             return inner_ref;
         },
         .allocator => |alloc_type_id| {
@@ -2735,13 +2738,14 @@ pub const GlobalFieldInfo = struct {
     container_type_id: Refinements.Tid,
 };
 
-/// Initialize a refinement created by typeToRefinement.
-/// Dispatches to init_from_type handlers to set up analysis state.
-/// Called when a Type (e.g., .undefined wrapper) needs to mark the resulting refinement.
-pub fn splatInitFromType(ref: *Refinement, is_undefined: bool, meta: Meta) void {
+/// Special exception to the "typeToRefinement is structural only" rule.
+/// `.undefined` in the codegen type stream carries AIR semantic information that would
+/// otherwise be lost, so analyses that care can initialize the freshly-created
+/// refinement here.
+pub fn splatInitUndefined(ref: *Refinement, meta: Meta) void {
     inline for (Analyte.analyses) |Analysis| {
-        if (@hasDecl(Analysis, "init_from_type")) {
-            Analysis.init_from_type(ref, is_undefined, meta);
+        if (@hasDecl(Analysis, "init_undefined")) {
+            Analysis.init_undefined(ref, meta);
         }
     }
 }
