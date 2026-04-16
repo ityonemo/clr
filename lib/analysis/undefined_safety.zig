@@ -1858,7 +1858,7 @@ pub const UndefinedSafety = union(enum) {
             return false; // memory_safety.call() intercepts
         }
 
-        if (gates.isAllocatorRealloc(fqn) or gates.isAllocatorRemap(fqn)) {
+        if (gates.isAllocatorRealloc(fqn)) {
             handleAllocatorRealloc(state, index);
             return false; // memory_safety.call() intercepts
         }

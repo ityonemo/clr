@@ -5,6 +5,7 @@ const Context = @import("Context.zig");
 const Refinements = @import("Refinements.zig");
 const Refinement = Refinements.Refinement;
 const Analyte = @import("Analyte.zig");
+const gates = @import("analysis/gates.zig");
 pub const Gid = Refinements.Gid;
 pub const State = @import("lib.zig").State;
 
@@ -83,11 +84,53 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
     return gids;
 }
 
+fn srcToGid(state: State, src: tag.Src) !Gid {
+    return switch (src) {
+        .inst => |idx| state.results[idx].refinement orelse {
+            std.debug.panic("srcToGid: instruction {} has no refinement", .{idx});
+        },
+        .interned => |interned| blk: {
+            if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
+                break :blk global_gid;
+            }
+            const ref = try tag.typeToRefinement(interned.ty, state.refinements);
+            const gid = try state.refinements.appendEntity(ref);
+            tag.splatInitInterned(state.refinements, gid);
+            break :blk gid;
+        },
+        .fnptr => |choices| blk: {
+            const owned_choices = try state.ctx.allocator.dupe(tag.FnInterpreter, choices);
+            const gid = try state.refinements.appendEntity(.{ .fnptr = .{ .choices = owned_choices } });
+            tag.splatInitInterned(state.refinements, gid);
+            break :blk gid;
+        },
+    };
+}
+
+fn initRemapReturnSlot(state: State, index: usize, args: []const tag.Src, return_type: tag.Type) !void {
+    if (args.len < 2) {
+        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+        state.results[index].refinement = try state.refinements.appendEntity(return_ref);
+        return;
+    }
+
+    const old_slice_gid = try srcToGid(state, args[1]);
+    const payload_gid = try state.refinements.valueCopy(old_slice_gid);
+    const result_gid = try state.refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
+    state.results[index].refinement = result_gid;
+}
+
 pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src, fqn: []const u8) !void {
-    // Create typed return slot for the call result
-    const return_ref = try tag.typeToRefinement(return_type, state.refinements);
-    const return_slot = try state.refinements.appendEntity(return_ref);
-    state.results[index].refinement = return_slot;
+    if (gates.isAllocatorRemap(fqn)) {
+        try initRemapReturnSlot(state, index, args, return_type);
+    } else {
+        // Create typed return slot for the call result
+        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+        const return_slot = try state.refinements.appendEntity(return_ref);
+        state.results[index].refinement = return_slot;
+    }
+
+    const return_slot = state.results[index].refinement.?;
 
     // Dispatch to analysis modules' runtime call filters
     // If any module intercepts (returns true), skip normal function execution
@@ -1214,4 +1257,45 @@ test "ret_safe at entrypoint succeeds" {
 
     // Return - should just succeed without error
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
+}
+
+test "allocator remap builds optional around copied old slice" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    const results = try make_results_list(allocator, 3);
+    defer clear_results_list(results, allocator);
+
+    const state = testState(&ctx, results, &refinements);
+
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .region = &.{ .scalar = {} } } } });
+
+    const old_slice_gid = results[0].refinement.?;
+    const old_region_gid = refinements.at(old_slice_gid).pointer.to;
+
+    const return_type: tag.Type = .{ .optional = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+    const args = [_]tag.Src{
+        .{ .interned = .{ .ip_idx = 0, .ty = .{ .allocator = 0 } } },
+        .{ .inst = 0 },
+        .{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = {} } } },
+    };
+    try Inst.call(state, 1, null, return_type, &args, "std.mem.Allocator.remap");
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(result_ref.*));
+
+    const payload_gid = result_ref.optional.to;
+    try std.testing.expect(payload_gid != old_slice_gid);
+
+    const payload_ref = refinements.at(payload_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(payload_ref.*));
+    try std.testing.expectEqual(old_region_gid, payload_ref.pointer.to);
 }

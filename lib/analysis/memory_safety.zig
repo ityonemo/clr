@@ -3792,9 +3792,14 @@ pub const MemorySafety = union(enum) {
     /// Spatially this is a no-op: success preserves the existing allocation identity,
     /// failure keeps the old allocation live.
     fn handleAllocRemap(state: State, index: usize, args: []const tag.Src) !void {
-        _ = state;
-        _ = index;
         _ = args;
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+        if (result_ref.* != .optional) return;
+        result_ref.optional.analyte.memory_safety = .{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = null,
+        } };
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
