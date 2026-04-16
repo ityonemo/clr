@@ -1382,22 +1382,14 @@ pub const WrapErrunionPayload = struct {
         // tracking affects the original allocation.
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
-                // Get payload refinement from source instruction - share it
-                const src_gid = state.results[src].refinement orelse {
-                    // Source has no refinement - create based on type
-                    const ref = try typeToRefinement(self.ty.errorunion.*, state.refinements);
-                    const gid = try state.refinements.appendEntity(ref);
-                    break :blk gid;
-                };
-                // Share the payload entity - when ret_safe marks allocations as
-                // returned, it affects the original allocation, not a copy
-                break :blk src_gid;
+                const src_gid = state.results[src].refinement orelse
+                    std.debug.panic("wrap_errunion_payload: source inst {d} has no refinement", .{src});
+                break :blk try state.refinements.valueCopy(src_gid);
             },
             .interned => |interned| blk: {
                 // Try to look up as tracked global first
                 if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
-                    // Share the global
-                    break :blk global_gid;
+                    break :blk try state.refinements.valueCopy(global_gid);
                 } else {
                     // Not tracked - create from type with interned memory_safety
                     const ref = try typeToRefinement(interned.ty, state.refinements);
@@ -1442,22 +1434,14 @@ pub const WrapOptional = struct {
         // tracking affects the original allocation.
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
-                const src_gid = state.results[src].refinement orelse {
-                    // Source has no refinement - create based on type and initialize
-                    const inner_ty = if (self.ty == .optional) self.ty.optional.* else Type{ .scalar = {} };
-                    const ref = try typeToRefinement(inner_ty, state.refinements);
-                    const gid = try state.refinements.appendEntity(ref);
-                    break :blk gid;
-                };
-                // Share the payload entity - when ret_safe marks allocations as
-                // returned, it affects the original allocation, not a copy
-                break :blk src_gid;
+                const src_gid = state.results[src].refinement orelse
+                    std.debug.panic("wrap_optional: source inst {d} has no refinement", .{src});
+                break :blk try state.refinements.valueCopy(src_gid);
             },
             .interned => |interned| blk: {
                 // Try to look up as tracked global first
                 if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
-                    // Share the global
-                    break :blk global_gid;
+                    break :blk try state.refinements.valueCopy(global_gid);
                 } else {
                     // Not tracked - create from type with interned memory_safety
                     const ref = try typeToRefinement(interned.ty, state.refinements);
@@ -3521,7 +3505,12 @@ test "unwrap_errunion_payload extracts payload from error union" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create an error union with a scalar payload
-    const payload_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .undefined_safety = .{ .defined = {} },
+        },
+    } });
     const eu_gid = try refinements.appendEntity(.{ .errorunion = .{ .to = payload_gid } });
     results[0].refinement = eu_gid;
 
@@ -3530,6 +3519,134 @@ test "unwrap_errunion_payload extracts payload from error union" {
 
     // Result should point to the payload
     try std.testing.expectEqual(payload_gid, results[1].refinement.?);
+}
+
+test "wrap_optional valueCopies inst payload" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .undefined_safety = .{ .defined = {} },
+        },
+    } });
+    results[0].refinement = payload_gid;
+
+    try Inst.apply(state, 1, .{ .wrap_optional = .{
+        .src = .{ .inst = 0 },
+        .ty = .{ .optional = &.{ .scalar = {} } },
+    } });
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(result_ref.*));
+    try std.testing.expect(result_ref.optional.to != payload_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(result_ref.optional.to).*));
+}
+
+test "wrap_errunion_payload valueCopies inst payload" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .undefined_safety = .{ .defined = {} },
+        },
+    } });
+    results[0].refinement = payload_gid;
+
+    try Inst.apply(state, 1, .{ .wrap_errunion_payload = .{
+        .src = .{ .inst = 0 },
+        .ty = .{ .errorunion = &.{ .scalar = {} } },
+    } });
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.errorunion, std.meta.activeTag(result_ref.*));
+    try std.testing.expect(result_ref.errorunion.to != payload_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(result_ref.errorunion.to).*));
+}
+
+test "wrap_optional valueCopies tracked global payload" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const global_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    splatInitInterned(&refinements, global_gid);
+    try refinements.global_map.put(42, global_gid);
+
+    try Inst.apply(state, 0, .{ .wrap_optional = .{
+        .src = .{ .interned = .{ .ip_idx = 42, .ty = .{ .scalar = {} } } },
+        .ty = .{ .optional = &.{ .scalar = {} } },
+    } });
+
+    const result_gid = results[0].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.optional, std.meta.activeTag(result_ref.*));
+    try std.testing.expect(result_ref.optional.to != global_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(result_ref.optional.to).*));
+}
+
+test "wrap_errunion_payload valueCopies tracked global payload" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const global_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    splatInitInterned(&refinements, global_gid);
+    try refinements.global_map.put(43, global_gid);
+
+    try Inst.apply(state, 0, .{ .wrap_errunion_payload = .{
+        .src = .{ .interned = .{ .ip_idx = 43, .ty = .{ .scalar = {} } } },
+        .ty = .{ .errorunion = &.{ .scalar = {} } },
+    } });
+
+    const result_gid = results[0].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.errorunion, std.meta.activeTag(result_ref.*));
+    try std.testing.expect(result_ref.errorunion.to != global_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(result_ref.errorunion.to).*));
 }
 
 test "Simple tags produce scalar" {
