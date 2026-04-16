@@ -62,6 +62,46 @@ pub const UndefinedSafety = union(enum) {
         };
     }
 
+    /// Check if a refinement is "fully undefined" - meaning it and all nested parts
+    /// (including pointer.to targets) are undefined. Used to validate placeholder entities
+    /// created by typeToRefinement that haven't been initialized with real values yet.
+    ///
+    /// NOTE: This function is called from memory_safety.testValid to verify that
+    /// placeholder entities are fully undefined. This crosses module boundaries
+    /// (memory_safety depending on undefined_safety) but is acceptable because
+    /// placeholder is a special state that ties the two analyses together.
+    pub fn fullyUndefined(refinements: *Refinements, gid: Gid) bool {
+        const ref = refinements.at(gid);
+        return switch (ref.*) {
+            .scalar => |s| if (s.analyte.undefined_safety) |u| u == .undefined else false,
+            .pointer => |p| {
+                const ptr_undef = if (p.analyte.undefined_safety) |u| u == .undefined else false;
+                return ptr_undef and fullyUndefined(refinements, p.to);
+            },
+            .fnptr => |f| if (f.analyte.undefined_safety) |u| u == .undefined else false,
+            .allocator => |a| if (a.analyte.undefined_safety) |u| u == .undefined else false,
+            .optional => |o| fullyUndefined(refinements, o.to),
+            .errorunion => |e| fullyUndefined(refinements, e.to),
+            .region => |r| fullyUndefined(refinements, r.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    if (!fullyUndefined(refinements, field_gid)) return false;
+                }
+                return true;
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        if (!fullyUndefined(refinements, field_gid)) return false;
+                    }
+                }
+                return true;
+            },
+            .recursive => |r| if (r.to != 0) fullyUndefined(refinements, r.to) else true,
+            .void, .noreturn, .unimplemented => true,
+        };
+    }
+
     pub fn reportInconsistentBranches(self: @This(), ctx: *Context) anyerror!void {
         try ctx.meta.print(ctx.writer, "use of value that may be undefined in ", .{});
         switch (self) {
@@ -118,6 +158,18 @@ pub const UndefinedSafety = union(enum) {
         ptr.analyte.undefined_safety = .{ .defined = {} };
         // The element's undefined state is already set (it's the shared region element)
         // Don't call ensureUndefinedStateSet - the element already has its state from alloc
+    }
+
+    pub fn slice_field_ptr(state: State, index: usize, params: tag.SliceFieldPtr) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        // The pointer itself is defined (it exists and points to a valid slice component)
+        const ptr_idx = results[index].refinement orelse return;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined_safety = .{ .defined = {} };
+        // The pointee (the slice ptr or len) is already defined - it comes from an existing entity.
+        // Don't call ensureUndefinedStateSet - the pointee already has its state set.
     }
 
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
@@ -331,7 +383,8 @@ pub const UndefinedSafety = union(enum) {
             return;
         }
 
-        // Otherwise, tag is defined (splatInitDefined already set this in tag handler)
+        // Otherwise, tag is defined - set it explicitly
+        refinements.at(result_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
     }
 
     // Simple operations produce defined scalar results (non-binop/unop)
@@ -351,9 +404,12 @@ pub const UndefinedSafety = union(enum) {
     // =========================================================================
 
     fn binOpHandler(state: State, index: usize, params: anytype) !void {
-        _ = index;
+        // Check source operands for undefined
         try checkSrcUndefined(state, params.lhs);
         try checkSrcUndefined(state, params.rhs);
+        // Mark result as defined (binary ops always produce defined results)
+        const result_gid = state.results[index].refinement.?;
+        state.refinements.at(result_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
     }
 
     pub const add = binOpHandler;
@@ -378,17 +434,38 @@ pub const UndefinedSafety = union(enum) {
     pub const min = binOpHandler;
     pub const max = binOpHandler;
     pub const cmp_vector = binOpHandler;
-    pub const add_with_overflow = binOpHandler;
-    pub const sub_with_overflow = binOpHandler;
-    pub const mul_with_overflow = binOpHandler;
+
+    /// Handler for overflow operations (add_with_overflow, sub_with_overflow, mul_with_overflow).
+    /// These return a struct { result: T, overflow: u1 } - check sources and mark both fields defined.
+    fn overflowOpHandler(state: State, index: usize, params: anytype) !void {
+        // Check source operands for undefined
+        try checkSrcUndefined(state, params.lhs);
+        try checkSrcUndefined(state, params.rhs);
+
+        // Mark result struct fields as defined
+        const result_gid = state.results[index].refinement.?;
+        const result_ref = state.refinements.at(result_gid);
+        // Overflow ops produce a struct with two scalar fields
+        const s = result_ref.@"struct";
+        for (s.fields) |field_gid| {
+            state.refinements.at(field_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
+        }
+    }
+
+    pub const add_with_overflow = overflowOpHandler;
+    pub const sub_with_overflow = overflowOpHandler;
+    pub const mul_with_overflow = overflowOpHandler;
 
     // =========================================================================
     // UnOp handlers - check operand for undefined value
     // =========================================================================
 
     fn unOpHandler(state: State, index: usize, params: anytype) !void {
-        _ = index;
+        // Check source operand for undefined
         try checkSrcUndefined(state, params.src);
+        // Mark result as defined (unary ops always produce defined results)
+        const result_gid = state.results[index].refinement.?;
+        state.refinements.at(result_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
     }
 
     pub const ctz = unOpHandler;
@@ -2065,8 +2142,9 @@ pub const UndefinedSafety = union(enum) {
 const debug = @import("builtin").mode == .Debug;
 
 /// Validate that a refinement conforms to undefined tracking rules:
-/// - For .optional, .errorunion and .struct, the top-level analyte.undefined must be null
-/// - For .scalar and .pointer, the analyte.undefined must be set (not null)
+/// - MUST EXIST: .scalar, .pointer, .fnptr, .allocator
+/// - MUST BE NULL: .optional, .errorunion, .struct, .region, .union, .recursive
+/// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
     switch (refinement) {
@@ -2081,18 +2159,22 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
             }
         },
         .fnptr => |f| {
-            // Function pointers are values that can be undefined (like scalars/pointers)
             if (f.analyte.undefined_safety == null) {
                 std.debug.panic("undefined state must be set on fnptrs", .{});
             }
         },
-        inline .optional, .errorunion, .@"struct", .region => |data, t| {
-            // Note: .@"union" is intentionally not included here - unions use analyte.undefined
-            // for tracking state when activating inactive fields
+        .allocator => |a| {
+            if (a.analyte.undefined_safety == null) {
+                std.debug.panic("undefined state must be set on allocators", .{});
+            }
+        },
+        inline .optional, .errorunion, .@"struct", .region, .@"union", .recursive => |data, t| {
+            // Container types track undefined on children, not on the container itself.
+            // For unions, variant_safety tracks active variant; each variant field tracks its own undefined state.
             if (data.analyte.undefined_safety != null) {
                 std.debug.panic("undefined state should not exist on container types, got {s} at idx {} (undefined_safety={any})", .{ @tagName(t), idx, data.analyte.undefined_safety });
             }
         },
-        else => {},
+        .void, .noreturn, .unimplemented => {},
     }
 }

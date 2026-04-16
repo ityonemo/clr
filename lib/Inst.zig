@@ -67,14 +67,14 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
                 // Mark as global (interned/comptime values point to const memory)
                 const ref = try tag.typeToRefinement(interned.ty, state.refinements);
                 const gid = try state.refinements.appendEntity(ref);
-                tag.splatInitInterned(state.refinements, gid, state.ctx);
+                tag.splatInitInterned(state.refinements, gid);
                 break :blk gid;
             },
             .fnptr => |choices| blk: {
                 // Deep copy choices since fnptr provides compile-time slice
                 const owned_choices = try allocator.dupe(tag.FnInterpreter, choices);
                 const gid = try state.refinements.appendEntity(.{ .fnptr = .{ .choices = owned_choices } });
-                tag.splatInitDefined(state.refinements, gid, state.ctx);
+                tag.splatInitInterned(state.refinements, gid);
                 break :blk gid;
             },
         };
@@ -87,8 +87,6 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     // Create typed return slot for the call result
     const return_ref = try tag.typeToRefinement(return_type, state.refinements);
     const return_slot = try state.refinements.appendEntity(return_ref);
-    // Initialize as defined (analysis modules override if needed)
-    tag.splatInitDefined(state.refinements, return_slot, state.ctx);
     state.results[index].refinement = return_slot;
 
     // Dispatch to analysis modules' runtime call filters
@@ -107,20 +105,12 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
         const fnptr_gid = state.results[called.inst].refinement orelse return;
         const fnptr_ref = state.refinements.at(fnptr_gid);
 
-        // Re-initialize for indirect call (may have multiple targets)
-        tag.splatInit(state.refinements, return_slot, state.ctx);
-
         // Call ALL possible target functions to get conservative analysis
         const saved_base_line = state.ctx.base_line;
         for (fnptr_ref.fnptr.choices) |func| {
             _ = try func(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, arg_gids);
         }
         state.ctx.base_line = saved_base_line;
-
-        // If no choices, fall back to defined return value (conservative)
-        if (fnptr_ref.fnptr.choices.len == 0) {
-            tag.splatInitDefined(state.refinements, return_slot, state.ctx);
-        }
 
         return;
     }
@@ -131,8 +121,6 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     // Direct call to known function
     // Save caller's base_line - callee will set its own
     const saved_base_line = state.ctx.base_line;
-    // Re-initialize for direct call execution
-    tag.splatInit(state.refinements, return_slot, state.ctx);
     // Call function with ctx, refinements, return_slot, and args slice
     // FnInterpreter uses *anyopaque for Context and Refinements to break import cycles
     const return_gid = try called(@ptrCast(state.ctx), @ptrCast(state.refinements), return_slot, arg_gids);
@@ -985,6 +973,8 @@ pub fn mergeEarlyReturns(state: State) !void {
     );
 }
 
+const debug = @import("builtin").mode == .Debug;
+
 pub fn onFinish(state: State) !void {
     try tag.splatFinish(state.results, state.ctx, state.refinements, state.return_gid);
 }
@@ -1133,7 +1123,6 @@ test "ret_safe writes return value to return slot" {
     const return_type: tag.Type = .{ .pointer = &.{ .scalar = {} } };
     const return_ref = try tag.typeToRefinement(return_type, &refinements);
     const return_gid = try refinements.appendEntity(return_ref);
-    tag.splatInit(&refinements, return_gid, &ctx);
 
     const results = try make_results_list(allocator, 3);
     defer clear_results_list(results, allocator);
@@ -1208,7 +1197,6 @@ test "ret_safe at entrypoint succeeds" {
     const return_type: tag.Type = .{ .pointer = &.{ .scalar = {} } };
     const return_ref = try tag.typeToRefinement(return_type, &refinements);
     const return_gid = try refinements.appendEntity(return_ref);
-    tag.splatInit(&refinements, return_gid, &ctx);
 
     const results = try make_results_list(allocator, 2);
     defer clear_results_list(results, allocator);

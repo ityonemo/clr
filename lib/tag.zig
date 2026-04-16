@@ -71,6 +71,11 @@ pub const INVALID_GID = core.INVALID_GID;
 /// Used when storing interned values to determine the refinement structure.
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
 /// Note: For struct/union types, type_id is set to 0 here; actual type_id comes from tag struct fields.
+///
+/// ARCHITECTURE: This function creates ONLY the structural scaffolding of refinements.
+/// All analyte fields (undefined_safety, memory_safety, null_safety, etc.) are left as null.
+/// It is the responsibility of `splat` handlers in `lib/analysis/*.zig` to set analyte values.
+/// This ensures a clean separation: tag.zig handles structure, analysis modules handle semantics.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
     return switch (ty) {
         .scalar => .{ .scalar = .{} },
@@ -117,7 +122,6 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // All elements share this single refinement (uniform region model)
             const child_ref = try typeToRefinement(child.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            // Region container has null undefined (only child has undefined state)
             return .{ .region = .{ .to = child_idx } };
         },
         .@"struct" => |struct_type| {
@@ -145,7 +149,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // Recursive type reference - return a placeholder .recursive refinement.
             // The actual pointer tracking happens through runtime assignments
             // (e.g., node.next = &other_node), not through type descriptions.
-            // Traversal functions like retval_init skip .recursive to avoid infinite loops.
+            // Traversal functions skip .recursive to avoid infinite loops.
             return .{ .recursive = .{ .to = 0 } };
         },
         .unimplemented => .unimplemented,
@@ -204,11 +208,11 @@ pub const Alloc = struct {
     ty: Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create pointee from type info
+        // ty is the type being allocated, wrap it in a pointer
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
-        const pointee_idx = try state.refinements.appendEntity(pointee_ref);
-        // Create pointer entity pointing to the typed pointee
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = pointee_idx } });
+        const pointee_gid = try state.refinements.appendEntity(pointee_ref);
+        // Initialize the pointee's memory_safety (created from type, so has .placeholder)
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = pointee_gid } });
         try splat(.alloc, state, index, self);
     }
 };
@@ -266,7 +270,6 @@ pub const ArenaInit = struct {
         const ref = try typeToRefinement(self.ty, state.refinements);
         const gid = try state.refinements.appendEntity(ref);
         state.results[index].refinement = gid;
-        splatInit(state.refinements, gid, state.ctx);
         try splat(.arena_init, state, index, self);
     }
 };
@@ -363,7 +366,7 @@ pub const Bitcast = struct {
 
                                     // Wrap in optional
                                     const opt_gid = try state.refinements.appendEntity(.{
-                                        .optional = .{ .to = new_ptr_gid },
+                                        .optional = .{ .to = new_ptr_gid, .analyte = .{ .null_safety = .unknown } },
                                     });
                                     state.results[index].refinement = opt_gid;
                                     try splat(.bitcast, state, index, self);
@@ -374,7 +377,7 @@ pub const Bitcast = struct {
                     }
                     // Default: just wrap existing pointer in optional
                     const opt_gid = try state.refinements.appendEntity(.{
-                        .optional = .{ .to = src_gid },
+                        .optional = .{ .to = src_gid, .analyte = .{ .null_safety = .unknown } },
                     });
                     state.results[index].refinement = opt_gid;
                 } else if (self.ty == .pointer and src_ref.* == .pointer) {
@@ -479,6 +482,7 @@ pub const Block = struct {
         // Create block result from type info
         const result_ref = try typeToRefinement(self.ty, state.refinements);
         _ = try Inst.clobberInst(state.refinements, state.results, index, result_ref);
+        // Initialize the block result's memory_safety (created from type, so has .placeholder)
         try splat(.block, state, index, self);
     }
 };
@@ -532,8 +536,13 @@ pub const Br = struct {
                 // Try to look up as tracked global first
                 if (state.refinements.getGlobal(interned.ip_idx)) |global_gid| {
                     state.results[self.block].refinement = global_gid;
+                } else {
+                    // Not tracked - comptime constant. Create refinement with .interned memory_safety.
+                    const ref = try typeToRefinement(interned.ty, state.refinements);
+                    const gid = try state.refinements.appendEntity(ref);
+                    splatInitInterned(state.refinements, gid);
+                    state.results[self.block].refinement = gid;
                 }
-                // Not tracked - comptime constant, handled by analysis modules (e.g., undefined.br marks as defined)
             },
             // Function pointer constant - create fnptr refinement with choices
             .fnptr => |choices| {
@@ -541,8 +550,8 @@ pub const Br = struct {
                 const owned_choices = try state.ctx.allocator.dupe(FnInterpreter, choices);
                 const fnptr_ref = Refinement{ .fnptr = .{ .choices = owned_choices } };
                 const fnptr_gid = try state.refinements.appendEntity(fnptr_ref);
-                // Initialize analytes (fnptrs are always defined)
-                splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                // fnptrs are interned
+                splatInitInterned(state.refinements, fnptr_gid);
                 state.results[self.block].refinement = fnptr_gid;
             },
         }
@@ -752,8 +761,8 @@ pub const Load = struct {
                 // interned.ty is the pointer type, so create that first
                 const ptr_ref = try typeToRefinement(interned.ty, state.refinements);
                 const ptr_gid_temp = try state.refinements.appendEntity(ptr_ref);
-                // Initialize as defined - comptime constants are always defined
-                splatInitDefined(state.refinements, ptr_gid_temp, state.ctx);
+                // Initialize as interned - comptime constants have interned memory_safety
+                splatInitInterned(state.refinements, ptr_gid_temp);
                 // Now follow the pointer to get the pointee (same as tracked case)
                 const pointee_gid = state.refinements.at(ptr_gid_temp).pointer.to;
                 const new_gid = try state.refinements.valueCopy(pointee_gid);
@@ -810,21 +819,23 @@ pub const StructFieldPtr = struct {
                 if (state.refinements.getGlobal(interned.ip_idx)) |gid| {
                     break :blk gid;
                 }
-                // Not tracked - comptime constant, use type info to create proper structure
-                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                // Not tracked - comptime constant, use type info with interned memory_safety
+                const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                splatInitInterned(state.refinements, new_gid);
                 try splat(.struct_field_ptr, state, index, self);
                 return;
             },
             .fnptr => {
-                // Function pointer base - use type info to create proper structure
-                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                // Function pointer base - use type info with interned memory_safety
+                const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                splatInitInterned(state.refinements, new_gid);
                 try splat(.struct_field_ptr, state, index, self);
                 return;
             },
         };
 
         const effective_base_ref = base_ref orelse {
-            // Base has no refinement - use type info
+            // Base has no refinement - use type info and initialize
             _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
             try splat(.struct_field_ptr, state, index, self);
             return;
@@ -852,7 +863,7 @@ pub const StructFieldPtr = struct {
             .@"union" => |data| {
                 const field_idx = idx: {
                     if (data.fields[self.field_index]) |idx| break :idx idx;
-                    // Field is inactive - create entity for it
+                    // Field is inactive - create entity for it and initialize
                     // For tagged unions, the analysis module (variant_safety) will report the error
                     // For untagged unions, this creates the entity on first access
                     const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
@@ -1174,15 +1185,14 @@ pub const RetSafe = struct {
                         const ref = try typeToRefinement(interned.ty, cloned);
                         cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = ref;
-                        splatInit(cloned, return_gid, state.ctx);
                     } else {
-                        // Non-void, non-undefined comptime value (constants, null) - mark as defined
+                        // Non-void, non-undefined comptime value (constants, null) - interned
                         // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
                         // dangling pointer if typeToRefinement causes list reallocation.
                         const ref = try typeToRefinement(interned.ty, cloned);
                         cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = ref;
-                        splatInitDefined(cloned, return_gid, state.ctx);
+                        splatInitInterned(cloned, return_gid);
                     }
                 }
             },
@@ -1191,8 +1201,8 @@ pub const RetSafe = struct {
                 const owned_choices = try allocator.dupe(FnInterpreter, choices);
                 cloned.freeValue(cloned.at(return_gid));
                 cloned.at(return_gid).* = .{ .fnptr = .{ .choices = owned_choices } };
-                // Initialize analytes (fnptrs are always defined)
-                splatInitDefined(cloned, return_gid, state.ctx);
+                // fnptrs are interned
+                splatInitInterned(cloned, return_gid);
             },
         }
 
@@ -1316,6 +1326,60 @@ pub const RetLoad = struct {
 ///
 /// We do NOT modify the ptr instruction's refinement - it still points to the same
 /// pointer entity. We only update the pointee's analysis state.
+
+/// Update .to references from dest to match src.
+/// Used when storing a struct to ensure pointer/optional/etc fields share targets.
+fn updateFieldReferences(refinements: *Refinements, dest_gid: Gid, src_gid: Gid) void {
+    const dest_ref = refinements.at(dest_gid);
+    const src_ref = refinements.at(src_gid);
+
+    switch (dest_ref.*) {
+        .pointer => |*p| {
+            if (src_ref.* == .pointer) {
+                // Share the same target
+                p.to = src_ref.pointer.to;
+            }
+        },
+        .optional => |*o| {
+            if (src_ref.* == .optional) {
+                o.to = src_ref.optional.to;
+            }
+        },
+        .errorunion => |*e| {
+            if (src_ref.* == .errorunion) {
+                e.to = src_ref.errorunion.to;
+            }
+        },
+        .region => |*r| {
+            if (src_ref.* == .region) {
+                r.to = src_ref.region.to;
+            }
+        },
+        .@"struct" => |dest_struct| {
+            if (src_ref.* == .@"struct") {
+                const src_struct = src_ref.@"struct";
+                for (dest_struct.fields, src_struct.fields) |dest_field_gid, src_field_gid| {
+                    updateFieldReferences(refinements, dest_field_gid, src_field_gid);
+                }
+            }
+        },
+        .@"union" => |dest_union| {
+            if (src_ref.* == .@"union") {
+                const src_union = src_ref.@"union";
+                for (dest_union.fields, src_union.fields) |maybe_dest, maybe_src| {
+                    if (maybe_dest) |dest_field_gid| {
+                        if (maybe_src) |src_field_gid| {
+                            updateFieldReferences(refinements, dest_field_gid, src_field_gid);
+                        }
+                    }
+                }
+            }
+        },
+        // Scalars, allocators, fnptrs don't have .to references
+        .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+    }
+}
+
 pub const Store = struct {
     /// Pointer being stored through - can be local inst, global (interned), or constant.
     ptr: Src,
@@ -1404,7 +1468,17 @@ pub const Store = struct {
                         e.to = try state.refinements.valueCopy(src.errorunion.to);
                     }
                 },
-                .@"struct" => {},
+                .@"struct" => |dest_struct| {
+                    // Storing struct into struct slot - update field .to references.
+                    // For pointer/optional/errorunion/region fields, the destination
+                    // should reference the same targets as the source.
+                    if (src.* == .@"struct") {
+                        const src_struct = src.@"struct";
+                        for (dest_struct.fields, src_struct.fields) |dest_field_gid, src_field_gid| {
+                            updateFieldReferences(state.refinements, dest_field_gid, src_field_gid);
+                        }
+                    }
+                },
                 .region => |*r| {
                     // Storing into an existing region slot mutates the destination value.
                     // Do not alias the source element subtree directly.
@@ -1476,7 +1550,8 @@ pub const WrapErrunionPayload = struct {
                 const src_gid = state.results[src].refinement orelse {
                     // Source has no refinement - create based on type
                     const ref = try typeToRefinement(self.ty.errorunion.*, state.refinements);
-                    break :blk try state.refinements.appendEntity(ref);
+                    const gid = try state.refinements.appendEntity(ref);
+                    break :blk gid;
                 };
                 // Share the payload entity - when ret_safe marks allocations as
                 // returned, it affects the original allocation, not a copy
@@ -1488,9 +1563,11 @@ pub const WrapErrunionPayload = struct {
                     // Share the global
                     break :blk global_gid;
                 } else {
-                    // Not tracked - create from type
+                    // Not tracked - create from type with interned memory_safety
                     const ref = try typeToRefinement(interned.ty, state.refinements);
-                    break :blk try state.refinements.appendEntity(ref);
+                    const gid = try state.refinements.appendEntity(ref);
+                    splatInitInterned(state.refinements, gid);
+                    break :blk gid;
                 }
             },
             .fnptr => |choices| blk: {
@@ -1499,8 +1576,8 @@ pub const WrapErrunionPayload = struct {
                 const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
                     .choices = owned_choices,
                 } });
-                // Initialize analytes (fnptrs are always defined)
-                splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                // Initialize analytes (fnptrs are interned)
+                splatInitInterned(state.refinements, fnptr_gid);
                 break :blk fnptr_gid;
             },
         };
@@ -1530,10 +1607,11 @@ pub const WrapOptional = struct {
         const payload_gid: Gid = switch (self.src) {
             .inst => |src| blk: {
                 const src_gid = state.results[src].refinement orelse {
-                    // Source has no refinement - create based on type
+                    // Source has no refinement - create based on type and initialize
                     const inner_ty = if (self.ty == .optional) self.ty.optional.* else Type{ .scalar = {} };
                     const ref = try typeToRefinement(inner_ty, state.refinements);
-                    break :blk try state.refinements.appendEntity(ref);
+                    const gid = try state.refinements.appendEntity(ref);
+                    break :blk gid;
                 };
                 // Share the payload entity - when ret_safe marks allocations as
                 // returned, it affects the original allocation, not a copy
@@ -1545,8 +1623,11 @@ pub const WrapOptional = struct {
                     // Share the global
                     break :blk global_gid;
                 } else {
+                    // Not tracked - create from type with interned memory_safety
                     const ref = try typeToRefinement(interned.ty, state.refinements);
-                    break :blk try state.refinements.appendEntity(ref);
+                    const gid = try state.refinements.appendEntity(ref);
+                    splatInitInterned(state.refinements, gid);
+                    break :blk gid;
                 }
             },
             .fnptr => |choices| blk: {
@@ -1554,7 +1635,8 @@ pub const WrapOptional = struct {
                 const fnptr_gid = try state.refinements.appendEntity(.{ .fnptr = .{
                     .choices = owned_choices,
                 } });
-                splatInitDefined(state.refinements, fnptr_gid, state.ctx);
+                // fnptrs are interned
+                splatInitInterned(state.refinements, fnptr_gid);
                 break :blk fnptr_gid;
             },
         };
@@ -1562,6 +1644,7 @@ pub const WrapOptional = struct {
         // Create the optional that points to the payload (non-null case)
         const optional_gid = try state.refinements.appendEntity(.{ .optional = .{
             .to = payload_gid,
+            .analyte = .{ .null_safety = .unknown },
         } });
 
         state.results[index].refinement = optional_gid;
@@ -1614,9 +1697,8 @@ pub fn UnOp(comptime instr: anytype) type {
         src: Src,
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
-            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             // Unary operations produce defined results (the operation executed)
-            splatInitDefined(state.refinements, gid, state.ctx);
             try splat(instr, state, index, self);
         }
     };
@@ -1628,8 +1710,7 @@ pub const Reduce = struct {
     src: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-        splatInitDefined(state.refinements, gid, state.ctx);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.reduce, state, index, self);
     }
 };
@@ -1642,8 +1723,7 @@ pub const Select = struct {
     b: Src,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-        splatInitDefined(state.refinements, gid, state.ctx);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         try splat(.select, state, index, self);
     }
 };
@@ -1693,9 +1773,8 @@ pub fn NullCheck(comptime instr: anytype) type {
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
             // Result is a boolean scalar (the result of the null check)
-            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             // Null checks produce defined results (the check executed)
-            splatInitDefined(state.refinements, gid, state.ctx);
             try splat(instr, state, index, self);
         }
     };
@@ -1717,8 +1796,6 @@ pub fn OverflowOp(comptime instr: anytype) type {
             const field1_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
 
             // Initialize fields as defined (overflow ops always produce defined results)
-            splatInitDefined(state.refinements, field0_gid, state.ctx);
-            splatInitDefined(state.refinements, field1_gid, state.ctx);
 
             // clobberInst takes ownership of fields slice
             const fields = allocator.alloc(Gid, 2) catch @panic("out of memory");
@@ -1766,9 +1843,8 @@ pub const IsNonErr = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Result is a boolean scalar (the result of the error check)
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         // The result is defined (the error check executed)
-        splatInitDefined(state.refinements, gid, state.ctx);
         try splat(.is_non_err, state, index, self);
     }
 };
@@ -1894,9 +1970,8 @@ pub const AggregateInit = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const refinement = try typeToRefinement(self.ty, state.refinements);
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, refinement);
         // Initialize as defined first (sets up base analyte state)
-        splatInitDefined(state.refinements, gid, state.ctx);
         // Then dispatch to analysis modules to incorporate source element state
         try splat(.aggregate_init, state, index, self);
     }
@@ -1979,8 +2054,7 @@ pub const Slice = struct {
 
         // Fallback: create new refinement from type (for cases without source ptr)
         const refinement = try typeToRefinement(self.ty, state.refinements);
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
-        splatInitDefined(state.refinements, gid, state.ctx);
+        _ = try Inst.clobberInst(state.refinements, state.results, index, refinement);
     }
 };
 
@@ -2044,9 +2118,8 @@ pub const GetUnionTag = struct {
     operand: ?usize, // the union instruction we're getting the tag from
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         // The result is defined (we read the tag value)
-        splatInitDefined(state.refinements, gid, state.ctx);
         try splat(.get_union_tag, state, index, self);
     }
 };
@@ -2095,7 +2168,6 @@ pub const UnionInit = struct {
                             .choices = owned_choices,
                         } });
                         // Initialize analytes (fnptrs are always defined)
-                        splatInitDefined(state.refinements, fnptr_gid, state.ctx);
                         fields[i] = fnptr_gid;
                     },
                 }
@@ -2137,16 +2209,16 @@ pub const ArrayElemVal = struct {
                 };
                 const element_ref = try typeToRefinement(element_type, state.refinements);
                 const element_gid = try state.refinements.appendEntity(element_ref);
-                // Mark as defined since comptime values are always defined
-                splatInitDefined(state.refinements, element_gid, state.ctx);
+                // Comptime values have interned memory_safety
+                splatInitInterned(state.refinements, element_gid);
                 state.results[index].refinement = element_gid;
                 try splat(.array_elem_val, state, index, self);
                 return;
             },
             .fnptr => {
-                // Function pointer - no tracking needed, return scalar
-                const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-                splatInitDefined(state.refinements, gid, state.ctx);
+                // Function pointer - fnptrs are interned
+                const new_gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+                splatInitInterned(state.refinements, new_gid);
                 try splat(.array_elem_val, state, index, self);
                 return;
             },
@@ -2154,8 +2226,7 @@ pub const ArrayElemVal = struct {
 
         const effective_base_ref = base_ref orelse {
             // No refinement - create scalar and mark defined
-            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
-            splatInitDefined(state.refinements, gid, state.ctx);
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             try splat(.array_elem_val, state, index, self);
             return;
         };
@@ -2525,9 +2596,8 @@ pub fn BinOp(comptime tag: anytype) type {
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
             // Binary operations produce scalar results
-            const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
             // Binary operations produce defined results (the operation executed)
-            splatInitDefined(state.refinements, gid, state.ctx);
             try splat(tag, state, index, self);
         }
     };
@@ -2540,9 +2610,8 @@ pub const TransferOp = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create a scalar result - analyses will handle any property transfer
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{} });
         // The result is defined (the transfer operation executed)
-        splatInitDefined(state.refinements, gid, state.ctx);
         // Let each analysis decide how to handle this operation
         try splat(.transfer_op, state, index, self);
     }
@@ -2551,16 +2620,58 @@ pub const TransferOp = struct {
 /// Slice field pointer operations - gets pointer to a slice component (ptr or len).
 /// Used for ptr_slice_ptr_ptr and ptr_slice_len_ptr.
 /// These create pointer refinements, not scalars.
+///
+/// For ptr_slice_ptr_ptr: The result pointer's .to must point to the ORIGINAL slice
+/// entity so that stores through it update the original struct field. Otherwise,
+/// allocations stored via `container.items.ptr = new_alloc.ptr` won't be seen
+/// as reachable from `container` at branch merge, causing false positive leaks.
 pub const SliceFieldPtr = struct {
     src: Src,
     ty: core.Type,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
-        // Create the refinement structure based on the result type
-        const gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
-        // The result is defined (the operation executed successfully)
-        splatInitDefined(state.refinements, gid, state.ctx);
-        // Let each analysis decide how to handle this operation
+        // Get the source pointer refinement (pointer to the slice)
+        const src_gid: ?Gid = switch (self.src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+
+        const effective_src_gid = src_gid orelse {
+            // Fall back to type-based creation for globals/constants
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.slice_field_ptr, state, index, self);
+            return;
+        };
+
+        const src_ref = state.refinements.at(effective_src_gid);
+        if (src_ref.* != .pointer) {
+            // Not a pointer - fall back to type-based creation
+            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            try splat(.slice_field_ptr, state, index, self);
+            return;
+        }
+
+        // Get the slice GID - this is what the source pointer points to
+        const slice_gid = src_ref.pointer.to;
+        const slice_ref = state.refinements.at(slice_gid);
+
+        // For ptr_slice_ptr_ptr: slice is a pointer (pointer → region) AND result is pointer to pointer
+        // Create a pointer whose .to is the slice GID, so stores update the original slice
+        // But for ptr_slice_len_ptr, result is pointer to SCALAR, so we need type-based creation
+        const result_is_ptr_to_ptr = self.ty == .pointer and self.ty.pointer.* == .pointer;
+        if (slice_ref.* == .pointer and result_is_ptr_to_ptr) {
+            // Create pointer pointing to the existing slice entity
+            // DON'T call splatInit here - that would traverse into the existing slice
+            // and overwrite its memory_safety (e.g., changing .interned to .stack).
+            // The memory_safety.slice_field_ptr handler will set proper state on the new pointer.
+            _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = slice_gid } });
+            try splat(.slice_field_ptr, state, index, self);
+            return;
+        }
+
+        // For ptr_slice_len_ptr or unexpected types, use type-based creation
+        _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
         try splat(.slice_field_ptr, state, index, self);
     }
 };
@@ -2588,41 +2699,13 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements, re
     }
 }
 
-/// Initialize a return slot refinement. Called after creating the return slot
-/// to set up initial analysis state (e.g., marking values as defined).
-/// Each analysis can implement `retval_init` to initialize its state.
-pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-    inline for (Analyte.analyses) |Analysis| {
-        if (@hasDecl(Analysis, "retval_init")) {
-            Analysis.retval_init(refinements, gid, ctx);
-        }
-    }
-}
-
-/// Initialize a return slot refinement as DEFINED. Used for interned comptime values
-/// (constants, null) that are not the .undefined type wrapper.
-/// Calls retval_init_defined if available (marks as defined), otherwise retval_init.
-pub fn splatInitDefined(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-    inline for (Analyte.analyses) |Analysis| {
-        if (@hasDecl(Analysis, "retval_init_defined")) {
-            Analysis.retval_init_defined(refinements, gid);
-        } else if (@hasDecl(Analysis, "retval_init")) {
-            Analysis.retval_init(refinements, gid, ctx);
-        }
-    }
-}
-
 /// Initialize analysis state for interned/comptime values that are NOT tracked globals.
 /// These are compile-time constants (e.g., &global_value) and should have .interned memory_safety.
 /// Different from splatInitGlobal which sets up tracked global variables.
-pub fn splatInitInterned(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+pub fn splatInitInterned(refinements: *Refinements, gid: Gid) void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "interned_init")) {
             Analysis.interned_init(refinements, gid);
-        } else if (@hasDecl(Analysis, "retval_init_defined")) {
-            Analysis.retval_init_defined(refinements, gid);
-        } else if (@hasDecl(Analysis, "retval_init")) {
-            Analysis.retval_init(refinements, gid, ctx);
         }
     }
 }
@@ -3669,6 +3752,47 @@ test "block creates refinement based on type" {
     try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .void = {} } } });
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
+}
+
+test "block initializes memory_safety for pointer types" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    // Block with pointer→region→scalar type (like alignedAlloc result)
+    const nested_type = Type{ .pointer = &.{ .region = &.{ .scalar = {} } } };
+    try Inst.apply(state, 0, .{ .block = .{ .ty = nested_type } });
+
+    // Block should create a pointer refinement
+    const ptr_gid = results[0].refinement.?;
+    const ptr_ref = refinements.at(ptr_gid).*;
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(ptr_ref));
+
+    // The POINTER value should have memory_safety = .stack (pointer lives on stack)
+    const ptr_ms = ptr_ref.pointer.analyte.memory_safety.?;
+    try std.testing.expectEqual(.stack, std.meta.activeTag(ptr_ms));
+
+    // The POINTEE (region) should have null memory_safety
+    // The pointee's location is determined by assignment, not by the block
+    const region_gid = ptr_ref.pointer.to;
+    const region_ref = refinements.at(region_gid).*;
+    try std.testing.expectEqual(.region, std.meta.activeTag(region_ref));
+    try std.testing.expect(region_ref.region.analyte.memory_safety == null);
+
+    // The scalar element should also have null memory_safety
+    const scalar_gid = region_ref.region.to;
+    const scalar_ref = refinements.at(scalar_gid).*;
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(scalar_ref));
+    try std.testing.expect(scalar_ref.scalar.analyte.memory_safety == null);
 }
 
 test "unreach does nothing" {
