@@ -2336,7 +2336,19 @@ pub const MemorySafety = union(enum) {
             const src_ref = state.refinements.at(src);
             if (src_ref.* == .pointer) {
                 if (src_ref.pointer.analyte.memory_safety) |src_ms| {
-                    ptr.analyte.memory_safety = propagateMemorySafety(src_ms, src);
+                    ptr.analyte.memory_safety = switch (src_ms) {
+                        .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src } },
+                        .allocated => |a| .{ .allocated = .{
+                            .meta = a.meta,
+                            .allocator_gid = a.allocator_gid,
+                            .type_id = a.type_id,
+                            .freed = a.freed,
+                            .root_gid = src,
+                        } },
+                        .interned => |g| .{ .interned = g },
+                        .error_stub => @panic("optional_payload_ptr: error_stub source is not a valid pointer source"),
+                        .placeholder => @panic("optional_payload_ptr: placeholder source is not a valid pointer source"),
+                    };
                 }
             }
         }
@@ -2358,27 +2370,22 @@ pub const MemorySafety = union(enum) {
             const src_ref = state.refinements.at(src);
             if (src_ref.* == .pointer) {
                 if (src_ref.pointer.analyte.memory_safety) |src_ms| {
-                    ptr.analyte.memory_safety = propagateMemorySafety(src_ms, src);
+                    ptr.analyte.memory_safety = switch (src_ms) {
+                        .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src } },
+                        .allocated => |a| .{ .allocated = .{
+                            .meta = a.meta,
+                            .allocator_gid = a.allocator_gid,
+                            .type_id = a.type_id,
+                            .freed = a.freed,
+                            .root_gid = src,
+                        } },
+                        .interned => |g| .{ .interned = g },
+                        .error_stub => @panic("unwrap_errunion_payload_ptr: error_stub source is not a valid pointer source"),
+                        .placeholder => @panic("unwrap_errunion_payload_ptr: placeholder source is not a valid pointer source"),
+                    };
                 }
             }
         }
-    }
-
-    /// Helper to propagate memory_safety with root_gid set for derived pointers.
-    fn propagateMemorySafety(src_ms: MemorySafety, src_gid: Gid) MemorySafety {
-        return switch (src_ms) {
-            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src_gid } },
-            .allocated => |a| .{ .allocated = .{
-                .meta = a.meta,
-                .allocator_gid = a.allocator_gid,
-                .type_id = a.type_id,
-                .freed = a.freed,
-                .root_gid = src_gid,
-            } },
-            .interned => |g| .{ .interned = g },
-            .error_stub => .{ .error_stub = {} },
-            .placeholder => .{ .placeholder = {} },
-        };
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
