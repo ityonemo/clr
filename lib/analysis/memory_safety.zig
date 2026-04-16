@@ -3120,14 +3120,15 @@ pub const MemorySafety = union(enum) {
 
         // realloc: frees old slice, allocates new slice
         if (gates.isAllocatorRealloc(fqn)) {
-            try handleAllocRealloc(state, index, args, false);
+            try handleAllocRealloc(state, index, args);
             return true;
         }
 
-        // remap: attempts to resize in place, returns null on failure - doesn't free old memory
-        // For remap, we don't report errors for interned memory since it just returns null
+        // remap: attempts to resize in place and returns null on failure.
+        // For spatial memory we treat this as a no-op: old memory remains valid,
+        // and success preserves identity rather than creating a new allocation.
         if (gates.isAllocatorRemap(fqn)) {
-            try handleAllocRealloc(state, index, args, true);
+            try handleAllocRemap(state, index, args);
             return true;
         }
 
@@ -3321,64 +3322,8 @@ pub const MemorySafety = union(enum) {
         const ptr = &state.refinements.at(ptr_ref).pointer;
         const pointee_ref = ptr.to;
 
-        // Get allocator GID, type_id, and arena_gid from the allocator argument
-        var allocator_gid: ?Gid = null;
-        var type_id: u32 = 0;
-        var arena_gid: ?Gid = null;
-
-        // Try to get allocator info from args[0] (the allocator)
-        if (args.len > 0) {
-            switch (args[0]) {
-                .inst => |inst| {
-                    if (state.results[inst].refinement) |arg_gid| {
-                        const ref = state.refinements.at(arg_gid);
-                        if (ref.* != .allocator) return;
-                        allocator_gid = arg_gid;
-                        type_id = ref.allocator.type_id;
-                        if (ref.allocator.deinit) |deinit_meta| {
-                            return reportAllocAfterDeinit(state.ctx, deinit_meta);
-                        }
-                        arena_gid = ref.allocator.arena_gid;
-                    }
-                },
-                .interned => |interned| {
-                    // Allocators must be registered as globals
-                    if (interned.ty != .allocator) return;
-                    // getGlobal returns a pointer GID, follow it to get the allocator
-                    const ptr_gid = state.refinements.getGlobal(interned.ip_idx) orelse {
-                        std.debug.panic("allocator_create: interned allocator ip_idx={d} not registered as global", .{interned.ip_idx});
-                    };
-                    const agid = state.refinements.at(ptr_gid).pointer.to;
-                    const alloc_ref = state.refinements.at(agid).allocator;
-                    allocator_gid = agid;
-                    type_id = alloc_ref.type_id;
-                    if (alloc_ref.deinit) |deinit_meta| {
-                        return reportAllocAfterDeinit(state.ctx, deinit_meta);
-                    }
-                    arena_gid = alloc_ref.arena_gid;
-                },
-                .fnptr => {},
-            }
-        }
-
-        // Check if allocating from a deinited arena
-        if (arena_gid) |agid| {
-            if (findAllocatorForArena(state.refinements, agid)) |alloc_ref| {
-                if (alloc_ref.deinit) |deinit_meta| {
-                    return reportAllocAfterDeinit(state.ctx, deinit_meta);
-                }
-            }
-        }
-
-        // If we reach here, allocator_gid must be set
-        const agid = allocator_gid orelse return;
-
-        const alloc_base: AllocatedBase = .{
-            .meta = state.ctx.meta,
-            .allocator_gid = agid,
-            .type_id = type_id,
-            .root_gid = null, // This is the root allocation
-        };
+        if (args.len == 0) return;
+        const alloc_id = try resolveAllocatingAllocator(state, args[0], "allocator_create");
 
         // The errorunion wrapper itself is a fresh computed value on the stack.
         eu.analyte.memory_safety = .{ .stack = .{
@@ -3390,9 +3335,9 @@ pub const MemorySafety = union(enum) {
         // Note: We only set memory_safety on the POINTEE, not the pointer itself.
         // The pointer is a return value (register/stack), the pointee is on the heap.
         paintSpatialMemory(state.refinements, pointee_ref, .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .allocator_gid = alloc_base.allocator_gid,
-            .type_id = alloc_base.type_id,
+            .meta = state.ctx.meta,
+            .allocator_gid = alloc_id.gid,
+            .type_id = alloc_id.type_id,
             .root_gid = null,
         } });
     }
@@ -3657,6 +3602,22 @@ pub const MemorySafety = union(enum) {
         };
     }
 
+    fn resolveAllocatingAllocator(state: State, src: tag.Src, comptime panic_name: []const u8) !AllocatorIdentity {
+        const alloc_id = resolveAllocatorIdentity(state.results, state.refinements, src, panic_name) orelse return error.InvalidAllocator;
+        const alloc_ref = state.refinements.at(alloc_id.gid).allocator;
+        if (alloc_ref.deinit) |deinit_meta| {
+            return reportAllocAfterDeinit(state.ctx, deinit_meta);
+        }
+        if (alloc_ref.arena_gid) |arena_gid| {
+            if (findAllocatorForArena(state.refinements, arena_gid)) |arena_alloc_ref| {
+                if (arena_alloc_ref.deinit) |deinit_meta| {
+                    return reportAllocAfterDeinit(state.ctx, deinit_meta);
+                }
+            }
+        }
+        return alloc_id;
+    }
+
     fn freeSliceLike(state: State, allocator_src: tag.Src, slice_src: tag.Src, allow_interned_noop: bool) !AllocatorIdentity {
         const results = state.results;
         const refinements = state.refinements;
@@ -3809,184 +3770,31 @@ pub const MemorySafety = union(enum) {
     /// Marks the slice memory as freed after checking for errors.
     fn handleAllocFree(state: State, index: usize, args: []const tag.Src) !void {
         _ = index; // free returns void
-        const results = state.results;
-        const refinements = state.refinements;
-        const ctx = state.ctx;
-
-        // free signature: free(self, slice) -> args[0]=allocator, args[1]=slice
         if (args.len < 2) return;
-
-        // Resolve slice source to get the pointer's refinement index
-        const ptr_idx: Gid = switch (args[1]) {
-            .inst => |inst| results[inst].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
-                return reportFreeGlobalMemory(ctx);
-            },
-            .fnptr => {
-                return reportFreeGlobalMemory(ctx);
-            },
+        _ = freeSliceLike(state, args[0], args[1], false) catch |err| switch (err) {
+            error.InvalidReallocInput => return,
+            else => return err,
         };
-        const ptr_refinement = refinements.at(ptr_idx);
-        if (ptr_refinement.* != .pointer) return;
-
-        // Check the POINTER's memory_safety first - derived pointers have root_gid set
-        if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
-            switch (ptr_ms) {
-                .allocated => |a| {
-                    if (a.root_gid != null) {
-                        return reportFreeFieldPointer(ctx, a);
-                    }
-                },
-                .stack => |s| {
-                    if (s.root_gid != null) {
-                        return reportFreeFieldPointerStack(ctx, s);
-                    }
-                },
-                .interned => return reportFreeGlobalMemory(ctx),
-                .error_stub => return,
-                .placeholder => std.debug.panic("placeholder in free - pointer not initialized", .{}),
-            }
-        }
-
-        // Get the pointee entity
-        const pointee_idx = ptr_refinement.pointer.to;
-        const pointee_ref = refinements.at(pointee_idx);
-
-        // For free, we expect a region (slice allocation).
-        // If pointee is not a region, it's a single-item allocation → mismatch.
-        // If pointee is a region:
-        //   - If region has .allocated, it's a real alloc allocation → OK
-        //   - If region has NO .allocated but element does, it's create wrapped by bitcast → mismatch
-        const pointee_analyte: *Analyte = switch (pointee_ref.*) {
-            .region => |*r| blk: {
-                // Check if region has allocation metadata
-                if (r.analyte.memory_safety) |*ms| {
-                    switch (ms.*) {
-                        .allocated => break :blk &r.analyte, // Real alloc allocation
-                        .stack => |sp| return reportFreeStackMemory(ctx, sp),
-                        .interned => {
-                            // TODO: Ideally we'd distinguish between:
-                            // - Empty interned slices (like ArrayList.init items) - OK to free (no-op)
-                            // - Non-empty interned slices (like string literals) - error
-                            // For now, allow all interned free since empty slices are common
-                            // and freeing them is a no-op in most allocators.
-                            return;
-                        },
-                        .error_stub => return,
-                        .placeholder => std.debug.panic("placeholder in free - region not initialized", .{}),
-                    }
-                }
-                // Region has no metadata - check if element has allocation metadata
-                // (This happens when create allocation is bitcast to [*]T)
-                const element_ref = refinements.at(r.to);
-                const element_analyte = getAnalytePtr(element_ref);
-                if (element_analyte.memory_safety) |element_ms| {
-                    if (element_ms == .allocated) {
-                        // Element has allocation metadata but region doesn't
-                        // This means it was a create allocation wrapped by bitcast → mismatch
-                        return reportMethodMismatch(ctx, element_ms.allocated, false, true);
-                    }
-                }
-                // No allocation metadata found - can't verify
-                return;
-            },
-            .scalar => |*s| blk: {
-                // Scalar pointee means single-item allocation → mismatch for free
-                if (s.analyte.memory_safety) |ms| {
-                    if (ms == .allocated) {
-                        return reportMethodMismatch(ctx, ms.allocated, false, true);
-                    }
-                }
-                break :blk &s.analyte;
-            },
-            else => return,
-        };
-
-        const ms_ptr = &(pointee_analyte.memory_safety orelse {
-            // memory_safety is null - region was not tracked (e.g., returned from function)
-            // Silently skip - we can't verify allocation status
-            return;
-        });
-
-        switch (ms_ptr.*) {
-            .stack => |sp| return reportFreeStackMemory(ctx, sp),
-            .interned => return reportFreeGlobalMemory(ctx),
-            .error_stub => return,
-            .placeholder => std.debug.panic("placeholder in free - pointee not initialized", .{}),
-            .allocated => {},
-        }
-
-        const a = ms_ptr.allocated;
-
-        if (a.freed) |previous_free| {
-            return reportDoubleFree(ctx, a, previous_free);
-        }
-
-        // Determine allocator GID and type_id from the free call
-        var free_allocator_gid: ?Gid = null;
-        var free_type_id: u32 = 0;
-        switch (args[0]) {
-            .inst => |inst| {
-                if (results[inst].refinement) |arg_gid| {
-                    const ref = refinements.at(arg_gid);
-                    if (ref.* != .allocator) return;
-                    free_allocator_gid = arg_gid;
-                    free_type_id = ref.allocator.type_id;
-                }
-            },
-            .interned => |interned| {
-                if (interned.ty != .allocator) return;
-                // getGlobal returns a pointer GID, follow it to get the allocator
-                const ptr_gid = refinements.getGlobal(interned.ip_idx) orelse {
-                    std.debug.panic("allocator_free: interned allocator ip_idx={d} not registered as global", .{interned.ip_idx});
-                };
-                const agid = refinements.at(ptr_gid).pointer.to;
-                const alloc_ref = refinements.at(agid).allocator;
-                free_allocator_gid = agid;
-                free_type_id = alloc_ref.type_id;
-            },
-            .fnptr => {},
-        }
-
-        // Check for mismatched allocator (only if free allocator GID is known)
-        // Skip check if both type_ids are 0 (unknown) - can't verify without type info.
-        // This happens when allocators are passed through function arguments without
-        // going through MkAllocator, causing each load to create a new GID.
-        if (free_allocator_gid) |fag| {
-            if (a.allocator_gid != fag) {
-                // GIDs differ - check if we can verify via type_id
-                if (a.type_id != 0 or free_type_id != 0) {
-                    if (a.type_id != free_type_id) {
-                        return reportMismatchedAllocator(ctx, a, free_type_id);
-                    }
-                }
-            }
-        }
-
-        // Note: Method mismatch is already checked above when getting pointee_analyte
-
-        // Mark as freed
-        const slice_inst: ?usize = switch (args[1]) {
-            .inst => |inst| inst,
-            else => null,
-        };
-        const free_meta: Free = .{
-            .meta = ctx.meta,
-            .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
-        };
-        setFreedRecursive(refinements, pointee_idx, free_meta);
     }
 
-    /// Handle mem.Allocator.realloc/remap calls.
-    /// Marks the old slice as freed (for realloc) and the new slice as allocated.
-    /// For remap, old memory is not freed - it just attempts to resize in place.
-    fn handleAllocRealloc(state: State, index: usize, args: []const tag.Src, is_remap: bool) !void {
+    /// Handle mem.Allocator.realloc calls.
+    /// Model as free(old) + alloc(new) to conservatively assume the allocation may move.
+    fn handleAllocRealloc(state: State, index: usize, args: []const tag.Src) !void {
         if (args.len < 2) return;
-        const alloc_id = freeSliceLike(state, args[0], args[1], is_remap) catch |err| switch (err) {
+        const alloc_id = freeSliceLike(state, args[0], args[1], false) catch |err| switch (err) {
             error.InternedNoOp, error.InvalidReallocInput => return,
             else => return err,
         };
         try paintAllocatedSliceResult(state, index, alloc_id.gid, alloc_id.type_id);
+    }
+
+    /// Handle mem.Allocator.remap calls.
+    /// Spatially this is a no-op: success preserves the existing allocation identity,
+    /// failure keeps the old allocation live.
+    fn handleAllocRemap(state: State, index: usize, args: []const tag.Src) !void {
+        _ = state;
+        _ = index;
+        _ = args;
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
