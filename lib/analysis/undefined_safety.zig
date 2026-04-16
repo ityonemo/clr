@@ -948,7 +948,8 @@ pub const UndefinedSafety = union(enum) {
     pub fn optional_payload(state: State, index: usize, params: tag.OptionalPayload) !void {
         _ = state;
         _ = index;
-        // For .inst: result shares source's entity, undefined state already correct
+        // OptionalPayload now value-copies the payload in tag.zig.
+        // valueCopy preserves undefined analytes, so there is nothing to do here.
         if (params.src == .interned) {
             @panic("optional_payload: interned source unimplemented");
         }

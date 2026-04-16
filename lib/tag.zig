@@ -819,13 +819,8 @@ pub const OptionalPayload = struct {
                 if (src_ref.* == .optional) {
                     // Extract the payload from the optional (optional.to is the inner value)
                     state.results[index].refinement = try state.refinements.valueCopy(src_ref.optional.to);
-                } else if (src_ref.* == .errorunion) {
-                    // For remap which uses alloc_realloc but returns ?[]T not Error![]T,
-                    // the AIR uses optional_payload but the refinement is errorunion
-                    state.results[index].refinement = try state.refinements.valueCopy(src_ref.errorunion.to);
                 } else {
-                    // optional_payload should only receive optionals or errorunions
-                    std.debug.panic("optional_payload: expected optional or errorunion, got {s}", .{@tagName(src_ref.*)});
+                    std.debug.panic("optional_payload: expected optional, got {s}", .{@tagName(src_ref.*)});
                 }
             },
             .interned => |interned| {
@@ -835,10 +830,8 @@ pub const OptionalPayload = struct {
                 const src_ref = state.refinements.at(global_gid);
                 if (src_ref.* == .optional) {
                     state.results[index].refinement = try state.refinements.valueCopy(src_ref.optional.to);
-                } else if (src_ref.* == .errorunion) {
-                    state.results[index].refinement = try state.refinements.valueCopy(src_ref.errorunion.to);
                 } else {
-                    std.debug.panic("optional_payload: expected optional or errorunion for global, got {s}", .{@tagName(src_ref.*)});
+                    std.debug.panic("optional_payload: expected optional for global, got {s}", .{@tagName(src_ref.*)});
                 }
             },
             .fnptr => {
@@ -4055,6 +4048,38 @@ test "union_init creates union with active variant" {
     try std.testing.expect(union_ref.@"union".fields[0] == null);
     try std.testing.expect(union_ref.@"union".fields[1] != null);
     try std.testing.expect(union_ref.@"union".fields[1].? != val_gid);
+}
+
+test "union_init valueCopies tracked global payload" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const global_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    splatInitInterned(&refinements, global_gid);
+    try refinements.global_map.put(44, global_gid);
+
+    try Inst.apply(state, 0, .{ .union_init = .{
+        .ty = .{ .@"union" = &.{ .type_id = 0, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } },
+        .field_index = 0,
+        .init = .{ .interned = .{ .ip_idx = 44, .ty = .{ .scalar = {} } } },
+        .type_id = 0,
+    } });
+
+    const union_ref = refinements.at(results[0].refinement.?);
+    try std.testing.expectEqual(.@"union", std.meta.activeTag(union_ref.*));
+    const active_gid = union_ref.@"union".fields[0].?;
+    try std.testing.expect(active_gid != global_gid);
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(active_gid).*));
 }
 
 test "br valueCopies inst source into block result" {
