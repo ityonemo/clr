@@ -3626,6 +3626,185 @@ pub const MemorySafety = union(enum) {
         } });
     }
 
+    const AllocatorIdentity = struct {
+        gid: Gid,
+        type_id: u32,
+    };
+
+    fn resolveAllocatorIdentity(
+        results: []Inst,
+        refinements: *Refinements,
+        src: tag.Src,
+        comptime panic_name: []const u8,
+    ) ?AllocatorIdentity {
+        return switch (src) {
+            .inst => |inst| blk: {
+                const arg_gid = results[inst].refinement orelse break :blk null;
+                const ref = refinements.at(arg_gid);
+                if (ref.* != .allocator) break :blk null;
+                break :blk .{ .gid = arg_gid, .type_id = ref.allocator.type_id };
+            },
+            .interned => |interned| blk: {
+                if (interned.ty != .allocator) break :blk null;
+                const ptr_gid = refinements.getGlobal(interned.ip_idx) orelse {
+                    std.debug.panic("{s}: interned allocator ip_idx={d} not registered as global", .{ panic_name, interned.ip_idx });
+                };
+                const agid = refinements.at(ptr_gid).pointer.to;
+                const alloc_ref = refinements.at(agid).allocator;
+                break :blk .{ .gid = agid, .type_id = alloc_ref.type_id };
+            },
+            .fnptr => null,
+        };
+    }
+
+    fn freeSliceLike(state: State, allocator_src: tag.Src, slice_src: tag.Src, allow_interned_noop: bool) !AllocatorIdentity {
+        const results = state.results;
+        const refinements = state.refinements;
+        const ctx = state.ctx;
+
+        const ptr_idx: Gid = switch (slice_src) {
+            .inst => |inst| results[inst].refinement orelse return error.InvalidReallocInput,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
+                if (allow_interned_noop) return error.InternedNoOp;
+                return reportFreeGlobalMemory(ctx);
+            },
+            .fnptr => {
+                if (allow_interned_noop) return error.InternedNoOp;
+                return reportFreeGlobalMemory(ctx);
+            },
+        };
+        const ptr_refinement = refinements.at(ptr_idx);
+        if (ptr_refinement.* != .pointer) return error.InvalidReallocInput;
+
+        if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
+            switch (ptr_ms) {
+                .allocated => |a| {
+                    if (a.root_gid != null) return reportFreeFieldPointer(ctx, a);
+                },
+                .stack => |s| {
+                    if (s.root_gid != null) return reportFreeFieldPointerStack(ctx, s);
+                },
+                .interned => return reportFreeGlobalMemory(ctx),
+                .error_stub => return error.InternedNoOp,
+                .placeholder => std.debug.panic("placeholder in free-like path - pointer not initialized", .{}),
+            }
+        }
+
+        const pointee_idx = ptr_refinement.pointer.to;
+        const pointee_ref = refinements.at(pointee_idx);
+        const pointee_analyte: *Analyte = switch (pointee_ref.*) {
+            .region => |*r| blk: {
+                if (r.analyte.memory_safety) |*ms| {
+                    switch (ms.*) {
+                        .allocated => break :blk &r.analyte,
+                        .stack => |sp| return reportFreeStackMemory(ctx, sp),
+                        .interned => {
+                            if (allow_interned_noop) return error.InternedNoOp;
+                            return reportFreeGlobalMemory(ctx);
+                        },
+                        .error_stub => return error.InternedNoOp,
+                        .placeholder => std.debug.panic("placeholder in free-like path - region not initialized", .{}),
+                    }
+                }
+                const element_ref = refinements.at(r.to);
+                const element_analyte = getAnalytePtr(element_ref);
+                if (element_analyte.memory_safety) |element_ms| {
+                    if (element_ms == .allocated) {
+                        return reportMethodMismatch(ctx, element_ms.allocated, false, true);
+                    }
+                }
+                return error.InvalidReallocInput;
+            },
+            .scalar => |*s| blk: {
+                if (s.analyte.memory_safety) |ms| {
+                    if (ms == .allocated) {
+                        return reportMethodMismatch(ctx, ms.allocated, false, true);
+                    }
+                }
+                break :blk &s.analyte;
+            },
+            else => return error.InvalidReallocInput,
+        };
+
+        const ms_ptr = &(pointee_analyte.memory_safety orelse return error.InvalidReallocInput);
+        switch (ms_ptr.*) {
+            .stack => |sp| return reportFreeStackMemory(ctx, sp),
+            .interned => return reportFreeGlobalMemory(ctx),
+            .error_stub => return error.InternedNoOp,
+            .placeholder => std.debug.panic("placeholder in free-like path - pointee not initialized", .{}),
+            .allocated => {},
+        }
+
+        const a = ms_ptr.allocated;
+        if (a.freed) |previous_free| return reportDoubleFree(ctx, a, previous_free);
+
+        const alloc_id = resolveAllocatorIdentity(results, refinements, allocator_src, "allocator_free") orelse return error.InvalidReallocInput;
+        if (a.allocator_gid != alloc_id.gid) {
+            if (a.type_id != 0 or alloc_id.type_id != 0) {
+                if (a.type_id != alloc_id.type_id) {
+                    return reportMismatchedAllocator(ctx, a, alloc_id.type_id);
+                }
+            }
+        }
+
+        const slice_inst: ?usize = switch (slice_src) {
+            .inst => |inst| inst,
+            else => null,
+        };
+        const free_meta: Free = .{
+            .meta = ctx.meta,
+            .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
+        };
+        setFreedRecursive(refinements, pointee_idx, free_meta);
+        return alloc_id;
+    }
+
+    fn paintAllocatedSliceResult(state: State, index: usize, allocator_gid: Gid, type_id: u32) !void {
+        const refinements = state.refinements;
+        const result_idx = state.results[index].refinement orelse return;
+        const result_ref = refinements.at(result_idx);
+
+        const new_ptr_idx: Gid = switch (result_ref.*) {
+            .errorunion => |eu| blk: {
+                refinements.at(result_idx).errorunion.analyte.memory_safety = .{ .stack = .{
+                    .meta = state.ctx.meta,
+                    .root_gid = null,
+                } };
+                break :blk eu.to;
+            },
+            .optional => |opt| blk: {
+                refinements.at(result_idx).optional.analyte.memory_safety = .{ .stack = .{
+                    .meta = state.ctx.meta,
+                    .root_gid = null,
+                } };
+                break :blk opt.to;
+            },
+            else => return,
+        };
+
+        const new_ptr_ref = refinements.at(new_ptr_idx);
+        if (new_ptr_ref.* != .pointer) return;
+        const new_region_idx = new_ptr_ref.pointer.to;
+        const new_region_ref = refinements.at(new_region_idx);
+        if (new_region_ref.* != .region) return;
+        const new_region = &new_region_ref.region;
+        const new_element_ref = new_region.to;
+
+        new_region.analyte.memory_safety = .{ .allocated = .{
+            .meta = state.ctx.meta,
+            .allocator_gid = allocator_gid,
+            .type_id = type_id,
+            .root_gid = null,
+        } };
+
+        paintSpatialMemory(refinements, new_element_ref, .{ .allocated = .{
+            .meta = state.ctx.meta,
+            .allocator_gid = allocator_gid,
+            .type_id = type_id,
+            .root_gid = null,
+        } });
+    }
+
     /// Handle mem.Allocator.free calls.
     /// Marks the slice memory as freed after checking for errors.
     fn handleAllocFree(state: State, index: usize, args: []const tag.Src) !void {
@@ -3802,193 +3981,12 @@ pub const MemorySafety = union(enum) {
     /// Marks the old slice as freed (for realloc) and the new slice as allocated.
     /// For remap, old memory is not freed - it just attempts to resize in place.
     fn handleAllocRealloc(state: State, index: usize, args: []const tag.Src, is_remap: bool) !void {
-        const results = state.results;
-        const refinements = state.refinements;
-        const ctx = state.ctx;
-
-        // realloc signature: realloc(self, slice, new_len) -> args[0]=allocator, args[1]=slice, args[2]=len
         if (args.len < 2) return;
-
-        // === 1. Mark old slice as freed (unless it's remap, which doesn't free) ===
-
-        // Resolve slice source to get the pointer's refinement index
-        const old_ptr_idx: Gid = switch (args[1]) {
-            .inst => |inst| results[inst].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
-                // For remap on interned memory, just skip - remap returns null
-                if (is_remap) return;
-                return reportFreeGlobalMemory(ctx);
-            },
-            .fnptr => {
-                // For remap on interned memory, just skip - remap returns null
-                if (is_remap) return;
-                return reportFreeGlobalMemory(ctx);
-            },
+        const alloc_id = freeSliceLike(state, args[0], args[1], is_remap) catch |err| switch (err) {
+            error.InternedNoOp, error.InvalidReallocInput => return,
+            else => return err,
         };
-        const old_ptr_refinement = refinements.at(old_ptr_idx);
-        if (old_ptr_refinement.* != .pointer) return;
-
-        // Get the old region entity
-        const old_region_idx = old_ptr_refinement.pointer.to;
-        const old_region_ref = refinements.at(old_region_idx);
-        if (old_region_ref.* != .region) return;
-
-        const old_region_analyte = &old_region_ref.region.analyte;
-
-        // Get memory_safety from old region
-        const old_ms = &(old_region_analyte.memory_safety orelse return);
-
-        // Check for invalid operations on old slice
-        switch (old_ms.*) {
-            .stack => |sp| {
-                if (sp.root_gid != null) {
-                    return reportFreeFieldPointerStack(ctx, sp);
-                }
-                return reportFreeStackMemory(ctx, sp);
-            },
-            .interned => {
-                // For remap on interned memory, just skip - remap returns null
-                if (is_remap) return;
-                return reportFreeGlobalMemory(ctx);
-            },
-            .error_stub => return,
-            .placeholder => std.debug.panic("placeholder in resize - region not initialized", .{}),
-            .allocated => {},
-        }
-
-        const old_a = old_ms.allocated;
-
-        // Check for field pointer
-        if (old_a.root_gid != null) {
-            return reportFreeFieldPointer(ctx, old_a);
-        }
-
-        // Check for double-free
-        if (old_a.freed) |previous_free| {
-            return reportDoubleFree(ctx, old_a, previous_free);
-        }
-
-        // Get allocator GID and type_id for mismatch detection
-        var realloc_allocator_gid: ?Gid = null;
-        var realloc_type_id: u32 = 0;
-        switch (args[0]) {
-            .inst => |inst| {
-                if (results[inst].refinement) |arg_gid| {
-                    const ref = refinements.at(arg_gid);
-                    if (ref.* != .allocator) return;
-                    realloc_allocator_gid = arg_gid;
-                    realloc_type_id = ref.allocator.type_id;
-                }
-            },
-            .interned => |interned| {
-                // Allocators must be registered as globals
-                if (interned.ty != .allocator) return;
-                // getGlobal returns a pointer GID, follow it to get the allocator
-                const ptr_gid = refinements.getGlobal(interned.ip_idx) orelse {
-                    std.debug.panic("allocator_realloc: interned allocator ip_idx={d} not registered as global", .{interned.ip_idx});
-                };
-                const agid = refinements.at(ptr_gid).pointer.to;
-                const alloc_ref = refinements.at(agid).allocator;
-                realloc_allocator_gid = agid;
-                realloc_type_id = alloc_ref.type_id;
-            },
-            .fnptr => {},
-        }
-
-        // If we reach here, realloc_allocator_gid must be set
-        const rag = realloc_allocator_gid orelse return;
-
-        // Check for mismatched allocator
-        if (old_a.allocator_gid != rag) {
-            return reportMismatchedAllocator(ctx, old_a, realloc_type_id);
-        }
-
-        // Mark old slice as freed
-        const slice_inst: ?usize = switch (args[1]) {
-            .inst => |inst| inst,
-            else => null,
-        };
-        const free_meta: Free = .{
-            .meta = ctx.meta,
-            .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
-        };
-        setFreedRecursive(refinements, old_region_idx, free_meta);
-
-        // === 2. Mark new slice as allocated ===
-
-        // Result is either:
-        // - errorunion -> pointer -> region -> element (for realloc)
-        // - optional -> pointer -> region -> element (for remap)
-        const result_idx = results[index].refinement orelse return;
-        const result_ref = refinements.at(result_idx);
-
-        const new_ptr_idx: Gid = switch (result_ref.*) {
-            .errorunion => |eu| blk: {
-                // The errorunion wrapper itself is a fresh computed value on the stack.
-                refinements.at(result_idx).errorunion.analyte.memory_safety = .{ .stack = .{
-                    .meta = ctx.meta,
-                    .root_gid = null,
-                } };
-                break :blk eu.to;
-            },
-            .optional => |opt| blk: {
-                // Set memory_safety on optional wrapper
-                refinements.at(result_idx).optional.analyte.memory_safety = .{
-                    .allocated = .{
-                        .meta = ctx.meta,
-                        .allocator_gid = rag,
-                        .type_id = realloc_type_id,
-                        .root_gid = null,
-                    },
-                };
-                break :blk opt.to;
-            },
-            else => return,
-        };
-
-        const new_ptr_ref = refinements.at(new_ptr_idx);
-        if (new_ptr_ref.* != .pointer) return;
-        const new_ptr = &new_ptr_ref.pointer;
-        const new_region_idx = new_ptr.to;
-        const new_region_ref = refinements.at(new_region_idx);
-        if (new_region_ref.* != .region) return;
-        const new_region = &new_region_ref.region;
-        const new_element_ref = new_region.to;
-
-        const alloc_base: AllocatedBase = .{
-            .meta = ctx.meta,
-            .allocator_gid = rag,
-            .type_id = realloc_type_id,
-            .root_gid = null,
-        };
-
-        // Set memory_safety on pointer
-        new_ptr.analyte.memory_safety = .{
-            .allocated = .{
-                .meta = alloc_base.meta,
-                .allocator_gid = alloc_base.allocator_gid,
-                .type_id = realloc_type_id,
-                .root_gid = null,
-            },
-        };
-
-        // Set memory_safety on region (realloc is for slices, metadata on region)
-        new_region.analyte.memory_safety = .{
-            .allocated = .{
-                .meta = alloc_base.meta,
-                .allocator_gid = alloc_base.allocator_gid,
-                .type_id = realloc_type_id,
-                .root_gid = null,
-            },
-        };
-
-        // Set allocation state recursively on the element
-        paintSpatialMemory(refinements, new_element_ref, .{ .allocated = .{
-            .meta = alloc_base.meta,
-            .allocator_gid = alloc_base.allocator_gid,
-            .type_id = realloc_type_id,
-            .root_gid = null,
-        } });
+        try paintAllocatedSliceResult(state, index, alloc_id.gid, alloc_id.type_id);
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
