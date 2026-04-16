@@ -1871,7 +1871,7 @@ pub const MemorySafety = union(enum) {
                         }
                     }
                 },
-                .error_stub => {}, // error_stub only on errorunions, shouldn't appear here
+                .error_stub => {}, // unwrap_errunion_payload rejects this at the tag layer
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it

@@ -1344,6 +1344,26 @@ pub const UnwrapErrunionPayload = struct {
                 const src_ref = state.refinements.at(src_gid).*;
                 // errorunion's .to points to the payload entity
                 const payload_gid = src_ref.errorunion.to;
+                const payload_ref = state.refinements.at(payload_gid);
+                const payload_ms = switch (payload_ref.*) {
+                    .scalar => |s| s.analyte.memory_safety,
+                    .pointer => |p| p.analyte.memory_safety,
+                    .optional => |o| o.analyte.memory_safety,
+                    .errorunion => |e| e.analyte.memory_safety,
+                    .@"struct" => |s| s.analyte.memory_safety,
+                    .@"union" => |u| u.analyte.memory_safety,
+                    .allocator => |a| a.analyte.memory_safety,
+                    .fnptr => |f| f.analyte.memory_safety,
+                    .region => |r| r.analyte.memory_safety,
+                    .recursive => |r| r.analyte.memory_safety,
+                    .void, .noreturn, .unimplemented => null,
+                };
+                if (payload_ms) |ms| {
+                    if (ms == .error_stub) {
+                        try state.ctx.meta.print(state.ctx.writer, "error union unwrap of error path in ", .{});
+                        return error.ErrorUnionUnwrap;
+                    }
+                }
                 state.results[index].refinement = try state.refinements.valueCopy(payload_gid);
             },
             .interned => |interned| {
@@ -1352,6 +1372,26 @@ pub const UnwrapErrunionPayload = struct {
                     @panic("UnwrapErrunionPayload: interned constant not supported");
                 const src_ref = state.refinements.at(global_gid).*;
                 const payload_gid = src_ref.errorunion.to;
+                const payload_ref = state.refinements.at(payload_gid);
+                const payload_ms = switch (payload_ref.*) {
+                    .scalar => |s| s.analyte.memory_safety,
+                    .pointer => |p| p.analyte.memory_safety,
+                    .optional => |o| o.analyte.memory_safety,
+                    .errorunion => |e| e.analyte.memory_safety,
+                    .@"struct" => |s| s.analyte.memory_safety,
+                    .@"union" => |u| u.analyte.memory_safety,
+                    .allocator => |a| a.analyte.memory_safety,
+                    .fnptr => |f| f.analyte.memory_safety,
+                    .region => |r| r.analyte.memory_safety,
+                    .recursive => |r| r.analyte.memory_safety,
+                    .void, .noreturn, .unimplemented => null,
+                };
+                if (payload_ms) |ms| {
+                    if (ms == .error_stub) {
+                        try state.ctx.meta.print(state.ctx.writer, "error union unwrap of error path in ", .{});
+                        return error.ErrorUnionUnwrap;
+                    }
+                }
                 state.results[index].refinement = try state.refinements.valueCopy(payload_gid);
             },
             .fnptr => {
@@ -3528,6 +3568,30 @@ test "unwrap_errunion_payload extracts payload from error union" {
     // Result should be a value-copy of the payload
     try std.testing.expect(results[1].refinement.? != payload_gid);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
+}
+
+test "unwrap_errunion_payload errors on error path payload" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .error_stub = {} } },
+    } });
+    const eu_gid = try refinements.appendEntity(.{ .errorunion = .{ .to = payload_gid } });
+    results[0].refinement = eu_gid;
+
+    const result = Inst.apply(state, 1, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 0 } } });
+    try std.testing.expectError(error.ErrorUnionUnwrap, result);
 }
 
 test "struct_field_val valueCopies field" {
