@@ -86,10 +86,13 @@ pub const MemorySafety = union(enum) {
             .meta = state.ctx.meta,
             .root_gid = null,
         } };
-
-        // Use paintReturnSlotMemory to traverse all nested structures including pointer.to
-        // since typeToRefinement creates the entire nested structure together.
-        paintReturnSlotMemory(state.refinements, ptr_idx, stack_ms);
+        // Paint the pointer itself
+        paintSpatialMemory(state.refinements, ptr_idx, stack_ms);
+        // Paint the pointee - paintSpatialMemory doesn't traverse pointer.to
+        const pointee_gid = state.refinements.at(ptr_idx).pointer.to;
+        paintSpatialMemory(state.refinements, pointee_gid, stack_ms);
+        // Initialize any nested pointer targets to .placeholder (they're unassigned)
+        initPointerTargetsPlaceholder(state.refinements, pointee_gid);
     }
 
     pub fn store(state: State, index: usize, params: tag.Store) !void {
@@ -1806,7 +1809,11 @@ pub const MemorySafety = union(enum) {
         // If original has an unfreed allocation, check if branches freed it
         if (orig_analyte.memory_safety) |*orig_ms| {
             switch (orig_ms.*) {
-                .placeholder => std.debug.panic("placeholder in merge - entity not initialized", .{}),
+                .placeholder => {
+                    // Placeholder means the pointer target was never assigned a real value.
+                    // This is valid for nested pointer fields in structs that were just created.
+                    // Nothing to merge - keep as placeholder.
+                },
                 .allocated => |*orig_alloc| {
                     if (orig_alloc.freed == null) {
                         // Both loop and normal branch merges use the same logic:
@@ -2016,85 +2023,21 @@ pub const MemorySafety = union(enum) {
         return if (is_arena) error.ArenaLeak else error.MemoryLeak;
     }
 
-    /// Fresh return slots keep null memory_safety until real values are written into them.
-    pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-        // Return slots are stack-allocated local values.
-        // Use paintReturnSlotMemory to traverse the full structure including .to fields,
-        // since typeToRefinement creates nested entities that all need initialization.
-        const stack_ms: MemorySafety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
-        paintReturnSlotMemory(refinements, gid, stack_ms);
-    }
-
-    /// Initialize memory_safety for defined scalar values produced by operations.
-    /// These are local stack values (like SIMD reduce results) that need memory_safety
-    /// set to .stack so they can be wrapped in optionals, error unions, etc.
-    /// Unlike paintSpatialMemory, this ALSO traverses pointer.to since we're setting up
-    /// the entire return slot structure at once (pointee structures are part of the slot).
-    pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
-        // Set stack memory_safety for scalar values
-        // Note: No specific meta location since this is a computed result
-        const stack_ms: MemorySafety = .{ .stack = .{ .meta = .{
-            .function = "",
-            .file = "<computed>",
-            .line = 0,
-            .column = 0,
-        }, .root_gid = null } };
-        paintReturnSlotMemory(refinements, gid, stack_ms);
-    }
-
-    /// Like paintSpatialMemory but also traverses pointer.to fields.
-    /// Used for return slot initialization where the entire nested type structure
-    /// (including pointee placeholders) was created together and needs memory_safety.
-    fn paintReturnSlotMemory(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .scalar => {
-                ref.scalar.analyte.memory_safety = ms;
+    /// Initialize memory_safety based on InitState.
+    /// - defined/undefined: Set to .interned (compile-time known location)
+    /// - runtime: Leave as null (tag handler sets stack/heap/allocated)
+    pub fn init(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: tag.InitState) void {
+        _ = ctx;
+        switch (state) {
+            .defined, .@"undefined" => {
+                // Interned/global values have .interned memory_safety
+                paintSpatialMemory(refinements, gid, .{ .interned = comptime_interned_meta });
+                // Initialize any nested pointer targets to .placeholder (they're unassigned)
+                initPointerTargetsPlaceholder(refinements, gid);
             },
-            .pointer => |p| {
-                ref.pointer.analyte.memory_safety = ms;
-                // Unlike paintSpatialMemory, traverse .to for return slot structures
-                paintReturnSlotMemory(refinements, p.to, ms);
+            .runtime => {
+                // Leave memory_safety as null - tag handler will set it
             },
-            .optional => |o| {
-                ref.optional.analyte.memory_safety = ms;
-                paintReturnSlotMemory(refinements, o.to, ms);
-            },
-            .errorunion => |e| {
-                ref.errorunion.analyte.memory_safety = ms;
-                paintReturnSlotMemory(refinements, e.to, ms);
-            },
-            .@"struct" => |s| {
-                ref.@"struct".analyte.memory_safety = ms;
-                for (s.fields) |field_gid| {
-                    paintReturnSlotMemory(refinements, field_gid, ms);
-                }
-            },
-            .@"union" => |u| {
-                ref.@"union".analyte.memory_safety = ms;
-                for (u.fields) |maybe_field_gid| {
-                    if (maybe_field_gid) |field_gid| {
-                        paintReturnSlotMemory(refinements, field_gid, ms);
-                    }
-                }
-            },
-            .allocator => {
-                ref.allocator.analyte.memory_safety = ms;
-            },
-            .fnptr => {
-                ref.fnptr.analyte.memory_safety = ms;
-            },
-            .region => |r| {
-                ref.region.analyte.memory_safety = ms;
-                paintReturnSlotMemory(refinements, r.to, ms);
-            },
-            .recursive => |r| {
-                ref.recursive.analyte.memory_safety = ms;
-                if (r.to != 0) {
-                    paintReturnSlotMemory(refinements, r.to, ms);
-                }
-            },
-            .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -2102,11 +2045,10 @@ pub const MemorySafety = union(enum) {
     /// These are compile-time constants and should have .interned memory_safety.
     /// This is called when creating entities for interned Src values that are
     /// not tracked globals (e.g., &global_value pointer constants).
-    /// Uses paintReturnSlotMemoryForce to traverse pointer.to, since interned pointers
-    /// point to interned data (both the pointer value and pointee are comptime).
-    /// Force=true because this needs to override .stack set by splatInit which runs first.
     pub fn interned_init(refinements: *Refinements, gid: Gid) void {
-        paintReturnSlotMemoryForce(refinements, gid, .{ .interned = comptime_interned_meta });
+        paintSpatialMemory(refinements, gid, .{ .interned = comptime_interned_meta });
+        // Initialize any nested pointer targets to .placeholder (they're unassigned)
+        initPointerTargetsPlaceholder(refinements, gid);
     }
 
     /// Initialize memory_safety on a refinement created from a `.undefined` type wrapper.
@@ -2117,60 +2059,6 @@ pub const MemorySafety = union(enum) {
         switch (ref.*) {
             .pointer => |*p| p.analyte.memory_safety = .{ .placeholder = {} },
             else => {},
-        }
-    }
-
-    /// Like paintReturnSlotMemory but always overwrites existing values.
-    /// Used by interned_init which needs to override .stack set by splatInit.
-    fn paintReturnSlotMemoryForce(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .scalar => {
-                ref.scalar.analyte.memory_safety = ms;
-            },
-            .pointer => |p| {
-                ref.pointer.analyte.memory_safety = ms;
-                paintReturnSlotMemoryForce(refinements, p.to, ms);
-            },
-            .optional => |o| {
-                ref.optional.analyte.memory_safety = ms;
-                paintReturnSlotMemoryForce(refinements, o.to, ms);
-            },
-            .errorunion => |e| {
-                ref.errorunion.analyte.memory_safety = ms;
-                paintReturnSlotMemoryForce(refinements, e.to, ms);
-            },
-            .@"struct" => |s| {
-                ref.@"struct".analyte.memory_safety = ms;
-                for (s.fields) |field_gid| {
-                    paintReturnSlotMemoryForce(refinements, field_gid, ms);
-                }
-            },
-            .@"union" => |u| {
-                ref.@"union".analyte.memory_safety = ms;
-                for (u.fields) |maybe_field_gid| {
-                    if (maybe_field_gid) |field_gid| {
-                        paintReturnSlotMemoryForce(refinements, field_gid, ms);
-                    }
-                }
-            },
-            .allocator => {
-                ref.allocator.analyte.memory_safety = ms;
-            },
-            .fnptr => {
-                ref.fnptr.analyte.memory_safety = ms;
-            },
-            .region => |r| {
-                ref.region.analyte.memory_safety = ms;
-                paintReturnSlotMemoryForce(refinements, r.to, ms);
-            },
-            .recursive => |r| {
-                ref.recursive.analyte.memory_safety = ms;
-                if (r.to != 0) {
-                    paintReturnSlotMemoryForce(refinements, r.to, ms);
-                }
-            },
-            .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -2725,11 +2613,9 @@ pub const MemorySafety = union(enum) {
     // These set memory_safety on refinements created by typeToRefinement
     // =========================================================================
 
-    /// Paint spatial memory over a newly materialized value tree.
-    ///
-    /// This traverses non-pointer structure and stops at pointer indirection.
-    /// Callers must only use this on newly materialized result structure, never
-    /// on shared preexisting nodes.
+    /// Set memory_safety on a refinement and its spatial children.
+    /// Does NOT traverse pointer.to - pointees are separate memory locations.
+    /// DOES traverse optional.to, errorunion.to, region.to, recursive.to - those are spatial.
     pub fn paintSpatialMemory(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
@@ -2761,12 +2647,8 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .allocator => {
-                ref.allocator.analyte.memory_safety = ms;
-            },
-            .fnptr => {
-                ref.fnptr.analyte.memory_safety = ms;
-            },
+            .allocator => |*a| a.analyte.memory_safety = ms,
+            .fnptr => |*f| f.analyte.memory_safety = ms,
             .region => |r| {
                 ref.region.analyte.memory_safety = ms;
                 paintSpatialMemory(refinements, r.to, ms);
@@ -2778,6 +2660,42 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    /// Initialize unassigned pointer targets to .placeholder.
+    /// Used after paintSpatialMemory when initializing refinements created by typeToRefinement.
+    /// Pointers in the structure point to entities that don't have real values yet,
+    /// so their targets get .placeholder memory_safety.
+    fn initPointerTargetsPlaceholder(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+            .pointer => |p| {
+                // Set target to placeholder and recurse
+                paintSpatialMemory(refinements, p.to, .{ .placeholder = {} });
+                initPointerTargetsPlaceholder(refinements, p.to);
+            },
+            .optional => |o| initPointerTargetsPlaceholder(refinements, o.to),
+            .errorunion => |e| initPointerTargetsPlaceholder(refinements, e.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    initPointerTargetsPlaceholder(refinements, field_gid);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        initPointerTargetsPlaceholder(refinements, field_gid);
+                    }
+                }
+            },
+            .region => |r| initPointerTargetsPlaceholder(refinements, r.to),
+            .recursive => |r| {
+                if (r.to != 0) {
+                    initPointerTargetsPlaceholder(refinements, r.to);
+                }
+            },
         }
     }
 
@@ -2892,6 +2810,7 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
     /// MkAllocator creates an allocator refinement - initialize memory_safety
@@ -2912,6 +2831,7 @@ pub const MemorySafety = union(enum) {
         const ref_idx = state.results[index].refinement orelse return;
         // Only init if memory_safety is null (not already set by container)
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
     /// UnionInit creates union entity and may create field via typeToRefinement
@@ -2919,6 +2839,7 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
     /// Bitcast may create optional wrapper - initialize memory_safety
@@ -2926,6 +2847,7 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
     /// SetUnionTag creates new field entity via typeToRefinement
@@ -3325,21 +3247,23 @@ pub const MemorySafety = union(enum) {
         if (args.len == 0) return;
         const alloc_id = try resolveAllocatingAllocator(state, args[0], "allocator_create");
 
-        // The errorunion wrapper itself is a fresh computed value on the stack.
-        eu.analyte.memory_safety = .{ .stack = .{
+        // The errorunion and pointer are fresh computed values on the stack.
+        // paintSpatialMemory traverses errorunion.to (the pointer) but stops at pointer.to.
+        paintSpatialMemory(state.refinements, eu_idx, .{ .stack = .{
             .meta = state.ctx.meta,
             .root_gid = null,
-        } };
+        } });
 
-        // Set allocation state recursively on the pointee
-        // Note: We only set memory_safety on the POINTEE, not the pointer itself.
-        // The pointer is a return value (register/stack), the pointee is on the heap.
+        // Set allocation state recursively on the pointee (the actual heap data)
         paintSpatialMemory(state.refinements, pointee_ref, .{ .allocated = .{
             .meta = state.ctx.meta,
             .allocator_gid = alloc_id.gid,
             .type_id = alloc_id.type_id,
             .root_gid = null,
         } });
+
+        // Initialize any nested pointer targets in the pointee to placeholder
+        initPointerTargetsPlaceholder(state.refinements, pointee_ref);
     }
 
     /// Handle mem.Allocator.destroy calls.
@@ -3830,7 +3754,9 @@ pub const MemorySafety = union(enum) {
         // Initialize memory_safety on the result (ArenaAllocator struct)
         // Inst.call already created the refinement, we just re-initialize it
         if (state.results[index].refinement) |gid| {
-            paintSpatialMemory(refinements, gid, .{ .stack = .{ .meta = comptime_interned_meta, .root_gid = null } });
+            paintSpatialMemory(refinements, gid, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+            // Initialize nested pointer targets to .placeholder
+            initPointerTargetsPlaceholder(refinements, gid);
         }
     }
 
@@ -3914,11 +3840,15 @@ pub const MemorySafety = union(enum) {
     fn handleMkAllocator(state: State, index: usize, args: []const tag.Src, fqn: []const u8) !void {
         const results = state.results;
         const refinements = state.refinements;
+        const ctx = state.ctx;
 
         // Get the allocator refinement that was created by Inst.call via typeToRefinement
         const alloc_idx = results[index].refinement orelse return;
         const alloc_ref = refinements.at(alloc_idx);
         if (alloc_ref.* != .allocator) return;
+
+        // Initialize memory_safety on the allocator (return value lives on stack)
+        paintSpatialMemory(refinements, alloc_idx, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
 
         // Check if this is ArenaAllocator.allocator() - need to link to arena
         if (!gates.isArenaAllocator(fqn)) return;

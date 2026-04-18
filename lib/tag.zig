@@ -67,6 +67,12 @@ pub const Interned = core.Interned;
 pub const FnInterpreter = core.FnInterpreter;
 pub const INVALID_GID = core.INVALID_GID;
 
+/// State for initializing refinements via splatInit.
+/// - defined: interned/global value, known to be defined
+/// - undefined: interned/global value, known to be undefined
+/// - runtime: stack/heap value, tag handler determines state
+pub const InitState = enum { defined, @"undefined", runtime };
+
 /// Convert a Type (from codegen) to a Refinement.
 /// Used when storing interned values to determine the refinement structure.
 /// Note: .null types are converted to .optional refinements since null is a valid defined value.
@@ -1153,7 +1159,6 @@ pub const RetLoad = struct {
 ///
 /// We do NOT modify the ptr instruction's refinement - it still points to the same
 /// pointer entity. We only update the pointee's analysis state.
-
 /// Update .to references from dest to match src.
 /// Used when storing a struct to ensure pointer/optional/etc fields share targets.
 fn updateFieldReferences(refinements: *Refinements, dest_gid: Gid, src_gid: Gid) void {
@@ -2561,11 +2566,8 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements, re
 /// These are compile-time constants (e.g., &global_value) and should have .interned memory_safety.
 /// Different from splatInitGlobal which sets up tracked global variables.
 pub fn splatInitInterned(refinements: *Refinements, gid: Gid) void {
-    inline for (Analyte.analyses) |Analysis| {
-        if (@hasDecl(Analysis, "interned_init")) {
-            Analysis.interned_init(refinements, gid);
-        }
-    }
+    // Interned values are always defined - use the unified init (no ctx needed)
+    splatInit(refinements, gid, null, .defined);
 }
 
 /// Called after receiving a return value from a function call.
@@ -2622,6 +2624,20 @@ pub fn splatInitGlobal(
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_global")) {
             Analysis.init_global(refinements, ptr_gid, pointee_gid, ctx, is_undefined, is_null, loc, field_info);
+        }
+    }
+}
+
+/// Initialize analysis state for a refinement.
+/// Dispatches to init handlers in each analysis module.
+/// - defined: interned/global value, known to be defined
+/// - undefined: interned/global value, known to be undefined
+/// - runtime: stack/heap value, analysis modules leave state null for tag handlers to set
+/// ctx is optional - only needed for runtime state where tag handlers may use it
+pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: InitState) void {
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "init")) {
+            Analysis.init(refinements, gid, ctx, state);
         }
     }
 }
@@ -3834,18 +3850,20 @@ test "block initializes memory_safety for pointer types" {
     const ptr_ms = ptr_ref.pointer.analyte.memory_safety.?;
     try std.testing.expectEqual(.stack, std.meta.activeTag(ptr_ms));
 
-    // The POINTEE (region) should have null memory_safety
-    // The pointee's location is determined by assignment, not by the block
+    // The POINTEE (region) should have .placeholder memory_safety
+    // (unassigned pointer targets get .placeholder until assigned to real memory)
     const region_gid = ptr_ref.pointer.to;
     const region_ref = refinements.at(region_gid).*;
     try std.testing.expectEqual(.region, std.meta.activeTag(region_ref));
-    try std.testing.expect(region_ref.region.analyte.memory_safety == null);
+    const region_ms = region_ref.region.analyte.memory_safety.?;
+    try std.testing.expectEqual(.placeholder, std.meta.activeTag(region_ms));
 
-    // The scalar element should also have null memory_safety
+    // The scalar element should also have .placeholder memory_safety
     const scalar_gid = region_ref.region.to;
     const scalar_ref = refinements.at(scalar_gid).*;
     try std.testing.expectEqual(.scalar, std.meta.activeTag(scalar_ref));
-    try std.testing.expect(scalar_ref.scalar.analyte.memory_safety == null);
+    const scalar_ms = scalar_ref.scalar.analyte.memory_safety.?;
+    try std.testing.expectEqual(.placeholder, std.meta.activeTag(scalar_ms));
 }
 
 test "unreach does nothing" {

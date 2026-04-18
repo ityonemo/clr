@@ -311,7 +311,6 @@ test "generateFunction produces complete function" {
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
-        \\    refinements.testValid();
         \\
         \\    const results = try Inst.make_results_list(ctx.allocator, 4);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -328,6 +327,7 @@ test "generateFunction produces complete function" {
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
         \\    try Inst.mergeEarlyReturns(state);
         \\    try Inst.onFinish(state);
+        \\    refinements.testValid();
         \\    return return_gid;
         \\}
         \\
@@ -373,7 +373,7 @@ test "epilogue generates correct output with typed return slot" {
         \\    const return_type: clr.Type = .{ .ty = .{ .scalar = {} } };
         \\    const return_ref = clr.typeToRefinement(return_type, &refinements) catch Refinements.Refinement{ .scalar = .{} };
         \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
-        \\    clr.splatInit(&refinements, return_gid, &ctx);
+        \\    clr.splatInit(&refinements, return_gid, &ctx, .runtime);
         \\
         \\    _ = fn_123(&ctx, &refinements, return_gid, &.{}) catch {
         \\        file_writer.interface.flush() catch {};
@@ -1146,7 +1146,6 @@ test "generateFunction with simple cond_br block" {
         \\    ctx.base_line = 10;
         \\    try ctx.push_fn("test.main");
         \\    defer ctx.pop_fn();
-        \\    refinements.testValid();
         \\
         \\    const results = try Inst.make_results_list(ctx.allocator, 10);
         \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -1169,6 +1168,7 @@ test "generateFunction with simple cond_br block" {
         \\    try Inst.apply(state, 9, .{ .ret_safe = .{ .src = .{ .inst = 8 } } });
         \\    try Inst.mergeEarlyReturns(state);
         \\    try Inst.onFinish(state);
+        \\    refinements.testValid();
         \\    return return_gid;
         \\}
         \\
