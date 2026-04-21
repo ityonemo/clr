@@ -176,8 +176,9 @@ pub const Alloc = struct {
         // ty is the type being allocated, wrap it in a pointer
         const pointee_ref = try typeToRefinement(self.ty, state.refinements);
         const pointee_gid = try state.refinements.appendEntity(pointee_ref);
-        // Initialize the pointee's memory_safety (created from type, so has .placeholder)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = pointee_gid } });
+        splatInit(state.refinements, pointee_gid, state.ctx, .runtime);
+        const ptr_gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = pointee_gid } });
+        splatInit(state.refinements, ptr_gid, state.ctx, .runtime);
         try splat(.alloc, state, index, self);
     }
 };
@@ -234,6 +235,7 @@ pub const ArenaInit = struct {
         // Create the ArenaAllocator struct refinement from the type
         const ref = try typeToRefinement(self.ty, state.refinements);
         const gid = try state.refinements.appendEntity(ref);
+        splatInit(state.refinements, gid, state.ctx, .runtime);
         state.results[index].refinement = gid;
         try splat(.arena_init, state, index, self);
     }
@@ -323,8 +325,8 @@ pub const Block = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create block result from type info
         const result_ref = try typeToRefinement(self.ty, state.refinements);
-        _ = try Inst.clobberInst(state.refinements, state.results, index, result_ref);
-        // Initialize the block result's memory_safety (created from type, so has .placeholder)
+        const new_gid = try Inst.clobberInst(state.refinements, state.results, index, result_ref);
+        splatInit(state.refinements, new_gid, state.ctx, .runtime);
         try splat(.block, state, index, self);
     }
 };
@@ -677,7 +679,8 @@ pub const StructFieldPtr = struct {
 
         const effective_base_ref = base_ref orelse {
             // Base has no refinement - use type info and initialize
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            splatInit(state.refinements, new_gid, state.ctx, .runtime);
             try splat(.struct_field_ptr, state, index, self);
             return;
         };
@@ -709,6 +712,7 @@ pub const StructFieldPtr = struct {
                     // For untagged unions, this creates the entity on first access
                     const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
                     const new_idx = try state.refinements.appendEntity(new_field_ref);
+                    splatInit(state.refinements, new_idx, state.ctx, .runtime);
                     // Persist in union's fields array (for untagged unions, this is correct;
                     // for tagged unions, variant_safety will report error before this matters)
                     state.refinements.at(container_idx).@"union".fields[self.field_index] = new_idx;
@@ -720,7 +724,8 @@ pub const StructFieldPtr = struct {
                 // Type mismatch - refinement is region/scalar but instruction expects struct/union.
                 // This happens when bitcast changed the pointer type (e.g., from *Region(S1) to *S2).
                 // Fall back to type info since the refinement structure doesn't match.
-                _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+                splatInit(state.refinements, new_gid, state.ctx, .runtime);
             },
             else => |t| std.debug.panic("struct_field_ptr: expected struct or union, got {s}", .{@tagName(t)}),
         }
@@ -746,7 +751,8 @@ pub const StructFieldVal = struct {
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const operand = self.operand orelse {
             // Interned/global struct/union - use type info to create proper structure
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            splatInit(state.refinements, new_gid, state.ctx, .runtime);
             try splat(.struct_field_val, state, index, self);
             return;
         };
@@ -768,6 +774,7 @@ pub const StructFieldVal = struct {
                         // Inactive field - create a fresh entity for structure
                         const new_field_ref = try typeToRefinement(self.ty, state.refinements);
                         const new_idx = try state.refinements.appendEntity(new_field_ref);
+                        splatInit(state.refinements, new_idx, state.ctx, .runtime);
                         break :idx new_idx;
                     } else {
                         break :idx data.fields[self.field_index];
@@ -802,7 +809,8 @@ pub const FieldParentPtr = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         // Create pointer to parent container using type info
-        _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        splatInit(state.refinements, new_gid, state.ctx, .runtime);
         try splat(.field_parent_ptr, state, index, self);
     }
 };
@@ -1018,6 +1026,7 @@ pub const RetSafe = struct {
                         const ref = try typeToRefinement(interned.ty, cloned);
                         cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = ref;
+                        splatInit(cloned, return_gid, state.ctx, .@"undefined");
                     } else {
                         // Non-void, non-undefined comptime value (constants, null) - interned
                         // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
@@ -1073,9 +1082,11 @@ pub const RetPtr = struct {
         // Create a local entity for the return value based on type
         const return_ref = try typeToRefinement(self.ty, state.refinements);
         const return_idx = try state.refinements.appendEntity(return_ref);
+        splatInit(state.refinements, return_idx, state.ctx, .runtime);
 
         // Create a pointer to this entity as the result
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = return_idx } });
+        const ptr_gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = return_idx } });
+        splatInit(state.refinements, ptr_gid, state.ctx, .runtime);
 
         try splat(.ret_ptr, state, index, self);
     }
@@ -1825,9 +1836,9 @@ pub const AggregateInit = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const refinement = try typeToRefinement(self.ty, state.refinements);
-        _ = try Inst.clobberInst(state.refinements, state.results, index, refinement);
-        // Initialize as defined first (sets up base analyte state)
-        // Then dispatch to analysis modules to incorporate source element state
+        const new_gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
+        splatInit(state.refinements, new_gid, state.ctx, .runtime);
+        // Dispatch to analysis modules to incorporate source element state
         try splat(.aggregate_init, state, index, self);
     }
 };
@@ -1907,7 +1918,8 @@ pub const Slice = struct {
 
         // Fallback: create new refinement from type (for cases without source ptr)
         const refinement = try typeToRefinement(self.ty, state.refinements);
-        _ = try Inst.clobberInst(state.refinements, state.results, index, refinement);
+        const new_gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
+        splatInit(state.refinements, new_gid, state.ctx, .runtime);
         try splat(.slice, state, index, self);
     }
 };
@@ -1958,6 +1970,7 @@ pub const SetUnionTag = struct {
         // so we must re-fetch the fields pointer AFTER these calls
         const field_ref = try typeToRefinement(self.ty, state.refinements);
         const new_field_eidx = try state.refinements.appendEntity(field_ref);
+        splatInit(state.refinements, new_field_eidx, state.ctx, .runtime);
 
         // Re-fetch fields pointer after potential reallocation
         state.refinements.at(union_eidx).@"union".fields[field_idx] = new_field_eidx;
@@ -2013,7 +2026,9 @@ pub const UnionInit = struct {
                         } else {
                             // Not tracked - comptime value, create entity from type
                             const field_ref = try typeToRefinement(interned.ty, state.refinements);
-                            fields[i] = try state.refinements.appendEntity(field_ref);
+                            const new_gid = try state.refinements.appendEntity(field_ref);
+                            splatInitInterned(state.refinements, new_gid);
+                            fields[i] = new_gid;
                         }
                     },
                     .fnptr => |choices| {
@@ -2502,7 +2517,8 @@ pub const SliceFieldPtr = struct {
 
         const effective_src_gid = src_gid orelse {
             // Fall back to type-based creation for globals/constants
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            splatInit(state.refinements, new_gid, state.ctx, .runtime);
             try splat(.slice_field_ptr, state, index, self);
             return;
         };
@@ -2510,7 +2526,8 @@ pub const SliceFieldPtr = struct {
         const src_ref = state.refinements.at(effective_src_gid);
         if (src_ref.* != .pointer) {
             // Not a pointer - fall back to type-based creation
-            _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+            splatInit(state.refinements, new_gid, state.ctx, .runtime);
             try splat(.slice_field_ptr, state, index, self);
             return;
         }
@@ -2534,7 +2551,8 @@ pub const SliceFieldPtr = struct {
         }
 
         // For ptr_slice_len_ptr or unexpected types, use type-based creation
-        _ = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        splatInit(state.refinements, new_gid, state.ctx, .runtime);
         try splat(.slice_field_ptr, state, index, self);
     }
 };
@@ -2577,6 +2595,24 @@ pub fn splatCallReturn(refinements: *Refinements, return_gid: Gid) void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "call_return")) {
             Analysis.call_return(refinements, return_gid);
+        }
+    }
+}
+
+/// Called by Inst.remap_br to set up each branch before execution.
+/// Dispatches to analysis modules to handle remap-specific semantics:
+/// - Success branch: old slice freed, new slice allocated, optional non-null
+/// - Failure branch: old slice valid, optional null
+pub fn splatRemapSetup(
+    refinements: *Refinements,
+    ctx: *Context,
+    is_success: bool,
+    old_slice_gid: Gid,
+    result_gid: Gid,
+) void {
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "remap_setup")) {
+            Analysis.remap_setup(refinements, ctx, is_success, old_slice_gid, result_gid);
         }
     }
 }
@@ -2638,6 +2674,37 @@ pub fn splatInit(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: Ini
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init")) {
             Analysis.init(refinements, gid, ctx, state);
+        }
+    }
+}
+
+/// Initialize the entrypoint's return slot.
+/// The entrypoint (main function) has no tag handler, so we need to explicitly
+/// initialize state for the return slot. Uses .runtime for general init, then
+/// dispatches to init_entrypoint_return_slot for analysis-specific setup.
+pub fn splatInitEntrypointReturnSlot(refinements: *Refinements, gid: Gid, ctx: ?*Context) void {
+    // First do runtime init for analyses that need it (e.g., undefined_safety)
+    splatInit(refinements, gid, ctx, .runtime);
+    // Then dispatch to entrypoint-specific handlers (e.g., memory_safety sets .stack)
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "init_entrypoint_return_slot")) {
+            Analysis.init_entrypoint_return_slot(refinements, gid);
+        }
+    }
+}
+
+/// Initialize a call's return slot.
+/// When Inst.call creates a return slot for a function call, the callee may return
+/// a different GID (not using the provided return_slot). The original return_slot
+/// entities become orphaned but remain in the table. They need valid memory_safety
+/// so testValid doesn't fail on them.
+pub fn splatInitCallReturnSlot(refinements: *Refinements, gid: Gid, ctx: ?*Context) void {
+    // First do runtime init for analyses that need it (e.g., undefined_safety)
+    splatInit(refinements, gid, ctx, .runtime);
+    // Then dispatch to call-return-slot-specific handlers (e.g., memory_safety sets .stack)
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "init_call_return_slot")) {
+            Analysis.init_call_return_slot(refinements, gid);
         }
     }
 }
@@ -2708,6 +2775,9 @@ pub fn splatMergeEarlyReturns(
         var copied_dummy = std.AutoHashMap(Gid, void).init(allocator);
         defer copied_dummy.deinit();
 
+        // base_len is current refinements length - entities >= this were created in branches
+        const merge_base_len: Gid = @intCast(refinements.list.items.len);
+
         try mergeRefinementRecursive(
             .early_return,
             allocator,
@@ -2718,6 +2788,7 @@ pub fn splatMergeEarlyReturns(
             branch_gids,
             &merged,
             &copied_dummy,
+            merge_base_len,
         );
     }
 }
@@ -2989,6 +3060,7 @@ pub fn splatMerge(
             branch_gids,
             &merged,
             &copied_from_branch,
+            base_len,
         );
     }
 
@@ -3039,6 +3111,7 @@ pub fn splatMergeByGid(
     ctx: *Context,
     branches: []const State,
     result_idx: usize,
+    base_len: Gid,
 ) !void {
     const allocator = ctx.allocator;
 
@@ -3080,6 +3153,7 @@ pub fn splatMergeByGid(
         branch_gids,
         &merged,
         &copied_dummy,
+        base_len,
     );
 }
 
@@ -3123,6 +3197,7 @@ fn mergeRefinementRecursive(
     branch_gids: []?Gid,
     merged: *std.AutoHashMap(Gid, void),
     copied_from_branch: *std.AutoHashMap(Gid, void),
+    base_len: Gid,
 ) !void {
     // Skip if we've already merged this entity
     if (merged.contains(orig_gid)) return;
@@ -3175,8 +3250,9 @@ fn mergeRefinementRecursive(
             // a winner branch based on iteration order.
             const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != p.to) blk: {
                 const branch_inner = consistent_inner.?;
-                // If the inner GID doesn't exist in parent, copy entire subtree from branch
-                if (branch_inner >= refinements.list.items.len) {
+                // If the inner GID doesn't exist in parent (was created in branch), copy entire subtree
+                // Use base_len to check against parent's state at START of merge, not current length
+                if (branch_inner >= base_len) {
                     const branch_ref = first_branch.?;
                     const src_ref = branch_ref.at(branch_inner).*;
                     // Track source entities as copied before copyTo
@@ -3194,7 +3270,7 @@ fn mergeRefinementRecursive(
                 break :blk p.to;
             };
 
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch, base_len);
         },
         // For optional/errorunion: follow .to in all branches
         // Types always match when following the same structural path
@@ -3244,7 +3320,7 @@ fn mergeRefinementRecursive(
                 break :blk data.to;
             };
 
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch, base_len);
         },
         .@"struct" => |s| {
             // Need separate array for struct fields since we recurse multiple times
@@ -3267,7 +3343,7 @@ fn mergeRefinementRecursive(
                     }
                     field_gids[i] = branch_ref.@"struct".fields[field_i];
                 }
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch);
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch, base_len);
             }
         },
         .@"union" => |u| {
@@ -3316,7 +3392,7 @@ fn mergeRefinementRecursive(
                     continue;
                 };
 
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch);
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch, base_len);
             }
         },
         .region => |r| {
@@ -3346,7 +3422,8 @@ fn mergeRefinementRecursive(
             // If all branches point to a different element, copy to parent if needed and update
             const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != r.to) blk: {
                 const branch_inner = consistent_inner.?;
-                if (branch_inner >= refinements.list.items.len) {
+                // Use base_len to check against parent's state at START of merge, not current length
+                if (branch_inner >= base_len) {
                     const branch_ref = first_branch.?;
                     const src_ref = branch_ref.at(branch_inner).*;
                     try copied_from_branch.put(branch_inner, {});
@@ -3362,7 +3439,7 @@ fn mergeRefinementRecursive(
                 }
             } else r.to;
 
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch);
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch, base_len);
         },
         else => {},
     }
@@ -3795,7 +3872,7 @@ test "Simple tags produce scalar" {
         try std.testing.expect(results[i].refinement != null);
         try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[i].refinement.?).*));
     }
-    refinements.testValid();
+    refinements.testValid(0);
 }
 
 test "block creates refinement based on type" {

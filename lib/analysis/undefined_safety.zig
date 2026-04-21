@@ -130,7 +130,54 @@ pub const UndefinedSafety = union(enum) {
         // Note: packed struct fields also start undefined, but the RMW pattern
         // is handled by packed_field tracking in struct_field_ptr/load/store
         const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        setSafetyState(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        // Initialize any nested pointer targets to undefined (they're unassigned)
+        initPointerTargetsUndefined(refinements, pointee_idx, state.ctx.meta);
+    }
+
+    /// Initialize undefined_safety based on InitState.
+    /// - defined: Set to .defined (interned/computed values)
+    /// - undefined: Set to .undefined (explicitly undefined values)
+    /// - runtime: Set to .defined (sensible default for computed values; tag handlers override if needed)
+    pub fn init(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: tag.InitState) void {
+        switch (state) {
+            .defined, .runtime => initRecursive(refinements, gid, .{ .defined = {} }),
+            .@"undefined" => {
+                const meta = if (ctx) |c| c.meta else Meta{ .file = "", .line = 0, .function = "" };
+                initRecursive(refinements, gid, .{ .undefined = .{ .meta = meta } });
+            },
+        }
+    }
+
+    /// Helper to recursively set undefined_safety on a refinement tree.
+    fn initRecursive(refinements: *Refinements, gid: Gid, undef_state: UndefinedSafety) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => ref.scalar.analyte.undefined_safety = undef_state,
+            .pointer => |p| {
+                ref.pointer.analyte.undefined_safety = undef_state;
+                initRecursive(refinements, p.to, undef_state);
+            },
+            .optional => |o| initRecursive(refinements, o.to, undef_state),
+            .errorunion => |e| initRecursive(refinements, e.to, undef_state),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    initRecursive(refinements, field_gid, undef_state);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        initRecursive(refinements, field_gid, undef_state);
+                    }
+                }
+            },
+            .allocator => ref.allocator.analyte.undefined_safety = undef_state,
+            .fnptr => ref.fnptr.analyte.undefined_safety = undef_state,
+            .region => |r| initRecursive(refinements, r.to, undef_state),
+            .recursive => {}, // Don't follow recursive references
+            .void, .unimplemented, .noreturn => {},
+        }
     }
 
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
@@ -141,11 +188,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_idx = results[index].refinement.?;
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
-        // For existing field entities, preserve their undefined state.
-        // For newly created entities (from inactive union access), initialize to defined.
-        // This handles the case where variant_safety will report an error but we need
-        // valid undefined state on the entity for testValid.
-        ensureUndefinedStateSet(refinements, ptr.to);
+        // The pointee's undefined state is set by the tag handler via splatInit
     }
 
     pub fn ptr_elem_ptr(state: State, index: usize, params: tag.PtrElemPtr) !void {
@@ -156,8 +199,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_idx = results[index].refinement.?;
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
-        // The element's undefined state is already set (it's the shared region element)
-        // Don't call ensureUndefinedStateSet - the element already has its state from alloc
+        // The element's undefined state is already set (it's the shared region element from alloc)
     }
 
     pub fn slice_field_ptr(state: State, index: usize, params: tag.SliceFieldPtr) !void {
@@ -168,8 +210,29 @@ pub const UndefinedSafety = union(enum) {
         const ptr_idx = results[index].refinement orelse return;
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
-        // The pointee (the slice ptr or len) is already defined - it comes from an existing entity.
-        // Don't call ensureUndefinedStateSet - the pointee already has its state set.
+        // The pointee's undefined state is set by the tag handler via splatInit
+    }
+
+    pub fn slice(state: State, index: usize, params: tag.Slice) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        // The slice pointer itself is defined (we're creating a valid slice)
+        const ptr_idx = results[index].refinement.?;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined_safety = .{ .defined = {} };
+        // The region's undefined state is already set from the source pointer
+    }
+
+    pub fn ptr_add(state: State, index: usize, params: tag.PtrAdd) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        // The pointer itself is defined (it exists and points to a valid element)
+        const ptr_idx = results[index].refinement orelse return;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined_safety = .{ .defined = {} };
+        // The region's undefined state is already set from the source pointer
     }
 
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
@@ -180,8 +243,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_idx = results[index].refinement.?;
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
-        // Ensure the container has undefined state set
-        ensureUndefinedStateSet(refinements, ptr.to);
+        // The pointee's undefined state is set by the tag handler via splatInit
     }
 
     pub fn errunion_payload_ptr_set(state: State, index: usize, params: tag.ErrunionPayloadPtrSet) !void {
@@ -204,58 +266,6 @@ pub const UndefinedSafety = union(enum) {
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
         // The region's undefined state is already set (from alloc)
-    }
-
-    /// Ensure an entity and its children have undefined state set.
-    /// Only sets state if currently null (newly created), does not overwrite existing state.
-    fn ensureUndefinedStateSet(refinements: *Refinements, idx: Gid) void {
-        switch (refinements.at(idx).*) {
-            .scalar => |*s| {
-                if (s.analyte.undefined_safety == null) {
-                    s.analyte.undefined_safety = .{ .defined = {} };
-                }
-            },
-            .pointer => |*p| {
-                if (p.analyte.undefined_safety == null) {
-                    p.analyte.undefined_safety = .{ .defined = {} };
-                }
-                ensureUndefinedStateSet(refinements, p.to);
-            },
-            .optional => |o| ensureUndefinedStateSet(refinements, o.to),
-            .errorunion => |e| ensureUndefinedStateSet(refinements, e.to),
-            .@"struct" => |s| {
-                for (s.fields) |field_idx| {
-                    ensureUndefinedStateSet(refinements, field_idx);
-                }
-            },
-            .@"union" => |u| {
-                for (u.fields) |field_idx_opt| {
-                    if (field_idx_opt) |field_idx| {
-                        ensureUndefinedStateSet(refinements, field_idx);
-                    }
-                }
-            },
-            .allocator => |*a| {
-                if (a.analyte.undefined_safety == null) {
-                    a.analyte.undefined_safety = .{ .defined = {} };
-                }
-            },
-            .void, .unimplemented, .noreturn => {},
-            .region => |r| {
-                // Don't set analyte.undefined on region container - only the uniform element carries undefined state
-                ensureUndefinedStateSet(refinements, r.to);
-            },
-            .recursive => |r| {
-                // Follow the recursive reference
-                ensureUndefinedStateSet(refinements, r.to);
-            },
-            .fnptr => |*f| {
-                // fnptr is a value type that tracks undefined state
-                if (f.analyte.undefined_safety == null) {
-                    f.analyte.undefined_safety = .{ .defined = {} };
-                }
-            },
-        }
     }
 
     /// Get the pointee GID from a source reference by following the pointer.
@@ -281,15 +291,16 @@ pub const UndefinedSafety = union(enum) {
         refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
         // The pointee starts as undefined (must be set before ret_load)
         const pointee_idx = refinements.at(ptr_idx).pointer.to;
-        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        setSafetyState(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
     /// Block creates placeholder entities from type info. Set their undefined state.
     /// The actual block value comes from br instructions which may override the refinement.
     pub fn block(state: State, index: usize, params: tag.Block) !void {
         _ = params;
-        const result_idx = state.results[index].refinement orelse return;
-        ensureUndefinedStateSet(state.refinements, result_idx);
+        // The undefined state is set by the tag handler via splatInit
+        _ = state;
+        _ = index;
     }
 
     pub fn set_union_tag(state: State, index: usize, params: tag.SetUnionTag) !void {
@@ -312,7 +323,7 @@ pub const UndefinedSafety = union(enum) {
         // The newly activated field is undefined (tag set but value not stored yet)
         const field_idx = params.field_index.?;
         if (u.fields[field_idx]) |field_eidx| {
-            setUndefinedRecursive(refinements, field_eidx, .{ .undefined = .{ .meta = state.ctx.meta } });
+            setSafetyState(refinements, field_eidx, .{ .undefined = .{ .meta = state.ctx.meta } });
         }
     }
 
@@ -513,7 +524,7 @@ pub const UndefinedSafety = union(enum) {
 
         // After memset, destination region elements are defined (they're set to value)
         const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
-        forceDefinedRecursive(state.refinements, dest_elem_gid);
+        setSafetyState(state.refinements, dest_elem_gid, .{ .defined = {} });
     }
     pub const memset = memsetHandler;
     pub const memset_safe = memsetHandler;
@@ -807,39 +818,6 @@ pub const UndefinedSafety = union(enum) {
         }
     }
 
-    /// Helper to FORCE all scalars/pointers in a refinement tree to defined.
-    /// Unlike setDefinedRecursive, this always overwrites existing undefined states.
-    /// Used when explicitly storing a value (like .null to an optional).
-    fn forceDefinedRecursive(refinements: *Refinements, idx: Gid) void {
-        switch (refinements.at(idx).*) {
-            .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
-            .pointer => |*p| {
-                p.analyte.undefined_safety = .{ .defined = {} };
-                forceDefinedRecursive(refinements, p.to);
-            },
-            .optional => |o| forceDefinedRecursive(refinements, o.to),
-            .errorunion => |e| forceDefinedRecursive(refinements, e.to),
-            .@"struct" => |s| {
-                for (s.fields) |field_idx| {
-                    forceDefinedRecursive(refinements, field_idx);
-                }
-            },
-            .@"union" => |*u| {
-                u.analyte.undefined_safety = .{ .defined = {} };
-                for (u.fields) |field_idx_opt| {
-                    if (field_idx_opt) |field_idx| {
-                        forceDefinedRecursive(refinements, field_idx);
-                    }
-                }
-            },
-            .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
-            .fnptr => |*f| f.analyte.undefined_safety = .{ .defined = {} },
-            .void, .unimplemented, .noreturn => {},
-            .region => |r| forceDefinedRecursive(refinements, r.to),
-            .recursive => |r| forceDefinedRecursive(refinements, r.to),
-        }
-    }
-
     /// Recursively set name_when_set on undefined states that don't have a name yet.
     /// Called by DbgVarPtr to retroactively name undefined states that were created
     /// before the variable name was known (since dbg_var_ptr comes AFTER stores in AIR).
@@ -1031,27 +1009,27 @@ pub const UndefinedSafety = union(enum) {
         }
     }
 
-    /// Recursively set undefined state on a refinement and its children.
-    /// Only called when storing an undefined value (src type is .undefined).
-    fn setUndefinedRecursive(refinements: *Refinements, idx: Gid, undef_state: UndefinedSafety) void {
+    /// Set undefined_safety state on a refinement and its spatial children.
+    /// Does NOT traverse pointer.to - pointees are separate memory.
+    fn setSafetyState(refinements: *Refinements, idx: Gid, undef_state: UndefinedSafety) void {
         switch (refinements.at(idx).*) {
             .scalar => |*s| s.analyte.undefined_safety = undef_state,
             .pointer => |*p| {
+                // Set state on pointer value, but NOT on pointee (separate memory)
                 p.analyte.undefined_safety = undef_state;
-                setUndefinedRecursive(refinements, p.to, undef_state);
             },
             .optional => |o| {
                 // Don't set analyte.undefined on optional - only the payload carries undefined state
-                setUndefinedRecursive(refinements, o.to, undef_state);
+                setSafetyState(refinements, o.to, undef_state);
             },
             .errorunion => |e| {
                 // Don't set analyte.undefined on errorunion - only the payload carries undefined state
-                setUndefinedRecursive(refinements, e.to, undef_state);
+                setSafetyState(refinements, e.to, undef_state);
             },
             .@"struct" => |s| {
                 // Don't set analyte.undefined on struct - only the fields carry undefined state
                 for (s.fields) |field_idx| {
-                    setUndefinedRecursive(refinements, field_idx, undef_state);
+                    setSafetyState(refinements, field_idx, undef_state);
                 }
             },
             .@"union" => |*u| {
@@ -1060,7 +1038,7 @@ pub const UndefinedSafety = union(enum) {
                 // Also set on active fields
                 for (u.fields) |field_idx_opt| {
                     if (field_idx_opt) |field_idx| {
-                        setUndefinedRecursive(refinements, field_idx, undef_state);
+                        setSafetyState(refinements, field_idx, undef_state);
                     }
                 }
             },
@@ -1068,25 +1046,55 @@ pub const UndefinedSafety = union(enum) {
             .void, .unimplemented, .noreturn => {},
             .region => |r| {
                 // Don't set analyte.undefined on region - only the uniform element carries undefined state
-                setUndefinedRecursive(refinements, r.to, undef_state);
+                setSafetyState(refinements, r.to, undef_state);
             },
-            .recursive => |r| {
-                // Follow the recursive reference
-                setUndefinedRecursive(refinements, r.to, undef_state);
+            .recursive => {
+                // Don't follow recursive references - they're placeholders
             },
             .fnptr => |*f| f.analyte.undefined_safety = undef_state,
         }
     }
 
+    /// Initialize undefined_safety on pointer targets to undefined.
+    /// Used after setSafetyState when initializing refinements created by typeToRefinement.
+    /// Pointers in the structure point to entities that don't have real values yet,
+    /// so their targets also need undefined_safety initialized.
+    fn initPointerTargetsUndefined(refinements: *Refinements, gid: Gid, meta: Meta) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
+            .pointer => |p| {
+                // Set target to undefined and recurse
+                setSafetyState(refinements, p.to, .{ .undefined = .{ .meta = meta } });
+                initPointerTargetsUndefined(refinements, p.to, meta);
+            },
+            .optional => |o| initPointerTargetsUndefined(refinements, o.to, meta),
+            .errorunion => |e| initPointerTargetsUndefined(refinements, e.to, meta),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    initPointerTargetsUndefined(refinements, field_gid, meta);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        initPointerTargetsUndefined(refinements, field_gid, meta);
+                    }
+                }
+            },
+            .region => |r| initPointerTargetsUndefined(refinements, r.to, meta),
+        }
+    }
+
     /// Apply defined/undefined state from an interned type to a refinement.
     /// Handles field-level undefined for structs where some fields may be undefined.
-    /// Uses forceDefinedRecursive because explicit stores should overwrite existing undefined states.
+    /// Uses setSafetyState because explicit stores should overwrite existing undefined states.
     fn applyInternedType(refinements: *Refinements, idx: Gid, ty: tag.Type, ctx: *Context) void {
         switch (ty) {
             .undefined => {
                 // Mark as undefined - don't recurse further, undefined is terminal
                 const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = ctx.meta } };
-                setUndefinedRecursive(refinements, idx, undef_state);
+                setSafetyState(refinements, idx, undef_state);
             },
             .@"struct" => |struct_type| {
                 // Apply field-level undefined state
@@ -1100,7 +1108,7 @@ pub const UndefinedSafety = union(enum) {
                     },
                     else => {
                         // Non-struct refinement - just mark as defined
-                        forceDefinedRecursive(refinements, idx);
+                        setSafetyState(refinements, idx, .{ .defined = {} });
                     },
                 }
             },
@@ -1117,26 +1125,26 @@ pub const UndefinedSafety = union(enum) {
                         p.analyte.undefined_safety = .{ .defined = {} };
                         applyInternedType(refinements, p.to, inner.*, ctx);
                     },
-                    else => forceDefinedRecursive(refinements, idx),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .optional => |inner| {
                 switch (refinements.at(idx).*) {
                     .optional => |o| applyInternedType(refinements, o.to, inner.*, ctx),
-                    else => forceDefinedRecursive(refinements, idx),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .errorunion => |inner| {
                 switch (refinements.at(idx).*) {
                     .errorunion => |e| applyInternedType(refinements, e.to, inner.*, ctx),
-                    else => forceDefinedRecursive(refinements, idx),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .null => {
                 // Null value - mark inner as defined (it's explicitly null, not undefined)
                 switch (refinements.at(idx).*) {
-                    .optional => |o| forceDefinedRecursive(refinements, o.to),
-                    else => forceDefinedRecursive(refinements, idx),
+                    .optional => |o| setSafetyState(refinements, o.to, .{ .defined = {} }),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .@"union" => |union_type| {
@@ -1155,7 +1163,7 @@ pub const UndefinedSafety = union(enum) {
                     },
                     else => {
                         // Non-union refinement - just mark as defined
-                        forceDefinedRecursive(refinements, idx);
+                        setSafetyState(refinements, idx, .{ .defined = {} });
                     },
                 }
             },
@@ -1163,26 +1171,26 @@ pub const UndefinedSafety = union(enum) {
                 // Allocator value - mark as defined
                 switch (refinements.at(idx).*) {
                     .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
-                    else => forceDefinedRecursive(refinements, idx),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .void => {},
             .region => |inner| {
                 switch (refinements.at(idx).*) {
                     .region => |r| applyInternedType(refinements, r.to, inner.*, ctx),
-                    else => forceDefinedRecursive(refinements, idx),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .recursive => {
                 // Recursive type reference - the actual structure is materialized elsewhere
                 // Just mark as defined like a scalar
-                forceDefinedRecursive(refinements, idx);
+                setSafetyState(refinements, idx, .{ .defined = {} });
             },
             .fnptr => {
                 // Function pointer - mark as defined
                 switch (refinements.at(idx).*) {
                     .fnptr => |*f| f.analyte.undefined_safety = .{ .defined = {} },
-                    else => forceDefinedRecursive(refinements, idx),
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .unimplemented => {
@@ -1210,9 +1218,9 @@ pub const UndefinedSafety = union(enum) {
             const container = refinements.at(pf.container_gid);
             if (container.* == .@"struct") {
                 const field_gid = container.@"struct".fields[pf.field_index];
-                // Use setUndefinedRecursive with .defined to forcefully set as defined
+                // Use setSafetyState with .defined to forcefully set as defined
                 // (setDefinedRecursive only sets if currently null, but we have .undefined)
-                setUndefinedRecursive(refinements, field_gid, .{ .defined = {} });
+                setSafetyState(refinements, field_gid, .{ .defined = {} });
             }
             return;
         }
@@ -1235,7 +1243,7 @@ pub const UndefinedSafety = union(enum) {
                 .fnptr => null,
             };
             const undef_state: UndefinedSafety = .{ .undefined = .{ .meta = state.ctx.meta, .name_when_set = name_when_set } };
-            setUndefinedRecursive(refinements, pointee_idx, undef_state);
+            setSafetyState(refinements, pointee_idx, undef_state);
         } else {
             // Defined stores: mark the pointee as defined
             // Note: structural .to updates are handled by the Store tag handler
@@ -1360,7 +1368,7 @@ pub const UndefinedSafety = union(enum) {
         // RMW loads read the backing byte to modify and store back - skip undefined check.
         if (params.is_packed_rmw) {
             const result_idx = results[index].refinement.?;
-            setUndefinedRecursive(refinements, result_idx, .{ .defined = {} });
+            setSafetyState(refinements, result_idx, .{ .defined = {} });
             return;
         }
 
@@ -1390,7 +1398,7 @@ pub const UndefinedSafety = union(enum) {
                     }
                     // Mark result as defined (we checked the field, not the backing byte)
                     const result_idx = results[index].refinement.?;
-                    setUndefinedRecursive(refinements, result_idx, .{ .defined = {} });
+                    setSafetyState(refinements, result_idx, .{ .defined = {} });
                     return;
                 }
             }
@@ -1398,12 +1406,8 @@ pub const UndefinedSafety = union(enum) {
 
         // Get pointee GID by following the pointer chain.
         // If we can't follow (interned constant, missing refinement, or not a pointer),
-        // the tag handler created a new entity - ensure its undefined state is set.
-        const pointee_idx = getPointeeFromSrc(params.ptr, results, refinements) orelse {
-            const result_idx = results[index].refinement.?;
-            ensureUndefinedStateSet(refinements, result_idx);
-            return;
-        };
+        // the tag handler created a new entity - its undefined state is set via splatInit.
+        const pointee_idx = getPointeeFromSrc(params.ptr, results, refinements) orelse return;
         switch (refinements.at(pointee_idx).*) {
             .scalar => |s| {
                 // undefined is null when value wasn't allocated through our tracked mechanisms
@@ -1420,20 +1424,22 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .pointer => |ind| {
-                // undefined is null when pointer wasn't allocated through our tracked mechanisms.
-                // No undefined tracking available - skip.
-                const undef = ind.analyte.undefined_safety orelse return;
+                // Check source pointer's undefined state
+                const undef = ind.analyte.undefined_safety orelse {
+                    // Source pointer has no undefined tracking - still need to set state on result
+                    // since valueCopy created a new entity that needs undefined_safety set.
+                    const idx = results[index].refinement.?;
+                    setSafetyState(refinements, idx, .{ .defined = {} });
+                    return;
+                };
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .inconsistent => return undef.reportInconsistentBranches(ctx),
                     .defined => {
-                        // For compound types, we share the entity so state is already correct.
-                        // Only propagate for fresh scalars.
-                        const idx = results[index].refinement orelse return;
-                        switch (refinements.at(idx).*) {
-                            .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
-                            else => {}, // Shared entity - state is already correct
-                        }
+                        // Propagate defined state to the loaded value.
+                        // valueCopy creates a new pointer entity that needs undefined_safety set.
+                        const idx = results[index].refinement.?;
+                        setSafetyState(refinements, idx, .{ .defined = {} });
                     },
                 }
             },
@@ -1549,7 +1555,7 @@ pub const UndefinedSafety = union(enum) {
                     if (u.analyte.undefined_safety) |undef| {
                         // Set the result's undefined state before checking/reporting errors
                         // This ensures testValid won't panic on the fresh result entity
-                        setUndefinedRecursive(refinements, result_idx, undef);
+                        setSafetyState(refinements, result_idx, undef);
                         switch (undef) {
                             .undefined => return undef.reportUseBeforeAssign(ctx),
                             .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -1692,98 +1698,6 @@ pub const UndefinedSafety = union(enum) {
         } };
     }
 
-    /// Initialize the undefined state on a return slot refinement.
-    /// Return slots start as undefined - they become defined when ret_safe fills them.
-    pub fn retval_init(refinements: *Refinements, gid: Gid, ctx: *Context) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .scalar => {
-                ref.scalar.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
-            },
-            .pointer => |p| {
-                ref.pointer.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
-                retval_init(refinements, p.to, ctx);
-            },
-            .optional => |o| retval_init(refinements, o.to, ctx),
-            .errorunion => |e| retval_init(refinements, e.to, ctx),
-            .@"struct" => |s| {
-                for (s.fields) |field_gid| {
-                    retval_init(refinements, field_gid, ctx);
-                }
-            },
-            .@"union" => |u| {
-                for (u.fields) |maybe_field_gid| {
-                    if (maybe_field_gid) |field_gid| {
-                        retval_init(refinements, field_gid, ctx);
-                    }
-                }
-            },
-            .allocator => {
-                ref.allocator.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
-            },
-            .fnptr => {
-                ref.fnptr.analyte.undefined_safety = .{ .undefined = .{ .meta = ctx.meta } };
-            },
-            .region => |r| {
-                // Region is a container type - don't set undefined state on it, just recurse
-                retval_init(refinements, r.to, ctx);
-            },
-            .recursive => {
-                // Don't follow recursive references - they point back to an ancestor struct
-                // that is already being processed. Following would cause infinite recursion.
-            },
-            .void => {}, // void return type is valid
-            .unimplemented => @panic("retval_init: unimplemented return type"),
-            .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
-        }
-    }
-
-    /// Initialize the undefined state on a return slot refinement as DEFINED.
-    /// Used for interned comptime values (constants, null) that are not the .undefined type.
-    pub fn retval_init_defined(refinements: *Refinements, gid: Gid) void {
-        const ref = refinements.at(gid);
-        switch (ref.*) {
-            .scalar => {
-                ref.scalar.analyte.undefined_safety = .{ .defined = {} };
-            },
-            .pointer => |p| {
-                ref.pointer.analyte.undefined_safety = .{ .defined = {} };
-                retval_init_defined(refinements, p.to);
-            },
-            .optional => |o| retval_init_defined(refinements, o.to),
-            .errorunion => |e| retval_init_defined(refinements, e.to),
-            .@"struct" => |s| {
-                for (s.fields) |field_gid| {
-                    retval_init_defined(refinements, field_gid);
-                }
-            },
-            .@"union" => |u| {
-                for (u.fields) |maybe_field_gid| {
-                    if (maybe_field_gid) |field_gid| {
-                        retval_init_defined(refinements, field_gid);
-                    }
-                }
-            },
-            .allocator => {
-                ref.allocator.analyte.undefined_safety = .{ .defined = {} };
-            },
-            .fnptr => {
-                ref.fnptr.analyte.undefined_safety = .{ .defined = {} };
-            },
-            .region => |r| {
-                // Region is a container type - don't set undefined state on it, just recurse
-                retval_init_defined(refinements, r.to);
-            },
-            .recursive => {
-                // Don't follow recursive references - they point back to an ancestor struct
-                // that is already being processed. Following would cause infinite recursion.
-            },
-            .void => {}, // void return type is valid
-            .unimplemented => {}, // unimplemented types are silently skipped
-            .noreturn => unreachable, // noreturn functions don't return, shouldn't reach here
-        }
-    }
-
     /// Initialize undefined state on a refinement created from a `.undefined` type wrapper.
     /// This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
     pub fn init_undefined(ref: *Refinements.Refinement, meta: Meta) void {
@@ -1824,7 +1738,7 @@ pub const UndefinedSafety = union(enum) {
                 .line = loc.line,
                 .column = loc.column,
             };
-            setUndefinedRecursive(refinements, pointee_gid, .{ .undefined = .{ .meta = meta } });
+            setSafetyState(refinements, pointee_gid, .{ .undefined = .{ .meta = meta } });
         } else {
             setDefinedRecursive(refinements, pointee_gid);
         }
@@ -2066,7 +1980,7 @@ pub const UndefinedSafety = union(enum) {
 
         // The pointee starts as undefined (must be set by store before use)
         const pointee_idx = ptr_ref.pointer.to;
-        setUndefinedRecursive(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        setSafetyState(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
     /// Handle mem.Allocator.alloc/dupe/dupeZ - mark elements as undefined.
@@ -2093,7 +2007,7 @@ pub const UndefinedSafety = union(enum) {
 
         // The elements start as undefined (must be set before use)
         const element_idx = region_ref.region.to;
-        setUndefinedRecursive(refinements, element_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
+        setSafetyState(refinements, element_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
     /// Handle mem.Allocator.realloc/remap - mark elements as DEFINED.
@@ -2121,7 +2035,7 @@ pub const UndefinedSafety = union(enum) {
 
         // The elements are DEFINED since realloc preserves data from the original
         const element_idx = region_ref.region.to;
-        setUndefinedRecursive(refinements, element_idx, .{ .defined = {} });
+        setSafetyState(refinements, element_idx, .{ .defined = {} });
     }
 
     /// Handle mem.Allocator.resize - result is defined bool
@@ -2154,7 +2068,7 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         },
         .pointer => |p| {
             if (p.analyte.undefined_safety == null) {
-                std.debug.panic("undefined state must be set on pointers", .{});
+                std.debug.panic("undefined state must be set on pointers (refinement idx {})", .{idx});
             }
         },
         .fnptr => |f| {

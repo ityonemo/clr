@@ -371,7 +371,10 @@ pub const MemorySafety = union(enum) {
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
-            .placeholder => std.debug.panic("placeholder in slice_ptr - region not initialized", .{}),
+            // Region has placeholder - the pointee is uninitialized, but the pointer VALUE
+            // itself lives on the stack. The pointee's placeholder state is already tracked
+            // on the region; accessing the pointee will be caught by other safety checks.
+            .placeholder => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
         };
     }
 
@@ -431,6 +434,8 @@ pub const MemorySafety = union(enum) {
             .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = src_gid } },
             .placeholder => std.debug.panic("placeholder in slice_field_ptr - source not initialized", .{}),
         };
+        // Initialize the pointee to .placeholder (it's an unassigned pointer target)
+        initPointerTargetsPlaceholder(refinements, ptr_idx);
     }
 
     /// ptr_add/ptr_sub perform pointer arithmetic on an already-validated source pointer.
@@ -731,7 +736,8 @@ pub const MemorySafety = union(enum) {
     /// Recursively check refinement tree for escaping stack pointers.
     /// Only checks for stack_ptr escapes - does NOT modify allocation state.
     fn checkStackEscapeRecursive(refinements: *Refinements, idx: Gid, ctx: *Context, func_name: []const u8) !void {
-        switch (refinements.at(idx).*) {
+        const ref = refinements.at(idx);
+        switch (ref.*) {
             .pointer => |p| {
                 // For pointers, check if the POINTEE is stack memory from this function.
                 // A pointer stored on the stack that points to heap memory is fine to return.
@@ -764,9 +770,96 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
-            .region => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
+            .region => |r| {
+                // Cycle detection - should not happen if merge is correct
+                if (r.to == idx) @panic("region.to cycle detected - refinement structure is corrupted");
+                try checkStackEscapeRecursive(refinements, r.to, ctx, func_name);
+            },
             .recursive => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    /// remap_setup handler - handles memory semantics for remap success/failure.
+    /// Called by Inst.remap_br via splatRemapSetup BEFORE executing each branch.
+    /// - Success branch (is_success=true):
+    ///   1. Mark new slice's structure (optional/pointer=stack, region/element=allocated)
+    ///   2. Mark old slice's region as freed (ownership transferred)
+    /// - Failure branch (is_success=false):
+    ///   1. Mark result structure as stack (null optional return value)
+    ///   2. Mark the unreachable region as placeholder (it's a null optional, no valid pointer)
+    pub fn remap_setup(
+        refinements: *Refinements,
+        ctx: *Context,
+        is_success: bool,
+        old_slice_gid: Gid,
+        result_gid: Gid,
+    ) void {
+        const result_ref = refinements.at(result_gid);
+        // Result should be an optional
+        if (result_ref.* != .optional) return;
+
+        const new_ptr_gid = result_ref.optional.to;
+        const new_ptr_ref = refinements.at(new_ptr_gid);
+        // Payload should be a pointer (slice)
+        if (new_ptr_ref.* != .pointer) return;
+        const new_region_gid = new_ptr_ref.pointer.to;
+
+        const stack_ms: MemorySafety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
+
+        // Paint the optional and pointer as stack values (return value)
+        paintSpatialMemory(refinements, result_gid, stack_ms);
+
+        if (is_success) {
+            // === SUCCESS BRANCH ===
+            const old_slice_ref = refinements.at(old_slice_gid);
+            if (old_slice_ref.* != .pointer) return;
+
+            const old_region_gid = old_slice_ref.pointer.to;
+            const old_region = refinements.at(old_region_gid);
+
+            const old_analyte = getAnalytePtr(old_region);
+            const old_ms = old_analyte.memory_safety orelse
+                std.debug.panic("remap_setup: old_ms is null - old slice should have memory_safety", .{});
+
+            switch (old_ms) {
+                .allocated => |alloc_info| {
+                    // Old slice was allocated - update new region with allocation info
+                    // and mark old region as freed (ownership transferred)
+                    paintSpatialMemory(refinements, new_region_gid, .{ .allocated = .{
+                        .meta = ctx.meta,
+                        .allocator_gid = alloc_info.allocator_gid,
+                        .type_id = alloc_info.type_id,
+                        .freed = null,
+                        .root_gid = null, // New region is the root
+                    } });
+
+                    // Mark old slice's region as freed
+                    const free_meta: Free = .{
+                        .meta = ctx.meta,
+                        .name_at_free = null, // Name tracking not available in setup
+                    };
+                    setFreedRecursive(refinements, old_region_gid, free_meta);
+                },
+                .placeholder, .interned => {
+                    // Old slice was unallocated - this success branch is unreachable.
+                    // Set error_stub on new region to mark it as phantom memory.
+                    paintSpatialMemory(refinements, new_region_gid, .{ .error_stub = {} });
+                },
+                .stack => {
+                    // Remapping stack memory - success branch is unreachable.
+                    paintSpatialMemory(refinements, new_region_gid, .{ .error_stub = {} });
+                },
+                .error_stub => {
+                    // Already in error path - propagate
+                    paintSpatialMemory(refinements, new_region_gid, .{ .error_stub = {} });
+                },
+            }
+        } else {
+            // === FAILURE BRANCH ===
+            // The optional is null, so the pointer/region are unreachable.
+            // Mark the region as placeholder (unreachable memory behind null optional).
+            paintSpatialMemory(refinements, new_region_gid, .{ .placeholder = {} });
         }
     }
 
@@ -1272,6 +1365,24 @@ pub const MemorySafety = union(enum) {
             .allocator => |*a| &a.analyte,
             .fnptr => |*f| &f.analyte,
             .void, .noreturn, .unimplemented => @panic("no analyte on this type"),
+        };
+    }
+
+    /// Returns true if the refinement has no memory_safety set (null).
+    /// Used by initPointerTargetsPlaceholder to avoid overwriting existing memory_safety.
+    fn hasNoMemorySafety(ref: *Refinements.Refinement) bool {
+        return switch (ref.*) {
+            .scalar => |s| s.analyte.memory_safety == null,
+            .pointer => |p| p.analyte.memory_safety == null,
+            .optional => |o| o.analyte.memory_safety == null,
+            .errorunion => |e| e.analyte.memory_safety == null,
+            .@"struct" => |s| s.analyte.memory_safety == null,
+            .region => |r| r.analyte.memory_safety == null,
+            .recursive => |rec| rec.analyte.memory_safety == null,
+            .@"union" => |u| u.analyte.memory_safety == null,
+            .allocator => |a| a.analyte.memory_safety == null,
+            .fnptr => |f| f.analyte.memory_safety == null,
+            .void, .noreturn, .unimplemented => true, // No analyte, so no memory_safety
         };
     }
 
@@ -1810,9 +1921,24 @@ pub const MemorySafety = union(enum) {
         if (orig_analyte.memory_safety) |*orig_ms| {
             switch (orig_ms.*) {
                 .placeholder => {
-                    // Placeholder means the pointer target was never assigned a real value.
-                    // This is valid for nested pointer fields in structs that were just created.
-                    // Nothing to merge - keep as placeholder.
+                    // Placeholder means the entity was uninitialized before branches.
+                    // If branches have meaningful values (e.g., from br setting block result),
+                    // copy the first branch's memory_safety to orig.
+                    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
+                        const branch = branch_opt orelse continue;
+                        const branch_gid = branch_gid_opt orelse continue;
+                        const branch_ref = branch.refinements.at(branch_gid);
+                        const branch_analyte = switch (branch_ref.*) {
+                            .void, .noreturn, .unimplemented => continue,
+                            else => getAnalytePtr(branch_ref),
+                        };
+                        if (branch_analyte.memory_safety) |branch_ms| {
+                            if (branch_ms != .placeholder) {
+                                orig_ms.* = branch_ms;
+                                break;
+                            }
+                        }
+                    }
                 },
                 .allocated => |*orig_alloc| {
                     if (orig_alloc.freed == null) {
@@ -1882,11 +2008,13 @@ pub const MemorySafety = union(enum) {
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it
+            var found_any = false;
             for (branches, branch_gids) |branch_opt, branch_gid_opt| {
                 // Null branch = unreachable path
                 const branch = branch_opt orelse continue;
                 // Entity may not exist in all branches during recursive merge traversal
                 const branch_gid = branch_gid_opt orelse continue;
+                found_any = true;
                 const branch_ref = branch.refinements.at(branch_gid);
                 const branch_analyte = switch (branch_ref.*) {
                     .void, .noreturn, .unimplemented => continue,
@@ -2049,6 +2177,38 @@ pub const MemorySafety = union(enum) {
         paintSpatialMemory(refinements, gid, .{ .interned = comptime_interned_meta });
         // Initialize any nested pointer targets to .placeholder (they're unassigned)
         initPointerTargetsPlaceholder(refinements, gid);
+    }
+
+    /// Initialize memory_safety for the entrypoint's return slot.
+    /// The entrypoint (main function) has no tag handler, so we need to explicitly
+    /// set stack memory_safety on the return slot created by the generated code.
+    pub fn initReturnSlotStack(refinements: *Refinements, gid: Gid) void {
+        const stack_ms: MemorySafety = .{ .stack = .{
+            .meta = .{
+                .function = "",
+                .file = "<entrypoint>",
+                .line = 0,
+                .column = 0,
+            },
+            .root_gid = null,
+        } };
+        paintSpatialMemory(refinements, gid, stack_ms);
+        // Initialize any nested pointer targets to .placeholder (they're unassigned)
+        initPointerTargetsPlaceholder(refinements, gid);
+    }
+
+    /// Handler for splatInitEntrypointReturnSlot dispatch.
+    /// Called by tag.splatInitEntrypointReturnSlot to initialize the entrypoint's return slot.
+    pub fn init_entrypoint_return_slot(refinements: *Refinements, gid: Gid) void {
+        initReturnSlotStack(refinements, gid);
+    }
+
+    /// Handler for splatInitCallReturnSlot dispatch.
+    /// Called by tag.splatInitCallReturnSlot to initialize a call's return slot.
+    /// The return slot may become orphaned if the callee returns a different GID,
+    /// but it still needs valid memory_safety for testValid.
+    pub fn init_call_return_slot(refinements: *Refinements, gid: Gid) void {
+        initReturnSlotStack(refinements, gid);
     }
 
     /// Initialize memory_safety on a refinement created from a `.undefined` type wrapper.
@@ -2601,6 +2761,9 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        // Initialize pointer targets to placeholder if not already set
+        // (handles fallback case where typeToRefinement created fresh structure)
+        initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
     pub fn dbg_inline_block(state: State, index: usize, params: anytype) !void {
@@ -2667,13 +2830,20 @@ pub const MemorySafety = union(enum) {
     /// Used after paintSpatialMemory when initializing refinements created by typeToRefinement.
     /// Pointers in the structure point to entities that don't have real values yet,
     /// so their targets get .placeholder memory_safety.
-    fn initPointerTargetsPlaceholder(refinements: *Refinements, gid: Gid) void {
+    /// IMPORTANT: Only paints if target doesn't already have memory_safety set.
+    /// This prevents overwriting caller-owned entities when store aliases a pointer
+    /// to point at an existing entity with valid memory_safety.
+    pub fn initPointerTargetsPlaceholder(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
             .pointer => |p| {
-                // Set target to placeholder and recurse
-                paintSpatialMemory(refinements, p.to, .{ .placeholder = {} });
+                // Only set target to placeholder if it doesn't already have memory_safety set
+                // This prevents overwriting caller-owned entities that were aliased via store
+                const target_ref = refinements.at(p.to);
+                if (hasNoMemorySafety(target_ref)) {
+                    paintSpatialMemory(refinements, p.to, .{ .placeholder = {} });
+                }
                 initPointerTargetsPlaceholder(refinements, p.to);
             },
             .optional => |o| initPointerTargetsPlaceholder(refinements, o.to),
@@ -3310,7 +3480,9 @@ pub const MemorySafety = union(enum) {
             },
             .interned => return reportFreeGlobalMemory(ctx),
             .error_stub => return,
-            .placeholder => std.debug.panic("placeholder in free - entity not initialized", .{}),
+            // Placeholder = never allocated. Can't free what was never allocated.
+                // This is an infeasible code path in our conservative analysis.
+                .placeholder => return error.InvalidReallocInput,
             .allocated => {},
         }
 
@@ -3467,14 +3639,12 @@ pub const MemorySafety = union(enum) {
             .root_gid = null,
         };
 
-        // The errorunion wrapper itself is a fresh computed value on the stack.
-        eu.analyte.memory_safety = .{ .stack = .{
+        // The errorunion and pointer (inside errorunion) are fresh computed values on the stack.
+        // paintSpatialMemory traverses errorunion.to but not pointer.to, so region stays unaffected.
+        paintSpatialMemory(state.refinements, eu_idx, .{ .stack = .{
             .meta = state.ctx.meta,
             .root_gid = null,
-        } };
-
-        // Note: We only set memory_safety on the REGION and ELEMENT, not the pointer itself.
-        // The pointer is a return value (register/stack), the region/element are on the heap.
+        } });
 
         // Set memory_safety on region (alloc allocations have metadata ON the region)
         region.analyte.memory_safety = .{
@@ -3547,6 +3717,8 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
+        // Debug output will be added when we hit the error path
+
         const ptr_idx: Gid = switch (slice_src) {
             .inst => |inst| results[inst].refinement orelse return error.InvalidReallocInput,
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
@@ -3570,8 +3742,13 @@ pub const MemorySafety = union(enum) {
                     if (s.root_gid != null) return reportFreeFieldPointerStack(ctx, s);
                 },
                 .interned => return reportFreeGlobalMemory(ctx),
-                .error_stub => return error.InternedNoOp,
-                .placeholder => std.debug.panic("placeholder in free-like path - pointer not initialized", .{}),
+                .error_stub => {
+                    std.debug.print("DEBUG: error_stub on ptr_refinement at freeSliceLike\n", .{});
+                    ctx.dumpStackTrace();
+                    return error.InternedNoOp;
+                },
+                // Placeholder = never allocated - infeasible code path
+                .placeholder => return error.InvalidReallocInput,
             }
         }
 
@@ -3587,8 +3764,14 @@ pub const MemorySafety = union(enum) {
                             if (allow_interned_noop) return error.InternedNoOp;
                             return reportFreeGlobalMemory(ctx);
                         },
-                        .error_stub => return error.InternedNoOp,
-                        .placeholder => std.debug.panic("placeholder in free-like path - region not initialized", .{}),
+                        .error_stub => {
+                            std.debug.print("DEBUG: error_stub on region.ms at freeSliceLike\n", .{});
+                            std.debug.print("  ptr_idx={}, pointee_idx={}, pointer.to={}\n", .{ ptr_idx, pointee_idx, ptr_refinement.pointer.to });
+                            ctx.dumpStackTrace();
+                            return error.InternedNoOp;
+                        },
+                        // Placeholder = never allocated - infeasible code path
+                        .placeholder => return error.InvalidReallocInput,
                     }
                 }
                 const element_ref = refinements.at(r.to);
@@ -3615,8 +3798,13 @@ pub const MemorySafety = union(enum) {
         switch (ms_ptr.*) {
             .stack => |sp| return reportFreeStackMemory(ctx, sp),
             .interned => return reportFreeGlobalMemory(ctx),
-            .error_stub => return error.InternedNoOp,
-            .placeholder => std.debug.panic("placeholder in free-like path - pointee not initialized", .{}),
+            .error_stub => {
+                std.debug.print("DEBUG: error_stub on pointee_analyte.ms at freeSliceLike\n", .{});
+                ctx.dumpStackTrace();
+                return error.InternedNoOp;
+            },
+            // Placeholder = never allocated - infeasible code path
+            .placeholder => return error.InvalidReallocInput,
             .allocated => {},
         }
 
@@ -3718,12 +3906,20 @@ pub const MemorySafety = union(enum) {
     fn handleAllocRemap(state: State, index: usize, args: []const tag.Src) !void {
         _ = args;
         const result_gid = state.results[index].refinement orelse return;
-        const result_ref = state.refinements.at(result_gid);
-        if (result_ref.* != .optional) return;
-        result_ref.optional.analyte.memory_safety = .{ .stack = .{
+        const refinements = state.refinements;
+
+        // The return value (optional + payload) lives on the stack
+        const stack_ms: MemorySafety = .{ .stack = .{
             .meta = state.ctx.meta,
             .root_gid = null,
         } };
+
+        // Paint spatial memory: sets stack on optional, pointer (via optional.to traversal)
+        paintSpatialMemory(refinements, result_gid, stack_ms);
+
+        // Initialize pointer targets to placeholder if not already set
+        // This handles the case where source was placeholder and we created a fresh slot
+        initPointerTargetsPlaceholder(refinements, result_gid);
     }
 
     /// Handle ArenaAllocator.init() - creates an ArenaAllocator.
@@ -3889,7 +4085,11 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
 
     switch (refinement) {
         .scalar => |s| {
-            if (s.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on scalar (idx={d})", .{idx});
+            if (s.analyte.memory_safety == null) {
+                std.debug.print("TESTVALID FAIL: scalar at idx={d} - memory_safety is null\n", .{idx});
+                std.debug.dumpCurrentStackTrace(@returnAddress());
+                std.debug.panic("memory_safety must be set on scalar (idx={d})", .{idx});
+            }
         },
         .pointer => |p| {
             if (p.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on pointer (idx={d})", .{idx});
