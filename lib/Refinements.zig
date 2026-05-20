@@ -326,10 +326,13 @@ pub const Refinement = union(enum) {
     /// This is intended for fixed slots like return_gid where the top-level GID must remain stable.
     pub fn copyToSlot(dst_gid: Gid, src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !void {
         const allocator = dst_list.list.allocator;
-        const dst = dst_list.at(dst_gid);
-        dst_list.freeValue(dst);
+        // IMPORTANT: Don't capture dst pointer before copyTo calls - copyTo can
+        // reallocate dst_list.list, invalidating any pointers into it.
+        // We must free the old value first, then build the new value, then
+        // re-fetch the destination pointer after all potential reallocations.
+        dst_list.freeValue(dst_list.at(dst_gid));
 
-        dst.* = switch (src) {
+        const new_value: Refinement = switch (src) {
             .scalar => src,
             .allocator => src,
             .fnptr => |f| blk: {
@@ -373,6 +376,10 @@ pub const Refinement = union(enum) {
             .void => .{ .void = {} },
             .noreturn => .{ .noreturn = {} },
         };
+
+        // Now safe to get dst pointer - no more reallocations possible
+        const dst = dst_list.at(dst_gid);
+        dst.* = new_value;
 
         switch (dst.*) {
             .void, .noreturn, .unimplemented => {},
@@ -952,13 +959,21 @@ const undefined_analysis = @import("analysis/undefined_safety.zig");
 const memory_safety_analysis = @import("analysis/memory_safety.zig");
 const null_safety_analysis = @import("analysis/null_safety.zig");
 const variant_safety_analysis = @import("analysis/variant_safety.zig");
+const fd_safety_analysis = @import("analysis/fd_safety.zig");
+const fieldparentptr_safety_analysis = @import("analysis/fieldparentptr_safety.zig");
 
-pub fn testValid(self: *Refinements) void {
-    for (self.list.items, 0..) |refinement, i| {
+/// Validate refinements in the table.
+/// Only validates entities from base_gid onwards - caller-owned entities (below base_gid)
+/// are the caller's responsibility and may have different validity states during
+/// nested function execution.
+pub fn testValid(self: *Refinements, base_gid: Gid) void {
+    for (self.list.items[base_gid..], base_gid..) |refinement, i| {
         undefined_analysis.testValid(refinement, i);
         memory_safety_analysis.testValid(refinement, i);
         null_safety_analysis.testValid(refinement);
         variant_safety_analysis.testValid(refinement);
+        fd_safety_analysis.testValid(refinement, i);
+        fieldparentptr_safety_analysis.testValid(refinement, i);
     }
 }
 

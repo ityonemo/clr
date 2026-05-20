@@ -11,10 +11,17 @@ fi
 
 AIR_FILE="$1"
 LIB_DIR="lib"
+CACHE_ROOT="$(mktemp -d)"
+trap 'rm -rf "$CACHE_ROOT"' EXIT
 
 if [ ! -f "$AIR_FILE" ]; then
     echo "Error: File not found: $AIR_FILE"
     exit 1
 fi
 
-zig run --dep clr -Mroot="$AIR_FILE" -Mclr="${LIB_DIR}/lib.zig"
+zig run \
+    --dep clr \
+    -Mroot="$AIR_FILE" \
+    -Mclr="${LIB_DIR}/lib.zig" \
+    --cache-dir "$CACHE_ROOT/local" \
+    --global-cache-dir "$CACHE_ROOT/global"

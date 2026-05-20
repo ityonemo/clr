@@ -116,6 +116,7 @@ pub const OrphanContext = union(enum) {
     branch_merge: struct {
         meta: Meta,
         branch_type: BranchType,
+        base_len: usize,
     },
     /// Entity unreachable at end of function
     function_end: struct {

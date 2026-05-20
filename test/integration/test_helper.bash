@@ -34,7 +34,8 @@ compile_air() {
         -ofmt=air \
         -femit-bin="$output" \
         -fno-valgrind \
-        --global-cache-dir "$TEST_TEMP/.zig-cache" \
+        --cache-dir "$TEST_TEMP/.zig-local-cache" \
+        --global-cache-dir "$TEST_TEMP/.zig-global-cache" \
         -lc \
         "$input" 2>&1
 }
@@ -47,7 +48,8 @@ run_air() {
         --dep clr \
         -Mroot="$zig_file" \
         -Mclr="${LIB_DIR}/lib.zig" \
-        --global-cache-dir "$TEST_TEMP/.zig-cache" \
+        --cache-dir "$TEST_TEMP/.zig-local-cache-run" \
+        --global-cache-dir "$TEST_TEMP/.zig-global-cache-run" \
         2>&1
 }
 

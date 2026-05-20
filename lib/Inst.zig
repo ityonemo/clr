@@ -108,16 +108,32 @@ fn srcToGid(state: State, src: tag.Src) !Gid {
 }
 
 fn initRemapReturnSlot(state: State, index: usize, args: []const tag.Src, return_type: tag.Type) !void {
-    if (args.len < 2) {
-        const return_ref = try tag.typeToRefinement(return_type, state.refinements);
-        state.results[index].refinement = try state.refinements.appendEntity(return_ref);
-        return;
+    if (args.len >= 2) {
+        const old_slice_gid = try srcToGid(state, args[1]);
+        const old_slice_ref = state.refinements.at(old_slice_gid);
+
+        // Check if the source slice's region has placeholder memory_safety.
+        // If so, the source memory was never allocated, so remap semantically
+        // must fail - don't copy the placeholder-containing payload.
+        const has_valid_region = blk: {
+            if (old_slice_ref.* != .pointer) break :blk false;
+            const region_ref = state.refinements.at(old_slice_ref.pointer.to);
+            if (region_ref.* != .region) break :blk false;
+            const region_ms = region_ref.region.analyte.memory_safety orelse break :blk false;
+            break :blk region_ms != .placeholder;
+        };
+
+        if (has_valid_region) {
+            const payload_gid = try state.refinements.valueCopy(old_slice_gid);
+            const result_gid = try state.refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
+            state.results[index].refinement = result_gid;
+            return;
+        }
     }
 
-    const old_slice_gid = try srcToGid(state, args[1]);
-    const payload_gid = try state.refinements.valueCopy(old_slice_gid);
-    const result_gid = try state.refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
-    state.results[index].refinement = result_gid;
+    // Fall through: no valid source slice - create fresh return slot
+    const return_ref = try tag.typeToRefinement(return_type, state.refinements);
+    state.results[index].refinement = try state.refinements.appendEntity(return_ref);
 }
 
 pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, args: []const tag.Src, fqn: []const u8) !void {
@@ -131,6 +147,12 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     }
 
     const return_slot = state.results[index].refinement.?;
+
+    // Initialize the return slot with stack memory_safety.
+    // The callee may return a different GID (not using return_slot), leaving
+    // the original return_slot entities orphaned but still in the table.
+    // They need valid memory_safety so testValid doesn't fail on them.
+    tag.splatInitCallReturnSlot(state.refinements, return_slot, state.ctx);
 
     // Dispatch to analysis modules' runtime call filters
     // If any module intercepts (returns true), skip normal function execution
@@ -198,6 +220,44 @@ pub fn splatCall(
         }
     }
     return intercepted;
+}
+
+/// Debug helper to print refinement structure with memory_safety values.
+fn debugPrintStructure(refinements: *Refinements, gid: Gid, depth: usize) void {
+    const indent = "  " ** 8;
+    const ref = refinements.at(gid);
+    switch (ref.*) {
+        .scalar => |s| {
+            const ms_str = if (s.analyte.memory_safety) |ms| @tagName(ms) else "null";
+            std.debug.print("{s}[{d}] scalar memory_safety={s}\n", .{ indent[0 .. depth * 2], gid, ms_str });
+        },
+        .pointer => |p| {
+            const ms_str = if (p.analyte.memory_safety) |ms| @tagName(ms) else "null";
+            std.debug.print("{s}[{d}] pointer memory_safety={s} -> {d}\n", .{ indent[0 .. depth * 2], gid, ms_str, p.to });
+            debugPrintStructure(refinements, p.to, depth + 1);
+        },
+        .optional => |o| {
+            const ms_str = if (o.analyte.memory_safety) |ms| @tagName(ms) else "null";
+            std.debug.print("{s}[{d}] optional memory_safety={s} -> {d}\n", .{ indent[0 .. depth * 2], gid, ms_str, o.to });
+            debugPrintStructure(refinements, o.to, depth + 1);
+        },
+        .region => |r| {
+            const ms_str = if (r.analyte.memory_safety) |ms| @tagName(ms) else "null";
+            std.debug.print("{s}[{d}] region memory_safety={s} -> {d}\n", .{ indent[0 .. depth * 2], gid, ms_str, r.to });
+            debugPrintStructure(refinements, r.to, depth + 1);
+        },
+        .@"struct" => |s| {
+            const ms_str = if (s.analyte.memory_safety) |ms| @tagName(ms) else "null";
+            std.debug.print("{s}[{d}] struct memory_safety={s} fields={d}\n", .{ indent[0 .. depth * 2], gid, ms_str, s.fields.len });
+            for (s.fields, 0..) |field_gid, i| {
+                std.debug.print("{s}  field[{d}]:\n", .{ indent[0 .. depth * 2], i });
+                debugPrintStructure(refinements, field_gid, depth + 2);
+            }
+        },
+        else => {
+            std.debug.print("{s}[{d}] {s}\n", .{ indent[0 .. depth * 2], gid, @tagName(ref.*) });
+        },
+    }
 }
 
 /// Store a function pointer constant with its specific function as a choice.
@@ -360,6 +420,203 @@ pub fn cond_br(
         }
     }
     // Free the branch ArrayLists (the States are either transferred or freed above)
+    true_early_returns.deinit(ctx.allocator);
+    false_early_returns.deinit(ctx.allocator);
+
+    // Propagate created/modified GIDs to parent's lists if tracking
+    if (state.created_gids) |parent_created| {
+        try parent_created.appendSlice(ctx.allocator, true_created.items);
+        try parent_created.appendSlice(ctx.allocator, false_created.items);
+    }
+    if (state.modified_gids) |parent_modified| {
+        try parent_modified.appendSlice(ctx.allocator, true_modified.items);
+        try parent_modified.appendSlice(ctx.allocator, false_modified.items);
+    }
+}
+
+/// Parameters for remap_br - passed from codegen to set up both branches
+pub const RemapBrParams = struct {
+    /// Source slice being remapped
+    old_slice: tag.Src,
+    /// Return type for creating result refinement
+    return_type: tag.Type,
+    /// Instruction index of the original remap call (for result placement)
+    call_idx: usize,
+};
+
+/// Execute a remap branch - fused call(remap) + is_non_null + cond_br.
+/// Sets up result slots for both branches with proper memory_safety semantics,
+/// then executes them. Unlike cond_br, this handles remap-specific setup:
+/// - Success branch: old slice freed, new slice allocated, optional non-null
+/// - Failure branch: old slice valid, optional null
+pub fn remap_br(
+    state: State,
+    comptime index: usize,
+    comptime true_fn: fn (State) anyerror!void,
+    comptime false_fn: fn (State) anyerror!void,
+    params: RemapBrParams,
+) !void {
+    const ctx = state.ctx;
+    const results = state.results;
+    const return_gid = state.return_gid;
+
+    // Resolve old_slice GID from parent state BEFORE cloning
+    const old_slice_gid: Gid = switch (params.old_slice) {
+        .inst => |inst| results[inst].refinement.?,
+        .interned => |interned| state.refinements.getGlobal(interned.ip_idx).?,
+        .fnptr => @panic("remap_br: old_slice cannot be fnptr"),
+    };
+
+    // Clone results and refinements for each branch
+    const true_results = try clone_results_list(results, ctx.allocator);
+    defer clear_results_list(true_results, ctx.allocator);
+    var true_refinements = try state.refinements.clone(ctx.allocator);
+    defer true_refinements.deinit();
+
+    const false_results = try clone_results_list(results, ctx.allocator);
+    defer clear_results_list(false_results, ctx.allocator);
+    var false_refinements = try state.refinements.clone(ctx.allocator);
+    defer false_refinements.deinit();
+
+    // === SUCCESS BRANCH SETUP ===
+    // Create result: optional with FRESH payload structure (not copied from old_slice).
+    // This is critical: remap returns a NEW slice pointing to new memory.
+    const success_result_gid: Gid = blk: {
+        const return_ref = try tag.typeToRefinement(params.return_type, &true_refinements);
+        const gid = try true_refinements.appendEntity(return_ref);
+        true_results[params.call_idx].refinement = gid;
+        // Initialize structural state (undefined_safety, etc.) but NOT memory_safety
+        tag.splatInit(&true_refinements, gid, ctx, .runtime);
+        break :blk gid;
+    };
+
+    // === FAILURE BRANCH SETUP ===
+    // Create result: null optional (fresh from type)
+    const failure_result_gid: Gid = blk: {
+        const return_ref = try tag.typeToRefinement(params.return_type, &false_refinements);
+        const gid = try false_refinements.appendEntity(return_ref);
+        false_results[params.call_idx].refinement = gid;
+        // Initialize structural state
+        tag.splatInit(&false_refinements, gid, ctx, .runtime);
+        break :blk gid;
+    };
+
+    // Set up memory_safety and null_safety for each branch via analysis dispatch
+    tag.splatRemapSetup(&true_refinements, ctx, true, old_slice_gid, success_result_gid);
+    tag.splatRemapSetup(&false_refinements, ctx, false, old_slice_gid, failure_result_gid);
+
+    // Create GID tracking lists for each branch
+    var true_created = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer true_created.deinit(ctx.allocator);
+    var true_modified = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer true_modified.deinit(ctx.allocator);
+
+    var false_created = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer false_created.deinit(ctx.allocator);
+    var false_modified = std.ArrayListUnmanaged(Refinements.Gid){};
+    defer false_modified.deinit(ctx.allocator);
+
+    // Track if each branch returns
+    var true_returns: bool = false;
+    var false_returns: bool = false;
+
+    // Detect if success branch is semantically unreachable based on old_slice's memory_safety.
+    // If old_slice's region is not allocated (placeholder/interned/stack/error_stub),
+    // remap cannot succeed, so the success branch is unreachable.
+    {
+        const old_slice_ref = state.refinements.at(old_slice_gid);
+        if (old_slice_ref.* == .pointer) {
+            const old_region_gid = old_slice_ref.pointer.to;
+            const old_region = state.refinements.at(old_region_gid);
+            // Access memory_safety through region.analyte
+            if (old_region.* == .region) {
+                if (old_region.region.analyte.memory_safety) |old_ms| {
+                    switch (old_ms) {
+                        .placeholder, .interned, .stack, .error_stub => {
+                            // Success branch is unreachable - mark it so merge skips it
+                            true_returns = true;
+                        },
+                        .allocated => {},
+                    }
+                }
+            }
+        }
+    }
+
+    // Create branch-local early_returns lists
+    var true_early_returns = std.ArrayListUnmanaged(State){};
+    var false_early_returns = std.ArrayListUnmanaged(State){};
+
+    // Build state for each branch
+    const true_state = State{
+        .ctx = ctx,
+        .results = true_results,
+        .refinements = &true_refinements,
+        .return_gid = return_gid,
+        .base_gid = state.base_gid,
+        .created_gids = &true_created,
+        .modified_gids = &true_modified,
+        .branch_returns = &true_returns,
+        .early_returns = &true_early_returns,
+        .dispatch_target = state.dispatch_target,
+        .copied_gids = state.copied_gids,
+    };
+    const false_state = State{
+        .ctx = ctx,
+        .results = false_results,
+        .refinements = &false_refinements,
+        .return_gid = return_gid,
+        .base_gid = state.base_gid,
+        .created_gids = &false_created,
+        .modified_gids = &false_modified,
+        .branch_returns = &false_returns,
+        .early_returns = &false_early_returns,
+        .dispatch_target = state.dispatch_target,
+        .copied_gids = state.copied_gids,
+    };
+
+    // Save ctx.meta before branches execute
+    const saved_meta = ctx.meta;
+
+    // Execute both branches (no RemapBranch tag injection - setup is already done)
+    try true_fn(true_state);
+    try false_fn(false_state);
+
+    // Restore ctx.meta for the merge
+    ctx.meta = saved_meta;
+
+    // Create parent refinement for call_idx so merge has a target to merge into
+    {
+        const return_ref = try tag.typeToRefinement(params.return_type, state.refinements);
+        const parent_result_gid = try state.refinements.appendEntity(return_ref);
+        results[params.call_idx].refinement = parent_result_gid;
+        tag.splatInit(state.refinements, parent_result_gid, ctx, .runtime);
+    }
+
+    // Record base_len BEFORE creating void
+    const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
+
+    // Mark the remap_br instruction as void
+    results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+
+    // Merge branches (use cond_br merge - it's just a regular branch merge now)
+    const branches = [_]State{ true_state, false_state };
+    try tag.splatMerge(.cond_br, results, ctx, state.refinements, &branches, null, branch_base_len, state.copied_gids);
+
+    // Propagate early_returns to parent if tracking
+    if (state.early_returns) |parent_early| {
+        try parent_early.appendSlice(ctx.allocator, true_early_returns.items);
+        try parent_early.appendSlice(ctx.allocator, false_early_returns.items);
+    } else {
+        for (true_early_returns.items) |s| {
+            s.refinements.deinit();
+            ctx.allocator.destroy(s.refinements);
+        }
+        for (false_early_returns.items) |s| {
+            s.refinements.deinit();
+            ctx.allocator.destroy(s.refinements);
+        }
+    }
     true_early_returns.deinit(ctx.allocator);
     false_early_returns.deinit(ctx.allocator);
 
@@ -699,6 +956,9 @@ pub fn loop_switch_br(
             }
             if (!any_has_refinement) continue;
 
+            // Capture base_len before copyTo - entities >= this are from branches
+            const merge_base_len: Gid = @intCast(state.refinements.list.items.len);
+
             // Copy refinement from first terminal state that has it, then merge all
             for (terminal_states.items) |ts| {
                 if (ts.results[result_idx].refinement) |gid| {
@@ -714,7 +974,7 @@ pub fn loop_switch_br(
             }
 
             // Now merge this slot across all terminal states
-            try tag.splatMergeByGid(.loop_switch_br, state.refinements, result.refinement.?, ctx, terminal_states.items, result_idx);
+            try tag.splatMergeByGid(.loop_switch_br, state.refinements, result.refinement.?, ctx, terminal_states.items, result_idx, merge_base_len);
         }
     }
 

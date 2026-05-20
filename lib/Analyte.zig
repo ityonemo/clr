@@ -89,6 +89,7 @@ pub fn formatMemSafety(self: Analyte) []const u8 {
             .stack => "stack",
             .interned => "interned",
             .error_stub => "error_stub",
+            .placeholder => "placeholder",
         };
     }
     return "null";

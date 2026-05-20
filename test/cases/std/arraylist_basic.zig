@@ -6,13 +6,13 @@ pub fn main() u8 {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var list = std.ArrayList(u8).init(allocator);
-    defer list.deinit();
+    var list = std.ArrayList(u8).initCapacity(allocator, 0) catch return 1;
+    defer list.deinit(allocator);
 
     // Append some items
-    list.append(1) catch return 1;
-    list.append(2) catch return 1;
-    list.append(3) catch return 1;
+    list.append(allocator, 1) catch return 1;
+    list.append(allocator, 2) catch return 1;
+    list.append(allocator, 3) catch return 1;
 
     // Access items
     if (list.items.len != 3) return 2;

@@ -317,9 +317,6 @@ pub const UndefinedSafety = union(enum) {
         const container_idx = refinements.at(ptr_ref).pointer.to;
         const u = &refinements.at(container_idx).@"union";
 
-        // When a tag is set, the union container is being initialized - mark as defined
-        u.analyte.undefined_safety = .{ .defined = {} };
-
         // The newly activated field is undefined (tag set but value not stored yet)
         const field_idx = params.field_index.?;
         if (u.fields[field_idx]) |field_eidx| {
@@ -360,17 +357,7 @@ pub const UndefinedSafety = union(enum) {
         }
         const u = src_ref.@"union";
 
-        // Check 1: If the union itself is undefined, mark result as undefined
-        if (u.analyte.undefined_safety) |us| {
-            if (us == .undefined) {
-                refinements.at(result_gid).scalar.analyte.undefined_safety = .{
-                    .undefined = .{ .meta = us.undefined.meta, .name_when_set = us.undefined.name_when_set },
-                };
-                return;
-            }
-        }
-
-        // Check 2: If no variant is active (all active_metas are null), mark result as undefined
+        // If no variant is active (all active_metas are null), the tag is undefined.
         if (u.analyte.variant_safety) |vs| {
             var any_active = false;
             for (vs.active_metas) |meta| {
@@ -793,12 +780,14 @@ pub const UndefinedSafety = union(enum) {
                     setDefinedRecursive(refinements, field_idx);
                 }
             },
-            .@"union" => |*u| {
-                // Set union's analyte to defined
-                u.analyte.undefined_safety = .{ .defined = {} };
-                // NOTE: Do NOT recurse into union fields. Union fields have their own
-                // independent undefined states based on whether the field VALUE is undefined
-                // (e.g., .{ .int = undefined } has a defined union but undefined field value).
+            .@"union" => |u| {
+                // Union active/inactive state is represented by variant_safety; only
+                // active payload fields carry undefined_safety.
+                for (u.fields) |field_idx_opt| {
+                    if (field_idx_opt) |field_idx| {
+                        setDefinedRecursive(refinements, field_idx);
+                    }
+                }
             },
             .allocator => |*a| {
                 // Only set to defined if not already set
@@ -1032,10 +1021,9 @@ pub const UndefinedSafety = union(enum) {
                     setSafetyState(refinements, field_idx, undef_state);
                 }
             },
-            .@"union" => |*u| {
-                // Set analyte.undefined on union - used when activating inactive fields later
-                u.analyte.undefined_safety = undef_state;
-                // Also set on active fields
+            .@"union" => |u| {
+                // Union containers do not carry undefined_safety. Only active payload
+                // fields carry defined/undefined state.
                 for (u.fields) |field_idx_opt| {
                     if (field_idx_opt) |field_idx| {
                         setSafetyState(refinements, field_idx, undef_state);
@@ -1150,9 +1138,7 @@ pub const UndefinedSafety = union(enum) {
             .@"union" => |union_type| {
                 // Apply field-level undefined state for unions
                 switch (refinements.at(idx).*) {
-                    .@"union" => |*u| {
-                        // Mark union itself as defined (since we're storing a value, not undefined)
-                        u.analyte.undefined_safety = .{ .defined = {} };
+                    .@"union" => |u| {
                         for (union_type.variants, 0..) |field_type, i| {
                             if (i < u.fields.len) {
                                 if (u.fields[i]) |field_idx| {
@@ -1297,9 +1283,8 @@ pub const UndefinedSafety = union(enum) {
                                 }
                             }
                         },
-                        .@"union" => |*u| {
-                            // When storing a union value, mark union and active fields as defined
-                            u.analyte.undefined_safety = .{ .defined = {} };
+                        .@"union" => |u| {
+                            // When storing a union value, mark active fields as defined.
                             for (u.fields) |field_idx_opt| {
                                 if (field_idx_opt) |field_idx| {
                                     setDefinedRecursive(refinements, field_idx);
@@ -1544,27 +1529,13 @@ pub const UndefinedSafety = union(enum) {
                 try checkFieldUndefined(refinements, field_idx, ctx);
             },
             .@"union" => |u| {
-                // For unions, if the field is inactive (was null in tag handler), it was just created
-                // and needs to inherit the union's undefined state
                 if (u.fields[params.field_index]) |field_idx| {
                     // Active field - check its state
                     try checkFieldUndefined(refinements, field_idx, ctx);
                 } else {
-                    // Field was inactive - the tag handler created a fresh entity
-                    // Check the union's analyte undefined state instead
-                    if (u.analyte.undefined_safety) |undef| {
-                        // Set the result's undefined state before checking/reporting errors
-                        // This ensures testValid won't panic on the fresh result entity
-                        setSafetyState(refinements, result_idx, undef);
-                        switch (undef) {
-                            .undefined => return undef.reportUseBeforeAssign(ctx),
-                            .inconsistent => return undef.reportInconsistentBranches(ctx),
-                            .defined => {},
-                        }
-                    } else {
-                        // No undefined state on union - set result to defined
-                        setDefinedRecursive(refinements, result_idx);
-                    }
+                    // Undefined-safety does not decide inactive union field access.
+                    // Variant-safety owns that state; keep the result initialized.
+                    setDefinedRecursive(refinements, result_idx);
                 }
             },
             else => {

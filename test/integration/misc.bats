@@ -147,3 +147,27 @@ load test_helper
     run compile_and_run "$TEST_CASES/undefined_safety/memset_marks_dest_defined.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no false positive for allocation reachable through struct argument" {
+    # When a struct argument contains a pointer to allocated memory, the allocation
+    # should not be reported as leaked at branch merge points inside the called function.
+    # Pattern: HashMap passes self to getIndex, metadata field points to allocated memory.
+    run compile_and_run "$TEST_CASES/allocator_safety/struct_arg_allocated_field.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no false positive for allocation stored through slice ptr field" {
+    # When storing an allocation into a struct slice field via ptr_slice_ptr_ptr,
+    # the allocation should be reachable from the original struct at branch merge.
+    # Pattern: ArrayList.ensureTotalCapacityPrecise stores new allocation to self.items.ptr
+    run compile_and_run "$TEST_CASES/misc/slice_ptr_store_reachable.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "no placeholder error for block with nested type in branch" {
+    # Block with nested type (pointer→region→scalar) inside a conditional branch
+    # should have its memory_safety properly initialized. Previously caused
+    # "placeholder in merge - entity not initialized" panic.
+    run compile_and_run "$TEST_CASES/misc/block_nested_type_in_branch.zig"
+    [ "$status" -eq 0 ]
+}

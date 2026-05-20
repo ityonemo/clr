@@ -4,6 +4,43 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: ptr_slice_ptr_ptr creates fresh pointer chain instead of pointing to original slice
+
+**Date:** 2026-04-15
+
+**Symptom:**
+"memory leak detected at if/else merge" in `ArrayList.ensureTotalCapacityPrecise` when allocating new memory and storing it via `self.items.ptr = new_alloc.ptr`.
+
+**Root Cause:**
+The `SliceFieldPtr.apply` handler (used by `ptr_slice_ptr_ptr`) created a fresh pointer chain from the type description instead of creating a pointer that points to the original slice entity. When storing through this fresh pointer, the store updated the fresh chain, not the original struct field. At branch merge, the allocation was not seen as reachable from the original struct.
+
+**When This Happens:**
+- Container struct has a slice field (e.g., `items: []u8`)
+- Code stores allocation to slice's ptr field: `container.items.ptr = new_alloc.ptr`
+- This generates: `struct_field_ptr` → `ptr_slice_ptr_ptr` → `slice_ptr` → `store`
+- The `ptr_slice_ptr_ptr` result was a fresh pointer, not connected to the original `items` field
+- At branch merge, orphan detection doesn't find allocation reachable from container
+
+**The Fix:**
+Modified `SliceFieldPtr.apply` to:
+1. Get the source pointer's refinement
+2. Get the source pointer's `.to` (the slice GID)
+3. If the slice is a pointer, create result pointer with `.to = slice_gid`
+4. This ensures stores through the result update the original slice
+
+Now when we store through `ptr_slice_ptr_ptr`, the store handler updates `slice.pointer.to = src.pointer.to`, connecting the original struct field to the new allocation.
+
+**Additional Fixes:**
+Added guards in `memory_safety.onFinish` and `memory_safety.cond_br` to skip refinements without analytes (void, noreturn, unimplemented, fnptr), which could cause panics when checking pointer pointees.
+
+**Key Files Changed:**
+- `lib/tag.zig` - Modified `SliceFieldPtr.apply` to point to original slice
+- `lib/analysis/memory_safety.zig` - Added void/fnptr guards in `onFinish` and `cond_br`
+
+**Test Case:** `test/cases/misc/slice_ptr_store_reachable.zig` (test "no false positive for allocation stored through slice ptr field")
+
+---
+
 ## Fix: Create/free method mismatch not detected after bitcast
 
 **Date:** 2026-03-31

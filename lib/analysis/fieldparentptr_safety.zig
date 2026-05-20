@@ -213,3 +213,47 @@ pub const FieldParentPtrSafety = struct {
         return false;
     }
 };
+
+const debug = @import("builtin").mode == .Debug;
+
+/// Validates that fieldparentptr_safety is correctly set on refinements.
+/// - ALLOWED: .pointer (tracks where the pointer came from)
+/// - MUST BE NULL: .scalar, .optional, .errorunion, .struct, .union, .recursive, .fnptr, .allocator, .region
+/// - NO ANALYTE: .void, .noreturn, .unimplemented
+pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
+    if (!debug) return;
+    switch (refinement) {
+        // ALLOWED - fieldparentptr_safety can be null or non-null on pointers
+        .pointer => {},
+        // MUST BE NULL - fieldparentptr_safety only applies to pointers from struct fields
+        .scalar => |s| {
+            if (s.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on scalar (idx={d})", .{idx});
+        },
+        .optional => |o| {
+            if (o.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on optional (idx={d})", .{idx});
+        },
+        .errorunion => |e| {
+            if (e.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on errorunion (idx={d})", .{idx});
+        },
+        .@"struct" => |st| {
+            if (st.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on struct (idx={d})", .{idx});
+        },
+        .@"union" => |u| {
+            if (u.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on union (idx={d})", .{idx});
+        },
+        .recursive => |rec| {
+            if (rec.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on recursive (idx={d})", .{idx});
+        },
+        .fnptr => |f| {
+            if (f.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on fnptr (idx={d})", .{idx});
+        },
+        .allocator => |a| {
+            if (a.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on allocator (idx={d})", .{idx});
+        },
+        .region => |r| {
+            if (r.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on region (idx={d})", .{idx});
+        },
+        // NO ANALYTE - trivial types
+        .void, .noreturn, .unimplemented => {},
+    }
+}

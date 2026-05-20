@@ -429,3 +429,51 @@ test "ret_safe does not report stack escape when pointer points to allocated mem
     // Test passes if we get here without error
     // refinements.deinit() handles cleanup of all fields
 }
+
+test "init with runtime leaves memory_safety null" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a scalar refinement with null analytes
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+
+    // Call init with runtime - should NOT set memory_safety
+    tag.splatInit(&refinements, scalar_gid, &ctx, .runtime);
+
+    // Verify memory_safety is still null
+    const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety;
+    try std.testing.expect(ms == null);
+}
+
+test "init with defined sets memory_safety to interned" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a scalar refinement with null analytes
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+
+    // Call init with defined - should set memory_safety to interned
+    tag.splatInit(&refinements, scalar_gid, &ctx, .defined);
+
+    // Verify memory_safety is interned
+    const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety.?;
+    try std.testing.expect(ms == .interned);
+}
+
+test "init with undefined sets memory_safety to interned" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a scalar refinement with null analytes
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+
+    // Call init with undefined - should set memory_safety to interned
+    tag.splatInit(&refinements, scalar_gid, &ctx, .@"undefined");
+
+    // Verify memory_safety is interned
+    const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety.?;
+    try std.testing.expect(ms == .interned);
+}

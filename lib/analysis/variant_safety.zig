@@ -11,15 +11,20 @@ const memory_safety = @import("memory_safety.zig");
 const UndefinedSafety = @import("undefined_safety.zig").UndefinedSafety;
 
 /// Validate that variant_safety state is consistent with the refinement.
-/// Called by Refinements.testValid for each refinement.
+/// - MUST EXIST: .union
+/// - MUST BE NULL: .scalar, .pointer, .optional, .errorunion, .struct, .recursive, .fnptr, .allocator, .region
+/// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement) void {
     switch (refinement) {
+        // variant_safety must exist on unions
         .@"union" => |u| {
             if (u.analyte.variant_safety) |vs| {
                 vs.testValidForUnion(u);
+            } else {
+                std.debug.panic("variant_safety must be set on unions", .{});
             }
         },
-        // variant_safety should only exist on unions - check that other types don't have it
+        // variant_safety must be null on non-union types
         .scalar => |s| {
             if (s.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got scalar", .{});
@@ -30,13 +35,12 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("variant_safety should only exist on unions, got allocator", .{});
             }
         },
-        inline .pointer, .optional, .errorunion, .@"struct", .recursive, .fnptr => |data, t| {
+        inline .pointer, .optional, .errorunion, .@"struct", .recursive, .fnptr, .region => |data, t| {
             if (data.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got {s}", .{@tagName(t)});
             }
         },
-        // No analyte on void, noreturn, etc.
-        .void, .noreturn, .unimplemented, .region => {},
+        .void, .noreturn, .unimplemented => {},
     }
 }
 

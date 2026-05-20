@@ -56,6 +56,13 @@ There should be no side-channel recursive assignment of pointer types' to field,
 
 It is tempting to check the .undefined analyte type.  Don't do it.
 
+## NO papering over invariant misses.
+
+For example, if we are doing something with .placeholder, this is a problem,
+unless it's legitimately an unassigned pointer.
+
+Another example:  error.SomeError => return
+
 ## init() strategy.
 
 init() should be null for runtime spatial memory, and setting memory_safety on those

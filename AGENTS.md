@@ -1,0 +1,150 @@
+# AGENTS.md
+
+## Project Overview
+
+CLR is a Zig-based static analysis plugin for a forked Zig compiler. The plugin
+emits `.air.zig` analyzer programs from Zig AIR, and the runtime library in
+`lib/` executes those analyzers to detect memory safety, undefined-value, null,
+variant, fieldParentPtr, and file-descriptor issues.
+
+## Important Directories
+
+- `src/`: compiler plugin and AIR-to-Zig code generation.
+- `lib/`: runtime analysis library used by generated analyzers.
+- `lib/analysis/`: individual safety analyses and their focused tests.
+- `test/cases/`: Zig input programs used by integration tests.
+- `test/integration/`: BATS integration tests.
+- `zig/`: forked Zig compiler submodule. Do not modify unless explicitly asked.
+- `vendor/`: vendored validation projects and external inputs.
+
+## Build And Test Commands
+
+- Build plugin: `zig build -Doptimize=ReleaseFast`
+- Codegen/plugin tests: `zig build test`
+- Runtime library tests: `zig test lib/lib.zig`
+- Single test case: `./run_one.sh test/cases/path/to/case.zig`
+- Integration test file: `bats test/integration/name.bats`
+- Full integration suite: `./run_integration.sh`
+- Clean generated analyzer files: `./clear.sh`
+
+Use `ReleaseFast` by default. The vendored Zig compiler and `libclr.so` must be
+built with matching optimization modes or plugin loading may crash.
+
+## Development Workflow
+
+For bug fixes and new analysis behavior:
+
+1. Add or identify a failing test before changing implementation code.
+2. Prefer a focused unit test in `lib/analysis/*_test.zig` or
+   `src/codegen_test.zig` when the bug is localized.
+3. Add a minimal Zig case under `test/cases/`.
+4. Add BATS coverage under the appropriate `test/integration/*.bats` file.
+5. Fix the implementation in `lib/`, `src/`, or both.
+6. Run the narrowest relevant tests first.
+7. Run the full integration suite once before committing broad changes.
+8. Document completed fixes in `FIXES_LOG.md`.
+
+Do not delete, skip, or weaken integration tests to make the suite pass without
+explicit permission. Investigate failures instead of assuming they are
+pre-existing.
+
+## Debugging Generated Analyzers
+
+`./run_one.sh` generates a root-level `.air.zig` file. After generation, run it
+directly for faster iteration:
+
+```sh
+zig run --dep clr -Mroot=name.air.zig -Mclr=lib/lib.zig
+```
+
+It is acceptable to temporarily instrument generated `.air.zig` files while
+debugging. They are ignored by git and can be removed with `./clear.sh`.
+
+For raw AIR around a function, use:
+
+```sh
+./dump_air.sh test/cases/path/to/case.zig function.name 80
+```
+
+Do not use `-femit-air` or `--verbose-air` directly; use the helper scripts.
+
+## Coding Guidelines
+
+- Match existing Zig style and local helper APIs.
+- Keep changes scoped to the affected analysis or codegen path.
+- Avoid broad refactors while fixing a specific false positive or false
+  negative.
+- Commit messages should indicate the commit content contains code written by
+  Codex.
+- Treat `.air.zig` files, `.zig-cache/`, and `zig-out/` as generated artifacts.
+- Do not modify `zig/` unless the task explicitly requires compiler changes.
+- Be careful with dirty worktrees; preserve user changes and avoid reverting
+  unrelated files.
+
+## Test Expectations
+
+`zig build test` only covers `src/` tests. When changing runtime analysis logic,
+also run `zig test lib/lib.zig`.
+
+Integration tests should assert exit status, error type, function name, source
+location, and relevant context messages where applicable.
+
+## Current Implementation Risks
+
+The integration baseline after the union container-state fix is `316/368`
+passing (`52` failing). Treat the remaining failures as real analyzer work, not
+compiler-cache failures.
+
+The largest incomplete areas are:
+
+- Union and variant state. Union containers must not carry `undefined_safety`;
+  active/inactive state belongs in `variant_safety`, while active field payloads
+  carry undefined state. The first union-state fix removed known
+  `undefined_safety` writes from union containers and got tagged/untagged defined
+  field cases passing. Remaining union gaps include whole-union undefined
+  detection (`undefined.bats` 311, 315, 331), switching on global union dispatch
+  (`variant_safety.bats` 365), recursive cleanup (`recursive.bats` 237), and
+  union return/provenance cases in allocator, fieldParentPtr, and stack-pointer
+  analyses.
+- Interprocedural ownership transfer. Allocator and slice cases fail when caller
+  and callee transfer responsibility for freeing memory. Return/call handling is
+  currently connectivity-based and several `call_return` handlers are no-ops, so
+  ownership is not consistently reconciled at function boundaries.
+- Field pointer provenance. `fieldParentPtr` tracking depends on
+  `struct_field_ptr` producing a pointer with field origin metadata. This misses
+  or loses provenance for globals, unions, returned pointers, and merged pointers.
+- FD closure propagation. FD state is scalar-only and copied through some stores
+  and aggregate inits, but close state is not reliably propagated to all aliases
+  or returned values. Correct open/close examples still report leaks.
+- Stdlib reductions. Packed struct RMW, pointer/slice conversion, memcpy, string
+  literals, ArrayList, HashMap, and error-union branch merges still expose gaps in
+  type/character preservation and analysis propagation.
+- Stack escape false positives. Returning passed-in or heap-backed pointers inside
+  structs/unions/globals is still too conservative in several cases.
+
+Problematic patterns to fix before adding more surface area:
+
+- Do not weaken `testValid`. Failures there are signals that handlers wrote
+  invalid analysis state.
+- Avoid `.scalar` fallback entities for missing or mismatched structure. The
+  project guidance says unexpected structure should be copied correctly,
+  represented as `.unimplemented`, or crash loudly.
+- Avoid `orelse return` for data that should exist. Many handlers silently skip
+  missing refinements/globals/variant state; this hides root causes and turns
+  failures into later false positives.
+- Keep analyte mutation inside `lib/analysis/*.zig`. `lib/tag.zig`,
+  `lib/Refinements.zig`, and `lib/Inst.zig` should only build structure and
+  dispatch through `splat`, except for tests or explicitly documented generic
+  helpers.
+- Preserve character across casts and stores. A pointer-like or aggregate value
+  should not degrade to scalar just because the apparent Zig type changed.
+
+Good next targets:
+
+1. Add a replacement representation for whole-union undefined state that does not
+   use container `undefined_safety`, likely through missing/empty variant state
+   plus metadata that can report the original undefined location.
+2. Then address variant merge/check behavior for branches, switch cases, globals,
+   and labeled breaks.
+3. After unions are stable, revisit allocator ownership transfer and FD aliasing,
+   since both depend heavily on reliable aggregate/union propagation.

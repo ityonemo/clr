@@ -555,6 +555,30 @@ fn payloadAlloc(info: *const FnInfo, datum: Data) []const u8 {
     return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s} }}", .{pointee_str}, null);
 }
 
+/// Helper to get an aggregate element as a source string.
+/// Returns a simple .inst or .interned source format.
+fn getAggregateElement(info: *const FnInfo, payload_index: usize, offset: usize) []const u8 {
+    if (payload_index + offset >= info.extra.len) {
+        return ".{ .inst = 0 }";
+    }
+    const raw = info.extra[payload_index + offset];
+    const ref: Ref = @enumFromInt(raw);
+    // Use simple formatting to avoid complex lookups that might crash in DLL context
+    if (ref == .none) {
+        return ".{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } }";
+    }
+    if (ref.toIndex()) |idx| {
+        return clr_allocator.allocPrint(info.arena, ".{{ .inst = {d} }}", .{@intFromEnum(idx)}, null);
+    }
+    if (ref.toInterned()) |interned_idx| {
+        const ip_idx: u32 = @intFromEnum(interned_idx);
+        // Use simple scalar type to avoid crashes - the analysis will use the struct's field type
+        return clr_allocator.allocPrint(info.arena, ".{{ .interned = .{{ .ip_idx = {d}, .ty = .{{ .scalar = {{}} }} }} }}", .{ip_idx}, null);
+    }
+    // Fallback
+    return ".{ .inst = 0 }";
+}
+
 /// Payload for aggregate_init (creates struct/array/tuple)
 fn payloadAggregateInit(info: *const FnInfo, datum: Data) []const u8 {
     // First try direct interned type, then fall back to instruction result type
@@ -582,6 +606,7 @@ fn payloadAggregateInit(info: *const FnInfo, datum: Data) []const u8 {
         else => 0,
     };
 
+    // Build elements dynamically for any count
     if (elem_count == 0) {
         return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{}} }}", .{type_str}, null);
     }
@@ -591,34 +616,33 @@ fn payloadAggregateInit(info: *const FnInfo, datum: Data) []const u8 {
     // ty_pl: { ty: Ref (u32), payload: u32 }
     const payload_index: usize = @intCast(raw_ptr[1]);
 
-    // Build elements - fully inlined to avoid DLL issues
-    if (elem_count == 0) {
-        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{}} }}", .{type_str}, null);
-    }
-
-    // Get first element
-    const elem0: []const u8 = if (payload_index < info.extra.len) blk: {
-        const raw = info.extra[payload_index];
-        const ref: Ref = @enumFromInt(raw);
-        break :blk srcString(info, ref);
-    } else ".{ .inst = 0 }";
-
+    // Build elements for up to 5 fields (covers common structs)
+    const elem0 = getAggregateElement(info, payload_index, 0);
     if (elem_count == 1) {
         return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s} }} }}", .{ type_str, elem0 }, null);
     }
 
-    // Get second element
-    const elem1: []const u8 = if (payload_index + 1 < info.extra.len) blk: {
-        const raw = info.extra[payload_index + 1];
-        const ref: Ref = @enumFromInt(raw);
-        break :blk srcString(info, ref);
-    } else ".{ .inst = 0 }";
-
+    const elem1 = getAggregateElement(info, payload_index, 1);
     if (elem_count == 2) {
         return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s}, {s} }} }}", .{ type_str, elem0, elem1 }, null);
     }
 
-    // For more than 2 elements, just return unimplemented for now
+    const elem2 = getAggregateElement(info, payload_index, 2);
+    if (elem_count == 3) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s}, {s}, {s} }} }}", .{ type_str, elem0, elem1, elem2 }, null);
+    }
+
+    const elem3 = getAggregateElement(info, payload_index, 3);
+    if (elem_count == 4) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s}, {s}, {s}, {s} }} }}", .{ type_str, elem0, elem1, elem2, elem3 }, null);
+    }
+
+    const elem4 = getAggregateElement(info, payload_index, 4);
+    if (elem_count == 5) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{ {s}, {s}, {s}, {s}, {s} }} }}", .{ type_str, elem0, elem1, elem2, elem3, elem4 }, null);
+    }
+
+    // For more than 5 elements, return empty (rare case)
     return clr_allocator.allocPrint(info.arena, ".{{ .ty = {s}, .elements = &.{{}} }}", .{type_str}, null);
 }
 
@@ -3291,6 +3315,14 @@ fn extractDestroyPtrSrc(info: *const FnInfo, datum: Data) ?[]const u8 {
 const SubTag = union(enum) {
     cond_br_true,
     cond_br_false,
+    /// Remap success branch - like cond_br_true but injects RemapBranch tag
+    remap_true: struct {
+        call_idx: u32,
+    },
+    /// Remap failure branch - like cond_br_false but injects RemapBranch tag
+    remap_false: struct {
+        call_idx: u32,
+    },
     switch_case: struct {
         case_index: u32,
         num_cases: u32,
@@ -3323,11 +3355,11 @@ const FunctionGen = union(enum) {
         return switch (self) {
             .full => |f| clr_allocator.allocPrint(arena, "fn_{d}", .{f.func_index}, null),
             .sub => |s| switch (s.tag) {
-                .cond_br_true => clr_allocator.allocPrint(arena, "fn_{d}_cond_br_true_{d}", .{
+                .cond_br_true, .remap_true => clr_allocator.allocPrint(arena, "fn_{d}_cond_br_true_{d}", .{
                     s.func_index,
                     s.instr_index,
                 }, null),
-                .cond_br_false => clr_allocator.allocPrint(arena, "fn_{d}_cond_br_false_{d}", .{
+                .cond_br_false, .remap_false => clr_allocator.allocPrint(arena, "fn_{d}_cond_br_false_{d}", .{
                     s.func_index,
                     s.instr_index,
                 }, null),
@@ -3361,7 +3393,6 @@ const FunctionGen = union(enum) {
                 \\    ctx.base_line = {d};
                 \\    try ctx.push_fn("{s}");
                 \\    defer ctx.pop_fn();
-                \\    refinements.testValid();
                 \\
                 \\    const results = try Inst.make_results_list(ctx.allocator, {d});
                 \\    defer Inst.clear_results_list(results, ctx.allocator);
@@ -3375,11 +3406,11 @@ const FunctionGen = union(enum) {
                 \\
             , .{ f.func_index, params, file_path, base_line, fqn, num_insts }, null),
             .sub => |s| switch (s.tag) {
-                .cond_br_true => clr_allocator.allocPrint(arena,
+                .cond_br_true, .remap_true => clr_allocator.allocPrint(arena,
                     \\fn fn_{d}_cond_br_true_{d}(state: State) anyerror!void {{
                     \\
                 , .{ s.func_index, s.instr_index }, null),
-                .cond_br_false => clr_allocator.allocPrint(arena,
+                .cond_br_false, .remap_false => clr_allocator.allocPrint(arena,
                     \\fn fn_{d}_cond_br_false_{d}(state: State) anyerror!void {{
                     \\
                 , .{ s.func_index, s.instr_index }, null),
@@ -3405,6 +3436,7 @@ const FunctionGen = union(enum) {
             .full => clr_allocator.allocPrint(arena,
                 \\    try Inst.mergeEarlyReturns(state);
                 \\    try Inst.onFinish(state);
+                \\    refinements.testValid(base_gid);
                 \\    return return_gid;
                 \\}}
                 \\
@@ -3674,6 +3706,45 @@ fn isDotQPattern(ip: *const InternPool, cond_br_idx: usize, tags: []const Tag, d
     return false;
 }
 
+/// Check if this cond_br is part of the remap branch pattern.
+/// Detects: call(remap) -> is_non_null -> cond_br
+/// Returns the call instruction index if pattern matches, null otherwise.
+///
+/// Pattern:
+/// 1. cond_br condition is is_non_null
+/// 2. is_non_null operand is a call instruction
+/// 3. call FQN contains "mem.Allocator.remap"
+fn isRemapBranchPattern(ip: *const InternPool, cond_br_idx: usize, tags: []const Tag, data: []const Data) ?u32 {
+    // 1. Get condition operand from cond_br
+    const cond_br_datum = data[cond_br_idx];
+    const condition_ref = cond_br_datum.pl_op.operand;
+    const condition_idx = condition_ref.toIndex() orelse return null;
+    const condition_idx_u32: u32 = @intFromEnum(condition_idx);
+
+    // 2. Check if condition is is_non_null
+    if (tags[condition_idx_u32] != .is_non_null) return null;
+
+    // 3. Get is_non_null's operand (should be the remap call)
+    const is_non_null_datum = data[condition_idx_u32];
+    const call_ref = is_non_null_datum.un_op;
+    const call_idx = call_ref.toIndex() orelse return null;
+    const call_idx_u32: u32 = @intFromEnum(call_idx);
+
+    // 4. Check if it's a call instruction
+    const call_tag = tags[call_idx_u32];
+    if (call_tag != .call and call_tag != .call_always_tail and
+        call_tag != .call_never_tail and call_tag != .call_never_inline)
+    {
+        return null;
+    }
+
+    // 5. Check if FQN contains "mem.Allocator.remap"
+    const fqn = getCallFqn(ip, data[call_idx_u32]) orelse return null;
+    if (std.mem.indexOf(u8, fqn, "mem.Allocator.remap") == null) return null;
+
+    return call_idx_u32;
+}
+
 /// Check if cmp_eq at idx is part of a union tag safety check pattern.
 /// Zig generates this pattern before union field assignment to check the variant:
 /// get_union_tag + cmp_eq + cond_br(call inactiveUnionField + unreach).
@@ -3857,6 +3928,30 @@ fn generateOneFunction(
         }
     }
 
+    // Pre-scan for remap patterns: call(remap) -> is_non_null -> cond_br
+    // Build maps: cond_br_idx -> call_idx, and indices_to_noop = {call_idx, is_non_null_idx}
+    var remap_pattern_map: std.AutoHashMapUnmanaged(u32, u32) = .empty; // cond_br_idx -> call_idx
+    var remap_noop_indices: std.AutoHashMapUnmanaged(u32, void) = .empty; // call and is_non_null indices to noop
+
+    // Scan body_set for cond_br instructions that match remap pattern
+    var body_iter = body_set.keyIterator();
+    while (body_iter.next()) |idx_ptr| {
+        const idx = idx_ptr.*;
+        if (info.tags[idx] == .cond_br) {
+            if (isRemapBranchPattern(info.ip, idx, info.tags, info.data)) |call_idx| {
+                // Found remap pattern! Get is_non_null index too
+                const cond_br_datum = info.data[idx];
+                const condition_ref = cond_br_datum.pl_op.operand;
+                const is_non_null_idx: u32 = @intFromEnum(condition_ref.toIndex().?);
+
+                // Store mapping and noop indices
+                remap_pattern_map.put(info.arena, idx, call_idx) catch @panic("out of memory");
+                remap_noop_indices.put(info.arena, call_idx, {}) catch @panic("out of memory");
+                remap_noop_indices.put(info.arena, is_non_null_idx, {}) catch @panic("out of memory");
+            }
+        }
+    }
+
     // Stack for instruction data (will be reversed)
     const InstrData = struct {
         idx: u32,
@@ -3864,6 +3959,7 @@ fn generateOneFunction(
         datum: Data,
         is_noop: bool,
         is_dotq_pattern: bool = false, // For dotQ pattern cond_br: generate Inst.apply instead of Inst.cond_br
+        remap_call_idx: ?u32 = null, // For remap pattern: the call instruction index
     };
     var stack: std.ArrayListUnmanaged(InstrData) = .empty;
 
@@ -3882,13 +3978,38 @@ fn generateOneFunction(
                     continue;
                 }
 
+                // Check if this index is part of a remap pattern (call or is_non_null)
+                // These should be noops since remap_branch handles them
+                if (remap_noop_indices.contains(idx)) {
+                    stack.append(info.arena, .{ .idx = idx, .tag = undefined, .datum = undefined, .is_noop = true }) catch @panic("out of memory");
+                    continue;
+                }
+
                 const tag = info.tags[idx];
                 const datum = info.data[idx];
 
-                // Check for cond_br - add branches to worklist (unless it's a .? pattern)
+                // Check for cond_br - add branches to worklist (unless it's a dotQ pattern)
                 var is_dotq_noop = false;
+                var remap_call_idx: ?u32 = null;
                 if (tag == .cond_br) {
-                    if (isDotQPattern(info.ip, idx, info.tags, info.data, info.extra)) {
+                    if (remap_pattern_map.get(idx)) |call_idx| {
+                        // Remap pattern: add branches with remap tags (they'll be called from remap_branch)
+                        remap_call_idx = call_idx;
+                        if (extractCondBrBodies(idx, info.data, info.extra)) |bodies| {
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .remap_true = .{ .call_idx = call_idx } },
+                                .body_indices = bodies.then,
+                            } }) catch @panic("out of memory");
+                            worklist.append(info.arena, .{ .sub = .{
+                                .func_index = func_index,
+                                .instr_index = idx,
+                                .tag = .{ .remap_false = .{ .call_idx = call_idx } },
+                                .body_indices = bodies.@"else",
+                            } }) catch @panic("out of memory");
+                        }
+                    } else if (isDotQPattern(info.ip, idx, info.tags, info.data, info.extra)) {
                         // .? pattern detected at TOP LEVEL - mark as noop to NOT narrow state.
                         // Top-level .? on an ambiguous optional should still error.
                         // (For nested .? inside cond_br branches, see .sub case which generates inline cond_br)
@@ -4000,7 +4121,7 @@ fn generateOneFunction(
                 const is_union_tag_safety = tag == .cmp_eq and
                     isUnionTagSafetyPattern(info.ip, idx, info.tags, info.data, info.extra);
 
-                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop or is_union_tag_safety, .is_dotq_pattern = false }) catch @panic("out of memory");
+                stack.append(info.arena, .{ .idx = idx, .tag = tag, .datum = datum, .is_noop = is_dotq_noop or is_union_tag_safety, .is_dotq_pattern = false, .remap_call_idx = remap_call_idx }) catch @panic("out of memory");
             }
         },
         .sub => {
@@ -4340,6 +4461,9 @@ fn generateOneFunction(
             .loop_body => {
                 // No special tag line needed for loop body - loop handling is done in Inst.loop()
             },
+            .remap_true, .remap_false => {
+                // No tag injection needed - remap_br handles setup via splatRemapSetup
+            },
         },
         .full => {},
     }
@@ -4352,7 +4476,10 @@ fn generateOneFunction(
             // Generate noop for unreferenced instruction
             line = generateNoopLine(info.arena, instr.idx);
         } else if (instr.tag == .cond_br) {
-            if (instr.is_dotq_pattern) {
+            if (instr.remap_call_idx) |call_idx| {
+                // Remap pattern: generate fused remap_br instruction
+                line = generateRemapBrLine(info, instr.idx, call_idx, func_index);
+            } else if (instr.is_dotq_pattern) {
                 // DotQ pattern: generate Inst.apply with cond_br tag for narrowing,
                 // but don't reference branch functions (they're not generated)
                 const cond_br_datum = info.data[instr.idx];
@@ -4435,6 +4562,34 @@ fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u3
         \\    try Inst.cond_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d});
         \\
     , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
+}
+
+/// Generate fused remap_br instruction line.
+/// This combines call(remap) + is_non_null + cond_br into a single instruction
+/// that handles both branches with proper memory semantics via splatRemapSetup.
+fn generateRemapBrLine(info: *const FnInfo, cond_br_idx: u32, call_idx: u32, func_index: u32) []const u8 {
+    // Extract call arguments from the remap call instruction
+    const call_datum = info.data[call_idx];
+    const payload_index = call_datum.pl_op.payload;
+
+    // Call payload structure: args_len, then args_len Ref values
+    const args_len = info.extra[payload_index];
+
+    // remap args: (allocator, old_slice, new_size) - we only need old_slice
+    var old_slice_src: []const u8 = ".{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } }";
+    if (args_len >= 2) {
+        const old_slice_ref: Ref = @enumFromInt(info.extra[payload_index + 2]);
+        old_slice_src = srcString(info, old_slice_ref);
+    }
+
+    // Get return type from call instruction using payloadCallParts
+    const call_parts = payloadCallParts(info, call_datum);
+    const return_type_str = call_parts.return_type;
+
+    return clr_allocator.allocPrint(info.arena,
+        \\    try Inst.remap_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d}, .{{ .old_slice = {s}, .return_type = {s}, .call_idx = {d} }});
+        \\
+    , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx, old_slice_src, return_type_str, call_idx }, null);
 }
 
 /// Generate Inst.apply with cond_br tag for dotQ patterns (.? operator)
@@ -4756,7 +4911,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
             \\    const return_type: clr.Type = {s};
             \\    const return_ref = clr.typeToRefinement(return_type, &refinements) catch Refinements.Refinement{{ .scalar = .{{}} }};
             \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
-            \\    clr.splatInit(&refinements, return_gid, &ctx);
+            \\    clr.splatInitEntrypointReturnSlot(&refinements, return_gid, &ctx);
         , .{rt}, null)
     else
         @panic("entrypoint must have return type");
@@ -4796,11 +4951,12 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
         \\    defer refinements.deinit();
         \\{s}
         \\
-        \\    _ = fn_{d}(&ctx, &refinements, return_gid, &.{{}}) catch {{
+        \\    _ = fn_{d}(&ctx, &refinements, return_gid, &.{{}}) catch |err| {{
+        \\        std.debug.print("Error: {{}}\\n", .{{err}});
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);
         \\    }};
-        \\    refinements.testValid();
+        \\    refinements.testValid(0);
         \\}}
         \\
     , .{ global_defs_str.items, init_call, return_slot_init, entrypoint_index }, null);
@@ -4818,7 +4974,7 @@ pub fn generateStub(func_index: u32, arity: u32, fqn: []const u8) []u8 {
         \\    // stubbed: {s}
         \\    std.debug.print("WARNING: call to intercepted function {s}\\n", .{{}});
         \\    ctx.dumpStackTrace();
-        \\    clr.splatInitDefined(refinements, return_gid, ctx);
+        \\    clr.splatInit(refinements, return_gid, ctx, .defined);
         \\    return return_gid;
         \\}}
         \\

@@ -117,7 +117,7 @@ test "load from defined value succeeds" {
     try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
 }
 
-test "init_global sets undefined state on union" {
+test "init_global leaves union container without undefined_safety" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
@@ -134,22 +134,26 @@ test "init_global sets undefined state on union" {
     const loc = tag.GlobalLocation{ .file = "test.zig", .line = 1, .column = 1 };
     UndefinedSafety.init_global(&refinements, ptr_gid, union_gid, &ctx, true, false, loc, null);
 
-    // The union's undefined_safety should be set to .undefined
-    const us = refinements.at(union_gid).@"union".analyte.undefined_safety.?;
-    try std.testing.expect(us == .undefined);
-    try std.testing.expectEqualStrings("test.zig", us.undefined.meta.file);
+    // Union containers do not carry undefined_safety. Active/inactive state is
+    // tracked by variant_safety and field payload state lives on field entities.
+    try std.testing.expect(refinements.at(union_gid).@"union".analyte.undefined_safety == null);
+    try std.testing.expect(refinements.at(union_gid).@"union".fields[0] == null);
+    try std.testing.expect(refinements.at(union_gid).@"union".fields[1] == null);
 }
 
-test "valueCopy preserves union undefined_safety" {
+test "valueCopy preserves union field undefined state without container undefined_safety" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
 
-    // Create a union with undefined_safety set
-    const fields = try std.testing.allocator.alloc(?Gid, 2);
-    @memset(fields, null);
-    const union_gid = try refinements.appendEntity(.{ .@"union" = .{
+    // Create a union with one active undefined field
+    const field_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = .{ .function = "", .file = "test.zig", .line = 1, .column = 1 } } } },
+    } });
+    const fields = try std.testing.allocator.alloc(?Gid, 2);
+    fields[0] = field_gid;
+    fields[1] = null;
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{
         .fields = fields,
         .type_id = 5120,
     } });
@@ -157,14 +161,64 @@ test "valueCopy preserves union undefined_safety" {
     // Copy it
     const copy_gid = try refinements.valueCopy(union_gid);
 
-    // Verify the copy has the same undefined_safety
-    const us = refinements.at(copy_gid).@"union".analyte.undefined_safety.?;
+    // Verify the copy has no union-level undefined_safety
+    try std.testing.expect(refinements.at(copy_gid).@"union".analyte.undefined_safety == null);
+
+    // Verify the active field's undefined_safety was preserved
+    const copy_field_gid = refinements.at(copy_gid).@"union".fields[0].?;
+    const us = refinements.at(copy_field_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expect(us == .undefined);
     try std.testing.expectEqualStrings("test.zig", us.undefined.meta.file);
 
-    // Also verify fields are all null (no active field) - preserved from source
-    try std.testing.expect(refinements.at(copy_gid).@"union".fields[0] == null);
+    // Also verify inactive fields stay inactive
     try std.testing.expect(refinements.at(copy_gid).@"union".fields[1] == null);
+}
+
+test "set_union_tag does not set undefined_safety on union container" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    const fields = try std.testing.allocator.alloc(?Gid, 2);
+    @memset(fields, null);
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 5120 } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = union_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    results[0].refinement = ptr_gid;
+
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+
+    const u = refinements.at(union_gid).@"union";
+    try std.testing.expect(u.analyte.undefined_safety == null);
+}
+
+test "set_union_tag marks active field undefined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    const fields = try std.testing.allocator.alloc(?Gid, 2);
+    @memset(fields, null);
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 5120 } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = union_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    results[0].refinement = ptr_gid;
+
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+
+    const field_gid = refinements.at(union_gid).@"union".fields[1].?;
+    const us = refinements.at(field_gid).scalar.analyte.undefined_safety.?;
+    try std.testing.expectEqual(.undefined, std.meta.activeTag(us));
 }
 
 test "store with .null to optional sets inner to defined" {
@@ -446,7 +500,7 @@ test "aggregate_init incorporates undefined state from source elements" {
     try std.testing.expectEqual(.undefined, std.meta.activeTag(field1_undef));
 }
 
-test "get_union_tag on undefined union marks result as undefined" {
+test "get_union_tag on union with no active variant marks result as undefined" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
@@ -454,11 +508,13 @@ test "get_union_tag on undefined union marks result as undefined" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create a union with undefined_safety = .undefined
+    // Create a union with variant tracking but no active variant.
     const fields = try std.testing.allocator.alloc(?Gid, 2);
     @memset(fields, null);
+    const active_metas = try std.testing.allocator.alloc(?@import("../core.zig").Meta, 2);
+    @memset(active_metas, null);
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{
-        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 } } } },
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 100,
     } });
@@ -484,11 +540,10 @@ test "get_union_tag on union with no variant_safety marks result as undefined" {
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
 
-    // Create a union with defined undefined_safety but no variant_safety
+    // Create a union with no variant_safety
     const fields = try std.testing.allocator.alloc(?Gid, 2);
     @memset(fields, null);
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
         .fields = fields,
         .type_id = 100,
     } });
@@ -521,10 +576,7 @@ test "get_union_tag on union with empty active_metas marks result as undefined" 
     @memset(active_metas, null);
 
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{
-        .analyte = .{
-            .undefined_safety = .{ .defined = {} },
-            .variant_safety = .{ .active_metas = active_metas },
-        },
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 100,
     } });
@@ -564,10 +616,7 @@ test "get_union_tag on union with active variant succeeds" {
     active_metas[1] = null;
 
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{
-        .analyte = .{
-            .undefined_safety = .{ .defined = {} },
-            .variant_safety = .{ .active_metas = active_metas },
-        },
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
         .fields = fields,
         .type_id = 100,
     } });
@@ -893,4 +942,128 @@ test "struct_field_val with region field succeeds" {
 
     // Result should have a refinement
     try std.testing.expect(results[1].refinement != null);
+}
+
+// =============================================================================
+// slice handler tests - verify slice pointer gets undefined_safety set
+// =============================================================================
+
+test "slice sets undefined_safety on result pointer" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a defined region element
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    // Create a region pointing to the defined element
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+
+    // Create a pointer to the region - without undefined_safety set (simulating some edge case)
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        // No undefined_safety set
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    // Create a slice from the pointer
+    try Inst.apply(state, 1, .{ .slice = .{
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ptr = .{ .inst = 0 },
+    } });
+
+    // The slice pointer itself should have undefined_safety = defined
+    const slice_gid = results[1].refinement.?;
+    const slice_ref = refinements.at(slice_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(slice_ref.*));
+    try std.testing.expect(slice_ref.pointer.analyte.undefined_safety != null);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(slice_ref.pointer.analyte.undefined_safety.?));
+}
+
+// =============================================================================
+// ptr_add handler tests - verify ptr_add result gets undefined_safety set
+// =============================================================================
+
+test "ptr_add sets undefined_safety on result pointer" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a defined region element
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    // Create a region pointing to the defined element
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+
+    // Create a pointer to the region - with undefined_safety set
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    // ptr_add creates a new pointer entity
+    try Inst.apply(state, 1, .{ .ptr_add = .{ .ptr = .{ .inst = 0 } } });
+
+    // The result pointer should have undefined_safety = defined
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expect(result_ref.pointer.analyte.undefined_safety != null);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.pointer.analyte.undefined_safety.?));
+}
+
+// =============================================================================
+// load handler tests - loading pointer with null undefined_safety
+// =============================================================================
+
+test "load pointer with null undefined_safety sets result to defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    // Create a scalar for the inner pointee
+    const inner_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    // Create a pointer to the scalar - WITHOUT undefined_safety set (null)
+    const inner_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = inner_scalar_gid,
+        // Note: analyte.undefined_safety is null by default
+    } });
+
+    // Create a pointer-to-pointer (like stack storage for a pointer)
+    const outer_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = inner_ptr_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = outer_ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    // Load through the outer pointer - this loads the inner pointer which has null undefined_safety
+    try Inst.apply(state, 1, .{ .load = .{ .ptr = .{ .inst = 0 } } });
+
+    // The result (loaded pointer) should have undefined_safety = defined
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    // Before the fix, this would be null. After the fix, it should be defined.
+    try std.testing.expect(result_ref.pointer.analyte.undefined_safety != null);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.pointer.analyte.undefined_safety.?));
 }

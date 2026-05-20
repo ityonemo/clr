@@ -27,6 +27,15 @@ pub const NullSafety = union(enum) {
         hasher.update(&.{@intFromEnum(self)});
     }
 
+    /// Initialize null_safety on optionals.
+    /// For all InitState values, optionals start as `.unknown` - we don't know
+    /// whether they're null or non-null until runtime checks establish it.
+    pub fn init(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: tag.InitState) void {
+        _ = ctx;
+        _ = state;
+        initOptionalsUnknown(refinements, gid);
+    }
+
     /// is_non_null is a pure operation - it tests nullity and returns a boolean.
     /// It does NOT modify the optional's analyte. The narrowing happens in cond_br.
     pub fn is_non_null(state: State, index: usize, params: tag.IsNonNull) !void {
@@ -114,6 +123,32 @@ pub const NullSafety = union(enum) {
             opt_ref.optional.analyte.null_safety = .{ .non_null = ctx.meta };
         } else {
             opt_ref.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
+        }
+    }
+
+    /// remap_setup handler - narrows null_safety for remap result.
+    /// Called by Inst.remap_br via splatRemapSetup BEFORE executing each branch.
+    /// - Success branch (is_success=true): remap result is .non_null
+    /// - Failure branch (is_success=false): remap result is .null
+    pub fn remap_setup(
+        refinements: *Refinements,
+        ctx: *Context,
+        is_success: bool,
+        old_slice_gid: Gid,
+        result_gid: Gid,
+    ) void {
+        _ = old_slice_gid; // Not needed for null_safety
+
+        const result_ref = refinements.at(result_gid);
+
+        // Should be an optional
+        if (result_ref.* != .optional) return;
+
+        // Set null_safety based on which branch we're in
+        if (is_success) {
+            result_ref.optional.analyte.null_safety = .{ .non_null = ctx.meta };
+        } else {
+            result_ref.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
         }
     }
 
@@ -432,6 +467,41 @@ pub const NullSafety = union(enum) {
         _ = fqn;
         // No null_safety-specific call intercepts currently needed
         return false;
+    }
+
+    /// Handle alloc - initialize null_safety on any optionals in the allocated type.
+    pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
+        _ = params;
+        const ptr_gid = state.results[index].refinement.?;
+        const pointee_gid = state.refinements.at(ptr_gid).pointer.to;
+        initOptionalsUnknown(state.refinements, pointee_gid);
+    }
+
+    /// Traverse structure and set null_safety = .unknown on all optionals.
+    fn initOptionalsUnknown(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
+            .optional => |o| {
+                ref.optional.analyte.null_safety = .{ .unknown = {} };
+                initOptionalsUnknown(refinements, o.to);
+            },
+            .pointer => |p| initOptionalsUnknown(refinements, p.to),
+            .errorunion => |e| initOptionalsUnknown(refinements, e.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    initOptionalsUnknown(refinements, field_gid);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        initOptionalsUnknown(refinements, field_gid);
+                    }
+                }
+            },
+            .region => |r| initOptionalsUnknown(refinements, r.to),
+        }
     }
 };
 
