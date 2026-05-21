@@ -91,8 +91,8 @@ location, and relevant context messages where applicable.
 
 ## Current Implementation Risks
 
-The integration baseline after the union container-state fix is `316/368`
-passing (`52` failing). Treat the remaining failures as real analyzer work, not
+The integration baseline after the variant branch/switch/global fix is `319/369`
+passing (`50` failing). Treat the remaining failures as real analyzer work, not
 compiler-cache failures.
 
 The largest incomplete areas are:
@@ -102,10 +102,9 @@ The largest incomplete areas are:
   carry undefined state. The first union-state fix removed known
   `undefined_safety` writes from union containers and got tagged/untagged defined
   field cases passing. Remaining union gaps include whole-union undefined
-  detection (`undefined.bats` 311, 315, 331), switching on global union dispatch
-  (`variant_safety.bats` 365), recursive cleanup (`recursive.bats` 237), and
-  union return/provenance cases in allocator, fieldParentPtr, and stack-pointer
-  analyses.
+  detection (`undefined.bats` 311, 315, 331), recursive cleanup
+  (`recursive.bats` 237), and union return/provenance cases in allocator,
+  fieldParentPtr, and stack-pointer analyses.
 - Interprocedural ownership transfer. Allocator and slice cases fail when caller
   and callee transfer responsibility for freeing memory. Return/call handling is
   currently connectivity-based and several `call_return` handlers are no-ops, so
@@ -141,10 +140,5 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Add a replacement representation for whole-union undefined state that does not
-   use container `undefined_safety`, likely through missing/empty variant state
-   plus metadata that can report the original undefined location.
-2. Then address variant merge/check behavior for branches, switch cases, globals,
-   and labeled breaks.
-3. After unions are stable, revisit allocator ownership transfer and FD aliasing,
-   since both depend heavily on reliable aggregate/union propagation.
+1. Revisit allocator ownership transfer and FD aliasing, since both depend
+   heavily on reliable aggregate propagation.

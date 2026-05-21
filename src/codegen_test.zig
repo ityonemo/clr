@@ -375,7 +375,8 @@ test "epilogue generates correct output with typed return slot" {
         \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
         \\    clr.splatInitEntrypointReturnSlot(&refinements, return_gid, &ctx);
         \\
-        \\    _ = fn_123(&ctx, &refinements, return_gid, &.{}) catch {
+        \\    _ = fn_123(&ctx, &refinements, return_gid, &.{}) catch |err| {
+        \\        std.debug.print("Error: {}\\n", .{err});
         \\        file_writer.interface.flush() catch {};
         \\        std.process.exit(1);
         \\    };
@@ -1195,4 +1196,3 @@ test "formatAllocatorType generates correct type string" {
     const result3 = codegen.formatAllocatorType(arena.allocator(), 4294967295);
     try std.testing.expectEqualStrings(".{ .allocator = 4294967295 }", result3);
 }
-

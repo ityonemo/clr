@@ -7,8 +7,6 @@ const tag = @import("../tag.zig");
 const core = @import("../core.zig");
 const Meta = core.Meta;
 const State = @import("../lib.zig").State;
-const memory_safety = @import("memory_safety.zig");
-const UndefinedSafety = @import("undefined_safety.zig").UndefinedSafety;
 
 /// Validate that variant_safety state is consistent with the refinement.
 /// - MUST EXIST: .union
@@ -195,17 +193,7 @@ pub const VariantSafety = struct {
 
         if (!has_known_active) {
             // No known active variant - use the cond_br check to establish it.
-            // Create field entity if it doesn't exist
-            // NOTE: We must re-fetch the union after appendEntity since it may reallocate the list
-            if (u.fields[field_index] == null) {
-                // Save undefined_safety before appendEntity (which may invalidate u)
-                const undef_safety: UndefinedSafety = u.analyte.undefined_safety orelse .{ .defined = {} };
-                const new_gid = refinements.appendEntity(.{ .scalar = .{
-                    .analyte = .{ .undefined_safety = undef_safety },
-                } }) catch return;
-                // Re-fetch after potential reallocation
-                refinements.at(union_eidx).@"union".fields[field_index] = new_gid;
-            }
+            try ensureVariantField(refinements, union_eidx, field_index, union_check.field_type, ctx);
 
             // Re-fetch union and update local copy's variant_safety
             const u_ref = &refinements.at(union_eidx).@"union";
@@ -237,17 +225,7 @@ pub const VariantSafety = struct {
         // Unlike locals where set_union_tag in the same function gives us accurate info,
         // globals may have been modified by other functions. The cond_br check is our
         // only source of truth in this function's analysis context.
-        // Create field entity if it doesn't exist
-        // NOTE: We must re-fetch the union after appendEntity since it may reallocate the list
-        if (global_u.fields[field_index] == null) {
-            // Save undefined_safety before appendEntity (which may invalidate global_u)
-            const undef_safety: UndefinedSafety = global_u.analyte.undefined_safety orelse .{ .defined = {} };
-            const new_gid = refinements.appendEntity(.{ .scalar = .{
-                .analyte = .{ .undefined_safety = undef_safety },
-            } }) catch return;
-            // Re-fetch after potential reallocation
-            refinements.at(global_pointee_gid).@"union".fields[field_index] = new_gid;
-        }
+        try ensureVariantField(refinements, global_pointee_gid, field_index, union_check.field_type, ctx);
 
         // Re-fetch union and clear all active variants, set only this one
         const global_u_ref = &refinements.at(global_pointee_gid).@"union";
@@ -282,7 +260,7 @@ pub const VariantSafety = struct {
         const field_index = union_check.field_index;
 
         // Update the loaded value's variant_safety
-        try updateVariantForUnion(refinements, union_eidx, field_index, ctx);
+        try updateVariantForUnion(refinements, union_eidx, field_index, union_check.field_type, ctx);
 
         // Also update the source pointer's pointee, so subsequent loads get the updated state
         const inst_tag = results[union_check.union_inst].inst_tag orelse return;
@@ -300,12 +278,12 @@ pub const VariantSafety = struct {
         // Only update if pointee is a union (it should be)
         if (refinements.at(pointee_gid).* != .@"union") return;
 
-        try updateVariantForUnion(refinements, pointee_gid, field_index, ctx);
+        try updateVariantForUnion(refinements, pointee_gid, field_index, union_check.field_type, ctx);
     }
 
     /// Helper to update variant_safety for a union at the given gid.
     /// Creates field entity if needed, clears all active variants, sets the specified one.
-    fn updateVariantForUnion(refinements: *Refinements, union_gid: Gid, field_index: usize, ctx: *Context) !void {
+    fn updateVariantForUnion(refinements: *Refinements, union_gid: Gid, field_index: usize, field_type: ?tag.Type, ctx: *Context) !void {
         const union_ref = refinements.at(union_gid);
         if (union_ref.* != .@"union") return;
 
@@ -315,17 +293,7 @@ pub const VariantSafety = struct {
         // Check field index bounds
         if (field_index >= vs.active_metas.len) return;
 
-        // Create field entity if it doesn't exist
-        // NOTE: We must re-fetch the union after appendEntity since it may reallocate the list
-        if (field_index < u.fields.len and u.fields[field_index] == null) {
-            // Save undefined_safety before appendEntity (which may invalidate u)
-            const undef_safety: UndefinedSafety = u.analyte.undefined_safety orelse .{ .defined = {} };
-            const new_gid = refinements.appendEntity(.{ .scalar = .{
-                .analyte = .{ .undefined_safety = undef_safety },
-            } }) catch return;
-            // Re-fetch after potential reallocation
-            refinements.at(union_gid).@"union".fields[field_index] = new_gid;
-        }
+        try ensureVariantField(refinements, union_gid, field_index, field_type, ctx);
 
         // Re-fetch union and update variant_safety
         const u_ref = &refinements.at(union_gid).@"union";
@@ -336,6 +304,23 @@ pub const VariantSafety = struct {
             meta.* = null;
         }
         vs_ref.active_metas[field_index] = ctx.meta;
+    }
+
+    /// Ensure the narrowed union variant has a field entity with the real payload
+    /// structure and initialized analytes. Silent scalar fallback corrupts analyzer
+    /// invariants, so missing type metadata is a codegen bug.
+    fn ensureVariantField(refinements: *Refinements, union_gid: Gid, field_index: usize, field_type: ?tag.Type, ctx: *Context) !void {
+        const u = refinements.at(union_gid).@"union";
+        if (field_index >= u.fields.len) return;
+        if (u.fields[field_index] != null) return;
+
+        const ty = field_type orelse @panic("variant narrowing missing union field type");
+        if (ty == .unimplemented) @panic("variant narrowing got unimplemented union field type");
+
+        const field_ref = try tag.typeToRefinement(ty, refinements);
+        const new_gid = try refinements.appendEntity(field_ref);
+        tag.splatInit(refinements, new_gid, ctx, .defined);
+        refinements.at(union_gid).@"union".fields[field_index] = new_gid;
     }
 
     /// Check struct_field_val access on unions - report error if accessing inactive variant

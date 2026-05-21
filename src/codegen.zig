@@ -3515,6 +3515,8 @@ const SwitchCaseInfo = struct {
     body: []const u32,
     /// Field index if this case matches an enum tag (for union or enum switch)
     field_index: ?u32 = null,
+    /// Field type if this case matches a generated union tag
+    field_type: ?[]const u8 = null,
     /// First item Ref for this case (used to match switch_dispatch targets)
     first_item: ?Ref = null,
 };
@@ -3568,13 +3570,19 @@ fn extractSwitchBrBodies(arena: std.mem.Allocator, ip: *const InternPool, switch
 
         // Extract field_index and first_item from first item (for any switch with items)
         var field_index: ?u32 = null;
+        var field_type: ?[]const u8 = null;
         var first_item: ?Ref = null;
         if (items_len > 0) {
             // Items are Ref values stored as u32s
             const item_ref: Ref = @enumFromInt(extra[extra_index]);
             first_item = item_ref;
             if (item_ref.toInterned()) |interned_idx| {
-                field_index = extractEnumTagFieldIndex(ip, interned_idx);
+                if (extractEnumTagPayload(arena, ip, interned_idx)) |tag_payload| {
+                    field_index = tag_payload.field_index;
+                    field_type = tag_payload.field_type;
+                } else {
+                    field_index = extractEnumTagFieldIndex(ip, interned_idx);
+                }
             }
         }
 
@@ -3584,7 +3592,7 @@ fn extractSwitchBrBodies(arena: std.mem.Allocator, ip: *const InternPool, switch
 
         // Extract body
         if (extra_index + body_len > extra.len) return null;
-        cases[i] = .{ .body = extra[extra_index..][0..body_len], .field_index = field_index, .first_item = first_item };
+        cases[i] = .{ .body = extra[extra_index..][0..body_len], .field_index = field_index, .field_type = field_type, .first_item = first_item };
         extra_index += body_len;
     }
 
@@ -3622,15 +3630,55 @@ fn extractEnumTagFieldIndex(ip: *const InternPool, interned_idx: InternPool.Inde
     };
 }
 
+const EnumTagPayload = struct {
+    field_index: u32,
+    field_type: []const u8,
+};
+
+/// Extract the field index and real payload type from a generated union tag.
+fn extractEnumTagPayload(arena: std.mem.Allocator, ip: *const InternPool, interned_idx: InternPool.Index) ?EnumTagPayload {
+    const key = ip.indexToKey(interned_idx);
+    if (key != .enum_tag) return null;
+
+    const int_idx = key.enum_tag.int;
+    const int_key = ip.indexToKey(int_idx);
+    if (int_key != .int) return null;
+
+    const field_index: u32 = switch (int_key.int.storage) {
+        .u64 => |v| @intCast(v),
+        .i64 => |v| @intCast(v),
+        .big_int => |big| big.toInt(u32) catch return null,
+        .lazy_align, .lazy_size => return null,
+    };
+
+    const enum_type_idx = key.enum_tag.ty;
+    const enum_key = ip.indexToKey(enum_type_idx);
+    if (enum_key != .enum_type) return null;
+
+    const union_type_idx = switch (enum_key.enum_type) {
+        .generated_tag => |gt| gt.union_type,
+        else => return null,
+    };
+    const loaded_union = ip.loadUnionType(union_type_idx);
+    const field_types = loaded_union.field_types.get(ip);
+    if (field_index >= field_types.len) return null;
+
+    return .{
+        .field_index = field_index,
+        .field_type = typeToString(null, null, arena, ip, field_types[field_index]),
+    };
+}
+
 /// Union tag check info for variant safety
 const UnionTagCheck = struct {
     union_inst: usize, // instruction index that holds the union
     field_index: u32, // the variant field being checked
+    field_type: []const u8, // generated tag.Type expression for the variant payload
 };
 
 /// Check if the condition is a union tag comparison (get_union_tag + cmp_eq).
 /// Returns the union instruction and field_index if it's a tag check pattern.
-fn getUnionTagCheck(ip: *const InternPool, condition_idx: usize, tags: []const Tag, data: []const Data) ?UnionTagCheck {
+fn getUnionTagCheck(arena: std.mem.Allocator, ip: *const InternPool, condition_idx: usize, tags: []const Tag, data: []const Data) ?UnionTagCheck {
     // Check if condition is cmp_eq
     if (tags[condition_idx] != .cmp_eq) return null;
 
@@ -3649,25 +3697,14 @@ fn getUnionTagCheck(ip: *const InternPool, condition_idx: usize, tags: []const T
     const union_ref = get_tag_datum.ty_op.operand;
     const union_idx = union_ref.toIndex() orelse return null;
 
-    // Extract field_index from rhs interned enum tag
+    // Extract field_index and payload type from rhs interned enum tag
     const interned_idx = rhs_ref.toInterned() orelse return null;
-    const key = ip.indexToKey(interned_idx);
-    if (key != .enum_tag) return null;
-
-    const int_idx = key.enum_tag.int;
-    const int_key = ip.indexToKey(int_idx);
-    if (int_key != .int) return null;
-
-    const field_index: ?u32 = switch (int_key.int.storage) {
-        .u64 => |v| @intCast(v),
-        .i64 => |v| @intCast(v),
-        .big_int => |big| big.toInt(u32) catch null,
-        .lazy_align, .lazy_size => null,
-    };
+    const tag_payload = extractEnumTagPayload(arena, ip, interned_idx) orelse return null;
 
     return .{
         .union_inst = @intFromEnum(union_idx),
-        .field_index = field_index orelse return null,
+        .field_index = tag_payload.field_index,
+        .field_type = tag_payload.field_type,
     };
 }
 
@@ -4038,8 +4075,8 @@ fn generateOneFunction(
                         // Add each case
                         for (bodies.cases, 0..) |case, case_idx| {
                             // Build union_tag info if this is a union switch
-                            const union_tag: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
-                                .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                            const union_tag: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null and case.field_type != null)
+                                .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.?, .field_type = case.field_type.? }
                             else
                                 null;
                             worklist.append(info.arena, .{ .sub = .{
@@ -4214,8 +4251,8 @@ fn generateOneFunction(
                         const has_else = bodies.else_body.len > 0;
                         const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
                         for (bodies.cases, 0..) |case, case_idx| {
-                            const union_tag: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
-                                .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                            const union_tag: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null and case.field_type != null)
+                                .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.?, .field_type = case.field_type.? }
                             else
                                 null;
                             worklist.append(info.arena, .{ .sub = .{
@@ -4362,8 +4399,8 @@ fn generateOneFunction(
                                 const has_else = bodies.else_body.len > 0;
                                 const num_cases: u32 = @intCast(bodies.cases.len + @as(usize, if (has_else) 1 else 0));
                                 for (bodies.cases, 0..) |case, case_idx| {
-                                    const union_tag_body: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null)
-                                        .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.? }
+                                    const union_tag_body: ?UnionTagCheck = if (bodies.union_operand != null and case.field_index != null and case.field_type != null)
+                                        .{ .union_inst = bodies.union_operand.?, .field_index = case.field_index.?, .field_type = case.field_type.? }
                                     else
                                         null;
                                     worklist.append(info.arena, .{ .sub = .{
@@ -4438,7 +4475,7 @@ fn generateOneFunction(
 
                 // Check if this is a union tag comparison pattern
                 const union_tag: ?UnionTagCheck = if (condition_idx) |cond_idx|
-                    getUnionTagCheck(info.ip, cond_idx, info.tags, info.data)
+                    getUnionTagCheck(info.arena, info.ip, cond_idx, info.tags, info.data)
                 else
                     null;
 
@@ -4631,9 +4668,9 @@ fn generateCondBrTagLine(arena: std.mem.Allocator, is_true_branch: bool, conditi
     // Only emit union_tag if it's set (defaults to null in tag.zig)
     if (union_tag) |ut| {
         return clr_allocator.allocPrint(arena,
-            \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d}, .union_tag = .{{ .union_inst = {d}, .field_index = {d} }} }} }});
+            \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d}, .union_tag = .{{ .union_inst = {d}, .field_index = {d}, .field_type = {s} }} }} }});
             \\
-        , .{ is_true_branch, condition_idx, ut.union_inst, ut.field_index }, null);
+        , .{ is_true_branch, condition_idx, ut.union_inst, ut.field_index, ut.field_type }, null);
     } else {
         return clr_allocator.allocPrint(arena,
             \\    try Inst.apply(state, 0, .{{ .cond_br = .{{ .branch = {}, .condition_idx = {?d} }} }});
@@ -4676,9 +4713,9 @@ fn generateSwitchBrLine(arena: std.mem.Allocator, switch_idx: u32, func_index: u
 fn generateSwitchBrTagLine(arena: std.mem.Allocator, case_index: u32, num_cases: u32, union_tag: ?UnionTagCheck) []const u8 {
     if (union_tag) |ut| {
         return clr_allocator.allocPrint(arena,
-            \\    try Inst.apply(state, 0, .{{ .switch_br = .{{ .case_index = {d}, .num_cases = {d}, .union_tag = .{{ .union_inst = {d}, .field_index = {d} }} }} }});
+            \\    try Inst.apply(state, 0, .{{ .switch_br = .{{ .case_index = {d}, .num_cases = {d}, .union_tag = .{{ .union_inst = {d}, .field_index = {d}, .field_type = {s} }} }} }});
             \\
-        , .{ case_index, num_cases, ut.union_inst, ut.field_index }, null);
+        , .{ case_index, num_cases, ut.union_inst, ut.field_index, ut.field_type }, null);
     } else {
         return clr_allocator.allocPrint(arena,
             \\    try Inst.apply(state, 0, .{{ .switch_br = .{{ .case_index = {d}, .num_cases = {d} }} }});

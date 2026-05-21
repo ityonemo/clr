@@ -1719,6 +1719,7 @@ pub const IsNonErr = struct {
 pub const UnionTagCheck = struct {
     union_inst: usize, // instruction index that holds the union
     field_index: u32, // the variant field being checked
+    field_type: ?Type = null, // real type of the variant payload, when known
 };
 
 /// CondBr is emitted at the start of each branch to trigger null_safety refinement.

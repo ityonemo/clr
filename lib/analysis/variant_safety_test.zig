@@ -28,6 +28,15 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     };
 }
 
+fn fullTestState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_gid = 0,
+    };
+}
+
 test "set_union_tag sets active variant" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -227,7 +236,7 @@ test "switch_br sets active variant" {
     try Inst.apply(state, 1, .{ .switch_br = .{
         .case_index = 1,
         .num_cases = 2,
-        .union_tag = .{ .union_inst = 0, .field_index = 1 },
+        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = {} } },
     } });
 
     // Check variant_safety was updated - only field 1 should be active
@@ -235,6 +244,66 @@ test "switch_br sets active variant" {
     const vs = union_ref.@"union".analyte.variant_safety.?;
     try std.testing.expect(vs.active_metas[0] == null); // field 0 no longer active
     try std.testing.expect(vs.active_metas[1] != null); // field 1 is active
+}
+
+test "switch_br creates initialized active field when narrowing missing variant" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    const allocator = std.testing.allocator;
+
+    const active_metas = try allocator.alloc(?Meta, 2);
+    @memset(active_metas, null);
+    const fields = try allocator.alloc(?Gid, 2);
+    @memset(fields, null);
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{
+        .fields = fields,
+        .type_id = 0,
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = union_gid;
+    const state = fullTestState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .switch_br = .{
+        .case_index = 1,
+        .num_cases = 2,
+        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = {} } },
+    } });
+
+    const field_gid = refinements.at(union_gid).@"union".fields[1].?;
+    try std.testing.expect(refinements.at(field_gid).scalar.analyte.memory_safety != null);
+}
+
+test "cond_br creates initialized active field when narrowing missing variant" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    const allocator = std.testing.allocator;
+
+    const active_metas = try allocator.alloc(?Meta, 2);
+    @memset(active_metas, null);
+    const fields = try allocator.alloc(?Gid, 2);
+    @memset(fields, null);
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{
+        .fields = fields,
+        .type_id = 0,
+        .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = union_gid;
+    const state = fullTestState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .cond_br = .{
+        .branch = true,
+        .condition_idx = null,
+        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = {} } },
+    } });
+
+    const field_gid = refinements.at(union_gid).@"union".fields[1].?;
+    try std.testing.expect(refinements.at(field_gid).scalar.analyte.memory_safety != null);
 }
 
 test "call is no-op for variant_safety" {

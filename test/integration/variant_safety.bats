@@ -121,6 +121,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "switch on global union does not poison global variant state" {
+    run compile_and_run "$TEST_CASES/variant_safety/globals/switch_does_not_poison_global.zig"
+    [ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # Cleanup issue tests
 # =============================================================================
