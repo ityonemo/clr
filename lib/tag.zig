@@ -1058,7 +1058,8 @@ pub const RetSafe = struct {
             });
         } else {
             // No early_returns tracking - fall back to writing directly to return slot
-            // Transfer ownership: copy value to original, then clear cloned's slot so deinit doesn't double-free
+            // Move the cloned value into the original slot, then clear the clone
+            // so deinit does not double-free owned field buffers.
             state.refinements.at(return_gid).* = cloned.at(return_gid).*;
             cloned.at(return_gid).* = .{ .scalar = .{} }; // Clear to prevent double-free in deinit
             cloned.deinit();
@@ -1137,7 +1138,8 @@ pub const RetLoad = struct {
             });
         } else {
             // No early_returns tracking - fall back to writing directly to return slot
-            // Transfer ownership: copy value to original, then clear cloned's slot so deinit doesn't double-free
+            // Move the cloned value into the original slot, then clear the clone
+            // so deinit does not double-free owned field buffers.
             state.refinements.at(return_gid).* = cloned.at(return_gid).*;
             cloned.at(return_gid).* = .{ .scalar = .{} }; // Clear to prevent double-free in deinit
             cloned.deinit();
@@ -2150,29 +2152,37 @@ pub const ArrayElemVal = struct {
 
 /// Pointer arithmetic (ptr_add, ptr_sub).
 /// Creates a fresh pointer value to the same region as the source pointer.
-pub const PtrAdd = struct {
-    /// Source pointer
-    ptr: Src,
+pub fn PtrArith(comptime instr: anytype) type {
+    return struct {
+        /// Source pointer
+        ptr: Src,
 
-    pub fn apply(self: @This(), state: State, index: usize) !void {
-        const ptr_idx = switch (self.ptr) {
-            .inst => |idx| idx,
-            .interned, .fnptr => @panic("interned source not implemented"),
-        };
-        if (state.results[ptr_idx].refinement) |src_gid| {
-            const src_ref = state.refinements.at(src_gid);
-            if (src_ref.* != .pointer) @panic("PtrAdd: expected pointer source");
-            const pointee_gid = src_ref.pointer.to;
-            if (state.refinements.at(pointee_gid).* != .region) {
-                try state.ctx.meta.print(state.ctx.writer, "pointer arithmetic on single-item pointer in ", .{});
-                return error.PtrArithmeticOnSingleItem;
+        pub fn apply(self: @This(), state: State, index: usize) !void {
+            const ptr_idx = switch (self.ptr) {
+                .inst => |idx| idx,
+                .interned, .fnptr => @panic("interned source not implemented"),
+            };
+            if (state.results[ptr_idx].refinement) |src_gid| {
+                const src_ref = state.refinements.at(src_gid);
+                if (src_ref.* != .pointer) {
+                    try state.ctx.meta.print(state.ctx.writer, "pointer arithmetic on non-region pointer in ", .{});
+                    return error.PtrArithmeticOnNonRegion;
+                }
+                const pointee_gid = src_ref.pointer.to;
+                if (state.refinements.at(pointee_gid).* != .region) {
+                    try state.ctx.meta.print(state.ctx.writer, "pointer arithmetic on non-region pointer in ", .{});
+                    return error.PtrArithmeticOnNonRegion;
+                }
+                const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{ .to = pointee_gid } });
+                state.results[index].refinement = new_ptr_gid;
             }
-            const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{ .to = pointee_gid } });
-            state.results[index].refinement = new_ptr_gid;
+            try splat(instr, state, index, self);
         }
-        try splat(.ptr_add, state, index, self);
-    }
-};
+    };
+}
+
+pub const PtrAdd = PtrArith(.ptr_add);
+pub const PtrSub = PtrArith(.ptr_sub);
 
 /// Convert array/many-pointer to slice.
 /// Creates a fresh slice pointer value to the same region as the source pointer.
@@ -2335,7 +2345,7 @@ pub const AnyTag = union(enum) {
     is_null_ptr: IsNullPtr,
     noop_debug: Void,
     ptr_add: PtrAdd,
-    ptr_sub: PtrAdd, // Same logic as ptr_add
+    ptr_sub: PtrSub,
     ret_addr: RetAddr,
     ret_load: RetLoad,
     ret_ptr: RetPtr,
@@ -2617,8 +2627,8 @@ pub fn splatInitInterned(refinements: *Refinements, gid: Gid) void {
 }
 
 /// Called after receiving a return value from a function call.
-/// Allows analyses to process the returned value (e.g., clear "returned" flags
-/// on allocations to transfer ownership from callee to caller).
+/// Allows analyses to process the returned value after callee state has been
+/// merged into the caller.
 pub fn splatCallReturn(refinements: *Refinements, return_gid: Gid) void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "call_return")) {
@@ -3049,11 +3059,14 @@ pub fn splatMerge(
                             // Track destination GIDs for nested merge propagation
                             const pre_copy_len = refinements.list.items.len;
 
-                            const copied_gid = try Refinement.copyTo(
-                                src_ref,
-                                branch.refinements,
-                                refinements,
-                            );
+                            const copied_gid = if (Refinement.pointerTargetsExistInDestination(new_gid, branch.refinements, refinements))
+                                try Refinement.copyValuePreservingPointerTargets(new_gid, branch.refinements, refinements)
+                            else
+                                try Refinement.copyTo(
+                                    src_ref,
+                                    branch.refinements,
+                                    refinements,
+                                );
 
                             // Record all destination GIDs created by copyTo
                             // These are "merge products" that shouldn't be flagged as orphans in outer merges
@@ -3336,8 +3349,33 @@ fn mergeRefinementRecursive(
                 // Track source entities as copied before copyTo
                 try copied_from_branch.put(branch_inner, {});
                 try Refinement.collectReachableGids(src_ref, branch_ref, copied_from_branch);
-                const copied_gid = try Refinement.copyTo(src_ref, branch_ref, refinements);
+                const copied_gid = if (merge_tag == .early_return)
+                    try Refinement.copyValuePreservingPointerTargets(branch_inner, branch_ref, refinements)
+                else
+                    try Refinement.copyTo(src_ref, branch_ref, refinements);
                 // Re-fetch the refinement after copyTo (may have reallocated)
+                switch (refinements.at(orig_gid).*) {
+                    .optional => |*o| o.to = copied_gid,
+                    .errorunion => |*e| e.to = copied_gid,
+                    else => unreachable,
+                }
+                break :blk copied_gid;
+            } else if (!all_same and merge_tag == .early_return) blk: {
+                var selected: ?struct { gid: Gid, refinements: *Refinements } = null;
+                for (branches, branch_gids) |branch_opt, gid_opt| {
+                    const branch = branch_opt orelse continue;
+                    const gid = gid_opt orelse continue;
+                    if (gid == data.to) continue;
+                    if (!Refinement.pointerTargetsExistInDestination(gid, branch.refinements, refinements)) continue;
+                    if (!Refinement.containsReachableAllocation(gid, branch.refinements)) continue;
+                    selected = .{ .gid = gid, .refinements = branch.refinements };
+                    break;
+                }
+                const chosen = selected orelse break :blk data.to;
+                const src_ref = chosen.refinements.at(chosen.gid).*;
+                try copied_from_branch.put(chosen.gid, {});
+                try Refinement.collectReachableGids(src_ref, chosen.refinements, copied_from_branch);
+                const copied_gid = try Refinement.copyValuePreservingPointerTargets(chosen.gid, chosen.refinements, refinements);
                 switch (refinements.at(orig_gid).*) {
                     .optional => |*o| o.to = copied_gid,
                     .errorunion => |*e| e.to = copied_gid,
@@ -4525,7 +4563,7 @@ test "ptr_sub on pointer to region returns pointer to same region" {
     try std.testing.expectEqual(region_gid, result_ref.pointer.to);
 }
 
-test "ptr_add on single-item pointer errors" {
+test "ptr_add on non-region pointer errors" {
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -4544,7 +4582,29 @@ test "ptr_add on single-item pointer errors" {
     results[0].refinement = ptr_gid;
 
     const result = Inst.apply(state, 1, .{ .ptr_add = .{ .ptr = .{ .inst = 0 } } });
-    try std.testing.expectError(error.PtrArithmeticOnSingleItem, result);
+    try std.testing.expectError(error.PtrArithmeticOnNonRegion, result);
+}
+
+test "ptr_sub on non-region pointer errors" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = scalar_gid } });
+    results[0].refinement = ptr_gid;
+
+    const result = Inst.apply(state, 1, .{ .ptr_sub = .{ .ptr = .{ .inst = 0 } } });
+    try std.testing.expectError(error.PtrArithmeticOnNonRegion, result);
 }
 
 test "array_to_slice returns fresh pointer to same region" {

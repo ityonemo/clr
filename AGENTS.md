@@ -81,6 +81,28 @@ Do not use `-femit-air` or `--verbose-air` directly; use the helper scripts.
 - Be careful with dirty worktrees; preserve user changes and avoid reverting
   unrelated files.
 
+## Memory Safety Model
+
+Zig-CLR memory analysis is provenance and safety tracking, not Rust-style
+single-owner transfer. More than one value or code path may refer to the same
+allocation root GID. When any path marks that allocation freed, the ambiguous
+safety state collapses around that root and later access/free/leak checks should
+use that state. Aliasing will be tracked separately.
+
+- Treat the allocation root GID as the allocation identity.
+- Use `allocator_gid` only for allocator mismatch detection.
+- Do not model allocation responsibility as exclusive ownership transfer.
+- Do not copy a pointer value's `.to` target across `Refinements` tables.
+  Cross-table operations may merge/import structure, but pointer values should
+  point only at GIDs that already exist in their destination table.
+- `ptr_add` and `ptr_sub` both produce derived pointers into the same region.
+  Neither operation proves that a pointer has returned to the allocation base.
+  Freeing memory through such a derived pointer should remain invalid unless an
+  explicit future retag feature, or an internal CLR stdlib override for a known
+  Zig stdlib pattern, reestablishes base-allocation provenance. Pointer
+  arithmetic must operate on a pointer-to-region; non-pointer or single-item
+  pointer inputs should produce a clear analysis error.
+
 ## Test Expectations
 
 `zig build test` only covers `src/` tests. When changing runtime analysis logic,
@@ -91,16 +113,17 @@ location, and relevant context messages where applicable.
 
 ## Current Implementation Risks
 
-The integration baseline after the union fieldParentPtr fix is `333/369`
-passing (`36` failing). Treat the remaining failures as real analyzer work, not
-compiler-cache failures.
+The integration baseline after allocator provenance/call-return work is
+`338/369` passing (`31` failing), from `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache
+ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local ./run_integration.sh` on 2026-05-21.
+Treat remaining failures as real analyzer work, not compiler-cache failures.
 
 The largest incomplete areas are:
 
-- Interprocedural ownership transfer. Allocator and slice cases fail when caller
-  and callee transfer responsibility for freeing memory. Return/call handling is
-  currently connectivity-based and several `call_return` handlers are no-ops, so
-  ownership is not consistently reconciled at function boundaries.
+- Interprocedural allocation safety. Allocator and slice cases depend on
+  consistent allocation-root provenance across call boundaries and return-slot
+  merges. Avoid Rust-style ownership terminology here; the analyzer tracks
+  allocation identity, free state, allocator mismatch state, and reachability.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic union
   and global union field recovery is covered, but struct/global false positives,
@@ -133,7 +156,9 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Revisit allocator ownership transfer and FD aliasing, since both depend
-   heavily on reliable aggregate propagation.
+1. Revisit remaining allocator provenance cases, especially sub-slices, remap,
+   optional pointer arithmetic wrappers, and conditional optional allocation
+   cleanup.
 2. Fix remaining struct/global field-pointer provenance cases, including
    allocator field-pointer tests 83/85 and stack/global false positives.
+3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.

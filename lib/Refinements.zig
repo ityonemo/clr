@@ -345,7 +345,13 @@ pub const Refinement = union(enum) {
                 } };
             },
             inline .pointer, .optional, .errorunion, .region, .recursive => |data, ref_tag| blk: {
-                const copied_to = try copyTo(src_list.at(data.to).*, src_list, dst_list);
+                const copied_to = if (ref_tag == .pointer or ref_tag == .recursive)
+                    data.to
+                else
+                    try copyValuePreservingPointerTargets(data.to, src_list, dst_list);
+                if (copied_to >= dst_list.list.items.len) {
+                    std.debug.panic("copyToSlot copied cross-table pointer target gid={d} missing from destination table", .{copied_to});
+                }
                 const new_analyte = try data.analyte.copy(allocator);
                 var new_data = data;
                 new_data.analyte = new_analyte;
@@ -357,12 +363,12 @@ pub const Refinement = union(enum) {
                 for (data.fields, 0..) |field_opt, i| {
                     if (ref_tag == .@"union") {
                         if (field_opt) |field_gid| {
-                            new_fields[i] = try copyTo(src_list.at(field_gid).*, src_list, dst_list);
+                            new_fields[i] = try copyValuePreservingPointerTargets(field_gid, src_list, dst_list);
                         } else {
                             new_fields[i] = null;
                         }
                     } else {
-                        new_fields[i] = try copyTo(src_list.at(field_opt).*, src_list, dst_list);
+                        new_fields[i] = try copyValuePreservingPointerTargets(field_opt, src_list, dst_list);
                     }
                 }
                 const new_analyte = try data.analyte.copy(allocator);
@@ -385,6 +391,152 @@ pub const Refinement = union(enum) {
             .void, .noreturn, .unimplemented => {},
             inline else => |*data| data.gid = dst_gid,
         }
+    }
+
+    pub fn copyValuePreservingPointerTargets(src_gid: Gid, noalias src_list: *Refinements, noalias dst_list: *Refinements) !Gid {
+        const src = src_list.at(src_gid).*;
+        const allocator = dst_list.list.allocator;
+
+        return switch (src) {
+            .scalar => try dst_list.appendEntity(src),
+            .allocator => try dst_list.appendEntity(src),
+            .fnptr => |f| blk: {
+                const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, f.choices.len);
+                @memcpy(new_choices, f.choices);
+                const new_analyte = try f.analyte.copy(allocator);
+                break :blk try dst_list.appendEntity(.{ .fnptr = .{
+                    .analyte = new_analyte,
+                    .choices = new_choices,
+                } });
+            },
+            .pointer => |p| blk: {
+                if (p.to >= dst_list.list.items.len) {
+                    std.debug.panic("copyToSlot copied cross-table pointer target gid={d} missing from destination table", .{p.to});
+                }
+                const new_analyte = try p.analyte.copy(allocator);
+                break :blk try dst_list.appendEntity(.{ .pointer = .{
+                    .analyte = new_analyte,
+                    .to = p.to,
+                    .packed_field = p.packed_field,
+                } });
+            },
+            inline .optional, .errorunion, .region, .recursive => |data, ref_tag| blk: {
+                const copied_to = if (ref_tag == .recursive)
+                    data.to
+                else
+                    try copyValuePreservingPointerTargets(data.to, src_list, dst_list);
+                if (copied_to >= dst_list.list.items.len) {
+                    std.debug.panic("copyToSlot copied cross-table target gid={d} missing from destination table", .{copied_to});
+                }
+                const new_analyte = try data.analyte.copy(allocator);
+                var new_data = data;
+                new_data.analyte = new_analyte;
+                new_data.to = copied_to;
+                break :blk try dst_list.appendEntity(@unionInit(Refinement, @tagName(ref_tag), new_data));
+            },
+            inline .@"struct", .@"union" => |data, ref_tag| blk: {
+                const new_fields = try allocator.alloc(@TypeOf(data.fields[0]), data.fields.len);
+                for (data.fields, 0..) |field_opt, i| {
+                    if (ref_tag == .@"union") {
+                        if (field_opt) |field_gid| {
+                            new_fields[i] = try copyValuePreservingPointerTargets(field_gid, src_list, dst_list);
+                        } else {
+                            new_fields[i] = null;
+                        }
+                    } else {
+                        new_fields[i] = try copyValuePreservingPointerTargets(field_opt, src_list, dst_list);
+                    }
+                }
+                const new_analyte = try data.analyte.copy(allocator);
+                break :blk try dst_list.appendEntity(@unionInit(Refinement, @tagName(ref_tag), .{
+                    .analyte = new_analyte,
+                    .fields = new_fields,
+                    .type_id = data.type_id,
+                }));
+            },
+            .unimplemented => try dst_list.appendEntity(.{ .unimplemented = {} }),
+            .void => try dst_list.appendEntity(.{ .void = {} }),
+            .noreturn => try dst_list.appendEntity(.{ .noreturn = {} }),
+        };
+    }
+
+    pub fn pointerTargetsExistInDestination(src_gid: Gid, src_list: *Refinements, dst_list: *Refinements) bool {
+        if (src_gid >= src_list.list.items.len) return false;
+        const src = src_list.at(src_gid);
+        return switch (src.*) {
+            .pointer => |p| p.to < dst_list.list.items.len,
+            .optional => |o| pointerTargetsExistInDestination(o.to, src_list, dst_list),
+            .errorunion => |e| pointerTargetsExistInDestination(e.to, src_list, dst_list),
+            .region => |r| pointerTargetsExistInDestination(r.to, src_list, dst_list),
+            .recursive => |r| r.to == 0 or r.to < dst_list.list.items.len,
+            .@"struct" => |s| blk: {
+                for (s.fields) |field_gid| {
+                    if (!pointerTargetsExistInDestination(field_gid, src_list, dst_list)) break :blk false;
+                }
+                break :blk true;
+            },
+            .@"union" => |u| blk: {
+                for (u.fields) |maybe_field_gid| {
+                    const field_gid = maybe_field_gid orelse continue;
+                    if (!pointerTargetsExistInDestination(field_gid, src_list, dst_list)) break :blk false;
+                }
+                break :blk true;
+            },
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => true,
+        };
+    }
+
+    pub fn containsReachableAllocation(src_gid: Gid, src_list: *Refinements) bool {
+        return containsReachableAllocationInner(src_gid, src_list, 0);
+    }
+
+    fn containsReachableAllocationInner(src_gid: Gid, src_list: *Refinements, depth: usize) bool {
+        if (depth > 100 or src_gid >= src_list.list.items.len) return false;
+        const src = src_list.at(src_gid);
+        switch (src.*) {
+            .void, .noreturn, .unimplemented => return false,
+            else => {},
+        }
+        if (analyteConst(src).memory_safety) |ms| {
+            if (ms == .allocated) return true;
+        }
+        return switch (src.*) {
+            .pointer => |p| containsReachableAllocationInner(p.to, src_list, depth + 1),
+            .optional => |o| containsReachableAllocationInner(o.to, src_list, depth + 1),
+            .errorunion => |e| containsReachableAllocationInner(e.to, src_list, depth + 1),
+            .region => |r| containsReachableAllocationInner(r.to, src_list, depth + 1),
+            .recursive => |r| r.to != 0 and containsReachableAllocationInner(r.to, src_list, depth + 1),
+            .@"struct" => |s| blk: {
+                for (s.fields) |field_gid| {
+                    if (containsReachableAllocationInner(field_gid, src_list, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .@"union" => |u| blk: {
+                for (u.fields) |maybe_field_gid| {
+                    const field_gid = maybe_field_gid orelse continue;
+                    if (containsReachableAllocationInner(field_gid, src_list, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
+        };
+    }
+
+    fn analyteConst(src: *const Refinement) *const Analyte {
+        return switch (src.*) {
+            .scalar => |*s| &s.analyte,
+            .pointer => |*p| &p.analyte,
+            .optional => |*o| &o.analyte,
+            .errorunion => |*e| &e.analyte,
+            .@"struct" => |*s| &s.analyte,
+            .@"union" => |*u| &u.analyte,
+            .fnptr => |*f| &f.analyte,
+            .allocator => |*a| &a.analyte,
+            .region => |*r| &r.analyte,
+            .recursive => |*r| &r.analyte,
+            .void, .noreturn, .unimplemented => unreachable,
+        };
     }
 
     fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime ref_tag: anytype) error{OutOfMemory}!Gid {

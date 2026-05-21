@@ -124,10 +124,10 @@ load test_helper
     [[ "$output" =~ "free_subslice.main" ]]
 }
 
-@test "detects pointer arithmetic on single-item pointer" {
+@test "errors on pointer arithmetic over non-region pointer" {
     run compile_and_run "$TEST_CASES/allocator_safety/basic/ptr_add_single_item.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "pointer arithmetic on single-item pointer" ]]
+    [[ "$output" =~ "pointer arithmetic on non-region pointer" ]]
     [[ "$output" =~ "ptr_add_single_item.main" ]]
 }
 

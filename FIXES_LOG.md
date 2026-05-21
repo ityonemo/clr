@@ -4,6 +4,54 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Allocation provenance across call and return boundaries
+
+**Date:** 2026-05-21
+
+**Symptom:**
+Allocator and slice no-leak cases still reported leaks when an allocation was
+freed across a caller/callee boundary or returned to the caller and freed there.
+Globals with undefined pointer fields could also trip `testValid` because pointer
+targets did not have initialized memory-safety analytes.
+
+**Root Cause:**
+Reachability grouped live allocations by `allocator_gid`, which conflated
+different allocations from the same allocator. Some return-slot and branch-merge
+paths structurally copied pointer values across `Refinements` tables, creating
+pointer `.to` targets that did not represent the same destination-table GID.
+Early-return optional merges could keep the null payload shape instead of the
+branch payload that actually carried the allocation. Global initialization
+painted the spatial struct but did not initialize undefined pointer field
+targets.
+
+**The Fix:**
+Allocation reachability now uses the allocation root GID as allocation identity,
+while `allocator_gid` remains allocator-mismatch metadata. Return-slot and
+early-return merge copies preserve pointer `.to` targets only when the target
+already exists in the destination table. Optional/error-union early-return
+merges prefer a branch payload that contains a reachable allocation when that
+payload can be copied without cross-table pointer transfer. Global initialization
+now initializes undefined pointer field targets as placeholders after painting
+interned spatial memory.
+
+Also renamed the slice pass-to-callee no-leak case so it no longer collides with
+the basic allocator case basename when generated analyzers are run in parallel.
+
+**Key Files Changed:**
+- `lib/Refinements.zig`
+- `lib/tag.zig`
+- `lib/analysis/memory_safety.zig`
+- `lib/analysis/memory_safety_test.zig`
+- `test/integration/allocator_slice.bats`
+
+**Test Cases:**
+- `test/cases/allocator_safety/basic/pass_to_callee_noleak.zig`
+- `test/cases/allocator_safety/basic/free_from_callee_noleak.zig`
+- `test/cases/allocator_safety/slice/pass_slice_to_callee_noleak.zig`
+- `test/cases/allocator_safety/slice/free_returned_slice.zig`
+
+---
+
 ## Fix: Union fieldParentPtr provenance through interned and global union fields
 
 **Date:** 2026-05-21

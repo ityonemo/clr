@@ -5,6 +5,7 @@ const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 const tag = @import("../tag.zig");
 const Gid = Refinements.Gid;
+const MemorySafety = @import("memory_safety.zig").MemorySafety;
 
 var test_buf: [4096]u8 = undefined;
 var test_discarding = std.Io.Writer.Discarding.init(&test_buf);
@@ -81,6 +82,29 @@ test "set_union_tag initializes pointer field targets as placeholders" {
     try std.testing.expect(refinements.at(nested_union_gid).@"union".analyte.memory_safety != null);
 }
 
+test "init_global initializes undefined pointer field targets as placeholders" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const target_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const ptr_field_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = target_gid,
+        .analyte = .{ .memory_safety = .{ .placeholder = {} } },
+    } });
+    const fields = try ctx.allocator.dupe(Gid, &.{ptr_field_gid});
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = fields,
+        .type_id = 200,
+    } });
+    const global_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
+
+    MemorySafety.init_global(&refinements, global_ptr_gid, struct_gid, &ctx, false, false, .{ .file = "test.zig", .line = 1, .column = 1 }, null);
+
+    try std.testing.expect(refinements.at(target_gid).scalar.analyte.memory_safety != null);
+    try std.testing.expectEqual(.placeholder, std.meta.activeTag(refinements.at(target_gid).scalar.analyte.memory_safety.?));
+}
+
 test "call intercepts mem.Allocator.create and sets allocation metadata" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -144,6 +168,138 @@ test "call intercepts mem.Allocator.destroy and marks allocation freed" {
     const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety.?;
     try std.testing.expect(ms == .allocated);
     try std.testing.expect(ms.allocated.freed != null);
+}
+
+test "reachable allocations are tracked by allocation root gid, not allocator gid" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const scalar_a = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const scalar_b = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const ptr_a = try refinements.appendEntity(.{ .pointer = .{ .to = scalar_a } });
+    const ptr_b = try refinements.appendEntity(.{ .pointer = .{ .to = scalar_b } });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = try ctx.allocator.dupe(Gid, &.{ ptr_a, ptr_b }),
+        .type_id = 200,
+    } });
+
+    var roots = std.AutoHashMap(Gid, void).init(ctx.allocator);
+    defer roots.deinit();
+    MemorySafety.collectReachableAllocationsForTest(&refinements, struct_gid, &roots);
+
+    try std.testing.expect(roots.contains(scalar_a));
+    try std.testing.expect(roots.contains(scalar_b));
+    try std.testing.expect(!roots.contains(alloc_gid));
+}
+
+test "slice from ptr_add is treated as derived pointer on free" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = elem_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 5;
+    results[0].refinement = alloc_gid;
+    results[1].refinement = base_ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .slice = .{
+        .ptr = .{ .inst = 2 },
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+    } });
+
+    try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 4, null, .{ .void = {} }, &.{
+        .{ .inst = 0 },
+        .{ .inst = 3 },
+    }, "std.mem.Allocator.free"));
+}
+
+test "ptr_sub from derived pointer remains derived on free" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = elem_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 6;
+    results[0].refinement = alloc_gid;
+    results[1].refinement = base_ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .ptr_sub = .{ .ptr = .{ .inst = 2 } } });
+    try Inst.apply(state, 4, .{ .slice = .{
+        .ptr = .{ .inst = 3 },
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+    } });
+
+    try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 5, null, .{ .void = {} }, &.{
+        .{ .inst = 0 },
+        .{ .inst = 4 },
+    }, "std.mem.Allocator.free"));
 }
 
 test "load detects use after free" {

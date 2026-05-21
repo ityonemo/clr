@@ -37,7 +37,7 @@ load test_helper
 }
 
 @test "no false positive when callee frees slice from caller" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/pass_to_callee_noleak.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/pass_slice_to_callee_noleak.zig"
     [ "$status" -eq 0 ]
 }
 

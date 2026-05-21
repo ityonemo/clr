@@ -441,6 +441,16 @@ pub const MemorySafety = union(enum) {
     /// ptr_add/ptr_sub perform pointer arithmetic on an already-validated source pointer.
     /// tag.PtrAdd is responsible for ensuring the source points to a region.
     pub fn ptr_add(state: State, index: usize, params: tag.PtrAdd) !void {
+        setPointerArithmeticMemory(state, index, params);
+    }
+
+    /// ptr_sub also produces a derived pointer. It does not prove that pointer
+    /// arithmetic has recovered the allocation base.
+    pub fn ptr_sub(state: State, index: usize, params: tag.PtrSub) !void {
+        setPointerArithmeticMemory(state, index, params);
+    }
+
+    fn setPointerArithmeticMemory(state: State, index: usize, params: anytype) void {
         const refinements = state.refinements;
 
         const ptr_gid: Gid = switch (params.ptr) {
@@ -451,11 +461,14 @@ pub const MemorySafety = union(enum) {
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
         const result_gid = state.results[index].refinement orelse return;
-        paintSpatialMemory(refinements, result_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
-    }
+        const result_ref = refinements.at(result_gid);
+        if (result_ref.* != .pointer) return;
 
-    /// ptr_sub has the same safety requirements as ptr_add
-    pub const ptr_sub = ptr_add;
+        result_ref.pointer.analyte.memory_safety = .{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = ptr_ref.pointer.to,
+        } };
+    }
 
     /// field_parent_ptr recovers the parent container pointer from a field pointer.
     /// We use the stored root_gid to reconnect to the original container entity.
@@ -700,7 +713,7 @@ pub const MemorySafety = union(enum) {
             if (ms != .allocated) continue;
 
             const allocation = ms.allocated;
-            const alloc_id = allocation.allocator_gid;
+            const alloc_id = allocationRootGid(pointee_gid, allocation);
 
             // Skip if already freed
             if (allocation.freed != null) continue;
@@ -859,7 +872,7 @@ pub const MemorySafety = union(enum) {
     /// Called by Inst.remap_br via splatRemapSetup BEFORE executing each branch.
     /// - Success branch (is_success=true):
     ///   1. Mark new slice's structure (optional/pointer=stack, region/element=allocated)
-    ///   2. Mark old slice's region as freed (ownership transferred)
+    ///   2. Mark old slice's region as freed
     /// - Failure branch (is_success=false):
     ///   1. Mark result structure as stack (null optional return value)
     ///   2. Mark the unreachable region as placeholder (it's a null optional, no valid pointer)
@@ -900,7 +913,7 @@ pub const MemorySafety = union(enum) {
             switch (old_ms) {
                 .allocated => |alloc_info| {
                     // Old slice was allocated - update new region with allocation info
-                    // and mark old region as freed (ownership transferred)
+                    // and mark old region as freed.
                     paintSpatialMemory(refinements, new_region_gid, .{
                         .allocated = .{
                             .meta = ctx.meta,
@@ -1139,7 +1152,7 @@ pub const MemorySafety = union(enum) {
 
             if (getAnalytePtrConst(pointee).memory_safety) |ms| {
                 if (ms == .allocated) {
-                    const alloc_id = ms.allocated.allocator_gid;
+                    const alloc_id = allocationRootGid(pointee_idx, ms.allocated);
                     if (arg_alloc_ids.contains(alloc_id)) continue;
                     if (return_alloc_ids.contains(alloc_id)) continue;
                     if (!in_main and global_alloc_ids.contains(alloc_id)) continue;
@@ -1298,9 +1311,31 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Recursively collect allocator GIDs from reachable allocated values.
+    fn allocationRootGid(gid: Gid, allocation: Allocated) Gid {
+        return allocation.root_gid orelse gid;
+    }
+
+    fn collectCurrentAllocationRoot(refinements: *Refinements, gid: Gid, allocs: *std.AutoHashMap(Gid, void)) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .void, .noreturn, .unimplemented => return,
+            else => {},
+        }
+        const analyte = getAnalytePtrConst(ref);
+        if (analyte.memory_safety) |ms| {
+            if (ms == .allocated) {
+                allocs.put(allocationRootGid(gid, ms.allocated), {}) catch return;
+            }
+        }
+    }
+
+    /// Recursively collect allocation root GIDs from reachable allocated values.
     fn collectReachableAllocations(refinements: *Refinements, gid: Gid, allocs: *std.AutoHashMap(Gid, void)) void {
         collectReachableAllocationsInner(refinements, gid, allocs, 0);
+    }
+
+    pub fn collectReachableAllocationsForTest(refinements: *Refinements, gid: Gid, allocs: *std.AutoHashMap(Gid, void)) void {
+        collectReachableAllocations(refinements, gid, allocs);
     }
 
     fn collectReachableAllocationsInner(
@@ -1313,6 +1348,7 @@ pub const MemorySafety = union(enum) {
         if (gid >= refinements.list.items.len) return;
 
         const ref = refinements.at(gid);
+        collectCurrentAllocationRoot(refinements, gid, allocs);
         switch (ref.*) {
             .pointer => |p| {
                 if (p.analyte.memory_safety) |ms| {
@@ -1330,7 +1366,7 @@ pub const MemorySafety = union(enum) {
                 const pointee_analyte = getAnalytePtrConst(pointee);
                 if (pointee_analyte.memory_safety) |ms| {
                     if (ms == .allocated) {
-                        allocs.put(ms.allocated.allocator_gid, {}) catch return;
+                        allocs.put(allocationRootGid(p.to, ms.allocated), {}) catch return;
                     }
                 }
                 collectReachableAllocationsInner(refinements, p.to, allocs, depth + 1);
@@ -1354,18 +1390,27 @@ pub const MemorySafety = union(enum) {
         }
     }
 
-    /// Check if a refinement at a given GID has an allocation using the given allocator.
+    /// Check if a refinement at a given GID has the given allocation root.
     /// This is used during branch merge to detect if an allocation is still reachable
     /// through another entity (avoiding false positive leak reports).
-    fn hasMatchingAllocation(refinements: *Refinements, gid: Gid, allocator_gid: Gid) bool {
-        return hasMatchingAllocationInner(refinements, gid, allocator_gid, 0);
+    fn hasMatchingAllocation(refinements: *Refinements, gid: Gid, allocation_root_gid: Gid) bool {
+        return hasMatchingAllocationInner(refinements, gid, allocation_root_gid, 0);
     }
 
-    fn hasMatchingAllocationInner(refinements: *Refinements, gid: Gid, allocator_gid: Gid, depth: usize) bool {
+    fn hasMatchingAllocationInner(refinements: *Refinements, gid: Gid, allocation_root_gid: Gid, depth: usize) bool {
         if (depth > 100) return false; // Prevent infinite recursion
         if (gid >= refinements.list.items.len) return false;
 
         const ref = refinements.at(gid);
+        switch (ref.*) {
+            .void, .noreturn, .unimplemented => return false,
+            else => {},
+        }
+        if (getAnalytePtrConst(ref).memory_safety) |ms| {
+            if (ms == .allocated and allocationRootGid(gid, ms.allocated) == allocation_root_gid) {
+                return true;
+            }
+        }
         switch (ref.*) {
             .pointer => |p| {
                 if (p.analyte.memory_safety) |ms| {
@@ -1375,7 +1420,7 @@ pub const MemorySafety = union(enum) {
                         .interned, .error_stub, .placeholder => null,
                     };
                     if (root_gid) |root| {
-                        if (hasMatchingAllocationInner(refinements, root, allocator_gid, depth + 1)) {
+                        if (hasMatchingAllocationInner(refinements, root, allocation_root_gid, depth + 1)) {
                             return true;
                         }
                     }
@@ -1385,30 +1430,30 @@ pub const MemorySafety = union(enum) {
                 const pointee_analyte = getAnalytePtrConst(pointee);
                 if (pointee_analyte.memory_safety) |ms| {
                     if (ms == .allocated) {
-                        if (ms.allocated.allocator_gid == allocator_gid) {
+                        if (allocationRootGid(p.to, ms.allocated) == allocation_root_gid) {
                             return true;
                         }
                     }
                 }
-                return hasMatchingAllocationInner(refinements, p.to, allocator_gid, depth + 1);
+                return hasMatchingAllocationInner(refinements, p.to, allocation_root_gid, depth + 1);
             },
-            .optional => |o| return hasMatchingAllocationInner(refinements, o.to, allocator_gid, depth + 1),
-            .errorunion => |e| return hasMatchingAllocationInner(refinements, e.to, allocator_gid, depth + 1),
+            .optional => |o| return hasMatchingAllocationInner(refinements, o.to, allocation_root_gid, depth + 1),
+            .errorunion => |e| return hasMatchingAllocationInner(refinements, e.to, allocation_root_gid, depth + 1),
             .region => |r| {
                 // Check region's own memory_safety for allocation
                 if (r.analyte.memory_safety) |ms| {
                     if (ms == .allocated) {
-                        if (ms.allocated.allocator_gid == allocator_gid) {
+                        if (allocationRootGid(gid, ms.allocated) == allocation_root_gid) {
                             return true;
                         }
                     }
                 }
                 // Also recurse into element type
-                return hasMatchingAllocationInner(refinements, r.to, allocator_gid, depth + 1);
+                return hasMatchingAllocationInner(refinements, r.to, allocation_root_gid, depth + 1);
             },
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
-                    if (hasMatchingAllocationInner(refinements, field_gid, allocator_gid, depth + 1)) {
+                    if (hasMatchingAllocationInner(refinements, field_gid, allocation_root_gid, depth + 1)) {
                         return true;
                     }
                 }
@@ -1417,7 +1462,7 @@ pub const MemorySafety = union(enum) {
             .@"union" => |u| {
                 for (u.fields) |maybe_field_gid| {
                     if (maybe_field_gid) |field_gid| {
-                        if (hasMatchingAllocationInner(refinements, field_gid, allocator_gid, depth + 1)) {
+                        if (hasMatchingAllocationInner(refinements, field_gid, allocation_root_gid, depth + 1)) {
                             return true;
                         }
                     }
@@ -1993,6 +2038,26 @@ pub const MemorySafety = union(enum) {
         // Determine if this is a loop merge (where index 0 is the null case)
         const is_loop_merge = comptime merge_tag == .loop;
 
+        const BranchMemorySafety = struct {
+            fn first(orig: Gid, branches_: []const ?State, branch_gids_: []const ?Gid) ?MemorySafety {
+                _ = orig;
+                var fallback: ?MemorySafety = null;
+                for (branches_, branch_gids_) |branch_opt, branch_gid_opt| {
+                    const branch = branch_opt orelse continue;
+                    const branch_gid = branch_gid_opt orelse continue;
+                    const branch_ref = branch.refinements.at(branch_gid);
+                    const branch_analyte = switch (branch_ref.*) {
+                        .void, .noreturn, .unimplemented => continue,
+                        else => getAnalytePtr(branch_ref),
+                    };
+                    const ms = branch_analyte.memory_safety orelse continue;
+                    if (ms == .allocated) return ms;
+                    if (fallback == null) fallback = ms;
+                }
+                return fallback;
+            }
+        };
+
         // Handle allocation freed state merging
         // If original has an unfreed allocation, check if branches freed it
         if (orig_analyte.memory_safety) |*orig_ms| {
@@ -2001,19 +2066,9 @@ pub const MemorySafety = union(enum) {
                     // Placeholder means the entity was uninitialized before branches.
                     // If branches have meaningful values (e.g., from br setting block result),
                     // copy the first branch's memory_safety to orig.
-                    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
-                        const branch = branch_opt orelse continue;
-                        const branch_gid = branch_gid_opt orelse continue;
-                        const branch_ref = branch.refinements.at(branch_gid);
-                        const branch_analyte = switch (branch_ref.*) {
-                            .void, .noreturn, .unimplemented => continue,
-                            else => getAnalytePtr(branch_ref),
-                        };
-                        if (branch_analyte.memory_safety) |branch_ms| {
-                            if (branch_ms != .placeholder) {
-                                orig_ms.* = branch_ms;
-                                break;
-                            }
+                    if (BranchMemorySafety.first(orig_gid, branches, branch_gids)) |branch_ms| {
+                        if (branch_ms != .placeholder) {
+                            orig_ms.* = branch_ms;
                         }
                     }
                 },
@@ -2067,40 +2122,16 @@ pub const MemorySafety = union(enum) {
                     // For return slot merges: the original may have placeholder .stack/.interned
                     // from splatInit, while branches have the actual returned value's
                     // memory_safety. Take the branch's value if it exists.
-                    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
-                        const branch = branch_opt orelse continue;
-                        const branch_gid = branch_gid_opt orelse continue;
-                        const branch_ref = branch.refinements.at(branch_gid);
-                        const branch_analyte = switch (branch_ref.*) {
-                            .void, .noreturn, .unimplemented => continue,
-                            else => getAnalytePtr(branch_ref),
-                        };
-                        if (branch_analyte.memory_safety) |ms| {
-                            orig_analyte.memory_safety = ms;
-                            break;
-                        }
+                    if (BranchMemorySafety.first(orig_gid, branches, branch_gids)) |ms| {
+                        orig_analyte.memory_safety = ms;
                     }
                 },
                 .error_stub => {}, // unwrap_errunion_payload rejects this at the tag layer
             }
         } else {
             // Original has no memory_safety - copy from first branch that has it
-            var found_any = false;
-            for (branches, branch_gids) |branch_opt, branch_gid_opt| {
-                // Null branch = unreachable path
-                const branch = branch_opt orelse continue;
-                // Entity may not exist in all branches during recursive merge traversal
-                const branch_gid = branch_gid_opt orelse continue;
-                found_any = true;
-                const branch_ref = branch.refinements.at(branch_gid);
-                const branch_analyte = switch (branch_ref.*) {
-                    .void, .noreturn, .unimplemented => continue,
-                    else => getAnalytePtr(branch_ref),
-                };
-                if (branch_analyte.memory_safety) |ms| {
-                    orig_analyte.memory_safety = ms;
-                    break;
-                }
+            if (BranchMemorySafety.first(orig_gid, branches, branch_gids)) |ms| {
+                orig_analyte.memory_safety = ms;
             }
         }
     }
@@ -2162,13 +2193,13 @@ pub const MemorySafety = union(enum) {
         // If ANY entity using the same allocator is still reachable, it's not a leak.
         if (orphan_ctx == .branch_merge) {
             const base_len = orphan_ctx.branch_merge.base_len;
-            const allocator_gid = allocation.allocator_gid;
+            const allocation_root_gid = allocationRootGid(pointee_idx, allocation);
 
-            // Check if this allocator is represented in any entity that was copied to parent
+            // Check if this allocation root is represented in any entity that was copied to parent
             if (copied_from_branch) |cfb| {
                 var it = cfb.keyIterator();
                 while (it.next()) |copied_gid| {
-                    if (hasMatchingAllocation(orphan_refinements, copied_gid.*, allocator_gid)) {
+                    if (hasMatchingAllocation(orphan_refinements, copied_gid.*, allocation_root_gid)) {
                         return;
                     }
                 }
@@ -2178,7 +2209,7 @@ pub const MemorySafety = union(enum) {
             // When a branch stores an allocation into an argument struct, the parent's
             // refinements get updated. So we must check the parent, not the branch.
             for (0..base_len) |pre_gid| {
-                if (hasMatchingAllocation(refinements, @intCast(pre_gid), allocator_gid)) {
+                if (hasMatchingAllocation(refinements, @intCast(pre_gid), allocation_root_gid)) {
                     return;
                 }
             }
@@ -2186,7 +2217,7 @@ pub const MemorySafety = union(enum) {
             // Also check in orphan_refinements (branch) - allocations stored through
             // argument pointers update the branch's copy of the argument entity
             for (0..base_len) |pre_gid| {
-                if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), allocator_gid)) {
+                if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), allocation_root_gid)) {
                     return;
                 }
             }
@@ -2835,8 +2866,26 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn slice(state: State, index: usize, params: anytype) !void {
-        _ = params;
         const ref_idx = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(ref_idx);
+        if (result_ref.* == .pointer) {
+            const source_gid: ?Gid = switch (params.ptr) {
+                .inst => |inst| state.results[inst].refinement,
+                .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+                .fnptr => null,
+            };
+            if (source_gid) |src_gid| {
+                const src_ref = state.refinements.at(src_gid);
+                if (src_ref.* == .pointer) {
+                    result_ref.pointer.analyte.memory_safety = src_ref.pointer.analyte.memory_safety orelse .{ .stack = .{
+                        .meta = state.ctx.meta,
+                        .root_gid = null,
+                    } };
+                    initPointerTargetsPlaceholder(state.refinements, ref_idx);
+                    return;
+                }
+            }
+        }
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
         // Initialize pointer targets to placeholder if not already set
         // (handles fallback case where typeToRefinement created fresh structure)
@@ -3235,6 +3284,7 @@ pub const MemorySafety = union(enum) {
 
         // Set .interned recursively on the pointee
         paintSpatialMemory(refinements, pointee_gid, .{ .interned = meta });
+        initPointerTargetsPlaceholder(refinements, pointee_gid);
     }
 
     // =========================================================================
