@@ -43,6 +43,44 @@ test "alloc sets stack metadata on pointee" {
     try std.testing.expect(ms == .stack);
 }
 
+test "set_union_tag initializes pointer field targets as placeholders" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    const union_type = tag.Type{ .@"union" = &.{
+        .type_id = 100,
+        .variants = &.{
+            .{ .scalar = {} },
+            .{ .pointer = &.{ .@"union" = &.{
+                .type_id = 100,
+                .variants = &.{ .{ .scalar = {} }, .{ .pointer = &.{ .recursive = 100 } } },
+            } } },
+        },
+    } };
+
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = union_type } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{
+        .ptr = .{ .inst = 0 },
+        .field_index = 1,
+        .ty = union_type.@"union".variants[1],
+    } });
+    try Inst.apply(state, 2, .{ .struct_field_ptr = .{
+        .base = .{ .inst = 0 },
+        .field_index = 1,
+        .ty = .{ .pointer = &union_type.@"union".variants[1] },
+        .type_id = 100,
+    } });
+
+    const ptr_gid = results[2].refinement.?;
+    const field_gid = refinements.at(ptr_gid).pointer.to;
+    const nested_union_gid = refinements.at(field_gid).pointer.to;
+    try std.testing.expect(refinements.at(nested_union_gid).@"union".analyte.memory_safety != null);
+}
+
 test "call intercepts mem.Allocator.create and sets allocation metadata" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -151,16 +189,22 @@ test "memcpy detects use after free on dest" {
 
     // Create freed region (dest) - memory_safety on the region (slice allocation)
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{
-        .to = elem_gid,
-        .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
-            .root_gid = null,
-            .allocator_gid = alloc_gid,
-            .type_id = 100,
-            .freed = .{ .meta = ctx.meta }, // Already freed
-        } } },
-    } });
+    const region_gid = try refinements.appendEntity(.{
+        .region = .{
+            .to = elem_gid,
+            .analyte = .{
+                .memory_safety = .{
+                    .allocated = .{
+                        .meta = ctx.meta,
+                        .root_gid = null,
+                        .allocator_gid = alloc_gid,
+                        .type_id = 100,
+                        .freed = .{ .meta = ctx.meta }, // Already freed
+                    },
+                },
+            },
+        },
+    });
     const dest_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
 
     // Create valid source region
@@ -193,16 +237,22 @@ test "memcpy detects use after free on src" {
 
     // Create freed source region - memory_safety on the region
     const src_elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const src_region_gid = try refinements.appendEntity(.{ .region = .{
-        .to = src_elem_gid,
-        .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
-            .root_gid = null,
-            .allocator_gid = alloc_gid,
-            .type_id = 100,
-            .freed = .{ .meta = ctx.meta }, // Already freed
-        } } },
-    } });
+    const src_region_gid = try refinements.appendEntity(.{
+        .region = .{
+            .to = src_elem_gid,
+            .analyte = .{
+                .memory_safety = .{
+                    .allocated = .{
+                        .meta = ctx.meta,
+                        .root_gid = null,
+                        .allocator_gid = alloc_gid,
+                        .type_id = 100,
+                        .freed = .{ .meta = ctx.meta }, // Already freed
+                    },
+                },
+            },
+        },
+    });
     const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = src_region_gid } });
 
     var results = [_]Inst{.{}} ** 3;
@@ -355,10 +405,12 @@ test "free on region with null memory_safety does not error" {
 
     // Create a region with NO memory_safety (null) - simulates returned slice
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{
-        .to = elem_gid,
-        // analyte.memory_safety is null by default
-    } });
+    const region_gid = try refinements.appendEntity(.{
+        .region = .{
+            .to = elem_gid,
+            // analyte.memory_safety is null by default
+        },
+    });
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
 
     var results = [_]Inst{.{}} ** 3;
@@ -471,7 +523,7 @@ test "init with undefined sets memory_safety to interned" {
     const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
 
     // Call init with undefined - should set memory_safety to interned
-    tag.splatInit(&refinements, scalar_gid, &ctx, .@"undefined");
+    tag.splatInit(&refinements, scalar_gid, &ctx, .undefined);
 
     // Verify memory_safety is interned
     const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety.?;

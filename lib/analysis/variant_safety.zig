@@ -48,12 +48,18 @@ pub fn testValid(refinement: Refinements.Refinement) void {
 /// - non-null Meta means the field is active (with location where it was set)
 pub const VariantSafety = struct {
     active_metas: []?Meta,
+    undefined_meta: ?Meta = null,
+    name_when_set: ?[]const u8 = null,
 
     /// Deep copy - allocates new slice for active_metas.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         const new_active_metas = try allocator.alloc(?Meta, self.active_metas.len);
         @memcpy(new_active_metas, self.active_metas);
-        return .{ .active_metas = new_active_metas };
+        return .{
+            .active_metas = new_active_metas,
+            .undefined_meta = self.undefined_meta,
+            .name_when_set = self.name_when_set,
+        };
     }
 
     /// Free allocated resources.
@@ -66,6 +72,7 @@ pub const VariantSafety = struct {
         for (self.active_metas) |am| {
             hasher.update(&.{@as(u8, if (am != null) 1 else 0)});
         }
+        hasher.update(&.{@as(u8, if (self.undefined_meta != null) 1 else 0)});
     }
 
     /// Validate that variant_safety state is consistent with the union refinement.
@@ -90,6 +97,42 @@ pub const VariantSafety = struct {
         }
     }
 
+    pub fn init(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: tag.InitState) void {
+        _ = ctx;
+        _ = state;
+        initRecursive(refinements, gid);
+    }
+
+    fn initRecursive(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .@"union" => |*u| {
+                _ = ensureState(refinements, u);
+                for (u.fields) |field_opt| {
+                    if (field_opt) |field_gid| initRecursive(refinements, field_gid);
+                }
+            },
+            .pointer => |p| initRecursive(refinements, p.to),
+            .optional => |o| initRecursive(refinements, o.to),
+            .errorunion => |e| initRecursive(refinements, e.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| initRecursive(refinements, field_gid);
+            },
+            .region => |r| initRecursive(refinements, r.to),
+            .recursive => {},
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    fn ensureState(refinements: *Refinements, u: *Refinements.Refinement.Union) *VariantSafety {
+        if (u.analyte.variant_safety == null) {
+            const active_metas = refinements.list.allocator.alloc(?Meta, u.fields.len) catch @panic("out of memory");
+            @memset(active_metas, null);
+            u.analyte.variant_safety = .{ .active_metas = active_metas };
+        }
+        return &u.analyte.variant_safety.?;
+    }
+
     /// Handle set_union_tag - update active_metas to reflect new active variant
     pub fn set_union_tag(state: State, index: usize, params: tag.SetUnionTag) !void {
         _ = index;
@@ -107,18 +150,55 @@ pub const VariantSafety = struct {
         const u = &refinements.at(container_idx).@"union";
         const field_idx = params.field_index.?;
 
-        // Get or create variant_safety
-        if (u.analyte.variant_safety) |*vs| {
-            // Update existing: set all to null, then set active field
-            for (vs.active_metas) |*m| m.* = null;
-            vs.active_metas[field_idx] = ctx.meta;
-        } else {
-            // Create new active_metas array
-            const active_metas = ctx.allocator.alloc(?Meta, u.fields.len) catch @panic("out of memory");
-            for (active_metas) |*m| m.* = null;
-            active_metas[field_idx] = ctx.meta;
-            u.analyte.variant_safety = .{ .active_metas = active_metas };
-        }
+        const vs = ensureState(refinements, u);
+        for (vs.active_metas) |*m| m.* = null;
+        vs.active_metas[field_idx] = ctx.meta;
+        vs.undefined_meta = null;
+        vs.name_when_set = null;
+    }
+
+    pub fn union_init(state: State, index: usize, params: tag.UnionInit) !void {
+        const result_gid = state.results[index].refinement orelse return;
+        const ref = state.refinements.at(result_gid);
+        if (ref.* != .@"union") return;
+
+        const u = &ref.@"union";
+        const vs = ensureState(state.refinements, u);
+        if (params.field_index >= vs.active_metas.len) return;
+        for (vs.active_metas) |*m| m.* = null;
+        vs.active_metas[params.field_index] = state.ctx.meta;
+        vs.undefined_meta = null;
+        vs.name_when_set = null;
+    }
+
+    pub fn store(state: State, index: usize, params: tag.Store) !void {
+        _ = index;
+        const is_undef = switch (params.src) {
+            .interned => |interned| interned.ty == .undefined,
+            else => false,
+        };
+        if (!is_undef) return;
+
+        const ptr_gid: Gid = switch (params.ptr) {
+            .inst => |ptr| state.results[ptr].refinement orelse return,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
+            .fnptr => return,
+        };
+        const ptr_ref = state.refinements.at(ptr_gid);
+        if (ptr_ref.* != .pointer) return;
+
+        const pointee_gid = ptr_ref.pointer.to;
+        const pointee = state.refinements.at(pointee_gid);
+        if (pointee.* != .@"union") return;
+
+        const u = &pointee.@"union";
+        const vs = ensureState(state.refinements, u);
+        for (vs.active_metas) |*m| m.* = null;
+        vs.undefined_meta = state.ctx.meta;
+        vs.name_when_set = switch (params.ptr) {
+            .inst => |ptr| state.ctx.buildPathName(state.results, state.refinements, ptr),
+            .interned, .fnptr => null,
+        };
     }
 
     /// Check struct_field_ptr access on unions - report error if accessing inactive variant
@@ -178,7 +258,7 @@ pub const VariantSafety = struct {
         // Unlike switch_br (user's explicit control flow), cond_br is a compiler-generated
         // safety check that should NOT override known state.
         const u = &union_ref.@"union";
-        const vs = &(u.analyte.variant_safety orelse return);
+        const vs = ensureState(refinements, u);
 
         // Check field index bounds
         if (field_index >= u.fields.len) return;
@@ -202,6 +282,8 @@ pub const VariantSafety = struct {
                 meta.* = null;
             }
             vs_ref.active_metas[field_index] = ctx.meta;
+            vs_ref.undefined_meta = null;
+            vs_ref.name_when_set = null;
         }
 
         // For globals: also update the global's variant_safety so subsequent loads see it
@@ -234,6 +316,8 @@ pub const VariantSafety = struct {
             meta.* = null;
         }
         global_vs_ref.active_metas[field_index] = ctx.meta;
+        global_vs_ref.undefined_meta = null;
+        global_vs_ref.name_when_set = null;
     }
 
     /// Handle switch_br - when switching on a union tag, update the active variant.
@@ -304,6 +388,8 @@ pub const VariantSafety = struct {
             meta.* = null;
         }
         vs_ref.active_metas[field_index] = ctx.meta;
+        vs_ref.undefined_meta = null;
+        vs_ref.name_when_set = null;
     }
 
     /// Ensure the narrowed union variant has a field entity with the real payload
@@ -513,7 +599,6 @@ pub const VariantSafety = struct {
     ) void {
         _ = ptr_gid;
         _ = ctx;
-        _ = is_undefined;
         _ = is_null_opt;
         _ = field_info;
 
@@ -527,6 +612,7 @@ pub const VariantSafety = struct {
         // Create active_metas array - all null initially
         const active_metas = allocator.alloc(?Meta, u.fields.len) catch @panic("OOM");
         @memset(active_metas, null);
+        var undefined_meta: ?Meta = null;
 
         // Find which field has an entity (the active one from initialization)
         for (u.fields, 0..) |field_opt, i| {
@@ -541,7 +627,19 @@ pub const VariantSafety = struct {
             }
         }
 
-        u.analyte.variant_safety = .{ .active_metas = active_metas };
+        if (is_undefined) {
+            undefined_meta = Meta{
+                .function = "",
+                .file = loc.file,
+                .line = loc.line,
+                .column = loc.column,
+            };
+        }
+
+        u.analyte.variant_safety = .{
+            .active_metas = active_metas,
+            .undefined_meta = undefined_meta,
+        };
     }
 
     // =========================================================================
@@ -594,27 +692,22 @@ pub const VariantSafety = struct {
                 const src_u = src_ref.@"union";
                 const src_vs = src_u.analyte.variant_safety orelse return;
 
-                // Copy the variant_safety if destination doesn't have one
-                if (u.analyte.variant_safety == null) {
-                    const allocator = state.refinements.list.allocator;
-                    u.analyte.variant_safety = src_vs.copy(allocator) catch @panic("OOM");
+                const allocator = state.refinements.list.allocator;
+                if (u.analyte.variant_safety) |old_vs| old_vs.deinit(allocator);
+                u.analyte.variant_safety = src_vs.copy(allocator) catch @panic("OOM");
+                const dst_fields_len = u.fields.len;
 
-                    // Also copy field entities for active variants
-                    for (src_vs.active_metas, 0..) |meta_opt, i| {
-                        if (meta_opt != null) {
-                            // This variant is active - ensure field entity exists
-                            if (i < src_u.fields.len and i < u.fields.len) {
-                                if (u.fields[i] == null) {
-                                    if (src_u.fields[i]) |src_field_gid| {
-                                        // Copy the field entity from source
-                                        const src_field_ref = state.refinements.at(src_field_gid).*;
-                                        const copied_gid = Refinements.Refinement.copyTo(src_field_ref, state.refinements, state.refinements) catch @panic("OOM");
-                                        // Re-fetch after potential reallocation
-                                        state.refinements.at(dst_gid).@"union".fields[i] = copied_gid;
-                                    }
-                                }
-                            }
-                        }
+                // Also copy field entities for active variants.
+                for (src_vs.active_metas, 0..) |meta_opt, i| {
+                    if (i >= src_u.fields.len or i >= dst_fields_len) continue;
+                    if (meta_opt == null) {
+                        state.refinements.at(dst_gid).@"union".fields[i] = null;
+                        continue;
+                    }
+                    if (src_u.fields[i]) |src_field_gid| {
+                        const src_field_ref = state.refinements.at(src_field_gid).*;
+                        const copied_gid = Refinements.Refinement.copyTo(src_field_ref, state.refinements, state.refinements) catch @panic("OOM");
+                        state.refinements.at(dst_gid).@"union".fields[i] = copied_gid;
                     }
                 }
             },

@@ -26,6 +26,15 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     };
 }
 
+fn fullTestState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
+    return .{
+        .ctx = ctx,
+        .results = results,
+        .refinements = refinements,
+        .return_gid = 0,
+    };
+}
+
 test "alloc creates pointer with undefined pointee" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -634,6 +643,36 @@ test "get_union_tag on union with active variant succeeds" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.scalar.analyte.undefined_safety.?));
 }
 
+test "cond_br on whole undefined union reports use before assign" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 4;
+    const state = fullTestState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .@"union" = &.{
+        .type_id = 100,
+        .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+    } } } });
+    try Inst.apply(state, 1, .{ .store = .{
+        .ptr = .{ .inst = 0 },
+        .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = &.{ .@"union" = &.{
+            .type_id = 100,
+            .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        } } } } },
+    } });
+    try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
+    try Inst.apply(state, 3, .{ .get_union_tag = .{ .operand = 2 } });
+
+    const result = Inst.apply(state, 3, .{ .cond_br = .{
+        .branch = true,
+        .condition_idx = 3,
+        .union_tag = .{ .union_inst = 2, .field_index = 0, .field_type = .{ .scalar = {} } },
+    } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
 // =============================================================================
 // Packed struct field tests - RMW pattern handling
 // =============================================================================
@@ -962,10 +1001,12 @@ test "slice sets undefined_safety on result pointer" {
     const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
 
     // Create a pointer to the region - without undefined_safety set (simulating some edge case)
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
-        .to = region_gid,
-        // No undefined_safety set
-    } });
+    const ptr_gid = try refinements.appendEntity(.{
+        .pointer = .{
+            .to = region_gid,
+            // No undefined_safety set
+        },
+    });
 
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = ptr_gid;
@@ -1040,10 +1081,12 @@ test "load pointer with null undefined_safety sets result to defined" {
     } });
 
     // Create a pointer to the scalar - WITHOUT undefined_safety set (null)
-    const inner_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
-        .to = inner_scalar_gid,
-        // Note: analyte.undefined_safety is null by default
-    } });
+    const inner_ptr_gid = try refinements.appendEntity(.{
+        .pointer = .{
+            .to = inner_scalar_gid,
+            // Note: analyte.undefined_safety is null by default
+        },
+    });
 
     // Create a pointer-to-pointer (like stack storage for a pointer)
     const outer_ptr_gid = try refinements.appendEntity(.{ .pointer = .{

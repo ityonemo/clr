@@ -91,20 +91,18 @@ location, and relevant context messages where applicable.
 
 ## Current Implementation Risks
 
-The integration baseline after the variant branch/switch/global fix is `319/369`
-passing (`50` failing). Treat the remaining failures as real analyzer work, not
+The integration baseline after the core union-state fix is `327/369`
+passing (`42` failing). Treat the remaining failures as real analyzer work, not
 compiler-cache failures.
 
 The largest incomplete areas are:
 
-- Union and variant state. Union containers must not carry `undefined_safety`;
-  active/inactive state belongs in `variant_safety`, while active field payloads
-  carry undefined state. The first union-state fix removed known
-  `undefined_safety` writes from union containers and got tagged/untagged defined
-  field cases passing. Remaining union gaps include whole-union undefined
-  detection (`undefined.bats` 311, 315, 331), recursive cleanup
-  (`recursive.bats` 237), and union return/provenance cases in allocator,
-  fieldParentPtr, and stack-pointer analyses.
+- Unfinished union concerns. Core union state, whole-union undefined values,
+  allocator ownership through union pointer fields, recursive expression-tree
+  cleanup, and stack-pointer union returns are now covered. Remaining
+  union-specific failures are `fieldParentPtr` provenance through union fields
+  and global union fields (`allocator_field_ptr` 86-87 and
+  `fieldparentptr_safety` 144/147).
 - Interprocedural ownership transfer. Allocator and slice cases fail when caller
   and callee transfer responsibility for freeing memory. Return/call handling is
   currently connectivity-based and several `call_return` handlers are no-ops, so
@@ -142,3 +140,6 @@ Good next targets:
 
 1. Revisit allocator ownership transfer and FD aliasing, since both depend
    heavily on reliable aggregate propagation.
+2. Fix `fieldParentPtr` provenance for union fields/globals; this is the only
+   remaining explicitly union-shaped failure cluster after the core union-state
+   fixes.

@@ -826,13 +826,15 @@ pub const MemorySafety = union(enum) {
                 .allocated => |alloc_info| {
                     // Old slice was allocated - update new region with allocation info
                     // and mark old region as freed (ownership transferred)
-                    paintSpatialMemory(refinements, new_region_gid, .{ .allocated = .{
-                        .meta = ctx.meta,
-                        .allocator_gid = alloc_info.allocator_gid,
-                        .type_id = alloc_info.type_id,
-                        .freed = null,
-                        .root_gid = null, // New region is the root
-                    } });
+                    paintSpatialMemory(refinements, new_region_gid, .{
+                        .allocated = .{
+                            .meta = ctx.meta,
+                            .allocator_gid = alloc_info.allocator_gid,
+                            .type_id = alloc_info.type_id,
+                            .freed = null,
+                            .root_gid = null, // New region is the root
+                        },
+                    });
 
                     // Mark old slice's region as freed
                     const free_meta: Free = .{
@@ -2157,7 +2159,7 @@ pub const MemorySafety = union(enum) {
     pub fn init(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: tag.InitState) void {
         _ = ctx;
         switch (state) {
-            .defined, .@"undefined" => {
+            .defined, .undefined => {
                 // Interned/global values have .interned memory_safety
                 paintSpatialMemory(refinements, gid, .{ .interned = comptime_interned_meta });
                 // Initialize any nested pointer targets to .placeholder (they're unassigned)
@@ -3032,6 +3034,7 @@ pub const MemorySafety = union(enum) {
         const union_gid = state.refinements.at(ptr_gid).pointer.to;
         const field_gid = state.refinements.at(union_gid).@"union".fields[field_index] orelse return;
         paintSpatialMemory(state.refinements, field_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        initPointerTargetsPlaceholder(state.refinements, field_gid);
     }
 
     /// WrapErrunionPayload may create payload via typeToRefinement
@@ -3481,8 +3484,8 @@ pub const MemorySafety = union(enum) {
             .interned => return reportFreeGlobalMemory(ctx),
             .error_stub => return,
             // Placeholder = never allocated. Can't free what was never allocated.
-                // This is an infeasible code path in our conservative analysis.
-                .placeholder => return error.InvalidReallocInput,
+            // This is an infeasible code path in our conservative analysis.
+            .placeholder => return error.InvalidReallocInput,
             .allocated => {},
         }
 

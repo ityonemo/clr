@@ -142,7 +142,7 @@ pub const UndefinedSafety = union(enum) {
     pub fn init(refinements: *Refinements, gid: Gid, ctx: ?*Context, state: tag.InitState) void {
         switch (state) {
             .defined, .runtime => initRecursive(refinements, gid, .{ .defined = {} }),
-            .@"undefined" => {
+            .undefined => {
                 const meta = if (ctx) |c| c.meta else Meta{ .file = "", .line = 0, .function = "" };
                 initRecursive(refinements, gid, .{ .undefined = .{ .meta = meta } });
             },
@@ -383,6 +383,21 @@ pub const UndefinedSafety = union(enum) {
 
         // Otherwise, tag is defined - set it explicitly
         refinements.at(result_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
+    }
+
+    pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
+        _ = index;
+        const union_check = params.union_tag orelse return;
+        if (!params.branch) return;
+
+        const union_gid = state.results[union_check.union_inst].refinement orelse return;
+        const union_ref = state.refinements.at(union_gid);
+        if (union_ref.* != .@"union") return;
+
+        const vs = union_ref.@"union".analyte.variant_safety orelse return;
+        if (wholeUnionUndefined(vs)) {
+            try reportWholeUnionUndefined(state.ctx, vs.undefined_meta.?, vs.name_when_set);
+        }
     }
 
     // Simple operations produce defined scalar results (non-binop/unop)
@@ -1529,6 +1544,11 @@ pub const UndefinedSafety = union(enum) {
                 try checkFieldUndefined(refinements, field_idx, ctx);
             },
             .@"union" => |u| {
+                if (u.analyte.variant_safety) |vs| {
+                    if (wholeUnionUndefined(vs)) {
+                        return reportWholeUnionUndefined(ctx, vs.undefined_meta.?, vs.name_when_set);
+                    }
+                }
                 if (u.fields[params.field_index]) |field_idx| {
                     // Active field - check its state
                     try checkFieldUndefined(refinements, field_idx, ctx);
@@ -1543,6 +1563,21 @@ pub const UndefinedSafety = union(enum) {
                 refinements.at(result_idx).scalar.analyte.undefined_safety = .{ .defined = {} };
             },
         }
+    }
+
+    fn wholeUnionUndefined(vs: @import("variant_safety.zig").VariantSafety) bool {
+        if (vs.undefined_meta == null) return false;
+        for (vs.active_metas) |meta| {
+            if (meta != null) return false;
+        }
+        return true;
+    }
+
+    fn reportWholeUnionUndefined(ctx: *Context, meta: Meta, name_when_set: ?[]const u8) anyerror!void {
+        return (UndefinedSafety{ .undefined = .{
+            .meta = meta,
+            .name_when_set = name_when_set,
+        } }).reportUseBeforeAssign(ctx);
     }
 
     fn checkFieldUndefined(refinements: *Refinements, field_idx: Refinements.Gid, ctx: *Context) !void {

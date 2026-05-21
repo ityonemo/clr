@@ -37,6 +37,53 @@ fn fullTestState(ctx: *Context, results: []Inst, refinements: *Refinements) Stat
     };
 }
 
+test "splatInit initializes union variant_safety with no active variants" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    const allocator = std.testing.allocator;
+
+    const fields = try allocator.alloc(?Gid, 2);
+    @memset(fields, null);
+    const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 0 } });
+
+    tag.splatInit(&refinements, union_gid, &ctx, .runtime);
+
+    const vs = refinements.at(union_gid).@"union".analyte.variant_safety.?;
+    try std.testing.expectEqual(@as(usize, 2), vs.active_metas.len);
+    try std.testing.expect(vs.active_metas[0] == null);
+    try std.testing.expect(vs.active_metas[1] == null);
+}
+
+test "union_init sets only initialized variant active" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    tag.splatInit(&refinements, scalar_gid, &ctx, .defined);
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = scalar_gid;
+    const state = fullTestState(&ctx, &results, &refinements);
+
+    const union_type = tag.Type{ .@"union" = &.{
+        .type_id = 200,
+        .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+    } };
+    try Inst.apply(state, 1, .{ .union_init = .{
+        .field_index = 1,
+        .init = .{ .inst = 0 },
+        .ty = union_type,
+        .type_id = 200,
+    } });
+
+    const union_gid = results[1].refinement.?;
+    const vs = refinements.at(union_gid).@"union".analyte.variant_safety.?;
+    try std.testing.expect(vs.active_metas[0] == null);
+    try std.testing.expect(vs.active_metas[1] != null);
+}
+
 test "set_union_tag sets active variant" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -348,9 +395,9 @@ test "aggregate_init incorporates variant_safety state from source elements" {
     // Create struct with union field using aggregate_init
     const struct_type = tag.Type{ .@"struct" = &.{
         .type_id = 100,
-        .fields = &.{ .{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } } },
+        .fields = &.{.{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } }},
     } };
-    const elements = &[_]tag.Src{ .{ .inst = 0 } };
+    const elements = &[_]tag.Src{.{ .inst = 0 }};
     try Inst.apply(state, 1, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
 
     // Check the struct's field has variant_safety

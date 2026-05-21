@@ -4,6 +4,46 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Core union state initialization and whole-union undefined reporting
+
+**Date:** 2026-05-21
+
+**Symptom:**
+Union cases could panic in `testValid` with missing `variant_safety`, and whole
+unions assigned `undefined` either passed silently or failed before producing the
+intended undefined-value diagnostic.
+
+**Root Cause:**
+Union refinements were structurally created with nullable field slots but no
+default variant-state analyte. That conflicted with the strict invariant that
+all unions must carry `variant_safety`. Whole-union undefined stores also had no
+place to preserve the source location because union containers intentionally do
+not carry `undefined_safety`.
+
+**The Fix:**
+Initialized every union with an all-inactive `variant_safety` state, added
+`union_init` handling to mark the initialized variant active, and recorded
+whole-union undefined source metadata in `variant_safety`. Undefined safety now
+reports `UseBeforeAssign` when a whole-undefined union reaches tag-check or
+field-access paths, before variant narrowing can manufacture an active field.
+
+Also initialized pointer-field targets created by union variant setup as memory
+placeholders, so recursive union pointer fields satisfy memory-safety validation.
+
+**Key Files Changed:**
+- `lib/analysis/variant_safety.zig`
+- `lib/analysis/undefined_safety.zig`
+- `lib/analysis/memory_safety.zig`
+
+**Test Cases:**
+- `undefined_safety/unions/tagged_whole_undefined.zig`
+- `undefined_safety/unions/untagged_whole_undefined.zig`
+- `undefined_safety/globals/use_undefined_union.zig`
+- `allocator_safety/recursive/expr_tree_correct.zig`
+- `stack_pointer_safety/union/no_escape.zig`
+
+---
+
 ## Fix: ptr_slice_ptr_ptr creates fresh pointer chain instead of pointing to original slice
 
 **Date:** 2026-04-15
