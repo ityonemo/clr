@@ -4,6 +4,46 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Union fieldParentPtr provenance through interned and global union fields
+
+**Date:** 2026-05-21
+
+**Symptom:**
+Union `fieldParentPtr` cases still failed after core union-state bringup,
+especially parent recovery through union fields, tagged union fields, and global
+union fields.
+
+**Root Cause:**
+Comptime-known union literals did not carry active-field metadata into generated
+analyzers, so stores from interned union values could create a union structure
+without selecting the active variant. Whole-union `undefined` checks also fired
+too early on tag checks, blocking valid field assignment patterns. Finally,
+`field_parent_ptr` depended too heavily on the field pointer's direct memory
+root, which was missing or stale for interned/global field pointers.
+
+**The Fix:**
+Generated `Interned.active_union_field` for known union literals, used it during
+stores to initialize the destination union's active field, and moved
+whole-union undefined reporting to actual field-value reads. `field_parent_ptr`
+now paints the parent pointer's pointee shape and can recover the parent by
+field-origin metadata when the immediate memory root is unavailable.
+
+**Key Files Changed:**
+- `src/codegen.zig`
+- `lib/core.zig`
+- `lib/tag.zig`
+- `lib/analysis/variant_safety.zig`
+- `lib/analysis/undefined_safety.zig`
+- `lib/analysis/memory_safety.zig`
+
+**Test Cases:**
+- `test/cases/fieldparentptr_safety/valid_union_field.zig`
+- `test/cases/fieldparentptr_safety/globals/valid_union_field.zig`
+- `test/cases/allocator_safety/field_ptr/free_via_fieldparentptr_union.zig`
+- `test/cases/allocator_safety/field_ptr/free_via_fieldparentptr_tagged_union.zig`
+
+---
+
 ## Fix: Core union state initialization and whole-union undefined reporting
 
 **Date:** 2026-05-21

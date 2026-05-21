@@ -71,7 +71,7 @@ pub const INVALID_GID = core.INVALID_GID;
 /// - defined: interned/global value, known to be defined
 /// - undefined: interned/global value, known to be undefined
 /// - runtime: stack/heap value, tag handler determines state
-pub const InitState = enum { defined, @"undefined", runtime };
+pub const InitState = enum { defined, undefined, runtime };
 
 /// Convert a Type (from codegen) to a Refinement.
 /// Used when storing interned values to determine the refinement structure.
@@ -1026,7 +1026,7 @@ pub const RetSafe = struct {
                         const ref = try typeToRefinement(interned.ty, cloned);
                         cloned.freeValue(cloned.at(return_gid));
                         cloned.at(return_gid).* = ref;
-                        splatInit(cloned, return_gid, state.ctx, .@"undefined");
+                        splatInit(cloned, return_gid, state.ctx, .undefined);
                     } else {
                         // Non-void, non-undefined comptime value (constants, null) - interned
                         // NOTE: Must evaluate typeToRefinement BEFORE cloned.at() to avoid
@@ -1265,6 +1265,9 @@ pub const Store = struct {
         // Special case for allocator: call splat after, as we modify ptr_ref.pointer.to
         // differently there (direct reference instead of structural update).
         const is_allocator = if (src_gid) |gid| state.refinements.at(gid).* == .allocator else false;
+        if (src_gid == null) {
+            try prepareInternedUnionStore(state, pointee_gid, self.src);
+        }
         if (!is_allocator) {
             try splat(.store, state, index, self);
         }
@@ -1334,6 +1337,30 @@ pub const Store = struct {
         }
     }
 };
+
+fn prepareInternedUnionStore(state: State, pointee_gid: Gid, src: Src) !void {
+    const interned = switch (src) {
+        .interned => |interned| interned,
+        .inst, .fnptr => return,
+    };
+    const field_index = interned.active_union_field orelse return;
+
+    const pointee = state.refinements.at(pointee_gid);
+    if (pointee.* != .@"union") return;
+    const union_type = switch (interned.ty) {
+        .@"union" => |union_type| union_type,
+        else => return,
+    };
+    if (field_index >= pointee.@"union".fields.len or field_index >= union_type.variants.len) return;
+
+    const fields = state.refinements.at(pointee_gid).@"union".fields;
+    for (fields) |*field| field.* = null;
+
+    const field_ref = try typeToRefinement(union_type.variants[field_index], state.refinements);
+    const field_gid = try state.refinements.appendEntity(field_ref);
+    splatInitInterned(state.refinements, field_gid);
+    state.refinements.at(pointee_gid).@"union".fields[field_index] = field_gid;
+}
 
 /// Entity operation: CREATE-SEMIDEEP
 /// Creates new entity via value copy from error union payload.

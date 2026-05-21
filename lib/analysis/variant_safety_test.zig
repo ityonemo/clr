@@ -84,6 +84,38 @@ test "union_init sets only initialized variant active" {
     try std.testing.expect(vs.active_metas[1] != null);
 }
 
+test "store of interned union value sets active variant" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = fullTestState(&ctx, &results, &refinements);
+
+    const union_type = tag.Type{ .@"union" = &.{
+        .type_id = 200,
+        .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+    } };
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = union_type } });
+    try Inst.apply(state, 1, .{ .store = .{
+        .ptr = .{ .inst = 0 },
+        .src = .{ .interned = .{
+            .ip_idx = 44,
+            .ty = union_type,
+            .active_union_field = 1,
+        } },
+    } });
+
+    const ptr_gid = results[0].refinement.?;
+    const union_gid = refinements.at(ptr_gid).pointer.to;
+    const u = refinements.at(union_gid).@"union";
+    const vs = u.analyte.variant_safety.?;
+    try std.testing.expect(vs.active_metas[0] == null);
+    try std.testing.expect(vs.active_metas[1] != null);
+    try std.testing.expect(u.fields[0] == null);
+    try std.testing.expect(u.fields[1] != null);
+}
+
 test "set_union_tag sets active variant" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

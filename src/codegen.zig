@@ -1201,10 +1201,30 @@ fn srcString(info: *const FnInfo, ref: Ref) []const u8 {
             break :blk typeToString(null, null, arena, ip, ty);
         };
 
-        return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .ip_idx = {d}, .ty = {s} }} }}", .{ ip_idx, type_str }, null);
+        const active_union_field_str = if (activeUnionFieldIndex(ip, interned_idx)) |field_index|
+            clr_allocator.allocPrint(arena, ", .active_union_field = {d}", .{field_index}, null)
+        else
+            "";
+        return clr_allocator.allocPrint(arena, ".{{ .interned = .{{ .ip_idx = {d}, .ty = {s}{s} }} }}", .{ ip_idx, type_str, active_union_field_str }, null);
     }
     // Fallback - shouldn't normally happen
     return ".{ .interned = .{ .ip_idx = 0, .ty = .{ .unimplemented = {} } } }";
+}
+
+fn activeUnionFieldIndex(ip: *const InternPool, interned_idx: InternPool.Index) ?usize {
+    const ty = ip.typeOf(interned_idx);
+    if (ip.indexToKey(ty) != .union_type) return null;
+
+    const val_key = ip.indexToKey(interned_idx);
+    if (val_key != .un) return null;
+    const un = val_key.un;
+    if (un.tag == .none) return null;
+
+    const tag_key = ip.indexToKey(un.tag);
+    if (tag_key != .enum_tag) return null;
+    const int_key = ip.indexToKey(tag_key.enum_tag.int);
+    if (int_key != .int) return null;
+    return @intCast(int_key.int.storage.u64);
 }
 
 /// Check if an interned value is a pointer to a user global variable.

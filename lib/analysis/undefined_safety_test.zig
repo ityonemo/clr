@@ -643,12 +643,12 @@ test "get_union_tag on union with active variant succeeds" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.scalar.analyte.undefined_safety.?));
 }
 
-test "cond_br on whole undefined union reports use before assign" {
+test "field value read from whole undefined union reports use before assign after tag check" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 4;
+    var results = [_]Inst{.{}} ** 5;
     const state = fullTestState(&ctx, &results, &refinements);
 
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .@"union" = &.{
@@ -665,10 +665,15 @@ test "cond_br on whole undefined union reports use before assign" {
     try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
     try Inst.apply(state, 3, .{ .get_union_tag = .{ .operand = 2 } });
 
-    const result = Inst.apply(state, 3, .{ .cond_br = .{
+    try Inst.apply(state, 3, .{ .cond_br = .{
         .branch = true,
         .condition_idx = 3,
         .union_tag = .{ .union_inst = 2, .field_index = 0, .field_type = .{ .scalar = {} } },
+    } });
+    const result = Inst.apply(state, 4, .{ .struct_field_val = .{
+        .operand = 2,
+        .field_index = 0,
+        .ty = .{ .scalar = {} },
     } });
     try std.testing.expectError(error.UseBeforeAssign, result);
 }

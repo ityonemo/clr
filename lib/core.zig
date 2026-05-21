@@ -81,7 +81,7 @@ pub const Type = union(enum) {
     @"struct": *const StructType, // struct with type_id and field types
     @"union": *const UnionType, // union with type_id and variant types
     allocator: Name, // pseudo-allocator, should always be pointed to, the allocator
-                     // pointer represents the pointer to metadata + pointer to vtable.
+    // pointer represents the pointer to metadata + pointer to vtable.
     fnptr: void, // function pointer (choices stored in Src.fnptr)
     recursive: Name, // self-referential type placeholder (Name unused, set to 0)
     void: void, // void type
@@ -107,6 +107,8 @@ pub const Interned = struct {
     ip_idx: u32,
     /// Type info for reifying refinement if not found in global_map
     ty: Type,
+    /// Active union field for comptime union values, if known.
+    active_union_field: ?usize = null,
 };
 
 /// Context for orphan detection - describes how/where an entity became unreachable.

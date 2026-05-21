@@ -385,21 +385,6 @@ pub const UndefinedSafety = union(enum) {
         refinements.at(result_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
     }
 
-    pub fn cond_br(state: State, index: usize, params: tag.CondBr) !void {
-        _ = index;
-        const union_check = params.union_tag orelse return;
-        if (!params.branch) return;
-
-        const union_gid = state.results[union_check.union_inst].refinement orelse return;
-        const union_ref = state.refinements.at(union_gid);
-        if (union_ref.* != .@"union") return;
-
-        const vs = union_ref.@"union".analyte.variant_safety orelse return;
-        if (wholeUnionUndefined(vs)) {
-            try reportWholeUnionUndefined(state.ctx, vs.undefined_meta.?, vs.name_when_set);
-        }
-    }
-
     // Simple operations produce defined scalar results (non-binop/unop)
     pub const slice_len = markResultDefined;
     pub const is_non_err = markResultDefined;

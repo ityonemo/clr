@@ -177,7 +177,11 @@ pub const VariantSafety = struct {
             .interned => |interned| interned.ty == .undefined,
             else => false,
         };
-        if (!is_undef) return;
+        const active_union_field = switch (params.src) {
+            .interned => |interned| interned.active_union_field,
+            else => null,
+        };
+        if (!is_undef and active_union_field == null) return;
 
         const ptr_gid: Gid = switch (params.ptr) {
             .inst => |ptr| state.results[ptr].refinement orelse return,
@@ -193,12 +197,20 @@ pub const VariantSafety = struct {
 
         const u = &pointee.@"union";
         const vs = ensureState(state.refinements, u);
-        for (vs.active_metas) |*m| m.* = null;
-        vs.undefined_meta = state.ctx.meta;
-        vs.name_when_set = switch (params.ptr) {
-            .inst => |ptr| state.ctx.buildPathName(state.results, state.refinements, ptr),
-            .interned, .fnptr => null,
-        };
+        if (is_undef) {
+            for (vs.active_metas) |*m| m.* = null;
+            vs.undefined_meta = state.ctx.meta;
+            vs.name_when_set = switch (params.ptr) {
+                .inst => |ptr| state.ctx.buildPathName(state.results, state.refinements, ptr),
+                .interned, .fnptr => null,
+            };
+        } else if (active_union_field) |field_index| {
+            if (field_index >= vs.active_metas.len) return;
+            for (vs.active_metas) |*m| m.* = null;
+            vs.active_metas[field_index] = state.ctx.meta;
+            vs.undefined_meta = null;
+            vs.name_when_set = null;
+        }
     }
 
     /// Check struct_field_ptr access on unions - report error if accessing inactive variant
@@ -271,7 +283,7 @@ pub const VariantSafety = struct {
             }
         }
 
-        if (!has_known_active) {
+        if (!has_known_active and vs.undefined_meta == null) {
             // No known active variant - use the cond_br check to establish it.
             try ensureVariantField(refinements, union_eidx, field_index, union_check.field_type, ctx);
 
@@ -286,38 +298,39 @@ pub const VariantSafety = struct {
             vs_ref.name_when_set = null;
         }
 
-        // For globals: also update the global's variant_safety so subsequent loads see it
+        // Also update the loaded source's pointee when available, so compiler-generated
+        // tag checks before `u.field = value` establish the field for the following
+        // struct_field_ptr on the original pointer.
         const inst_tag = results[union_check.union_inst].inst_tag orelse return;
         if (inst_tag != .load) return;
         const load_src = inst_tag.load.ptr;
-        if (load_src != .interned) return; // Not an interned value
-        const global_ip_idx = load_src.interned.ip_idx;
+        if (has_known_active and load_src != .interned) return;
+        const src_ptr_gid: Gid = switch (load_src) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .fnptr => return,
+        };
 
-        const global_ptr_gid = refinements.getGlobal(global_ip_idx) orelse return;
-        const global_pointee_gid = refinements.at(global_ptr_gid).pointer.to;
-        const global_union_ref = refinements.at(global_pointee_gid);
-        if (global_union_ref.* != .@"union") return;
+        const source_pointee_gid = refinements.at(src_ptr_gid).pointer.to;
+        const source_union_ref = refinements.at(source_pointee_gid);
+        if (source_union_ref.* != .@"union") return;
 
-        const global_u = &global_union_ref.@"union";
+        const source_u = &source_union_ref.@"union";
 
         // Check field index bounds
-        if (field_index >= global_u.fields.len) return;
+        if (field_index >= source_u.fields.len) return;
 
-        // For globals, we always update based on the cond_br check.
-        // Unlike locals where set_union_tag in the same function gives us accurate info,
-        // globals may have been modified by other functions. The cond_br check is our
-        // only source of truth in this function's analysis context.
-        try ensureVariantField(refinements, global_pointee_gid, field_index, union_check.field_type, ctx);
+        try ensureVariantField(refinements, source_pointee_gid, field_index, union_check.field_type, ctx);
 
         // Re-fetch union and clear all active variants, set only this one
-        const global_u_ref = &refinements.at(global_pointee_gid).@"union";
-        const global_vs_ref = &(global_u_ref.analyte.variant_safety orelse return);
-        for (global_vs_ref.active_metas) |*meta| {
+        const source_u_ref = &refinements.at(source_pointee_gid).@"union";
+        const source_vs_ref = &(source_u_ref.analyte.variant_safety orelse return);
+        for (source_vs_ref.active_metas) |*meta| {
             meta.* = null;
         }
-        global_vs_ref.active_metas[field_index] = ctx.meta;
-        global_vs_ref.undefined_meta = null;
-        global_vs_ref.name_when_set = null;
+        source_vs_ref.active_metas[field_index] = ctx.meta;
+        source_vs_ref.undefined_meta = null;
+        source_vs_ref.name_when_set = null;
     }
 
     /// Handle switch_br - when switching on a union tag, update the active variant.
