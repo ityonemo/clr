@@ -2156,6 +2156,8 @@ pub fn PtrArith(comptime instr: anytype) type {
     return struct {
         /// Source pointer
         ptr: Src,
+        /// True when codegen proved the arithmetic offset is comptime zero.
+        offset_is_zero: bool = false,
 
         pub fn apply(self: @This(), state: State, index: usize) !void {
             const ptr_idx = switch (self.ptr) {
@@ -3308,6 +3310,15 @@ fn mergeRefinementRecursive(
                     break :blk branch_inner;
                 }
             } else blk: {
+                if (!all_same) {
+                    for (branches, branch_gids) |branch_opt, gid_opt| {
+                        const branch = branch_opt orelse continue;
+                        const gid = gid_opt orelse continue;
+                        const src_ref = branch.refinements.at(gid).*;
+                        try copied_from_branch.put(gid, {});
+                        try Refinement.collectReachableGids(src_ref, branch.refinements, copied_from_branch);
+                    }
+                }
                 break :blk p.to;
             };
 

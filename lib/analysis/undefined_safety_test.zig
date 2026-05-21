@@ -1071,6 +1071,33 @@ test "ptr_add sets undefined_safety on result pointer" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.pointer.analyte.undefined_safety.?));
 }
 
+test "ptr_sub sets undefined_safety on result pointer" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .ptr_sub = .{ .ptr = .{ .inst = 0 } } });
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expect(result_ref.pointer.analyte.undefined_safety != null);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.pointer.analyte.undefined_safety.?));
+}
+
 // =============================================================================
 // load handler tests - loading pointer with null undefined_safety
 // =============================================================================

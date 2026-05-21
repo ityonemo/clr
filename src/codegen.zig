@@ -522,9 +522,23 @@ fn payloadPtrAdd(info: *const FnInfo, datum: Data) []const u8 {
     const payload_index = datum.ty_pl.payload;
     // Bin: lhs (Ref as u32), rhs (Ref as u32)
     const lhs_raw = info.extra[payload_index];
+    const rhs_raw = info.extra[payload_index + 1];
     const lhs_ref: Ref = @enumFromInt(lhs_raw);
+    const rhs_ref: Ref = @enumFromInt(rhs_raw);
     const ptr_str = srcString(info, lhs_ref);
-    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s} }}", .{ptr_str}, null);
+    return clr_allocator.allocPrint(info.arena, ".{{ .ptr = {s}, .offset_is_zero = {any} }}", .{ ptr_str, isZeroRef(info, rhs_ref) }, null);
+}
+
+fn isZeroRef(info: *const FnInfo, ref: Ref) bool {
+    const interned_idx = ref.toInterned() orelse return false;
+    const key = info.ip.indexToKey(interned_idx);
+    if (key != .int) return false;
+    return switch (key.int.storage) {
+        .u64 => |value| value == 0,
+        .i64 => |value| value == 0,
+        .big_int => |value| value.eqlZero(),
+        .lazy_align, .lazy_size => false,
+    };
 }
 
 /// Payload for ret_safe - just the src, caller_refinements and return_gid come from State.

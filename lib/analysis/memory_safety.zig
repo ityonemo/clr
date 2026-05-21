@@ -163,6 +163,9 @@ pub const MemorySafety = union(enum) {
         // while pointing to source regions that may have different memory_safety (e.g., .allocated).
         const dest_gid = ptr_ref.pointer.to;
         const dest_ref = refinements.at(dest_gid);
+        if (dest_ref.* == .pointer and src_refinement.* == .pointer) {
+            copyMemorySafetyRecursive(refinements, dest_gid, src_refinement_idx);
+        }
         if (dest_ref.* == .@"struct" and src_refinement.* == .@"struct") {
             const dest_struct = dest_ref.@"struct";
             const src_struct = src_refinement.@"struct";
@@ -337,11 +340,23 @@ pub const MemorySafety = union(enum) {
     /// We set root_gid on the pointer to the region, so free detection knows it's derived.
     pub fn slice_ptr(state: State, index: usize, params: tag.SlicePtr) !void {
         const refinements = state.refinements;
-        _ = params;
 
         // Get the result pointer
         const ptr_idx = state.results[index].refinement orelse return;
         const ptr = &refinements.at(ptr_idx).pointer;
+
+        if (params.slice) |slice_inst| {
+            if (state.results[slice_inst].refinement) |slice_gid| {
+                const slice_ref = refinements.at(slice_gid);
+                if (slice_ref.* == .pointer) {
+                    ptr.analyte.memory_safety = slice_ref.pointer.analyte.memory_safety orelse .{ .stack = .{
+                        .meta = state.ctx.meta,
+                        .root_gid = null,
+                    } };
+                    return;
+                }
+            }
+        }
 
         // Get the region this pointer points to
         const region_idx = ptr.to;
@@ -463,6 +478,11 @@ pub const MemorySafety = union(enum) {
         const result_gid = state.results[index].refinement orelse return;
         const result_ref = refinements.at(result_gid);
         if (result_ref.* != .pointer) return;
+
+        if (@hasField(@TypeOf(params), "offset_is_zero") and params.offset_is_zero) {
+            result_ref.pointer.analyte.memory_safety = ptr_ref.pointer.analyte.memory_safety;
+            return;
+        }
 
         result_ref.pointer.analyte.memory_safety = .{ .stack = .{
             .meta = state.ctx.meta,
@@ -1473,6 +1493,54 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    fn sameAllocationMetadata(lhs: Allocated, rhs: Allocated) bool {
+        return lhs.allocator_gid == rhs.allocator_gid and
+            lhs.type_id == rhs.type_id and
+            std.meta.eql(lhs.meta, rhs.meta);
+    }
+
+    fn hasEquivalentAllocation(refinements: *Refinements, gid: Gid, allocation: Allocated) bool {
+        return hasEquivalentAllocationInner(refinements, gid, allocation, 0);
+    }
+
+    fn hasEquivalentAllocationInner(refinements: *Refinements, gid: Gid, allocation: Allocated, depth: usize) bool {
+        if (depth > 100) return false;
+        if (gid >= refinements.list.items.len) return false;
+
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .void, .noreturn, .unimplemented => return false,
+            else => {},
+        }
+        if (getAnalytePtrConst(ref).memory_safety) |ms| {
+            if (ms == .allocated and sameAllocationMetadata(ms.allocated, allocation)) {
+                return true;
+            }
+        }
+
+        return switch (ref.*) {
+            .pointer => |p| hasEquivalentAllocationInner(refinements, p.to, allocation, depth + 1),
+            .optional => |o| hasEquivalentAllocationInner(refinements, o.to, allocation, depth + 1),
+            .errorunion => |e| hasEquivalentAllocationInner(refinements, e.to, allocation, depth + 1),
+            .region => |r| hasEquivalentAllocationInner(refinements, r.to, allocation, depth + 1),
+            .recursive => |r| r.to != 0 and hasEquivalentAllocationInner(refinements, r.to, allocation, depth + 1),
+            .@"struct" => |s| blk: {
+                for (s.fields) |field_gid| {
+                    if (hasEquivalentAllocationInner(refinements, field_gid, allocation, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .@"union" => |u| blk: {
+                for (u.fields) |maybe_field_gid| {
+                    const field_gid = maybe_field_gid orelse continue;
+                    if (hasEquivalentAllocationInner(refinements, field_gid, allocation, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
+        };
+    }
+
     /// Get a const pointer to the Analyte for any refinement type that has one.
     fn getAnalytePtrConst(ref: *const Refinements.Refinement) *const Analyte {
         return switch (ref.*) {
@@ -2205,11 +2273,13 @@ pub const MemorySafety = union(enum) {
                 }
             }
 
-            // Check pre-branch entities in the PARENT refinements.
-            // When a branch stores an allocation into an argument struct, the parent's
-            // refinements get updated. So we must check the parent, not the branch.
-            for (0..base_len) |pre_gid| {
-                if (hasMatchingAllocation(refinements, @intCast(pre_gid), allocation_root_gid)) {
+            // Check entities in the PARENT refinements after merge. Merge-created
+            // parent values can live at or above base_len and still be the path
+            // by which this branch allocation remains reachable.
+            for (0..refinements.list.items.len) |parent_gid| {
+                if (hasMatchingAllocation(refinements, @intCast(parent_gid), allocation_root_gid) or
+                    hasEquivalentAllocation(refinements, @intCast(parent_gid), allocation))
+                {
                     return;
                 }
             }
@@ -2368,6 +2438,11 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn cmp_eq(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn cmp_neq(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
     }
@@ -3139,9 +3214,43 @@ pub const MemorySafety = union(enum) {
     }
 
     /// Bitcast may create optional wrapper - initialize memory_safety
-    pub fn bitcast(state: State, index: usize, params: anytype) !void {
-        _ = params;
+    pub fn bitcast(state: State, index: usize, params: tag.Bitcast) !void {
         const ref_idx = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(ref_idx);
+        const src_gid: ?Gid = switch (params.src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+        if (src_gid) |source_gid| {
+            const src_ref = state.refinements.at(source_gid);
+            if (src_ref.* == .pointer) {
+                const pointer_ms: MemorySafety = src_ref.pointer.analyte.memory_safety orelse .{ .stack = .{
+                    .meta = state.ctx.meta,
+                    .root_gid = null,
+                } };
+                switch (result_ref.*) {
+                    .pointer => {
+                        result_ref.pointer.analyte.memory_safety = pointer_ms;
+                        initPointerTargetsPlaceholder(state.refinements, ref_idx);
+                        return;
+                    },
+                    .optional => |opt| {
+                        result_ref.optional.analyte.memory_safety = .{ .stack = .{
+                            .meta = state.ctx.meta,
+                            .root_gid = null,
+                        } };
+                        const payload_ref = state.refinements.at(opt.to);
+                        if (payload_ref.* == .pointer) {
+                            payload_ref.pointer.analyte.memory_safety = pointer_ms;
+                            initPointerTargetsPlaceholder(state.refinements, ref_idx);
+                            return;
+                        }
+                    },
+                    else => {},
+                }
+            }
+        }
         paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
         initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }

@@ -235,6 +235,15 @@ pub const UndefinedSafety = union(enum) {
         // The region's undefined state is already set from the source pointer
     }
 
+    pub fn ptr_sub(state: State, index: usize, params: tag.PtrSub) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        const ptr_idx = results[index].refinement orelse return;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined_safety = .{ .defined = {} };
+    }
+
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
         _ = params;
         const results = state.results;

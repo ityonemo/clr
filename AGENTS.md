@@ -134,6 +134,19 @@ The largest incomplete areas are:
 - Stdlib reductions. Packed struct RMW, pointer/slice conversion, memcpy, string
   literals, ArrayList, HashMap, and error-union branch merges still expose gaps in
   type/character preservation and analysis propagation.
+- Alignment-cast lowering. `@ptrCast(@alignCast(...))` currently exposes AIR that
+  bitcasts a pointer to an address-like scalar, masks low bits, and branches on
+  the alignment check. Add an AIR-to-analyzer interceptor that recognizes this
+  compiler-generated alignment guard and no-ops the failure branch for current
+  analyses; a future `alignment_safety` module can track the actual alignment
+  proof separately.
+- Pointer arithmetic expectation drift. Codegen now marks zero-offset pointer
+  arithmetic so full-slice reconstruction such as `ptr[0..len]` can preserve
+  base provenance, but the policy boundary for recovered-base patterns remains
+  unresolved. Decide whether `ptr_sub`-based reconstruction should require a
+  future retag/stdlib override or whether specific temporary pointer slot/bitcast
+  patterns should be accepted before finalizing the allocator-slice BATS
+  expectations.
 - Stack escape false positives. Returning passed-in or heap-backed pointers inside
   structs/unions/globals is still too conservative in several cases.
 

@@ -8,9 +8,12 @@ pub fn main() u8 {
     slice[0] = 42;
 
     // Remap to larger size - returns optional
-    // If remap succeeds, old slice is freed and new_slice is valid
-    // If remap fails, old slice is unchanged (but we'd need to free it)
-    const new_slice = allocator.remap(slice, 20) orelse return 2;
+    // If remap succeeds, old slice is freed and new_slice is valid.
+    // If remap fails, old slice is unchanged and must still be freed.
+    const new_slice = allocator.remap(slice, 20) orelse {
+        allocator.free(slice);
+        return 2;
+    };
     new_slice[0] = 43;
     allocator.free(new_slice);
 

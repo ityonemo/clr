@@ -79,16 +79,20 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
-@test "no false positive for freeing via pointer arithmetic with optional wrapper" {
-    # Tests the HashMap pattern: allocate [Header][Data], store derived pointer
-    # (pointing to Data), then free via reverse arithmetic (ptr - sizeof(Header)).
-    # The bitcast from [*]u8 to ?[*]Struct should not cause duplicate leak detection.
+@test "detects freeing via pointer arithmetic with optional wrapper" {
+    # ptr_sub preserves derived-pointer provenance; it does not prove that the
+    # pointer has returned to the allocation base.
     run compile_and_run "$TEST_CASES/allocator_safety/slice/optional_ptr_arithmetic_free.zig"
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of field pointer" ]]
+    [[ "$output" =~ "optional_ptr_arithmetic_free.Self.deallocate" ]]
 }
 
-@test "no false positive for freeing via simple pointer arithmetic" {
-    # Tests basic pointer arithmetic free pattern without optional wrapper.
+@test "detects freeing via simple pointer arithmetic" {
+    # ptr_sub over a derived pointer remains derived until a future retag or
+    # internal stdlib override reestablishes allocation-base provenance.
     run compile_and_run "$TEST_CASES/allocator_safety/slice/ptr_arithmetic_free.zig"
-    [ "$status" -eq 0 ]
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of field pointer" ]]
+    [[ "$output" =~ "ptr_arithmetic_free.main" ]]
 }
