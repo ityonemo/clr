@@ -1065,3 +1065,112 @@ test "init with undefined sets memory_safety to interned" {
     const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety.?;
     try std.testing.expect(ms == .interned);
 }
+
+test "block initializes memory_safety for pointer types" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const nested_type = tag.Type{ .pointer = &.{ .region = &.{ .scalar = {} } } };
+    try Inst.apply(state, 0, .{ .block = .{ .ty = nested_type } });
+
+    const ptr_gid = results[0].refinement.?;
+    const ptr_ref = refinements.at(ptr_gid).*;
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(ptr_ref));
+
+    const ptr_ms = ptr_ref.pointer.analyte.memory_safety.?;
+    try std.testing.expectEqual(.stack, std.meta.activeTag(ptr_ms));
+
+    const region_gid = ptr_ref.pointer.to;
+    const region_ref = refinements.at(region_gid).*;
+    try std.testing.expectEqual(.region, std.meta.activeTag(region_ref));
+    const region_ms = region_ref.region.analyte.memory_safety.?;
+    try std.testing.expectEqual(.placeholder, std.meta.activeTag(region_ms));
+
+    const scalar_gid = region_ref.region.to;
+    const scalar_ref = refinements.at(scalar_gid).*;
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(scalar_ref));
+    const scalar_ms = scalar_ref.scalar.analyte.memory_safety.?;
+    try std.testing.expectEqual(.placeholder, std.meta.activeTag(scalar_ms));
+}
+
+test "splatMerge propagates optional wrapper memory_safety from branches" {
+    const allocator = std.testing.allocator;
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    ctx.meta.function = "merge_test";
+    ctx.meta.file = "merge_test.zig";
+    ctx.meta.line = 10;
+
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
+
+    var results = [_]Inst{.{}} ** 1;
+    results[0].refinement = opt_gid;
+
+    var branch1_refinements = try refinements.clone(allocator);
+    defer branch1_refinements.deinit();
+    var branch2_refinements = try refinements.clone(allocator);
+    defer branch2_refinements.deinit();
+
+    branch1_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
+        .meta = ctx.meta,
+        .root_gid = null,
+    } };
+    branch2_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
+        .meta = ctx.meta,
+        .root_gid = null,
+    } };
+
+    var branch1_results = results;
+    var branch2_results = results;
+    const branches = [_]State{
+        testState(&ctx, &branch1_results, &branch1_refinements),
+        testState(&ctx, &branch2_results, &branch2_refinements),
+    };
+
+    try tag.splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
+
+    try std.testing.expect(refinements.at(opt_gid).optional.analyte.memory_safety != null);
+    try std.testing.expect(refinements.at(opt_gid).optional.analyte.memory_safety.? == .stack);
+}
+
+test "splatMerge propagates region wrapper memory_safety from branches" {
+    const allocator = std.testing.allocator;
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    ctx.meta.function = "merge_test";
+    ctx.meta.file = "merge_test.zig";
+    ctx.meta.line = 20;
+
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+
+    var results = [_]Inst{.{}} ** 1;
+    results[0].refinement = region_gid;
+
+    var branch1_refinements = try refinements.clone(allocator);
+    defer branch1_refinements.deinit();
+    var branch2_refinements = try refinements.clone(allocator);
+    defer branch2_refinements.deinit();
+
+    branch1_refinements.at(region_gid).region.analyte.memory_safety = .{ .interned = ctx.meta };
+    branch2_refinements.at(region_gid).region.analyte.memory_safety = .{ .interned = ctx.meta };
+
+    var branch1_results = results;
+    var branch2_results = results;
+    const branches = [_]State{
+        testState(&ctx, &branch1_results, &branch1_refinements),
+        testState(&ctx, &branch2_results, &branch2_refinements),
+    };
+
+    try tag.splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
+
+    try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety != null);
+    try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety.? == .interned);
+}

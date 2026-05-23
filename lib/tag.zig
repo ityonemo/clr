@@ -50,12 +50,6 @@ const Context = @import("Context.zig");
 const core = @import("core.zig");
 const Gid = core.Gid;
 const State = Inst.State;
-const UndefinedSafety = @import("analysis/undefined_safety.zig").UndefinedSafety;
-const MemorySafety = @import("analysis/memory_safety.zig").MemorySafety;
-const NullSafety = @import("analysis/null_safety.zig").NullSafety;
-const VariantSafety = @import("analysis/variant_safety.zig").VariantSafety;
-const FieldParentPtrSafety = @import("analysis/fieldparentptr_safety.zig").FieldParentPtrSafety;
-const FdSafety = @import("analysis/fd_safety.zig").FdSafety;
 const Analyte = @import("Analyte.zig");
 
 // Re-export core types
@@ -1220,8 +1214,13 @@ fn updateFieldReferences(refinements: *Refinements, dest_gid: Gid, src_gid: Gid)
                 }
             }
         },
-        // Scalars, allocators, fnptrs don't have .to references
-        .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+        .allocator => {
+            if (src_ref.* == .allocator) {
+                Refinement.clobber_structured_idx(dest_gid, refinements, src_ref.*, refinements) catch @panic("out of memory");
+            }
+        },
+        // Scalars and fnptrs don't have .to references.
+        .scalar, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
     }
 }
 
@@ -1382,26 +1381,6 @@ pub const UnwrapErrunionPayload = struct {
                 const src_ref = state.refinements.at(src_gid).*;
                 // errorunion's .to points to the payload entity
                 const payload_gid = src_ref.errorunion.to;
-                const payload_ref = state.refinements.at(payload_gid);
-                const payload_ms = switch (payload_ref.*) {
-                    .scalar => |s| s.analyte.memory_safety,
-                    .pointer => |p| p.analyte.memory_safety,
-                    .optional => |o| o.analyte.memory_safety,
-                    .errorunion => |e| e.analyte.memory_safety,
-                    .@"struct" => |s| s.analyte.memory_safety,
-                    .@"union" => |u| u.analyte.memory_safety,
-                    .allocator => |a| a.analyte.memory_safety,
-                    .fnptr => |f| f.analyte.memory_safety,
-                    .region => |r| r.analyte.memory_safety,
-                    .recursive => |r| r.analyte.memory_safety,
-                    .void, .noreturn, .unimplemented => null,
-                };
-                if (payload_ms) |ms| {
-                    if (ms == .error_stub) {
-                        try state.ctx.meta.print(state.ctx.writer, "error union unwrap of error path in ", .{});
-                        return error.ErrorUnionUnwrap;
-                    }
-                }
                 state.results[index].refinement = try state.refinements.valueCopy(payload_gid);
             },
             .interned => |interned| {
@@ -1410,26 +1389,6 @@ pub const UnwrapErrunionPayload = struct {
                     @panic("UnwrapErrunionPayload: interned constant not supported");
                 const src_ref = state.refinements.at(global_gid).*;
                 const payload_gid = src_ref.errorunion.to;
-                const payload_ref = state.refinements.at(payload_gid);
-                const payload_ms = switch (payload_ref.*) {
-                    .scalar => |s| s.analyte.memory_safety,
-                    .pointer => |p| p.analyte.memory_safety,
-                    .optional => |o| o.analyte.memory_safety,
-                    .errorunion => |e| e.analyte.memory_safety,
-                    .@"struct" => |s| s.analyte.memory_safety,
-                    .@"union" => |u| u.analyte.memory_safety,
-                    .allocator => |a| a.analyte.memory_safety,
-                    .fnptr => |f| f.analyte.memory_safety,
-                    .region => |r| r.analyte.memory_safety,
-                    .recursive => |r| r.analyte.memory_safety,
-                    .void, .noreturn, .unimplemented => null,
-                };
-                if (payload_ms) |ms| {
-                    if (ms == .error_stub) {
-                        try state.ctx.meta.print(state.ctx.writer, "error union unwrap of error path in ", .{});
-                        return error.ErrorUnionUnwrap;
-                    }
-                }
                 state.results[index].refinement = try state.refinements.valueCopy(payload_gid);
             },
             .fnptr => {
@@ -1868,8 +1827,32 @@ pub const AggregateInit = struct {
         const refinement = try typeToRefinement(self.ty, state.refinements);
         const new_gid = try Inst.clobberInst(state.refinements, state.results, index, refinement);
         splatInit(state.refinements, new_gid, state.ctx, .runtime);
+        try preserveTrackedInternedAggregateFields(state, new_gid, self);
         // Dispatch to analysis modules to incorporate source element state
         try splat(.aggregate_init, state, index, self);
+    }
+
+    fn preserveTrackedInternedAggregateFields(state: State, aggregate_gid: Gid, self: @This()) !void {
+        const aggregate_ref = state.refinements.at(aggregate_gid);
+        if (aggregate_ref.* != .@"struct") return;
+
+        const fields = aggregate_ref.@"struct".fields;
+        for (fields, 0..) |field_gid, i| {
+            if (i >= self.elements.len) break;
+            const field_ref = state.refinements.at(field_gid);
+            if (field_ref.* != .allocator) continue;
+
+            const interned = switch (self.elements[i]) {
+                .interned => |interned| interned,
+                else => continue,
+            };
+            const global_ptr_gid = state.refinements.getGlobal(interned.ip_idx) orelse continue;
+            const global_ptr = state.refinements.at(global_ptr_gid);
+            if (global_ptr.* != .pointer) continue;
+            const global_value = state.refinements.at(global_ptr.pointer.to).*;
+            if (global_value != .allocator) continue;
+            try Refinement.clobber_structured_idx(field_gid, state.refinements, global_value, state.refinements);
+        }
     }
 };
 
@@ -3145,6 +3128,15 @@ pub fn splatMerge(
     }
 }
 
+fn splatPreserveEarlyReturnPayload(refinements: *Refinements, gid: Gid) bool {
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "preserve_early_return_payload")) {
+            if (Analysis.preserve_early_return_payload(refinements, gid)) return true;
+        }
+    }
+    return false;
+}
+
 /// Merge a specific GID across terminal states by result index.
 /// Used for entities created inside switch cases that don't exist in main results.
 pub fn splatMergeByGid(
@@ -3378,7 +3370,7 @@ fn mergeRefinementRecursive(
                     const gid = gid_opt orelse continue;
                     if (gid == data.to) continue;
                     if (!Refinement.pointerTargetsExistInDestination(gid, branch.refinements, refinements)) continue;
-                    if (!Refinement.containsReachableAllocation(gid, branch.refinements)) continue;
+                    if (!splatPreserveEarlyReturnPayload(branch.refinements, gid)) continue;
                     selected = .{ .gid = gid, .refinements = branch.refinements };
                     break;
                 }
@@ -3792,6 +3784,64 @@ test "struct_field_val valueCopies field" {
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
 }
 
+test "aggregate_init preserves tracked interned allocator identity" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    const global_defs = [_]Refinements.GlobalDef{
+        .{ .ip_idx = 1, .ty = .{ .allocator = 517906155 }, .loc = .{}, .children = .{ .scalar = {} } },
+    };
+    var refinements = Refinements.initWithGlobals(allocator, &ctx, &global_defs);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 0, .{ .aggregate_init = .{
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = 2705 }} } },
+        .elements = &.{.{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = {} } } }},
+    } });
+
+    const struct_gid = results[0].refinement.?;
+    const field_gid = refinements.at(struct_gid).@"struct".fields[0];
+    try std.testing.expectEqual(@as(u32, 517906155), refinements.at(field_gid).allocator.type_id);
+}
+
+test "store struct preserves allocator field identity" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    const global_defs = [_]Refinements.GlobalDef{
+        .{ .ip_idx = 1, .ty = .{ .allocator = 517906155 }, .loc = .{}, .children = .{ .scalar = {} } },
+    };
+    var refinements = Refinements.initWithGlobals(allocator, &ctx, &global_defs);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 4;
+    const state = testState(&ctx, &results, &refinements);
+
+    const struct_ty: Type = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = 2705 }} } };
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = struct_ty } });
+    try Inst.apply(state, 1, .{ .aggregate_init = .{
+        .ty = struct_ty,
+        .elements = &.{.{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = {} } } }},
+    } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 0 } } });
+
+    const loaded_struct_gid = results[3].refinement.?;
+    const loaded_field_gid = refinements.at(loaded_struct_gid).@"struct".fields[0];
+    try std.testing.expectEqual(@as(u32, 517906155), refinements.at(loaded_field_gid).allocator.type_id);
+}
+
 test "wrap_optional valueCopies inst payload" {
     const allocator = std.testing.allocator;
 
@@ -3975,49 +4025,6 @@ test "block creates refinement based on type" {
     try Inst.apply(state, 1, .{ .block = .{ .ty = .{ .void = {} } } });
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.void, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
-}
-
-test "block initializes memory_safety for pointer types" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    var results = [_]Inst{.{}} ** 1;
-    const state = testState(&ctx, &results, &refinements);
-
-    // Block with pointer→region→scalar type (like alignedAlloc result)
-    const nested_type = Type{ .pointer = &.{ .region = &.{ .scalar = {} } } };
-    try Inst.apply(state, 0, .{ .block = .{ .ty = nested_type } });
-
-    // Block should create a pointer refinement
-    const ptr_gid = results[0].refinement.?;
-    const ptr_ref = refinements.at(ptr_gid).*;
-    try std.testing.expectEqual(.pointer, std.meta.activeTag(ptr_ref));
-
-    // The POINTER value should have memory_safety = .stack (pointer lives on stack)
-    const ptr_ms = ptr_ref.pointer.analyte.memory_safety.?;
-    try std.testing.expectEqual(.stack, std.meta.activeTag(ptr_ms));
-
-    // The POINTEE (region) should have .placeholder memory_safety
-    // (unassigned pointer targets get .placeholder until assigned to real memory)
-    const region_gid = ptr_ref.pointer.to;
-    const region_ref = refinements.at(region_gid).*;
-    try std.testing.expectEqual(.region, std.meta.activeTag(region_ref));
-    const region_ms = region_ref.region.analyte.memory_safety.?;
-    try std.testing.expectEqual(.placeholder, std.meta.activeTag(region_ms));
-
-    // The scalar element should also have .placeholder memory_safety
-    const scalar_gid = region_ref.region.to;
-    const scalar_ref = refinements.at(scalar_gid).*;
-    try std.testing.expectEqual(.scalar, std.meta.activeTag(scalar_ref));
-    const scalar_ms = scalar_ref.scalar.analyte.memory_safety.?;
-    try std.testing.expectEqual(.placeholder, std.meta.activeTag(scalar_ms));
 }
 
 test "unreach does nothing" {
@@ -4680,92 +4687,4 @@ test "bitcast from [*]T to *T preserves region structure" {
     try std.testing.expect(results[1].refinement.? != ptr_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(results[1].refinement.?).*));
     try std.testing.expectEqual(region_gid, refinements.at(results[1].refinement.?).pointer.to);
-}
-
-test "splatMerge propagates optional wrapper memory_safety from branches" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-    ctx.meta.function = "merge_test";
-    ctx.meta.file = "merge_test.zig";
-    ctx.meta.line = 10;
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    const payload_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
-
-    var results = [_]Inst{.{}} ** 1;
-    results[0].refinement = opt_gid;
-
-    var branch1_refinements = try refinements.clone(allocator);
-    defer branch1_refinements.deinit();
-    var branch2_refinements = try refinements.clone(allocator);
-    defer branch2_refinements.deinit();
-
-    branch1_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
-        .meta = ctx.meta,
-        .root_gid = null,
-    } };
-    branch2_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
-        .meta = ctx.meta,
-        .root_gid = null,
-    } };
-
-    var branch1_results = results;
-    var branch2_results = results;
-    const branches = [_]State{
-        testState(&ctx, &branch1_results, &branch1_refinements),
-        testState(&ctx, &branch2_results, &branch2_refinements),
-    };
-
-    try splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
-
-    try std.testing.expect(refinements.at(opt_gid).optional.analyte.memory_safety != null);
-    try std.testing.expect(refinements.at(opt_gid).optional.analyte.memory_safety.? == .stack);
-}
-
-test "splatMerge propagates region wrapper memory_safety from branches" {
-    const allocator = std.testing.allocator;
-
-    var buf: [4096]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&buf);
-    var ctx = Context.init(allocator, &discarding.writer);
-    defer ctx.deinit();
-    ctx.meta.function = "merge_test";
-    ctx.meta.file = "merge_test.zig";
-    ctx.meta.line = 20;
-
-    var refinements = Refinements.init(allocator);
-    defer refinements.deinit();
-
-    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
-
-    var results = [_]Inst{.{}} ** 1;
-    results[0].refinement = region_gid;
-
-    var branch1_refinements = try refinements.clone(allocator);
-    defer branch1_refinements.deinit();
-    var branch2_refinements = try refinements.clone(allocator);
-    defer branch2_refinements.deinit();
-
-    branch1_refinements.at(region_gid).region.analyte.memory_safety = .{ .interned = ctx.meta };
-    branch2_refinements.at(region_gid).region.analyte.memory_safety = .{ .interned = ctx.meta };
-
-    var branch1_results = results;
-    var branch2_results = results;
-    const branches = [_]State{
-        testState(&ctx, &branch1_results, &branch1_refinements),
-        testState(&ctx, &branch2_results, &branch2_refinements),
-    };
-
-    try splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
-
-    try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety != null);
-    try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety.? == .interned);
 }

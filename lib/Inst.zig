@@ -112,18 +112,7 @@ fn initRemapReturnSlot(state: State, index: usize, args: []const tag.Src, return
         const old_slice_gid = try srcToGid(state, args[1]);
         const old_slice_ref = state.refinements.at(old_slice_gid);
 
-        // Check if the source slice's region has placeholder memory_safety.
-        // If so, the source memory was never allocated, so remap semantically
-        // must fail - don't copy the placeholder-containing payload.
-        const has_valid_region = blk: {
-            if (old_slice_ref.* != .pointer) break :blk false;
-            const region_ref = state.refinements.at(old_slice_ref.pointer.to);
-            if (region_ref.* != .region) break :blk false;
-            const region_ms = region_ref.region.analyte.memory_safety orelse break :blk false;
-            break :blk region_ms != .placeholder;
-        };
-
-        if (has_valid_region) {
+        if (old_slice_ref.* == .pointer) {
             const payload_gid = try state.refinements.valueCopy(old_slice_gid);
             const result_gid = try state.refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
             state.results[index].refinement = result_gid;
@@ -220,44 +209,6 @@ pub fn splatCall(
         }
     }
     return intercepted;
-}
-
-/// Debug helper to print refinement structure with memory_safety values.
-fn debugPrintStructure(refinements: *Refinements, gid: Gid, depth: usize) void {
-    const indent = "  " ** 8;
-    const ref = refinements.at(gid);
-    switch (ref.*) {
-        .scalar => |s| {
-            const ms_str = if (s.analyte.memory_safety) |ms| @tagName(ms) else "null";
-            std.debug.print("{s}[{d}] scalar memory_safety={s}\n", .{ indent[0 .. depth * 2], gid, ms_str });
-        },
-        .pointer => |p| {
-            const ms_str = if (p.analyte.memory_safety) |ms| @tagName(ms) else "null";
-            std.debug.print("{s}[{d}] pointer memory_safety={s} -> {d}\n", .{ indent[0 .. depth * 2], gid, ms_str, p.to });
-            debugPrintStructure(refinements, p.to, depth + 1);
-        },
-        .optional => |o| {
-            const ms_str = if (o.analyte.memory_safety) |ms| @tagName(ms) else "null";
-            std.debug.print("{s}[{d}] optional memory_safety={s} -> {d}\n", .{ indent[0 .. depth * 2], gid, ms_str, o.to });
-            debugPrintStructure(refinements, o.to, depth + 1);
-        },
-        .region => |r| {
-            const ms_str = if (r.analyte.memory_safety) |ms| @tagName(ms) else "null";
-            std.debug.print("{s}[{d}] region memory_safety={s} -> {d}\n", .{ indent[0 .. depth * 2], gid, ms_str, r.to });
-            debugPrintStructure(refinements, r.to, depth + 1);
-        },
-        .@"struct" => |s| {
-            const ms_str = if (s.analyte.memory_safety) |ms| @tagName(ms) else "null";
-            std.debug.print("{s}[{d}] struct memory_safety={s} fields={d}\n", .{ indent[0 .. depth * 2], gid, ms_str, s.fields.len });
-            for (s.fields, 0..) |field_gid, i| {
-                std.debug.print("{s}  field[{d}]:\n", .{ indent[0 .. depth * 2], i });
-                debugPrintStructure(refinements, field_gid, depth + 2);
-            }
-        },
-        else => {
-            std.debug.print("{s}[{d}] {s}\n", .{ indent[0 .. depth * 2], gid, @tagName(ref.*) });
-        },
-    }
 }
 
 /// Store a function pointer constant with its specific function as a choice.
@@ -519,29 +470,6 @@ pub fn remap_br(
     // Track if each branch returns
     var true_returns: bool = false;
     var false_returns: bool = false;
-
-    // Detect if success branch is semantically unreachable based on old_slice's memory_safety.
-    // If old_slice's region is not allocated (placeholder/interned/stack/error_stub),
-    // remap cannot succeed, so the success branch is unreachable.
-    {
-        const old_slice_ref = state.refinements.at(old_slice_gid);
-        if (old_slice_ref.* == .pointer) {
-            const old_region_gid = old_slice_ref.pointer.to;
-            const old_region = state.refinements.at(old_region_gid);
-            // Access memory_safety through region.analyte
-            if (old_region.* == .region) {
-                if (old_region.region.analyte.memory_safety) |old_ms| {
-                    switch (old_ms) {
-                        .placeholder, .interned, .stack, .error_stub => {
-                            // Success branch is unreachable - mark it so merge skips it
-                            true_returns = true;
-                        },
-                        .allocated => {},
-                    }
-                }
-            }
-        }
-    }
 
     // Create branch-local early_returns lists
     var true_early_returns = std.ArrayListUnmanaged(State){};

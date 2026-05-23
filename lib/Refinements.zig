@@ -326,6 +326,9 @@ pub const Refinement = union(enum) {
     /// This is intended for fixed slots like return_gid where the top-level GID must remain stable.
     pub fn copyToSlot(dst_gid: Gid, src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) !void {
         const allocator = dst_list.list.allocator;
+        var copied_targets = std.AutoHashMap(Gid, Gid).init(allocator);
+        defer copied_targets.deinit();
+
         // IMPORTANT: Don't capture dst pointer before copyTo calls - copyTo can
         // reallocate dst_list.list, invalidating any pointers into it.
         // We must free the old value first, then build the new value, then
@@ -345,10 +348,10 @@ pub const Refinement = union(enum) {
                 } };
             },
             inline .pointer, .optional, .errorunion, .region, .recursive => |data, ref_tag| blk: {
-                const copied_to = if (ref_tag == .pointer or ref_tag == .recursive)
+                const copied_to = if (ref_tag == .recursive)
                     data.to
                 else
-                    try copyValuePreservingPointerTargets(data.to, src_list, dst_list);
+                    try copyValuePreservingPointerTargetsMapped(data.to, src_list, dst_list, &copied_targets);
                 if (copied_to >= dst_list.list.items.len) {
                     std.debug.panic("copyToSlot copied cross-table pointer target gid={d} missing from destination table", .{copied_to});
                 }
@@ -363,12 +366,12 @@ pub const Refinement = union(enum) {
                 for (data.fields, 0..) |field_opt, i| {
                     if (ref_tag == .@"union") {
                         if (field_opt) |field_gid| {
-                            new_fields[i] = try copyValuePreservingPointerTargets(field_gid, src_list, dst_list);
+                            new_fields[i] = try copyValuePreservingPointerTargetsMapped(field_gid, src_list, dst_list, &copied_targets);
                         } else {
                             new_fields[i] = null;
                         }
                     } else {
-                        new_fields[i] = try copyValuePreservingPointerTargets(field_opt, src_list, dst_list);
+                        new_fields[i] = try copyValuePreservingPointerTargetsMapped(field_opt, src_list, dst_list, &copied_targets);
                     }
                 }
                 const new_analyte = try data.analyte.copy(allocator);
@@ -394,10 +397,18 @@ pub const Refinement = union(enum) {
     }
 
     pub fn copyValuePreservingPointerTargets(src_gid: Gid, noalias src_list: *Refinements, noalias dst_list: *Refinements) !Gid {
+        var copied_targets = std.AutoHashMap(Gid, Gid).init(dst_list.list.allocator);
+        defer copied_targets.deinit();
+        return copyValuePreservingPointerTargetsMapped(src_gid, src_list, dst_list, &copied_targets);
+    }
+
+    fn copyValuePreservingPointerTargetsMapped(src_gid: Gid, noalias src_list: *Refinements, noalias dst_list: *Refinements, copied_targets: *std.AutoHashMap(Gid, Gid)) !Gid {
+        if (copied_targets.get(src_gid)) |copied_gid| return copied_gid;
+
         const src = src_list.at(src_gid).*;
         const allocator = dst_list.list.allocator;
 
-        return switch (src) {
+        const copied_gid = switch (src) {
             .scalar => try dst_list.appendEntity(src),
             .allocator => try dst_list.appendEntity(src),
             .fnptr => |f| blk: {
@@ -410,13 +421,14 @@ pub const Refinement = union(enum) {
                 } });
             },
             .pointer => |p| blk: {
-                if (p.to >= dst_list.list.items.len) {
-                    std.debug.panic("copyToSlot copied cross-table pointer target gid={d} missing from destination table", .{p.to});
-                }
+                const copied_to = if (p.to < dst_list.list.items.len)
+                    p.to
+                else
+                    try copyValuePreservingPointerTargetsMapped(p.to, src_list, dst_list, copied_targets);
                 const new_analyte = try p.analyte.copy(allocator);
                 break :blk try dst_list.appendEntity(.{ .pointer = .{
                     .analyte = new_analyte,
-                    .to = p.to,
+                    .to = copied_to,
                     .packed_field = p.packed_field,
                 } });
             },
@@ -424,7 +436,7 @@ pub const Refinement = union(enum) {
                 const copied_to = if (ref_tag == .recursive)
                     data.to
                 else
-                    try copyValuePreservingPointerTargets(data.to, src_list, dst_list);
+                    try copyValuePreservingPointerTargetsMapped(data.to, src_list, dst_list, copied_targets);
                 if (copied_to >= dst_list.list.items.len) {
                     std.debug.panic("copyToSlot copied cross-table target gid={d} missing from destination table", .{copied_to});
                 }
@@ -439,12 +451,12 @@ pub const Refinement = union(enum) {
                 for (data.fields, 0..) |field_opt, i| {
                     if (ref_tag == .@"union") {
                         if (field_opt) |field_gid| {
-                            new_fields[i] = try copyValuePreservingPointerTargets(field_gid, src_list, dst_list);
+                            new_fields[i] = try copyValuePreservingPointerTargetsMapped(field_gid, src_list, dst_list, copied_targets);
                         } else {
                             new_fields[i] = null;
                         }
                     } else {
-                        new_fields[i] = try copyValuePreservingPointerTargets(field_opt, src_list, dst_list);
+                        new_fields[i] = try copyValuePreservingPointerTargetsMapped(field_opt, src_list, dst_list, copied_targets);
                     }
                 }
                 const new_analyte = try data.analyte.copy(allocator);
@@ -458,6 +470,8 @@ pub const Refinement = union(enum) {
             .void => try dst_list.appendEntity(.{ .void = {} }),
             .noreturn => try dst_list.appendEntity(.{ .noreturn = {} }),
         };
+        try copied_targets.put(src_gid, copied_gid);
+        return copied_gid;
     }
 
     pub fn pointerTargetsExistInDestination(src_gid: Gid, src_list: *Refinements, dst_list: *Refinements) bool {
@@ -483,59 +497,6 @@ pub const Refinement = union(enum) {
                 break :blk true;
             },
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => true,
-        };
-    }
-
-    pub fn containsReachableAllocation(src_gid: Gid, src_list: *Refinements) bool {
-        return containsReachableAllocationInner(src_gid, src_list, 0);
-    }
-
-    fn containsReachableAllocationInner(src_gid: Gid, src_list: *Refinements, depth: usize) bool {
-        if (depth > 100 or src_gid >= src_list.list.items.len) return false;
-        const src = src_list.at(src_gid);
-        switch (src.*) {
-            .void, .noreturn, .unimplemented => return false,
-            else => {},
-        }
-        if (analyteConst(src).memory_safety) |ms| {
-            if (ms == .allocated) return true;
-        }
-        return switch (src.*) {
-            .pointer => |p| containsReachableAllocationInner(p.to, src_list, depth + 1),
-            .optional => |o| containsReachableAllocationInner(o.to, src_list, depth + 1),
-            .errorunion => |e| containsReachableAllocationInner(e.to, src_list, depth + 1),
-            .region => |r| containsReachableAllocationInner(r.to, src_list, depth + 1),
-            .recursive => |r| r.to != 0 and containsReachableAllocationInner(r.to, src_list, depth + 1),
-            .@"struct" => |s| blk: {
-                for (s.fields) |field_gid| {
-                    if (containsReachableAllocationInner(field_gid, src_list, depth + 1)) break :blk true;
-                }
-                break :blk false;
-            },
-            .@"union" => |u| blk: {
-                for (u.fields) |maybe_field_gid| {
-                    const field_gid = maybe_field_gid orelse continue;
-                    if (containsReachableAllocationInner(field_gid, src_list, depth + 1)) break :blk true;
-                }
-                break :blk false;
-            },
-            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
-        };
-    }
-
-    fn analyteConst(src: *const Refinement) *const Analyte {
-        return switch (src.*) {
-            .scalar => |*s| &s.analyte,
-            .pointer => |*p| &p.analyte,
-            .optional => |*o| &o.analyte,
-            .errorunion => |*e| &e.analyte,
-            .@"struct" => |*s| &s.analyte,
-            .@"union" => |*u| &u.analyte,
-            .fnptr => |*f| &f.analyte,
-            .allocator => |*a| &a.analyte,
-            .region => |*r| &r.analyte,
-            .recursive => |*r| &r.analyte,
-            .void, .noreturn, .unimplemented => unreachable,
         };
     }
 
@@ -1168,4 +1129,31 @@ fn hashRefinement(ref: Refinement) u64 {
 
 fn hashAnalyte(analyte: Analyte, hasher: *std.hash.Wyhash) void {
     analyte.hash(hasher);
+}
+
+test "copyValuePreservingPointerTargets imports missing pointer target" {
+    const allocator = std.testing.allocator;
+    var src = Refinements.init(allocator);
+    defer src.deinit();
+    var dst = Refinements.init(allocator);
+    defer dst.deinit();
+
+    const branch_region_gid = try src.appendEntity(.{ .region = .{
+        .to = try src.appendEntity(.{ .scalar = .{} }),
+    } });
+    const branch_ptr_gid = try src.appendEntity(.{ .pointer = .{
+        .to = branch_region_gid,
+    } });
+    const branch_optional_gid = try src.appendEntity(.{ .optional = .{
+        .to = branch_ptr_gid,
+    } });
+
+    const copied_optional_gid = try Refinement.copyValuePreservingPointerTargets(branch_optional_gid, &src, &dst);
+    const copied_optional = dst.at(copied_optional_gid);
+    try std.testing.expect(copied_optional.* == .optional);
+    const copied_ptr_gid = copied_optional.optional.to;
+    const copied_ptr = dst.at(copied_ptr_gid);
+    try std.testing.expect(copied_ptr.* == .pointer);
+    try std.testing.expect(copied_ptr.pointer.to < dst.list.items.len);
+    try std.testing.expect(dst.at(copied_ptr.pointer.to).* == .region);
 }

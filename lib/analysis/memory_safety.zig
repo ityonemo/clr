@@ -2916,6 +2916,69 @@ pub const MemorySafety = union(enum) {
         setResultStack(state, index);
     }
 
+    pub fn unwrap_errunion_payload(state: State, index: usize, params: tag.UnwrapErrunionPayload) !void {
+        _ = index;
+        const src_gid: Gid = switch (params.src) {
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("unwrap_errunion_payload: source inst {d} has no refinement", .{inst}),
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse
+                @panic("UnwrapErrunionPayload: interned constant not supported"),
+            .fnptr => return,
+        };
+
+        const src_ref = state.refinements.at(src_gid);
+        if (src_ref.* != .errorunion) {
+            std.debug.panic("unwrap_errunion_payload: expected errorunion, got {s}", .{@tagName(src_ref.*)});
+        }
+
+        const payload_ref = state.refinements.at(src_ref.errorunion.to);
+        const payload_ms = switch (payload_ref.*) {
+            .void, .noreturn, .unimplemented => null,
+            else => getAnalytePtrConst(payload_ref).memory_safety,
+        } orelse return;
+        if (payload_ms == .error_stub) {
+            try state.ctx.meta.print(state.ctx.writer, "error union unwrap of error path in ", .{});
+            return error.ErrorUnionUnwrap;
+        }
+    }
+
+    pub fn preserve_early_return_payload(refinements: *Refinements, gid: Gid) bool {
+        return containsReachableAllocation(refinements, gid, 0);
+    }
+
+    fn containsReachableAllocation(refinements: *Refinements, gid: Gid, depth: usize) bool {
+        if (depth > 100 or gid >= refinements.list.items.len) return false;
+        const ref = refinements.at(gid);
+        const analyte = switch (ref.*) {
+            .void, .noreturn, .unimplemented => return false,
+            else => getAnalytePtrConst(ref),
+        };
+        if (analyte.memory_safety) |ms| {
+            if (ms == .allocated) return true;
+        }
+        return switch (ref.*) {
+            .pointer => |p| containsReachableAllocation(refinements, p.to, depth + 1),
+            .optional => |o| containsReachableAllocation(refinements, o.to, depth + 1),
+            .errorunion => |e| containsReachableAllocation(refinements, e.to, depth + 1),
+            .region => |r| containsReachableAllocation(refinements, r.to, depth + 1),
+            .recursive => |r| r.to != 0 and containsReachableAllocation(refinements, r.to, depth + 1),
+            .@"struct" => |s| blk: {
+                for (s.fields) |field_gid| {
+                    if (containsReachableAllocation(refinements, field_gid, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .@"union" => |u| blk: {
+                for (u.fields) |maybe_field_gid| {
+                    const field_gid = maybe_field_gid orelse continue;
+                    if (containsReachableAllocation(refinements, field_gid, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
+        };
+    }
+
     pub fn slice(state: State, index: usize, params: anytype) !void {
         const ref_idx = state.results[index].refinement orelse return;
         const result_ref = state.refinements.at(ref_idx);
