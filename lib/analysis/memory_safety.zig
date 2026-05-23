@@ -1650,26 +1650,8 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        // Set result pointer's memory_safety based on source:
-        // - Loading from interned global: result points to interned memory -> .interned
-        // - Loading from local/inst ptr: result is a copy on the stack -> .stack
         const result_idx = results[index].refinement orelse return;
         const result_ref = refinements.at(result_idx);
-        if (result_ref.* == .pointer) {
-            switch (params.ptr) {
-                .interned => {
-                    // Loading from interned global - result points to interned memory
-                    paintSpatialMemory(refinements, result_idx, .{ .interned = ctx.meta });
-                },
-                .inst, .fnptr => {
-                    // Loading from local pointer - result is a stack copy
-                    result_ref.pointer.analyte.memory_safety = .{ .stack = .{
-                        .meta = ctx.meta,
-                        .root_gid = null,
-                    } };
-                },
-            }
-        }
 
         // Get ptr_idx from ptr - untracked interned loads have no memory safety tracking needed
         const ptr_idx: Gid = switch (params.ptr) {
@@ -1688,6 +1670,22 @@ pub const MemorySafety = union(enum) {
         const pointee_idx = ptr_refinement.pointer.to;
         const pointee = refinements.at(pointee_idx);
         const pointee_analyte = getAnalytePtr(pointee);
+
+        if (result_ref.* == .pointer) {
+            if (pointee.* == .pointer) {
+                result_ref.pointer.analyte.memory_safety = pointee.pointer.analyte.memory_safety orelse .{ .stack = .{
+                    .meta = ctx.meta,
+                    .root_gid = null,
+                } };
+            } else if (params.ptr == .interned) {
+                paintSpatialMemory(refinements, result_idx, .{ .interned = ctx.meta });
+            } else {
+                result_ref.pointer.analyte.memory_safety = .{ .stack = .{
+                    .meta = ctx.meta,
+                    .root_gid = null,
+                } };
+            }
+        }
 
         // memory_safety may be null for stack allocations or untracked pointers
         const ms = pointee_analyte.memory_safety orelse return;

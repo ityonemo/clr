@@ -140,13 +140,12 @@ The largest incomplete areas are:
   compiler-generated alignment guard and no-ops the failure branch for current
   analyses; a future `alignment_safety` module can track the actual alignment
   proof separately.
-- Pointer arithmetic expectation drift. Codegen now marks zero-offset pointer
-  arithmetic so full-slice reconstruction such as `ptr[0..len]` can preserve
-  base provenance, but the policy boundary for recovered-base patterns remains
-  unresolved. Decide whether `ptr_sub`-based reconstruction should require a
-  future retag/stdlib override or whether specific temporary pointer slot/bitcast
-  patterns should be accepted before finalizing the allocator-slice BATS
-  expectations.
+- Pointer arithmetic policy. Codegen marks zero-offset pointer arithmetic so
+  full-slice reconstruction such as `ptr[0..len]` can preserve base provenance.
+  Nonzero `ptr_add`/`ptr_sub` remains derived provenance; `ptr_sub` does not prove
+  recovery of the allocation base. Recovered-base patterns require a future
+  retag feature or a narrow internal stdlib override, and pointer stores/loads
+  must preserve the pointer value's memory-safety refinement.
 - Stack escape false positives. Returning passed-in or heap-backed pointers inside
   structs/unions/globals is still too conservative in several cases.
 

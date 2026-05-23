@@ -348,6 +348,64 @@ test "ptr_sub from derived pointer remains derived on free" {
     }, "std.mem.Allocator.free"));
 }
 
+test "ptr_sub derived provenance survives pointer slot store load before free" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = elem_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 12;
+    results[0].refinement = alloc_gid;
+    results[1].refinement = base_ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .ptr_sub = .{ .ptr = .{ .inst = 2 } } });
+    try Inst.apply(state, 4, .{ .alloc = .{ .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } } } });
+    try Inst.apply(state, 5, .{ .store = .{ .ptr = .{ .inst = 4 }, .src = .{ .inst = 3 } } });
+    try Inst.apply(state, 6, .{ .bitcast = .{
+        .src = .{ .inst = 4 },
+        .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } },
+    } });
+    try Inst.apply(state, 7, .{ .load = .{ .ptr = .{ .inst = 6 } } });
+    try Inst.apply(state, 8, .{ .ptr_add = .{ .ptr = .{ .inst = 7 }, .offset_is_zero = true } });
+    try Inst.apply(state, 9, .{ .bitcast = .{
+        .src = .{ .inst = 8 },
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+    } });
+    try Inst.apply(state, 10, .{ .slice = .{
+        .ptr = .{ .inst = 9 },
+        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+    } });
+
+    try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 11, null, .{ .void = {} }, &.{
+        .{ .inst = 0 },
+        .{ .inst = 10 },
+    }, "std.mem.Allocator.free"));
+}
+
 test "bitcast preserves derived pointer provenance on free" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
