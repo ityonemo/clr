@@ -504,6 +504,7 @@ pub const MemorySafety = union(enum) {
             const ref = refinements.at(ref_idx);
             if (ref.* == .pointer) {
                 paintSpatialMemory(refinements, ref.pointer.to, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                initPointerTargetsPlaceholder(refinements, ref.pointer.to);
             }
         }
 
@@ -535,8 +536,15 @@ pub const MemorySafety = union(enum) {
         const result_idx = state.results[index].refinement orelse return;
         const skeleton_parent_gid = refinements.at(result_idx).pointer.to;
         const rooted_parent = if (parent_gid) |root_gid| refinements.findByGid(root_gid) else null;
-        const origin_parent = findFieldParentByOrigin(refinements, ptr_idx, skeleton_parent_gid);
-        const parent_eidx = chooseFieldParent(refinements, rooted_parent, origin_parent) orelse return;
+        const origin = ptr_ref.pointer.analyte.fieldparentptr_safety orelse return;
+        if (origin.container_type_id != params.type_id or origin.field_index != params.field_index) return;
+        const parent_eidx = parentContainer(refinements, ptr_idx, params.type_id, params.field_index, skeleton_parent_gid) orelse
+            std.debug.panic("field_parent_ptr: field pointer has no exact parent container", .{});
+        if (rooted_parent) |rooted| {
+            if (rooted != parent_eidx) {
+                std.debug.panic("field_parent_ptr: root_gid parent does not match exact parent container", .{});
+            }
+        }
 
         // Update result to point to original parent container
         const result_ptr = &refinements.at(result_idx).pointer;
@@ -561,72 +569,42 @@ pub const MemorySafety = union(enum) {
         };
     }
 
-    fn chooseFieldParent(refinements: *Refinements, rooted_parent: ?Gid, origin_parent: ?Gid) ?Gid {
-        const origin = origin_parent orelse return rooted_parent;
-        const rooted = rooted_parent orelse return origin;
-
-        const origin_ms = getAnalytePtr(refinements.at(origin)).memory_safety;
-        const rooted_ms = getAnalytePtr(refinements.at(rooted)).memory_safety;
-        if (origin_ms != null and origin_ms.? == .interned and rooted_ms != null and rooted_ms.? == .stack) {
-            return origin;
-        }
-        return rooted;
-    }
-
-    fn findFieldParentByOrigin(refinements: *Refinements, field_ptr_gid: Gid, skip_gid: Gid) ?Gid {
+    fn parentContainer(refinements: *Refinements, field_ptr_gid: Gid, type_id: u32, field_index: usize, skip_gid: ?Gid) ?Gid {
         const field_ptr_ref = refinements.at(field_ptr_gid);
         if (field_ptr_ref.* != .pointer) return null;
-        const origin = field_ptr_ref.pointer.analyte.fieldparentptr_safety orelse return null;
         const field_gid = field_ptr_ref.pointer.to;
-        var first_type_match: ?Gid = null;
-        var first_interned_match: ?Gid = null;
-        var first_global_match: ?Gid = null;
         var exact_match: ?Gid = null;
-        var exact_interned_match: ?Gid = null;
-        var exact_global_match: ?Gid = null;
-        const global_cutoff = refinements.global_cutoff orelse 0;
 
         for (refinements.list.items, 0..) |*candidate, idx| {
-            if (idx == skip_gid) continue;
+            if (skip_gid != null and idx == skip_gid.?) continue;
             switch (candidate.*) {
                 .@"struct" => |s| {
-                    if (s.type_id != origin.container_type_id) continue;
-                    if (origin.field_index >= s.fields.len) continue;
-                    if (first_type_match == null) first_type_match = @intCast(idx);
-                    if (first_global_match == null and idx < global_cutoff) first_global_match = @intCast(idx);
-                    if (first_interned_match == null and s.analyte.memory_safety != null and s.analyte.memory_safety.? == .interned) {
-                        first_interned_match = @intCast(idx);
-                    }
-                    if (s.fields[origin.field_index] == field_gid) {
-                        exact_match = @intCast(idx);
-                        if (idx < global_cutoff) exact_global_match = @intCast(idx);
-                        if (s.analyte.memory_safety != null and s.analyte.memory_safety.? == .interned) {
-                            exact_interned_match = @intCast(idx);
-                        }
-                    }
+                    if (s.type_id != type_id) continue;
+                    if (field_index >= s.fields.len) continue;
+                    if (s.fields[field_index] == field_gid) exact_match = @intCast(idx);
                 },
                 .@"union" => |u| {
-                    if (u.type_id != origin.container_type_id) continue;
-                    if (origin.field_index >= u.fields.len) continue;
-                    if (first_type_match == null) first_type_match = @intCast(idx);
-                    if (first_global_match == null and idx < global_cutoff) first_global_match = @intCast(idx);
-                    if (first_interned_match == null and u.analyte.memory_safety != null and u.analyte.memory_safety.? == .interned) {
-                        first_interned_match = @intCast(idx);
-                    }
-                    if (u.fields[origin.field_index]) |candidate_field_gid| {
+                    if (u.type_id != type_id) continue;
+                    if (field_index >= u.fields.len) continue;
+                    if (u.fields[field_index]) |candidate_field_gid| {
                         if (candidate_field_gid == field_gid) {
                             exact_match = @intCast(idx);
-                            if (idx < global_cutoff) exact_global_match = @intCast(idx);
-                            if (u.analyte.memory_safety != null and u.analyte.memory_safety.? == .interned) {
-                                exact_interned_match = @intCast(idx);
-                            }
                         }
                     }
                 },
                 else => {},
             }
         }
-        return exact_interned_match orelse exact_global_match orelse first_interned_match orelse first_global_match orelse exact_match orelse first_type_match;
+        return exact_match;
+    }
+
+    fn isFieldPointer(refinements: *Refinements, ptr_gid: Gid) bool {
+        const ptr_ref = refinements.at(ptr_gid);
+        if (ptr_ref.* != .pointer) return false;
+        const origin = ptr_ref.pointer.analyte.fieldparentptr_safety orelse return false;
+        _ = parentContainer(refinements, ptr_gid, origin.container_type_id, origin.field_index, null) orelse
+            std.debug.panic("field pointer has no exact parent container", .{});
+        return true;
     }
 
     pub fn ret_safe(state: State, index: usize, params: tag.RetSafe) !void {
@@ -3696,6 +3674,18 @@ pub const MemorySafety = union(enum) {
         };
         const ptr_refinement = refinements.at(ptr_idx);
         if (ptr_refinement.* != .pointer) return; // Safety check
+        if (isFieldPointer(refinements, ptr_idx)) {
+            if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
+                switch (ptr_ms) {
+                    .stack => |sp| return reportFreeFieldPointerStack(ctx, sp),
+                    .allocated => |a| return reportFreeFieldPointer(ctx, a),
+                    .interned => return reportFreeGlobalMemory(ctx),
+                    .error_stub => return,
+                    .placeholder => return error.InvalidReallocInput,
+                }
+            }
+            return reportFreeFieldPointerStack(ctx, .{ .meta = ctx.meta, .root_gid = null });
+        }
 
         // Get the pointee entity via ptr.to
         const pointee_idx = ptr_refinement.pointer.to;
