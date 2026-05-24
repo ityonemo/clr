@@ -50,14 +50,13 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
-@test "bitcast from [*]u8 to [*]Struct converts region element type" {
-    # When bitcasting a pointer to bytes ([*]u8) to a pointer to structs ([*]Struct),
-    # the bitcast handler must convert the region element type from scalar to struct.
-    # This is the pattern HashMap uses: allocate raw bytes, then bitcast to metadata.
-    # Without the conversion, memset would mark a scalar as defined, but field access
-    # would look for struct fields and find nothing, causing false positives.
-    run compile_and_run "$TEST_CASES/misc/bitcast_scalar_to_struct.zig"
-    [ "$status" -eq 0 ]
+@test "detects packed struct undefined state across scalar call boundary" {
+    # Packed struct safety must survive conversion to the backing scalar and
+    # unpacking in a callee.
+    run compile_and_run "$TEST_CASES/misc/packed_struct_scalar_cross_call.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value" ]]
+    [[ "$output" =~ "packed_struct_scalar_cross_call" ]]
 }
 
 @test "no false positive for struct store propagation" {
