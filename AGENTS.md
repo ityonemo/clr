@@ -127,18 +127,42 @@ The largest incomplete areas are:
   or passed allocators, labeled-switch allocation/free, and stdlib ArrayList
   cleanup. Avoid Rust-style ownership terminology here; the analyzer tracks
   allocation identity, free state, allocator mismatch state, and reachability.
+- Current memory-safety failures from the latest full run:
+  - `allocator_globals.bats` 98/99: freeing global/comptime memory laundered
+    through a function is not reported as `FreeGlobalMemory`.
+  - `allocator_mismatched.bats` 105/106: allocator mismatch through local
+    `FixedBufferAllocator` and passed allocator is not reported.
+  - `labeled_switch.bats` 154: allocation/free across labeled-switch states
+    still false-positives.
+  - `misc.bats` 209: `std.ArrayList` cleanup still reports a leak in
+    `ensureTotalCapacityPrecise`.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic union
   and global union field recovery is covered, but struct/global false positives,
   returned pointers, and merged pointers still expose provenance gaps.
+- Current field/stack provenance failures from the latest full run:
+  - `fieldparentptr_safety.bats` 144/146: global struct/union field
+    `fieldParentPtr` false positives.
+  - `stack_pointer.bats` 259: passed-in pointer in struct return is still
+    reported as a stack escape.
 - FD closure propagation. FD state is scalar-only and copied through some stores
   and aggregate inits, but close state is not reliably propagated to all aliases
   or returned values. Correct open/close examples still report leaks.
+- Current FD failures from the latest full run:
+  - `fd.bats` 123/126/129/132/133/136 and `undefined.bats` 343. These remain
+    punted until the FD aliasing/closure architecture is addressed.
 - Stdlib reductions. Pointer/slice conversion, ArrayList, HashMap, and
   indexOfSentinel/SIMD still expose gaps in type/character preservation and
   analysis propagation. Packed struct init, memcpy/memset destination definition,
   string literal equality, branch clobber, and copied struct-argument allocation
   reachability are covered.
+- Current stdlib/undefined/null failures from the latest full run:
+  - `misc.bats` 196: `std.mem.indexOfSentinel` SIMD path still fails in
+    undefined-safety after memory-safety initialization fixes.
+  - `misc.bats` 199: bitcast from `[*]u8` to `[*]Struct` does not preserve the
+    expected region element type.
+  - `misc.bats` 210: `std.HashMap` basic usage currently reaches a
+    null-safety unchecked optional unwrap in `HashMapUnmanaged.header`.
 - Alignment-cast lowering. `@ptrCast(@alignCast(...))` currently exposes AIR that
   bitcasts a pointer to an address-like scalar, masks low bits, and branches on
   the alignment check. Add an AIR-to-analyzer interceptor that recognizes this
@@ -173,9 +197,12 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Continue memory-safety gaps first: ArrayList cleanup/leak in
-   `ensureTotalCapacityPrecise`, allocator global laundering, allocator mismatch
-   through FBA/passed allocators, and labeled-switch allocation/free.
-2. Fix remaining fieldParentPtr global struct/union false positives and the
-   stack-pointer false positive for passed-in pointer in struct return.
-3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
+1. Continue memory-safety gaps first. Recommended sprint: allocator global
+   laundering and allocator mismatch, because they are focused false negatives
+   with clear expected error types and should not require the larger stdlib
+   remap/ArrayList work.
+2. Then handle labeled-switch allocation/free, which likely needs control-flow
+   state merge work but is still memory-safety scoped.
+3. After that, decide between ArrayList remap/reallocation cleanup and the
+   fieldParentPtr/stack-pointer provenance false positives.
+4. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
