@@ -117,16 +117,10 @@ The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
 returned-pointer destroy handling, and labeled-switch branch-result import work
-is expected to be `356/365` passing (`9` failing); the last full measured
-baseline was `348/365` passing
-(`17` failing), from
+is `356/365` passing (`9` failing), from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
-./run_integration.sh` on 2026-05-23. Treat remaining failures as real analyzer
-work, not compiler-cache failures. A focused `misc.bats` run on 2026-05-24
-confirmed the error-path allocation metadata, GPA cleanup, and ArrayList basic
-usage cases now pass. The old `misc.bats` raw-byte-to-struct bitcast case was a
-bad test for CLR's bitcast model and has been replaced with a packed-struct
-scalar cross-call safety test.
+./run_integration.sh` on 2026-05-24. Treat remaining failures as real analyzer
+work, not compiler-cache failures.
 
 The largest incomplete areas are:
 
@@ -134,18 +128,17 @@ The largest incomplete areas are:
   GPA cleanup, and ArrayList basic false positives no longer reproduce. Avoid
   Rust-style ownership terminology here; the analyzer tracks allocation identity,
   free state, allocator mismatch state, and reachability.
-- Current memory-safety failures from the latest focused runs:
+- Current memory-safety failures from the latest full run:
   - No narrow allocator false positives are currently confirmed outside the
-    remaining stdlib HashMap/null-safety case. Re-run the full integration suite
-    before declaring memory-safety clean.
+    remaining stdlib HashMap/null-safety case.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic
   struct, union, and global struct/union field recovery is covered, but returned
   pointers through aggregate values and merged pointers still expose provenance
   gaps.
 - Current field/stack provenance failures from the latest full run:
-  - `stack_pointer.bats` 259: passed-in pointer in struct return is still
-    reported as a stack escape.
+  - None confirmed. The prior `stack_pointer.bats` 259 passed in the latest full
+    run.
 - FD closure propagation. FD state is scalar-only and copied through some stores
   and aggregate inits, but close state is not reliably propagated to all aliases
   or returned values. Correct open/close examples still report leaks.
@@ -196,10 +189,7 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Re-run the full integration suite soon to refresh exact counts after the
-   fieldParentPtr globals fix, the now-passing misc allocation cases, and the
-   replacement of the bad raw-byte-to-struct bitcast test.
-2. Recommended next focused sprint: decide between `std.mem.indexOfSentinel`
+1. Recommended next focused sprint: decide between `std.mem.indexOfSentinel`
    SIMD undefined-safety, `std.HashMap` optional/null-safety, and the
-   stack-pointer provenance false positive.
-3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
+   broader FD aliasing/closure architecture.
+2. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
