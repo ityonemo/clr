@@ -347,7 +347,18 @@ pub const Refinement = union(enum) {
                     .choices = new_choices,
                 } };
             },
-            inline .pointer, .optional, .errorunion, .region, .recursive => |data, ref_tag| blk: {
+            .pointer => |p| blk: {
+                const copied_to = if (p.to < dst_list.list.items.len)
+                    p.to
+                else
+                    try copyValuePreservingPointerTargetsMapped(p.to, src_list, dst_list, &copied_targets);
+                const new_analyte = try p.analyte.copy(allocator);
+                var new_data = p;
+                new_data.analyte = new_analyte;
+                new_data.to = copied_to;
+                break :blk .{ .pointer = new_data };
+            },
+            inline .optional, .errorunion, .region, .recursive => |data, ref_tag| blk: {
                 const copied_to = if (ref_tag == .recursive)
                     data.to
                 else
@@ -1156,4 +1167,32 @@ test "copyValuePreservingPointerTargets imports missing pointer target" {
     try std.testing.expect(copied_ptr.* == .pointer);
     try std.testing.expect(copied_ptr.pointer.to < dst.list.items.len);
     try std.testing.expect(dst.at(copied_ptr.pointer.to).* == .region);
+}
+
+test "copyToSlot preserves pointer target when destination already has pointee" {
+    var src = Refinements.init(std.testing.allocator);
+    defer src.deinit();
+
+    const field_gid = try src.appendEntity(.{ .scalar = .{} });
+    const field_ptr_gid = try src.appendEntity(.{ .pointer = .{
+        .to = field_gid,
+        .analyte = .{
+            .fieldparentptr_safety = .{
+                .field_index = 0,
+                .container_type_id = 100,
+            },
+        },
+    } });
+    const return_slot_gid = try src.appendEntity(.{ .pointer = .{
+        .to = try src.appendEntity(.{ .scalar = .{} }),
+    } });
+
+    var dst = try src.clone(std.testing.allocator);
+    defer dst.deinit();
+    try Refinement.copyToSlot(return_slot_gid, src.at(field_ptr_gid).*, &src, &dst);
+
+    const return_slot = dst.at(return_slot_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(return_slot.*));
+    try std.testing.expectEqual(field_gid, return_slot.pointer.to);
+    try std.testing.expect(return_slot.pointer.analyte.fieldparentptr_safety != null);
 }

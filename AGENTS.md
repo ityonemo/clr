@@ -117,32 +117,31 @@ The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
 returned-pointer destroy handling, and labeled-switch branch-result import work
-is expected to be `350/365` passing (`15` failing); the last full measured
+is expected to be `355/365` passing (`10` failing); the last full measured
 baseline was `348/365` passing
 (`17` failing), from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-05-23. Treat remaining failures as real analyzer
-work, not compiler-cache failures.
+work, not compiler-cache failures. A focused `misc.bats` run on 2026-05-24
+confirmed the error-path allocation metadata, GPA cleanup, and ArrayList basic
+usage cases now pass.
 
 The largest incomplete areas are:
 
-- Interprocedural allocation safety. The remaining allocator failures are
-  narrower: error-path allocation metadata, GPA cleanup, and stdlib
-  ArrayList/HashMap cleanup. Avoid Rust-style ownership terminology here; the
-  analyzer tracks allocation identity, free state, allocator mismatch state, and
-  reachability.
-- Current memory-safety failures from the latest full run:
-  - `misc.bats` 203/204: error-path allocation metadata and GPA cleanup still
-    false-positive.
-  - `misc.bats` 209/210: `std.ArrayList`/`std.HashMap` cleanup still reports
-    leaks in stdlib capacity/cleanup paths.
+- Interprocedural allocation safety. The earlier error-path allocation metadata,
+  GPA cleanup, and ArrayList basic false positives no longer reproduce. Avoid
+  Rust-style ownership terminology here; the analyzer tracks allocation identity,
+  free state, allocator mismatch state, and reachability.
+- Current memory-safety failures from the latest focused runs:
+  - No narrow allocator false positives are currently confirmed outside the
+    remaining stdlib HashMap/null-safety case. Re-run the full integration suite
+    before declaring memory-safety clean.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
-  `struct_field_ptr` producing a pointer with field origin metadata. Basic union
-  and global union field recovery is covered, but struct/global false positives,
-  returned pointers, and merged pointers still expose provenance gaps.
+  `struct_field_ptr` producing a pointer with field origin metadata. Basic
+  struct, union, and global struct/union field recovery is covered, but returned
+  pointers through aggregate values and merged pointers still expose provenance
+  gaps.
 - Current field/stack provenance failures from the latest full run:
-  - `fieldparentptr_safety.bats` 144/146: global struct/union field
-    `fieldParentPtr` false positives.
   - `stack_pointer.bats` 259: passed-in pointer in struct return is still
     reported as a stack escape.
 - FD closure propagation. FD state is scalar-only and copied through some stores
@@ -151,11 +150,11 @@ The largest incomplete areas are:
 - Current FD failures from the latest full run:
   - `fd.bats` 123/126/129/132/133/136 and `undefined.bats` 343. These remain
     punted until the FD aliasing/closure architecture is addressed.
-- Stdlib reductions. Pointer/slice conversion, ArrayList, HashMap, and
+- Stdlib reductions. Pointer/slice conversion, HashMap, and
   indexOfSentinel/SIMD still expose gaps in type/character preservation and
   analysis propagation. Packed struct init, memcpy/memset destination definition,
-  string literal equality, branch clobber, and copied struct-argument allocation
-  reachability are covered.
+  string literal equality, branch clobber, copied struct-argument allocation
+  reachability, and basic ArrayList usage are covered.
 - Current stdlib/undefined/null failures from the latest full run:
   - `misc.bats` 196: `std.mem.indexOfSentinel` SIMD path still fails in
     undefined-safety after memory-safety initialization fixes.
@@ -197,10 +196,12 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Continue memory-safety gaps first. Recommended sprint:
-   `misc.bats` 203/204, error-path allocation metadata and GPA cleanup. Start
-   with focused RED coverage around allocation error-union payload/error-branch
-   state, then GREEN the targeted cases.
-2. After that, decide between ArrayList remap/reallocation cleanup and the
-   fieldParentPtr/stack-pointer provenance false positives.
-3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
+1. Re-run the full integration suite soon to refresh exact counts after the
+   fieldParentPtr globals fix and the now-passing misc allocation cases.
+2. Recommended next focused sprint: `misc.bats` 199, preserving region element
+   type/character through `[*]u8` to `[*]Struct` bitcasts. Start with a RED unit
+   around the bitcast type conversion, then GREEN the focused misc case.
+3. After that, decide between `std.mem.indexOfSentinel` SIMD undefined-safety,
+   `std.HashMap` optional/null-safety, and the stack-pointer provenance false
+   positive.
+4. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
