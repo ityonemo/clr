@@ -199,10 +199,11 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Continue memory-safety gaps first. Recommended sprint: allocator global
-   laundering and allocator mismatch, because they are focused false negatives
-   with clear expected error types and should not require the larger stdlib
-   remap/ArrayList work.
+1. Continue memory-safety gaps first. Recommended sprint:
+   `allocator_basic.bats` 20, the false positive where caller frees an allocation
+   returned by a callee. Start with focused RED unit coverage for the returned
+   allocation/free path, then fix provenance/reachability, then GREEN the unit
+   and BATS case.
 2. Then handle labeled-switch allocation/free, which likely needs control-flow
    state merge work but is still memory-safety scoped.
 3. After that, decide between ArrayList remap/reallocation cleanup and the
