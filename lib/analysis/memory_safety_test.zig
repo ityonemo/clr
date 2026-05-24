@@ -601,6 +601,117 @@ test "branch orphan matches imported allocation with different parent gid" {
     } });
 }
 
+test "branch orphan matches allocation reachable through copied argument" {
+    var ctx, var parent = initTest();
+    defer ctx.deinit();
+    defer parent.deinit();
+
+    const alloc_gid = try parent.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+
+    var branch = try parent.clone(ctx.allocator);
+    defer branch.deinit();
+
+    const arg_elem_gid = try branch.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const arg_ptr_gid = try branch.appendEntity(.{ .pointer = .{
+        .to = arg_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const arg_struct_gid = try branch.appendEntity(.{ .@"struct" = .{
+        .fields = try ctx.allocator.dupe(Gid, &.{arg_ptr_gid}),
+        .type_id = 200,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    _ = arg_struct_gid;
+    const base_len: Gid = @intCast(branch.list.items.len);
+
+    const orphan_elem_gid = try branch.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const orphan_ptr_gid = try branch.appendEntity(.{ .pointer = .{
+        .to = orphan_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var copied = std.AutoHashMap(Gid, void).init(ctx.allocator);
+    defer copied.deinit();
+
+    try tag.splatOrphaned(&ctx, &parent, &branch, orphan_ptr_gid, &copied, .{ .branch_merge = .{
+        .meta = ctx.meta,
+        .branch_type = .cond_br,
+        .base_len = base_len,
+    } });
+}
+
+test "early return ignores allocation reachable through copied argument" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    try ctx.push_fn("test_func");
+    defer ctx.pop_fn();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
+    const arg_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const arg_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = arg_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const arg_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = try ctx.allocator.dupe(Gid, &.{arg_ptr_gid}),
+        .type_id = 200,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const base_gid: Gid = @intCast(refinements.list.items.len);
+
+    const local_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const local_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = local_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = arg_struct_gid;
+    results[1].refinement = local_ptr_gid;
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = 0,
+        .base_gid = base_gid,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 0, .{ .arg = .{ .value = arg_struct_gid, .name_id = 1 } });
+    try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = null } });
+    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+}
+
 test "divergent allocated pointer branch result does not orphan alternate allocation" {
     var ctx, var parent = initTest();
     defer ctx.deinit();
@@ -1380,6 +1491,55 @@ test "store pointer into pointer slot does not paint old target as allocated" {
     try std.testing.expectEqual(new_region_gid, refinements.at(slot_gid).pointer.to);
     try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(old_region_gid).region.analyte.memory_safety.?));
     try std.testing.expectEqual(.allocated, std.meta.activeTag(refinements.at(new_region_gid).region.analyte.memory_safety.?));
+}
+
+test "store pointer into pointer slot reports clobbered live allocation" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const old_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = allocator_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const slot_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = old_scalar_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const slot_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = slot_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const new_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = allocator_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = new_scalar_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = slot_ptr_gid;
+    results[1].refinement = src_ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try std.testing.expectError(error.MemoryLeak, Inst.apply(state, 2, .{ .store = .{
+        .ptr = .{ .inst = 0 },
+        .src = .{ .inst = 1 },
+    } }));
 }
 
 test "aggregate_init sets struct container memory_safety" {

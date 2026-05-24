@@ -164,6 +164,7 @@ pub const MemorySafety = union(enum) {
         const dest_gid = ptr_ref.pointer.to;
         const dest_ref = refinements.at(dest_gid);
         if (dest_ref.* == .pointer and src_refinement.* == .pointer) {
+            try checkPointerSlotClobber(state, dest_gid, src_refinement_idx);
             dest_ref.pointer.analyte.memory_safety = src_refinement.pointer.analyte.memory_safety orelse .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
         }
         if (dest_ref.* == .@"struct" and src_refinement.* == .@"struct") {
@@ -214,6 +215,33 @@ pub const MemorySafety = union(enum) {
                 ms.stack.meta = param_meta;
             }
         }
+    }
+
+    fn checkPointerSlotClobber(state: State, dest_gid: Gid, src_gid: Gid) !void {
+        const refinements = state.refinements;
+        const dest_ref = refinements.at(dest_gid);
+        const src_ref = refinements.at(src_gid);
+        if (dest_ref.* != .pointer or src_ref.* != .pointer) return;
+
+        const old_target = dest_ref.pointer.to;
+        const new_target = src_ref.pointer.to;
+        if (old_target == new_target) return;
+
+        const old_ref = refinements.at(old_target);
+        const old_ms = switch (old_ref.*) {
+            .void, .noreturn, .unimplemented => null,
+            else => getAnalytePtr(old_ref).memory_safety,
+        } orelse return;
+        if (old_ms != .allocated) return;
+        const old_alloc = old_ms.allocated;
+        if (old_alloc.freed != null) return;
+
+        if (hasMatchingAllocation(refinements, new_target, allocationRootGid(old_target, old_alloc))) return;
+
+        const allocator_ref = refinements.at(old_alloc.allocator_gid);
+        if (allocator_ref.* == .allocator and allocator_ref.allocator.deinit != null) return;
+
+        return reportMemoryLeak(state.ctx, old_alloc);
     }
 
     /// Retroactively set variable name on stack for escape detection messages.
@@ -670,6 +698,12 @@ pub const MemorySafety = union(enum) {
             collectReachableGids(refinements, arg_gid, &arg_reachable);
             collectReachableAllocations(refinements, arg_gid, &arg_alloc_ids);
         }
+        for (results) |inst| {
+            const gid = inst.refinement orelse continue;
+            if (gid >= state.base_gid) continue;
+            collectReachableGids(refinements, gid, &arg_reachable);
+            collectReachableAllocations(refinements, gid, &arg_alloc_ids);
+        }
 
         // Collect GIDs reachable from globals (allocations stored there aren't leaks)
         var global_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
@@ -722,7 +756,9 @@ pub const MemorySafety = union(enum) {
 
             if (returned_alloc_ids.contains(alloc_id)) continue;
             if (arg_alloc_ids.contains(alloc_id)) continue;
+            if (hasEquivalentAllocationInSet(refinements, &arg_reachable, allocation)) continue;
             if (global_alloc_ids.contains(alloc_id)) continue;
+            if (hasEquivalentAllocationInSet(refinements, &global_reachable, allocation)) continue;
 
             // Report leak - allocation is orphaned by this early return
             if (alloc_ref.arena_gid != null) {
@@ -730,6 +766,14 @@ pub const MemorySafety = union(enum) {
             }
             return reportMemoryLeak(ctx, allocation);
         }
+    }
+
+    fn hasEquivalentAllocationInSet(refinements: *Refinements, gids: *const std.AutoHashMap(Gid, void), allocation: Allocated) bool {
+        var it = gids.keyIterator();
+        while (it.next()) |gid| {
+            if (hasEquivalentAllocation(refinements, gid.*, allocation)) return true;
+        }
+        return false;
     }
 
     /// Recursively check for stack pointer escapes in a refinement tree being returned.
@@ -2259,7 +2303,6 @@ pub const MemorySafety = union(enum) {
         if (orphan_ctx == .branch_merge) {
             const base_len = orphan_ctx.branch_merge.base_len;
             const allocation_root_gid = allocationRootGid(pointee_idx, allocation);
-
             // Check if this allocation root is represented in any entity that was copied to parent
             if (copied_from_branch) |cfb| {
                 var it = cfb.keyIterator();
@@ -2284,7 +2327,9 @@ pub const MemorySafety = union(enum) {
             // Also check in orphan_refinements (branch) - allocations stored through
             // argument pointers update the branch's copy of the argument entity
             for (0..base_len) |pre_gid| {
-                if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), allocation_root_gid)) {
+                if (hasMatchingAllocation(orphan_refinements, @intCast(pre_gid), allocation_root_gid) or
+                    hasEquivalentAllocation(orphan_refinements, @intCast(pre_gid), allocation))
+                {
                     return;
                 }
             }

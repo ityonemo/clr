@@ -4,6 +4,41 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Clobber leaks and copied-argument allocation reachability
+
+**Date:** 2026-05-23
+
+**Symptom:**
+The branch clobber case did not report a leak when a pointer variable was
+assigned a second allocation on one branch before the final value was freed.
+Separately, functions that received a struct argument containing an allocated
+pointer could report a false leak on early returns or branch orphan checks.
+
+**Root Cause:**
+Pointer-slot stores preserved pointer value metadata but did not report when the
+slot already pointed at a different live allocation. For copied struct arguments,
+allocation identity could be represented by a different local GID even though it
+referred to the same allocation metadata. Branch helper functions can also
+overwrite the original `.arg` instruction tag at result slot 0 with `cond_br`,
+so early-return leak checks lost the argument root.
+
+**The Fix:**
+Pointer-slot stores now fail immediately when overwriting a live allocation with
+a different pointer. Branch orphan and early-return leak checks now account for
+equivalent allocation metadata reachable from copied arguments; early-return
+checks also treat pre-function result GIDs as caller-owned roots when an arg tag
+has been overwritten inside a branch helper.
+
+**Key Files Changed:**
+- `lib/analysis/memory_safety.zig`
+- `lib/analysis/memory_safety_test.zig`
+
+**Test Cases:**
+- `test/cases/allocator_safety/clobber/branch_clobber.zig`
+- `test/cases/allocator_safety/struct_pointer_field/struct_arg_allocated_field.zig`
+
+---
+
 ## Fix: Memory-safety initialization and pointer-slot store provenance
 
 **Date:** 2026-05-23
