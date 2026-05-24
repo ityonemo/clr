@@ -113,16 +113,19 @@ location, and relevant context messages where applicable.
 
 ## Current Implementation Risks
 
-The integration baseline after allocator provenance/call-return work is
-`338/369` passing (`31` failing), from `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache
-ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local ./run_integration.sh` on 2026-05-21.
-Treat remaining failures as real analyzer work, not compiler-cache failures.
+The integration baseline after allocator provenance, call-return, test
+reorganization, memory-safety initialization, branch clobber, and copied-argument
+reachability work is `346/365` passing (`19` failing), from
+`env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
+./run_integration.sh` on 2026-05-23. Treat remaining failures as real analyzer
+work, not compiler-cache failures.
 
 The largest incomplete areas are:
 
-- Interprocedural allocation safety. Allocator and slice cases depend on
-  consistent allocation-root provenance across call boundaries and return-slot
-  merges. Avoid Rust-style ownership terminology here; the analyzer tracks
+- Interprocedural allocation safety. The remaining allocator failures are
+  narrower: global/comptime pointer laundering, allocator mismatch through FBA
+  or passed allocators, labeled-switch allocation/free, and stdlib ArrayList
+  cleanup. Avoid Rust-style ownership terminology here; the analyzer tracks
   allocation identity, free state, allocator mismatch state, and reachability.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic union
@@ -131,9 +134,11 @@ The largest incomplete areas are:
 - FD closure propagation. FD state is scalar-only and copied through some stores
   and aggregate inits, but close state is not reliably propagated to all aliases
   or returned values. Correct open/close examples still report leaks.
-- Stdlib reductions. Packed struct RMW, pointer/slice conversion, memcpy, string
-  literals, ArrayList, HashMap, and error-union branch merges still expose gaps in
-  type/character preservation and analysis propagation.
+- Stdlib reductions. Pointer/slice conversion, ArrayList, HashMap, and
+  indexOfSentinel/SIMD still expose gaps in type/character preservation and
+  analysis propagation. Packed struct init, memcpy/memset destination definition,
+  string literal equality, branch clobber, and copied struct-argument allocation
+  reachability are covered.
 - Alignment-cast lowering. `@ptrCast(@alignCast(...))` currently exposes AIR that
   bitcasts a pointer to an address-like scalar, masks low bits, and branches on
   the alignment check. Add an AIR-to-analyzer interceptor that recognizes this
@@ -168,9 +173,9 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Revisit remaining allocator provenance cases, especially sub-slices, remap,
-   optional pointer arithmetic wrappers, and conditional optional allocation
-   cleanup.
-2. Fix remaining struct/global field-pointer provenance cases, including
-   allocator field-pointer tests 83/85 and stack/global false positives.
+1. Continue memory-safety gaps first: ArrayList cleanup/leak in
+   `ensureTotalCapacityPrecise`, allocator global laundering, allocator mismatch
+   through FBA/passed allocators, and labeled-switch allocation/free.
+2. Fix remaining fieldParentPtr global struct/union false positives and the
+   stack-pointer false positive for passed-in pointer in struct return.
 3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
