@@ -116,8 +116,9 @@ location, and relevant context messages where applicable.
 The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
-and returned-pointer destroy handling work is expected to be `349/365` passing
-(`16` failing); the last full measured baseline was `348/365` passing
+returned-pointer destroy handling, and labeled-switch branch-result import work
+is expected to be `350/365` passing (`15` failing); the last full measured
+baseline was `348/365` passing
 (`17` failing), from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-05-23. Treat remaining failures as real analyzer
@@ -126,14 +127,11 @@ work, not compiler-cache failures.
 The largest incomplete areas are:
 
 - Interprocedural allocation safety. The remaining allocator failures are
-  narrower: returned allocation cleanup from callee to caller, labeled-switch
-  allocation/free, error-path allocation metadata, GPA cleanup, and stdlib
+  narrower: error-path allocation metadata, GPA cleanup, and stdlib
   ArrayList/HashMap cleanup. Avoid Rust-style ownership terminology here; the
   analyzer tracks allocation identity, free state, allocator mismatch state, and
   reachability.
 - Current memory-safety failures from the latest full run:
-  - `labeled_switch.bats` 154: allocation/free across labeled-switch states
-    still false-positives.
   - `misc.bats` 203/204: error-path allocation metadata and GPA cleanup still
     false-positive.
   - `misc.bats` 209/210: `std.ArrayList`/`std.HashMap` cleanup still reports
@@ -200,9 +198,9 @@ Problematic patterns to fix before adding more surface area:
 Good next targets:
 
 1. Continue memory-safety gaps first. Recommended sprint:
-   `labeled_switch.bats` 154, allocation/free across labeled-switch states. It
-   likely needs control-flow
-   state merge work but is still memory-safety scoped.
+   `misc.bats` 203/204, error-path allocation metadata and GPA cleanup. Start
+   with focused RED coverage around allocation error-union payload/error-branch
+   state, then GREEN the targeted cases.
 2. After that, decide between ArrayList remap/reallocation cleanup and the
    fieldParentPtr/stack-pointer provenance false positives.
 3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.

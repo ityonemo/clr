@@ -884,9 +884,6 @@ pub fn loop_switch_br(
             }
             if (!any_has_refinement) continue;
 
-            // Capture base_len before copyTo - entities >= this are from branches
-            const merge_base_len: Gid = @intCast(state.refinements.list.items.len);
-
             // Copy refinement from first terminal state that has it, then merge all
             for (terminal_states.items) |ts| {
                 if (ts.results[result_idx].refinement) |gid| {
@@ -902,7 +899,7 @@ pub fn loop_switch_br(
             }
 
             // Now merge this slot across all terminal states
-            try tag.splatMergeByGid(.loop_switch_br, state.refinements, result.refinement.?, ctx, terminal_states.items, result_idx, merge_base_len);
+            try tag.splatMergeByGid(.loop_switch_br, state.refinements, result.refinement.?, ctx, terminal_states.items, result_idx, branch_base_len);
         }
     }
 
@@ -1232,6 +1229,34 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .refinements = refinements,
         .return_gid = 0,
     };
+}
+
+fn loopSwitchAllocCase0(state: State) anyerror!void {
+    try Inst.apply(state, 0, .{ .loop_switch_br = .{ .case_index = 0, .num_cases = 1, .loop_switch_inst = 2 } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+}
+
+test "loop_switch imports branch-only pointer result target instead of preserving colliding gid" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    const results = try make_results_list(allocator, 3);
+    defer clear_results_list(results, allocator);
+
+    const state = testState(&ctx, results, &refinements);
+    try Inst.loop_switch_br(state, 2, .{loopSwitchAllocCase0});
+
+    const ptr_gid = results[1].refinement.?;
+    const ptr_ref = refinements.at(ptr_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(ptr_ref.*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(ptr_ref.pointer.to).*));
 }
 
 test "alloc creates pointer to typed pointee" {
