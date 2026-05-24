@@ -3937,7 +3937,16 @@ pub const MemorySafety = union(enum) {
         if (ptr_refinement.* != .pointer) return; // Safety check
         if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
             switch (ptr_ms) {
-                .interned => return reportFreeGlobalMemory(ctx),
+                .interned => {
+                    const pointee_ref = refinements.at(ptr_refinement.pointer.to);
+                    const pointee_ms = switch (pointee_ref.*) {
+                        .void, .noreturn, .unimplemented => null,
+                        else => getAnalytePtr(pointee_ref).memory_safety,
+                    };
+                    if (pointee_ms == null or pointee_ms.? != .allocated) {
+                        return reportFreeGlobalMemory(ctx);
+                    }
+                },
                 .placeholder => return error.InvalidReallocInput,
                 .allocated, .stack, .error_stub => {},
             }

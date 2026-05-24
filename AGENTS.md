@@ -115,8 +115,10 @@ location, and relevant context messages where applicable.
 
 The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
-reachability, global-free, FBA mismatch, and returned-allocation leak-suppression
-work is `348/365` passing (`17` failing), from
+reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
+and returned-pointer destroy handling work is expected to be `349/365` passing
+(`16` failing); the last full measured baseline was `348/365` passing
+(`17` failing), from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-05-23. Treat remaining failures as real analyzer
 work, not compiler-cache failures.
@@ -130,8 +132,6 @@ The largest incomplete areas are:
   analyzer tracks allocation identity, free state, allocator mismatch state, and
   reachability.
 - Current memory-safety failures from the latest full run:
-  - `allocator_basic.bats` 20: caller freeing allocation returned by callee still
-    false-positives.
   - `labeled_switch.bats` 154: allocation/free across labeled-switch states
     still false-positives.
   - `misc.bats` 203/204: error-path allocation metadata and GPA cleanup still
@@ -200,12 +200,9 @@ Problematic patterns to fix before adding more surface area:
 Good next targets:
 
 1. Continue memory-safety gaps first. Recommended sprint:
-   `allocator_basic.bats` 20, the false positive where caller frees an allocation
-   returned by a callee. Start with focused RED unit coverage for the returned
-   allocation/free path, then fix provenance/reachability, then GREEN the unit
-   and BATS case.
-2. Then handle labeled-switch allocation/free, which likely needs control-flow
+   `labeled_switch.bats` 154, allocation/free across labeled-switch states. It
+   likely needs control-flow
    state merge work but is still memory-safety scoped.
-3. After that, decide between ArrayList remap/reallocation cleanup and the
+2. After that, decide between ArrayList remap/reallocation cleanup and the
    fieldParentPtr/stack-pointer provenance false positives.
-4. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
+3. Leave FD aliasing until later unless a narrower FD bug blocks another fix.

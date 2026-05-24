@@ -199,6 +199,43 @@ test "destroy of interned pointer reports global memory free" {
     }, "std.mem.Allocator.destroy"));
 }
 
+test "destroy of interned pointer value to allocated pointee frees allocation" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .interned = ctx.meta } },
+    } });
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = scalar_gid,
+        .analyte = .{ .memory_safety = .{ .interned = ctx.meta } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = alloc_gid;
+    results[1].refinement = ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.call(state, 2, null, .{ .void = {} }, &.{
+        .{ .inst = 0 },
+        .{ .inst = 1 },
+    }, "std.mem.Allocator.destroy");
+
+    const ms = refinements.at(scalar_gid).scalar.analyte.memory_safety.?;
+    try std.testing.expect(ms == .allocated);
+    try std.testing.expect(ms.allocated.freed != null);
+}
+
 test "ret_load of struct with slice pointer field leaves no invalid orphaned memory safety" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
