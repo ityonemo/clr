@@ -82,14 +82,14 @@ load test_helper
 @test "no false positive for error path clearing allocation metadata" {
     # When an allocation fails (error path), phantom allocation metadata must be
     # cleared while maintaining valid refinement state (memory_safety set to .unset).
-    run compile_and_run "$TEST_CASES/allocator_safety/error_path_clear_metadata.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/error_paths/error_path_clear_metadata.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "no false positive for GPA with error path" {
     # GeneralPurposeAllocator's detectLeaks uses array_elem_val with interned sources.
     # This must be handled correctly.
-    run compile_and_run "$TEST_CASES/allocator_safety/gpa_error_path.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/error_paths/gpa_error_path.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -106,7 +106,7 @@ load test_helper
     # the slice still points to allocated memory. The pointer VALUE is on the stack,
     # but the POINTEE (the region) should retain its .allocated memory_safety.
     # Stack escape detection checks the pointee, not the pointer itself.
-    run compile_and_run "$TEST_CASES/allocator_safety/load_preserves_allocation_tracking.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/basic/load_preserves_allocation_tracking.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -152,7 +152,7 @@ load test_helper
     # When a struct argument contains a pointer to allocated memory, the allocation
     # should not be reported as leaked at branch merge points inside the called function.
     # Pattern: HashMap passes self to getIndex, metadata field points to allocated memory.
-    run compile_and_run "$TEST_CASES/allocator_safety/struct_arg_allocated_field.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/struct_pointer_field/struct_arg_allocated_field.zig"
     [ "$status" -eq 0 ]
 }
 

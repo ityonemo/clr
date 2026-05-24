@@ -4,6 +4,46 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Memory-safety initialization and pointer-slot store provenance
+
+**Date:** 2026-05-23
+
+**Symptom:**
+Several stdlib and aggregate cases failed `testValid` because scalar or
+aggregate refinements had null `memory_safety`. Correct realloc usage also
+reported leaks after assigning a reallocated slice back into a pointer slot.
+
+**Root Cause:**
+Some computed scalar AIR operations did not initialize their result
+`memory_safety`. Interned struct stores initialized only the immediate
+destination, leaving nested fields null. Pointer-slot stores copied the source
+pointer target's allocation state into the old destination target before
+`tag.Store` updated the structural pointer alias, which created orphan
+allocations while also risking loss of pointer-value provenance.
+
+**The Fix:**
+Added memory-safety initialization for the missing scalar/vector result
+operations, copied `memcpy`/`memmove` element memory state, initialized interned
+stores recursively without overwriting existing destination state, and set
+aggregate struct containers. Pointer-slot stores now preserve only the pointer
+value's own memory-safety metadata while leaving pointee allocation state on the
+already-existing target region.
+
+**Key Files Changed:**
+- `lib/analysis/memory_safety.zig`
+- `lib/analysis/memory_safety_test.zig`
+
+**Test Cases:**
+- `test/cases/undefined_safety/memcpy_marks_dest_defined.zig`
+- `test/cases/undefined_safety/structs/packed_struct_init.zig`
+- `test/cases/undefined_safety/struct/struct_return_allocator.zig`
+- `test/cases/stack_pointer_safety/struct_store_propagation.zig`
+- `test/cases/std/std_mem_eql_strings.zig`
+- `test/cases/allocator_safety/basic/realloc_basic.zig`
+- `test/cases/allocator_safety/basic/allocator_interface.zig`
+
+---
+
 ## Fix: Allocation provenance across call and return boundaries
 
 **Date:** 2026-05-21
@@ -244,7 +284,7 @@ For error unions specifically, we use `.error_stub` instead of `.unset` since th
 .scalar => |*s| s.analyte.memory_safety = .{ .unset = {} },
 ```
 
-**Test Case:** `test/cases/misc/error_path_clear_metadata.zig`
+**Test Case:** `test/cases/allocator_safety/error_paths/error_path_clear_metadata.zig`
 
 ---
 
@@ -298,7 +338,7 @@ Added handling for `.interned` sources in ArrayElemVal:
 },
 ```
 
-**Test Case:** `test/cases/misc/gpa_error_path.zig`
+**Test Case:** `test/cases/allocator_safety/error_paths/gpa_error_path.zig`
 
 ---
 
@@ -352,7 +392,7 @@ if (src.* == .@"struct") {
 
 Special case for allocator: the allocator path calls splat after because it uses a different update pattern (direct reference).
 
-**Test Case:** `test/cases/store_struct_field_preserves_state.zig`
+**Test Case:** `test/cases/undefined_safety/store_struct_field_preserves_state.zig`
 
 ---
 
@@ -413,7 +453,7 @@ Also added a testable helper `formatAllocatorType()` that generates the allocato
 - `lib/tag.zig` - Removed obsolete `dbg_var_val` test, updated comments
 - `lib/Inst.zig`, `lib/Context.zig` - Updated comments about dbg_var_val
 
-**Test Case:** `test/cases/misc/allocator_in_struct.zig`
+**Test Case:** `test/cases/allocator_safety/basic/allocator_in_struct.zig`
 
 ---
 
@@ -471,7 +511,7 @@ Added `.region` to the list of container types that don't track undefined on the
 .optional, .@"struct", .@"union", .region => {},
 ```
 
-**Test Case:** `test/cases/misc/struct_with_array_field.zig`
+**Test Case:** `test/cases/undefined_safety/struct_with_array_field.zig`
 
 ---
 

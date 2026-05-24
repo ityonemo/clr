@@ -1174,3 +1174,228 @@ test "splatMerge propagates region wrapper memory_safety from branches" {
     try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety != null);
     try std.testing.expect(refinements.at(region_gid).region.analyte.memory_safety.? == .interned);
 }
+
+test "memcpy propagates region element memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const dest_elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const dest_region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = dest_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const dest_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = dest_region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    const src_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .interned = ctx.meta } },
+    } });
+    const src_region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = src_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = src_region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = dest_ptr_gid;
+    results[1].refinement = src_ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try Inst.apply(state, 2, .{ .memcpy = .{ .dest = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
+
+    try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(dest_elem_gid).scalar.analyte.memory_safety.?));
+}
+
+test "boolean ops set result memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+
+    try Inst.apply(state, 0, .{ .bool_or = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 1, .{ .bool_and = .{ .lhs = dummy_src, .rhs = dummy_src } });
+
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[0].refinement.?).scalar.analyte.memory_safety.?));
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[1].refinement.?).scalar.analyte.memory_safety.?));
+}
+
+test "scalar arithmetic and cast ops set result memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 6;
+    const state = testState(&ctx, &results, &refinements);
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+
+    try Inst.apply(state, 0, .{ .shr = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 1, .{ .shl = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 2, .{ .mul = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 3, .{ .min = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 4, .{ .not = .{ .src = dummy_src } });
+    try Inst.apply(state, 5, .{ .trunc = .{ .src = dummy_src } });
+
+    for (0..6) |i| {
+        try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[i].refinement.?).scalar.analyte.memory_safety.?));
+    }
+}
+
+test "select and reduce set result memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+
+    try Inst.apply(state, 0, .{ .select = .{ .mask = dummy_src, .a = dummy_src, .b = dummy_src } });
+    try Inst.apply(state, 1, .{ .reduce = .{ .src = .{ .inst = 0 } } });
+
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[0].refinement.?).scalar.analyte.memory_safety.?));
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[1].refinement.?).scalar.analyte.memory_safety.?));
+}
+
+test "store interned pointer initializes destination pointer target memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const pointer_slot_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const slot_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = pointer_slot_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = slot_ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try Inst.apply(state, 1, .{ .store = .{
+        .ptr = .{ .inst = 0 },
+        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } } } },
+    } });
+
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(pointer_slot_gid).pointer.analyte.memory_safety.?));
+    try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(region_gid).region.analyte.memory_safety.?));
+    try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(elem_gid).scalar.analyte.memory_safety.?));
+}
+
+test "store interned struct initializes destination fields memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .fields = try ctx.allocator.dupe(Gid, &.{scalar_gid}),
+        .type_id = 100,
+    } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = struct_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try Inst.apply(state, 1, .{ .store = .{
+        .ptr = .{ .inst = 0 },
+        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{ .{ .scalar = {} } } } } } },
+    } });
+
+    try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(struct_gid).@"struct".analyte.memory_safety.?));
+    try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(scalar_gid).scalar.analyte.memory_safety.?));
+}
+
+test "store pointer into pointer slot does not paint old target as allocated" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const old_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const old_region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = old_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const slot_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = old_region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const slot_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = slot_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    const new_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = allocator_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const new_region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = new_elem_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = allocator_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = new_region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = slot_ptr_gid;
+    results[1].refinement = src_ptr_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
+
+    try std.testing.expectEqual(new_region_gid, refinements.at(slot_gid).pointer.to);
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(old_region_gid).region.analyte.memory_safety.?));
+    try std.testing.expectEqual(.allocated, std.meta.activeTag(refinements.at(new_region_gid).region.analyte.memory_safety.?));
+}
+
+test "aggregate_init sets struct container memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+
+    try Inst.apply(state, 0, .{ .aggregate_init = .{
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{ .{ .scalar = {} } } } },
+        .elements = &.{dummy_src},
+    } });
+
+    const struct_gid = results[0].refinement.?;
+    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(struct_gid).@"struct".analyte.memory_safety.?));
+}

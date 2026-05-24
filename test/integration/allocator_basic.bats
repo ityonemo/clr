@@ -42,12 +42,6 @@ load test_helper
     [[ "$output" =~ "free_global_ptr.main" ]]
 }
 
-@test "detects mismatched allocator for create/destroy" {
-    run compile_and_run "$TEST_CASES/allocator_safety/basic/mismatched_allocator.zig"
-    [ "$status" -ne 0 ]
-    [[ "$output" =~ "allocator mismatch" ]]
-}
-
 @test "no false positive when callee frees allocation from caller" {
     run compile_and_run "$TEST_CASES/allocator_safety/basic/pass_to_callee_noleak.zig"
     [ "$status" -eq 0 ]

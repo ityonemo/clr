@@ -120,11 +120,11 @@ pub const MemorySafety = union(enum) {
                         if (ptr_ref.* == .pointer) {
                             const dest_idx = ptr_ref.pointer.to;
                             const dest_ref = refinements.at(dest_idx);
-                            const dest_analyte = getAnalytePtr(dest_ref);
-                            // Only set .interned if no memory_safety is already set
-                            if (dest_analyte.memory_safety == null) {
-                                dest_analyte.memory_safety = .{ .interned = ctx.meta };
+                            initNullSpatialMemory(refinements, dest_idx, .{ .interned = ctx.meta });
+                            if (interned.ty == .pointer and dest_ref.* == .pointer) {
+                                paintSpatialMemory(refinements, dest_ref.pointer.to, .{ .interned = ctx.meta });
                             }
+                            initPointerTargetsPlaceholder(refinements, dest_idx);
                         }
                     },
                     else => {},
@@ -164,7 +164,7 @@ pub const MemorySafety = union(enum) {
         const dest_gid = ptr_ref.pointer.to;
         const dest_ref = refinements.at(dest_gid);
         if (dest_ref.* == .pointer and src_refinement.* == .pointer) {
-            copyMemorySafetyRecursive(refinements, dest_gid, src_refinement_idx);
+            dest_ref.pointer.analyte.memory_safety = src_refinement.pointer.analyte.memory_safety orelse .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
         }
         if (dest_ref.* == .@"struct" and src_refinement.* == .@"struct") {
             const dest_struct = dest_ref.@"struct";
@@ -1727,12 +1727,20 @@ pub const MemorySafety = union(enum) {
     pub fn memcpy(state: State, _: usize, params: tag.Memcpy) !void {
         try checkPtrUseAfterFree(state, params.dest);
         try checkPtrUseAfterFree(state, params.src);
+
+        const src_elem_gid = getRegionElementGid(state, params.src) orelse return;
+        const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
+        copyMemorySafetyRecursive(state.refinements, dest_elem_gid, src_elem_gid);
     }
 
     /// memmove: copy from src to dest (overlap allowed)
     pub fn memmove(state: State, _: usize, params: tag.Memmove) !void {
         try checkPtrUseAfterFree(state, params.dest);
         try checkPtrUseAfterFree(state, params.src);
+
+        const src_elem_gid = getRegionElementGid(state, params.src) orelse return;
+        const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
+        copyMemorySafetyRecursive(state.refinements, dest_elem_gid, src_elem_gid);
     }
 
     /// memset: set memory to value
@@ -1743,6 +1751,19 @@ pub const MemorySafety = union(enum) {
 
     /// memset_safe: same as memset with safety checks
     pub const memset_safe = memset;
+
+    fn getRegionElementGid(state: State, src: tag.Src) ?Gid {
+        const src_gid: Gid = switch (src) {
+            .inst => |idx| state.results[idx].refinement orelse return null,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return null,
+            .fnptr => return null,
+        };
+        const ptr_ref = state.refinements.at(src_gid);
+        if (ptr_ref.* != .pointer) return null;
+        const region_ref = state.refinements.at(ptr_ref.pointer.to);
+        if (region_ref.* != .region) return null;
+        return region_ref.region.to;
+    }
 
     /// Handle pointer/slice element pointer access - detect use-after-free for slices.
     /// For slices, the base is pointer → region → element.
@@ -2413,6 +2434,16 @@ pub const MemorySafety = union(enum) {
         setResultStack(state, index);
     }
 
+    pub fn bool_and(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn bool_or(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
     pub fn cmp_eq(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
@@ -2448,12 +2479,77 @@ pub const MemorySafety = union(enum) {
         setResultStack(state, index);
     }
 
+    pub fn not(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn trunc(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
     pub fn sub(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
     }
 
     pub fn add(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn mul(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn div(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn mod(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn rem(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn shl(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn shr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn min(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn max(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn cmp_vector(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn select(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn reduce(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
     }
@@ -2739,6 +2835,7 @@ pub const MemorySafety = union(enum) {
 
         switch (result_ref.*) {
             .@"struct" => |s| {
+                result_ref.@"struct".analyte.memory_safety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
                 // For structs: copy memory_safety from each source element to corresponding field
                 for (s.fields, 0..) |field_gid, i| {
                     if (i >= params.elements.len) {
@@ -3060,6 +3157,57 @@ pub const MemorySafety = union(enum) {
                 ref.recursive.analyte.memory_safety = ms;
                 if (r.to != 0) {
                     paintSpatialMemory(refinements, r.to, ms);
+                }
+            },
+            .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    fn initNullSpatialMemory(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => |*s| {
+                if (s.analyte.memory_safety == null) s.analyte.memory_safety = ms;
+            },
+            .pointer => |*p| {
+                if (p.analyte.memory_safety == null) p.analyte.memory_safety = ms;
+            },
+            .optional => |o| {
+                if (ref.optional.analyte.memory_safety == null) ref.optional.analyte.memory_safety = ms;
+                initNullSpatialMemory(refinements, o.to, ms);
+            },
+            .errorunion => |e| {
+                if (ref.errorunion.analyte.memory_safety == null) ref.errorunion.analyte.memory_safety = ms;
+                initNullSpatialMemory(refinements, e.to, ms);
+            },
+            .@"struct" => |s| {
+                if (ref.@"struct".analyte.memory_safety == null) ref.@"struct".analyte.memory_safety = ms;
+                for (s.fields) |field_gid| {
+                    initNullSpatialMemory(refinements, field_gid, ms);
+                }
+            },
+            .@"union" => |u| {
+                if (ref.@"union".analyte.memory_safety == null) ref.@"union".analyte.memory_safety = ms;
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        initNullSpatialMemory(refinements, field_gid, ms);
+                    }
+                }
+            },
+            .allocator => |*a| {
+                if (a.analyte.memory_safety == null) a.analyte.memory_safety = ms;
+            },
+            .fnptr => |*f| {
+                if (f.analyte.memory_safety == null) f.analyte.memory_safety = ms;
+            },
+            .region => |r| {
+                if (ref.region.analyte.memory_safety == null) ref.region.analyte.memory_safety = ms;
+                initNullSpatialMemory(refinements, r.to, ms);
+            },
+            .recursive => |r| {
+                if (ref.recursive.analyte.memory_safety == null) ref.recursive.analyte.memory_safety = ms;
+                if (r.to != 0) {
+                    initNullSpatialMemory(refinements, r.to, ms);
                 }
             },
             .void, .noreturn, .unimplemented => {},
