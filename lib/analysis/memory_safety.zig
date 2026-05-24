@@ -1142,11 +1142,14 @@ pub const MemorySafety = union(enum) {
             collectReachableAllocations(refinements, arg_gid, &arg_alloc_ids);
         }
 
-        // Build set of allocation identities reachable from return value (transferred to caller, not leaks)
-        // We use allocation identity (meta) instead of GID because ret_safe deep-copies values,
-        // so the return_gid contains copied entities with different GIDs than the results table.
+        // Build set of allocations reachable from return value (transferred to caller, not leaks).
+        // ret_safe/ret_load can copy returned values, so the return slot may contain equivalent
+        // allocation metadata under a different GID than the original local result.
+        var return_reachable = std.AutoHashMap(Gid, void).init(ctx.allocator);
+        defer return_reachable.deinit();
         var return_alloc_ids = std.AutoHashMap(Gid, void).init(ctx.allocator);
         defer return_alloc_ids.deinit();
+        collectReachableGids(refinements, return_gid, &return_reachable);
         collectReachableAllocations(refinements, return_gid, &return_alloc_ids);
 
         // Check for memory leaks via splatOrphaned.
@@ -1197,6 +1200,7 @@ pub const MemorySafety = union(enum) {
                     const alloc_id = allocationRootGid(pointee_idx, ms.allocated);
                     if (arg_alloc_ids.contains(alloc_id)) continue;
                     if (return_alloc_ids.contains(alloc_id)) continue;
+                    if (hasEquivalentAllocationInSet(refinements, &return_reachable, ms.allocated)) continue;
                     if (!in_main and global_alloc_ids.contains(alloc_id)) continue;
                 }
             }
@@ -3584,6 +3588,7 @@ pub const MemorySafety = union(enum) {
         ptr_ref.pointer.analyte.memory_safety = stack_ms;
         // Set stack memory_safety on the pointee (the return value entity)
         paintSpatialMemory(state.refinements, ptr_ref.pointer.to, stack_ms);
+        initPointerTargetsPlaceholder(state.refinements, ptr_ref.pointer.to);
     }
 
     /// ErrunionPayloadPtrSet creates a new pointer to the payload - initialize memory_safety
@@ -3930,6 +3935,13 @@ pub const MemorySafety = union(enum) {
         };
         const ptr_refinement = refinements.at(ptr_idx);
         if (ptr_refinement.* != .pointer) return; // Safety check
+        if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
+            switch (ptr_ms) {
+                .interned => return reportFreeGlobalMemory(ctx),
+                .placeholder => return error.InvalidReallocInput,
+                .allocated, .stack, .error_stub => {},
+            }
+        }
         if (isFieldPointer(refinements, ptr_idx)) {
             if (ptr_refinement.pointer.analyte.memory_safety) |ptr_ms| {
                 switch (ptr_ms) {

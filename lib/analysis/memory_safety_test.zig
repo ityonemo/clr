@@ -171,6 +171,141 @@ test "call intercepts mem.Allocator.destroy and marks allocation freed" {
     try std.testing.expect(ms.allocated.freed != null);
 }
 
+test "destroy of interned pointer reports global memory free" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .interned = ctx.meta } },
+    } });
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .placeholder = {} } },
+    } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = scalar_gid,
+        .analyte = .{ .memory_safety = .{ .interned = ctx.meta } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = alloc_gid;
+    results[1].refinement = ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try std.testing.expectError(error.FreeGlobalMemory, Inst.call(state, 2, null, .{ .void = {} }, &.{
+        .{ .inst = 0 },
+        .{ .inst = 1 },
+    }, "std.mem.Allocator.destroy"));
+}
+
+test "ret_load of struct with slice pointer field leaves no invalid orphaned memory safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    try ctx.push_fn("test_func");
+    defer ctx.pop_fn();
+
+    var results = [_]Inst{.{}} ** 9;
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+    const caller_meta = core.Meta{ .function = "caller", .file = "caller.zig", .line = 1, .column = 1 };
+
+    const arg_elem_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = caller_meta, .root_gid = null } } },
+    } });
+    const arg_region_gid = try refinements.appendEntity(.{ .region = .{
+        .to = arg_elem_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = caller_meta, .root_gid = null } } },
+    } });
+    const arg_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = arg_region_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = caller_meta, .root_gid = null } } },
+    } });
+
+    const struct_ty: tag.Type = .{ .@"struct" = &.{
+        .type_id = 2706,
+        .fields = &.{
+            .{ .scalar = {} },
+            .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        },
+    } };
+    const return_ref = try tag.typeToRefinement(struct_ty, &refinements);
+    const return_gid = try refinements.appendEntity(return_ref);
+    tag.splatInitCallReturnSlot(&refinements, return_gid, &ctx);
+
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = return_gid,
+        .early_returns = &early_returns,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 0, .{ .arg = .{ .value = arg_ptr_gid, .name_id = 1 } });
+    try Inst.apply(state, 1, .{ .ret_ptr = .{ .ty = struct_ty } });
+    try Inst.apply(state, 2, .{ .struct_field_ptr = .{
+        .base = .{ .inst = 1 },
+        .field_index = 1,
+        .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } },
+        .type_id = 0,
+    } });
+    try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 2 }, .src = .{ .inst = 0 } } });
+    try Inst.apply(state, 4, .{ .struct_field_ptr = .{
+        .base = .{ .inst = 1 },
+        .field_index = 0,
+        .ty = .{ .pointer = &.{ .scalar = {} } },
+        .type_id = 0,
+    } });
+    try Inst.apply(state, 5, .{ .store = .{ .ptr = .{ .inst = 4 }, .src = .{ .interned = .{ .ip_idx = 109, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 6, .{ .ret_load = .{ .ptr = 1 } });
+    try Inst.mergeEarlyReturns(state);
+
+    for (refinements.list.items[return_gid..], return_gid..) |refinement, idx| {
+        @import("memory_safety.zig").testValid(refinement, idx);
+    }
+}
+
+test "allocation returned through block break is not reported as callee leak" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    try ctx.push_fn("allocate_with");
+    defer ctx.pop_fn();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const return_ref = try tag.typeToRefinement(.{ .pointer = &.{ .scalar = {} } }, &refinements);
+    const return_gid = try refinements.appendEntity(return_ref);
+    tag.splatInitCallReturnSlot(&refinements, return_gid, &ctx);
+
+    var results = [_]Inst{.{}} ** 8;
+    results[0].refinement = alloc_gid;
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = return_gid,
+        .early_returns = &early_returns,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.call(state, 1, null, .{ .errorunion = &.{ .pointer = &.{ .scalar = {} } } }, &.{.{ .inst = 0 }}, "std.mem.Allocator.create");
+    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .pointer = &.{ .scalar = {} } } } });
+    try Inst.apply(state, 3, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 1 } } });
+    try Inst.apply(state, 4, .{ .br = .{ .block = 2, .src = .{ .inst = 3 } } });
+    try Inst.apply(state, 5, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
+    try Inst.mergeEarlyReturns(state);
+    try Inst.onFinish(state);
+}
+
 test "reachable allocations are tracked by allocation root gid, not allocator gid" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -1427,7 +1562,7 @@ test "store interned struct initializes destination fields memory_safety" {
     const state = testState(&ctx, &results, &refinements);
     try Inst.apply(state, 1, .{ .store = .{
         .ptr = .{ .inst = 0 },
-        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{ .{ .scalar = {} } } } } } },
+        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = {} }} } } } },
     } });
 
     try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(struct_gid).@"struct".analyte.memory_safety.?));
@@ -1552,7 +1687,7 @@ test "aggregate_init sets struct container memory_safety" {
     const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
 
     try Inst.apply(state, 0, .{ .aggregate_init = .{
-        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{ .{ .scalar = {} } } } },
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = {} }} } },
         .elements = &.{dummy_src},
     } });
 

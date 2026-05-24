@@ -114,8 +114,9 @@ location, and relevant context messages where applicable.
 ## Current Implementation Risks
 
 The integration baseline after allocator provenance, call-return, test
-reorganization, memory-safety initialization, branch clobber, and copied-argument
-reachability work is `346/365` passing (`19` failing), from
+reorganization, memory-safety initialization, branch clobber, copied-argument
+reachability, global-free, FBA mismatch, and returned-allocation leak-suppression
+work is `348/365` passing (`17` failing), from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-05-23. Treat remaining failures as real analyzer
 work, not compiler-cache failures.
@@ -123,19 +124,20 @@ work, not compiler-cache failures.
 The largest incomplete areas are:
 
 - Interprocedural allocation safety. The remaining allocator failures are
-  narrower: global/comptime pointer laundering, allocator mismatch through FBA
-  or passed allocators, labeled-switch allocation/free, and stdlib ArrayList
-  cleanup. Avoid Rust-style ownership terminology here; the analyzer tracks
-  allocation identity, free state, allocator mismatch state, and reachability.
+  narrower: returned allocation cleanup from callee to caller, labeled-switch
+  allocation/free, error-path allocation metadata, GPA cleanup, and stdlib
+  ArrayList/HashMap cleanup. Avoid Rust-style ownership terminology here; the
+  analyzer tracks allocation identity, free state, allocator mismatch state, and
+  reachability.
 - Current memory-safety failures from the latest full run:
-  - `allocator_globals.bats` 98/99: freeing global/comptime memory laundered
-    through a function is not reported as `FreeGlobalMemory`.
-  - `allocator_mismatched.bats` 105/106: allocator mismatch through local
-    `FixedBufferAllocator` and passed allocator is not reported.
+  - `allocator_basic.bats` 20: caller freeing allocation returned by callee still
+    false-positives.
   - `labeled_switch.bats` 154: allocation/free across labeled-switch states
     still false-positives.
-  - `misc.bats` 209: `std.ArrayList` cleanup still reports a leak in
-    `ensureTotalCapacityPrecise`.
+  - `misc.bats` 203/204: error-path allocation metadata and GPA cleanup still
+    false-positive.
+  - `misc.bats` 209/210: `std.ArrayList`/`std.HashMap` cleanup still reports
+    leaks in stdlib capacity/cleanup paths.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic union
   and global union field recovery is covered, but struct/global false positives,
