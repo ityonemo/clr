@@ -149,13 +149,6 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             }) catch "errorunion(?)";
             break :blk result;
         },
-        .region => |r| blk: {
-            var inner_buf: [1024]u8 = undefined;
-            const inner = refinements.at(r.to);
-            const inner_desc = formatRefinementDeep(&inner_buf, r.to, inner.*, refinements, depth + 1);
-            const result = std.fmt.bufPrint(buf, "({d}) region → {s}", .{ gid, inner_desc }) catch "region(?)";
-            break :blk result;
-        },
         .recursive => |r| blk: {
             var inner_buf: [1024]u8 = undefined;
             const inner = refinements.at(r.to);
@@ -172,4 +165,3 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
         .noreturn => std.fmt.bufPrint(buf, "({d}) noreturn", .{gid}) catch "noreturn",
     };
 }
-

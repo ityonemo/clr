@@ -104,6 +104,151 @@ test "cond_br sets null on false branch after is_non_null check" {
     try std.testing.expect(ns == .null);
 }
 
+test "cond_br narrows struct_field_val source field" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const field_gid = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .unknown = {} } },
+        .to = inner_gid,
+    } });
+    const fields = try std.testing.allocator.alloc(Gid, 1);
+    fields[0] = field_gid;
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .type_id = 1,
+        .fields = fields,
+    } });
+
+    var results = [_]Inst{.{}} ** 4;
+    results[0].refinement = struct_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .struct_field_val = .{
+        .operand = 0,
+        .field_index = 0,
+        .ty = .{ .optional = &.{ .scalar = {} } },
+    } });
+    try Inst.apply(state, 2, .{ .is_null = .{ .src = .{ .inst = 1 } } });
+    try Inst.apply(state, 3, .{ .cond_br = .{ .condition_idx = 2, .branch = false } });
+
+    const copied_ns = refinements.at(results[1].refinement.?).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.non_null, std.meta.activeTag(copied_ns));
+
+    const field_ns = refinements.at(field_gid).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.non_null, std.meta.activeTag(field_ns));
+}
+
+test "cond_br narrows prior struct store copy of checked field" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const field_gid = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .unknown = {} } },
+        .to = inner_gid,
+    } });
+    const fields = try std.testing.allocator.alloc(Gid, 1);
+    fields[0] = field_gid;
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .type_id = 1,
+        .fields = fields,
+    } });
+
+    var results = [_]Inst{.{}} ** 6;
+    results[0].refinement = struct_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = &.{ .scalar = {} } }} } } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
+    const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.to;
+    const copied_field_gid = refinements.at(copied_struct_gid).@"struct".fields[0];
+
+    try Inst.apply(state, 3, .{ .struct_field_val = .{
+        .operand = 0,
+        .field_index = 0,
+        .ty = .{ .optional = &.{ .scalar = {} } },
+    } });
+    try Inst.apply(state, 4, .{ .is_null = .{ .src = .{ .inst = 3 } } });
+    try Inst.apply(state, 5, .{ .cond_br = .{ .condition_idx = 4, .branch = false } });
+
+    const copied_field_ns = refinements.at(copied_field_gid).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.non_null, std.meta.activeTag(copied_field_ns));
+}
+
+test "cond_br propagates already known struct field state to prior copy" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const field_gid = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .non_null = ctx.meta } },
+        .to = inner_gid,
+    } });
+    const fields = try std.testing.allocator.alloc(Gid, 1);
+    fields[0] = field_gid;
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .type_id = 1,
+        .fields = fields,
+    } });
+
+    var results = [_]Inst{.{}} ** 6;
+    results[0].refinement = struct_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = &.{ .scalar = {} } }} } } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
+    const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.to;
+    const copied_field_gid = refinements.at(copied_struct_gid).@"struct".fields[0];
+    refinements.at(copied_field_gid).optional.analyte.null_safety = .{ .unknown = {} };
+
+    try Inst.apply(state, 3, .{ .struct_field_val = .{
+        .operand = 0,
+        .field_index = 0,
+        .ty = .{ .optional = &.{ .scalar = {} } },
+    } });
+    try Inst.apply(state, 4, .{ .is_null = .{ .src = .{ .inst = 3 } } });
+    try Inst.apply(state, 5, .{ .cond_br = .{ .condition_idx = 4, .branch = false } });
+
+    const copied_field_ns = refinements.at(copied_field_gid).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.non_null, std.meta.activeTag(copied_field_ns));
+}
+
+test "hashmap_header marks metadata non_null" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const metadata_payload_gid = try refinements.appendEntity(.{ .pointer = .{ .to = try refinements.appendEntity(.{ .scalar = .{} }) } });
+    const metadata_gid = try refinements.appendEntity(.{ .optional = .{
+        .analyte = .{ .null_safety = .{ .unknown = {} } },
+        .to = metadata_payload_gid,
+    } });
+    const size_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const fields = try std.testing.allocator.alloc(Gid, 2);
+    fields[0] = metadata_gid;
+    fields[1] = size_gid;
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .type_id = 100,
+        .fields = fields,
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = struct_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .hashmap_header = .{
+        .self = .{ .inst = 0 },
+        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = {} }} } } },
+    } });
+
+    const ns = refinements.at(metadata_gid).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.non_null, std.meta.activeTag(ns));
+}
+
 test "optional_payload errors on unchecked unwrap" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -203,6 +348,33 @@ test "store to optional with value sets non_null state" {
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
     try std.testing.expect(ns == .non_null);
+}
+
+test "store interned struct with null optional field sets field null" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    const struct_ty: tag.Type = .{ .@"struct" = &.{
+        .type_id = 1,
+        .fields = &.{.{ .null = &.{ .scalar = {} } }},
+    } };
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .@"struct" = &.{
+        .type_id = 1,
+        .fields = &.{.{ .optional = &.{ .scalar = {} } }},
+    } } } });
+    try Inst.apply(state, 1, .{ .store = .{
+        .ptr = .{ .inst = 0 },
+        .src = .{ .interned = .{ .ip_idx = 1234, .ty = struct_ty } },
+    } });
+
+    const struct_gid = refinements.at(results[0].refinement.?).pointer.to;
+    const field_gid = refinements.at(struct_gid).@"struct".fields[0];
+    const ns = refinements.at(field_gid).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.null, std.meta.activeTag(ns));
 }
 
 test "init_global sets null state on optional" {

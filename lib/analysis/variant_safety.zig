@@ -10,7 +10,7 @@ const State = @import("../lib.zig").State;
 
 /// Validate that variant_safety state is consistent with the refinement.
 /// - MUST EXIST: .union
-/// - MUST BE NULL: .scalar, .pointer, .optional, .errorunion, .struct, .recursive, .fnptr, .allocator, .region
+/// - MUST BE NULL: .scalar, .pointer, .optional, .errorunion, .struct, .recursive, .fnptr, .allocator
 /// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement) void {
     switch (refinement) {
@@ -33,7 +33,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("variant_safety should only exist on unions, got allocator", .{});
             }
         },
-        inline .pointer, .optional, .errorunion, .@"struct", .recursive, .fnptr, .region => |data, t| {
+        inline .pointer, .optional, .errorunion, .@"struct", .recursive, .fnptr => |data, t| {
             if (data.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got {s}", .{@tagName(t)});
             }
@@ -118,7 +118,6 @@ pub const VariantSafety = struct {
             .@"struct" => |s| {
                 for (s.fields) |field_gid| initRecursive(refinements, field_gid);
             },
-            .region => |r| initRecursive(refinements, r.to),
             .recursive => {},
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
@@ -673,12 +672,6 @@ pub const VariantSafety = struct {
                     copyVariantSafetyState(state, field_gid, src);
                 }
             },
-            .region => |r| {
-                // For arrays/regions: use uniform model - first element applies to all
-                if (params.elements.len > 0) {
-                    copyVariantSafetyState(state, r.to, params.elements[0]);
-                }
-            },
             else => {},
         }
     }
@@ -742,10 +735,6 @@ pub const VariantSafety = struct {
                 if (src_ref.* != .errorunion) return;
                 copyVariantSafetyStateRecursive(state.refinements, e.to, src_ref.errorunion.to);
             },
-            .region => |r| {
-                if (src_ref.* != .region) return;
-                copyVariantSafetyStateRecursive(state.refinements, r.to, src_ref.region.to);
-            },
             // Other types don't have variant_safety
             else => {},
         }
@@ -799,10 +788,6 @@ pub const VariantSafety = struct {
             .errorunion => |e| {
                 if (src_ref.* != .errorunion) return;
                 copyVariantSafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
-            },
-            .region => |r| {
-                if (src_ref.* != .region) return;
-                copyVariantSafetyStateRecursive(refinements, r.to, src_ref.region.to);
             },
             else => {},
         }

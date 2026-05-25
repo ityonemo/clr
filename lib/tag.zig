@@ -35,6 +35,9 @@
 //   Tags: store, ret_safe, ret_load, ret_ptr, set_union_tag,
 //         memset_safe
 //
+// STDLIB OVERRIDE - Create structure for a known stdlib invariant pattern
+//   Tags: hashmap_header
+//
 // NO-OP / METADATA - No entity impact
 //   Tags: noop, noop_debug, dbg_stmt, dbg_var_ptr, dbg_var_val,
 //         dbg_arg_inline, dbg_inline_block, unreach, ret_addr,
@@ -113,7 +116,7 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
             var inner_ref = try typeToRefinement(child.*, refinements);
             const empty_meta = Meta{ .file = "", .line = 0, .function = "" };
-            splatInitUndefined(&inner_ref, empty_meta);
+            splatInitUndefined(refinements, &inner_ref, empty_meta);
             return inner_ref;
         },
         .allocator => |alloc_type_id| {
@@ -121,11 +124,12 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             return .{ .allocator = .{ .type_id = alloc_type_id } };
         },
         .region => |child| {
-            // Region (array/slice) - create uniform element entity
-            // All elements share this single refinement (uniform region model)
-            const child_ref = try typeToRefinement(child.*, refinements);
-            const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .region = .{ .to = child_idx } };
+            // Region (array/slice) - all elements share this single refinement.
+            // tag.Type.region remains a type DSL construct; runtime region-ness
+            // is represented by refinement multiplicity.
+            var child_ref = try typeToRefinement(child.*, refinements);
+            child_ref.setMultiplicity(.region);
+            return child_ref;
         },
         .@"struct" => |struct_type| {
             const allocator = refinements.list.allocator;
@@ -714,8 +718,8 @@ pub const StructFieldPtr = struct {
                 };
                 _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = field_idx } });
             },
-            .region, .scalar => {
-                // Type mismatch - refinement is region/scalar but instruction expects struct/union.
+            .scalar => {
+                // Type mismatch - refinement is scalar but instruction expects struct/union.
                 // This happens when bitcast changed the pointer type (e.g., from *Region(S1) to *S2).
                 // Fall back to type info since the refinement structure doesn't match.
                 const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
@@ -806,6 +810,26 @@ pub const FieldParentPtr = struct {
         const new_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
         splatInit(state.refinements, new_gid, state.ctx, .runtime);
         try splat(.field_parent_ptr, state, index, self);
+    }
+};
+
+/// Entity operation: STDLIB OVERRIDE
+/// Models std.hash_map.HashMapUnmanaged.header().
+///
+/// The stdlib implementation assertively unwraps self.metadata.? based on
+/// HashMap invariants that are not represented in ordinary AIR. This opcode
+/// gives analysis modules a narrow hook for that assertion without weakening
+/// general optional unwrap checking.
+pub const HashMapHeader = struct {
+    /// HashMap self value.
+    self: Src,
+    /// Return type, normally *Header.
+    ty: Type,
+
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        const result_gid = try Inst.clobberInst(state.refinements, state.results, index, try typeToRefinement(self.ty, state.refinements));
+        splatInit(state.refinements, result_gid, state.ctx, .runtime);
+        try splat(.hashmap_header, state, index, self);
     }
 };
 
@@ -1189,11 +1213,6 @@ fn updateFieldReferences(refinements: *Refinements, dest_gid: Gid, src_gid: Gid)
                 e.to = src_ref.errorunion.to;
             }
         },
-        .region => |*r| {
-            if (src_ref.* == .region) {
-                r.to = src_ref.region.to;
-            }
-        },
         .@"struct" => |dest_struct| {
             if (src_ref.* == .@"struct") {
                 const src_struct = src_ref.@"struct";
@@ -1317,20 +1336,13 @@ pub const Store = struct {
                 },
                 .@"struct" => |dest_struct| {
                     // Storing struct into struct slot - update field .to references.
-                    // For pointer/optional/errorunion/region fields, the destination
+                    // For pointer/optional/errorunion fields, the destination
                     // should reference the same targets as the source.
                     if (src.* == .@"struct") {
                         const src_struct = src.@"struct";
                         for (dest_struct.fields, src_struct.fields) |dest_field_gid, src_field_gid| {
                             updateFieldReferences(state.refinements, dest_field_gid, src_field_gid);
                         }
-                    }
-                },
-                .region => |*r| {
-                    // Storing into an existing region slot mutates the destination value.
-                    // Do not alias the source element subtree directly.
-                    if (src.* == .region) {
-                        r.to = try state.refinements.valueCopy(src.region.to);
                     }
                 },
                 else => {},
@@ -2116,18 +2128,22 @@ pub const ArrayElemVal = struct {
 
         const base_refinement = state.refinements.at(effective_base_ref).*;
         switch (base_refinement) {
-            .region => |r| {
-                // Array: region → element. Value-copy the element.
-                const new_gid = try state.refinements.valueCopy(r.to);
-                state.results[index].refinement = new_gid;
-            },
             .pointer => |p| {
-                // Slice: pointer → region → element. Follow pointer to region.
-                const region = state.refinements.at(p.to).region;
-                const new_gid = try state.refinements.valueCopy(region.to);
+                const new_gid = if (base_refinement.getMultiplicity() == .region) blk: {
+                    break :blk try state.refinements.valueCopy(effective_base_ref);
+                } else blk: {
+                    if (!base_refinement.hasRegionAccess(state.refinements)) @panic("ArrayElemVal: expected pointer to region");
+                    break :blk try state.refinements.valueCopy(p.to);
+                };
+                state.refinements.at(new_gid).setMultiplicity(.single);
                 state.results[index].refinement = new_gid;
             },
-            else => @panic("ArrayElemVal: expected region or pointer to region"),
+            else => {
+                if (base_refinement.getMultiplicity() != .region) @panic("ArrayElemVal: expected region");
+                const new_gid = try state.refinements.valueCopy(effective_base_ref);
+                state.refinements.at(new_gid).setMultiplicity(.single);
+                state.results[index].refinement = new_gid;
+            },
         }
         try splat(.array_elem_val, state, index, self);
     }
@@ -2154,11 +2170,14 @@ pub fn PtrArith(comptime instr: anytype) type {
                     return error.PtrArithmeticOnNonRegion;
                 }
                 const pointee_gid = src_ref.pointer.to;
-                if (state.refinements.at(pointee_gid).* != .region) {
+                if (!src_ref.hasRegionAccess(state.refinements)) {
                     try state.ctx.meta.print(state.ctx.writer, "pointer arithmetic on non-region pointer in ", .{});
                     return error.PtrArithmeticOnNonRegion;
                 }
-                const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{ .to = pointee_gid } });
+                const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{
+                    .to = pointee_gid,
+                    .raw_bytes = src_ref.pointer.raw_bytes,
+                } });
                 state.results[index].refinement = new_ptr_gid;
             }
             try splat(instr, state, index, self);
@@ -2184,12 +2203,14 @@ pub const ArrayToSlice = struct {
             const src_ref = state.refinements.at(src_gid);
             if (src_ref.* != .pointer) @panic("ArrayToSlice: expected pointer source");
             const region_gid = src_ref.pointer.to;
-            const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
+            const new_ptr_gid = try state.refinements.appendEntity(.{ .pointer = .{
+                .to = region_gid,
+                .raw_bytes = src_ref.pointer.raw_bytes,
+            } });
             state.results[index].refinement = new_ptr_gid;
         } else {
             // Source has no refinement - create fresh
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+            const region_gid = try state.refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
             _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
         }
         try splat(.array_to_slice, state, index, self);
@@ -2207,8 +2228,7 @@ pub const SlicePtr = struct {
         const slice_idx = self.slice orelse {
             // Interned slice (e.g., string literal) - create fresh pointer→region
             // No memory_safety needed - these are static data, not heap allocations
-            const element_gid = try state.refinements.appendEntity(.{ .scalar = .{} });
-            const region_gid = try state.refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+            const region_gid = try state.refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
             _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
             try splat(.slice_ptr, state, index, self);
             return;
@@ -2225,7 +2245,10 @@ pub const SlicePtr = struct {
         // Create a NEW pointer that points to the SAME region
         // This allows memory_safety.slice_ptr to set root_gid on the pointer
         const region_gid = slice_ref.pointer.to;
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{
+            .to = region_gid,
+            .raw_bytes = slice_ref.pointer.raw_bytes,
+        } });
         try splat(.slice_ptr, state, index, self);
     }
 };
@@ -2248,9 +2271,11 @@ pub const PtrElemPtr = struct {
         const base_refinement = state.refinements.at(base_ref).*;
         // Slice is pointer → region
         const ptr = base_refinement.pointer;
-        const region = state.refinements.at(ptr.to).region;
-        // Create pointer to the shared element (uniform region model)
-        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region.to } });
+        if (!base_refinement.hasRegionAccess(state.refinements)) @panic("ptr_elem_ptr: expected pointer to region");
+        _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{
+            .to = ptr.to,
+            .raw_bytes = ptr.raw_bytes,
+        } });
         try splat(.ptr_elem_ptr, state, index, self);
     }
 };
@@ -2272,6 +2297,7 @@ pub const AnyTag = union(enum) {
     optional_payload: OptionalPayload,
     optional_payload_ptr: OptionalPayloadPtr,
     field_parent_ptr: FieldParentPtr,
+    hashmap_header: HashMapHeader,
     ret_safe: RetSafe,
     store: Store,
     unwrap_errunion_payload: UnwrapErrunionPayload,
@@ -2658,10 +2684,10 @@ pub const GlobalFieldInfo = struct {
 /// `.undefined` in the codegen type stream carries AIR semantic information that would
 /// otherwise be lost, so analyses that care can initialize the freshly-created
 /// refinement here.
-pub fn splatInitUndefined(ref: *Refinement, meta: Meta) void {
+pub fn splatInitUndefined(refinements: *Refinements, ref: *Refinement, meta: Meta) void {
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_undefined")) {
-            Analysis.init_undefined(ref, meta);
+            Analysis.init_undefined(refinements, ref, meta);
         }
     }
 }
@@ -2857,7 +2883,7 @@ fn copyAnalytesRecursive(dst_refinements: *Refinements, src_refinements: *Refine
                 copyAnalytesRecursive(dst_refinements, src_refinements, dst_field, src_field);
             }
         },
-        .void, .unimplemented, .noreturn, .region => {},
+        .void, .unimplemented, .noreturn => {},
     }
 }
 
@@ -3464,52 +3490,6 @@ fn mergeRefinementRecursive(
                 try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch, base_len);
             }
         },
-        .region => |r| {
-            // Region: follow .to to the element and recurse
-            // Update branch_gids to follow region.to in each branch
-            followBranchGids(.region, branches, branch_gids);
-
-            // Check if branches have a consistent different .to than parent
-            var consistent_inner: ?Gid = null;
-            var all_same = true;
-            var first_branch: ?*Refinements = null;
-            for (branches, branch_gids) |branch_opt, gid_opt| {
-                const gid = gid_opt orelse continue;
-                if (first_branch == null) {
-                    if (branch_opt) |b| first_branch = b.refinements;
-                }
-                if (consistent_inner) |prev| {
-                    if (prev != gid) {
-                        all_same = false;
-                        break;
-                    }
-                } else {
-                    consistent_inner = gid;
-                }
-            }
-
-            // If all branches point to a different element, copy to parent if needed and update
-            const inner_to_merge = if (all_same and consistent_inner != null and consistent_inner.? != r.to) blk: {
-                const branch_inner = consistent_inner.?;
-                // Use base_len to check against parent's state at START of merge, not current length
-                if (branch_inner >= base_len) {
-                    const branch_ref = first_branch.?;
-                    const src_ref = branch_ref.at(branch_inner).*;
-                    try copied_from_branch.put(branch_inner, {});
-                    try Refinement.collectReachableGids(src_ref, branch_ref, copied_from_branch);
-                    const copied_gid = try Refinement.copyTo(src_ref, branch_ref, refinements);
-                    // Re-fetch after copyTo and update
-                    refinements.at(orig_gid).region.to = copied_gid;
-                    break :blk copied_gid;
-                } else {
-                    // Update region to point to branch's element
-                    refinements.at(orig_gid).region.to = branch_inner;
-                    break :blk branch_inner;
-                }
-            } else r.to;
-
-            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, inner_to_merge, branches, branch_gids, merged, copied_from_branch, base_len);
-        },
         else => {},
     }
 }
@@ -3525,6 +3505,11 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
         .refinements = refinements,
         .return_gid = 0,
     };
+}
+
+fn makeRegion(refinements: *Refinements, gid: Gid) Gid {
+    refinements.at(gid).setMultiplicity(.region);
+    return gid;
 }
 
 /// Test getName function that maps name IDs to strings for tests
@@ -4439,7 +4424,7 @@ test "slice_ptr produces pointer to region (multi-item pointer)" {
 
     // Create a slice structure: pointer -> region -> element (scalar)
     const element_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = element_gid } });
+    const region_gid = makeRegion(&refinements, element_gid);
     const slice_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = slice_gid;
 
@@ -4455,10 +4440,11 @@ test "slice_ptr produces pointer to region (multi-item pointer)" {
     // not to a scalar (single-item pointer). This allows ptr_add to work.
     const pointee_gid = result_ref.pointer.to;
     const pointee_ref = refinements.at(pointee_gid);
-    try std.testing.expectEqual(.region, std.meta.activeTag(pointee_ref.*));
+    try std.testing.expectEqual(.region, pointee_ref.getMultiplicity());
 
     // The region should point to the same element
-    try std.testing.expectEqual(element_gid, pointee_ref.region.to);
+    try std.testing.expectEqual(.region, pointee_ref.getMultiplicity());
+    try std.testing.expectEqual(element_gid, pointee_gid);
 }
 
 test "bitcast preserves existing region element refinement" {
@@ -4479,7 +4465,7 @@ test "bitcast preserves existing region element refinement" {
 
     // Create source: pointer → region → scalar (simulating [*]u8)
     const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = scalar_gid } });
+    const region_gid = makeRegion(&refinements, scalar_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 
@@ -4505,11 +4491,11 @@ test "bitcast preserves existing region element refinement" {
 
     // It should still point to the same region.
     const result_region_ref = refinements.at(result_ref.pointer.to);
-    try std.testing.expectEqual(.region, std.meta.activeTag(result_region_ref.*));
+    try std.testing.expectEqual(.region, result_region_ref.getMultiplicity());
     try std.testing.expectEqual(region_gid, result_ref.pointer.to);
 
     // The region element refinement is preserved as-is.
-    const elem_gid = result_region_ref.region.to;
+    const elem_gid = result_ref.pointer.to;
     const elem_ref = refinements.at(elem_gid);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(elem_ref.*));
     try std.testing.expectEqual(scalar_gid, elem_gid);
@@ -4533,7 +4519,7 @@ test "ptr_add on pointer to region returns pointer to same region" {
 
     // Create: pointer → region → scalar
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 
@@ -4550,8 +4536,8 @@ test "ptr_add on pointer to region returns pointer to same region" {
 test "ptr_sub on pointer to region returns pointer to same region" {
     // When doing pointer arithmetic (ptr - N) on a pointer to a region,
     // the result must still point to the SAME region entity.
-    // This is critical for HashMap's header() pattern where metadata - 1
-    // recovers the original allocation.
+    // ptr_sub should preserve the same region provenance. It does not prove
+    // recovery of the allocation base.
     const allocator = std.testing.allocator;
 
     var buf: [4096]u8 = undefined;
@@ -4567,7 +4553,7 @@ test "ptr_sub on pointer to region returns pointer to same region" {
 
     // Create: pointer → region → scalar
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 
@@ -4640,7 +4626,7 @@ test "array_to_slice returns fresh pointer to same region" {
     const state = testState(&ctx, &results, &refinements);
 
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 
@@ -4651,6 +4637,37 @@ test "array_to_slice returns fresh pointer to same region" {
     const result_ref = refinements.at(result_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
     try std.testing.expectEqual(region_gid, result_ref.pointer.to);
+}
+
+test "array_elem_val on region-multiplicity pointer value returns single pointer element" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const pointee_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const region_pointer_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = pointee_gid,
+        .multiplicity = .region,
+    } });
+    results[0].refinement = region_pointer_gid;
+
+    try Inst.apply(state, 1, .{ .array_elem_val = .{ .base = .{ .inst = 0 } } });
+
+    const result_gid = results[1].refinement.?;
+    try std.testing.expect(result_gid != region_pointer_gid);
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(.single, result_ref.getMultiplicity());
+    try std.testing.expectEqual(pointee_gid, result_ref.pointer.to);
 }
 
 test "bitcast from [*]T to *T preserves region structure" {
@@ -4672,7 +4689,7 @@ test "bitcast from [*]T to *T preserves region structure" {
 
     // Create source: pointer → region → struct (simulating [*]Header)
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = &.{}, .type_id = 123 } });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = struct_gid } });
+    const region_gid = makeRegion(&refinements, struct_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
     results[0].refinement = ptr_gid;
 

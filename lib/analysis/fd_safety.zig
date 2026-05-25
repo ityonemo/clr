@@ -390,7 +390,6 @@ pub const FdSafety = union(enum) {
             .pointer => |p| collectReachableFdsInner(refinements, p.to, fds, depth + 1),
             .optional => |o| collectReachableFdsInner(refinements, o.to, fds, depth + 1),
             .errorunion => |e| collectReachableFdsInner(refinements, e.to, fds, depth + 1),
-            .region => |r| collectReachableFdsInner(refinements, r.to, fds, depth + 1),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
                     collectReachableFdsInner(refinements, field_gid, fds, depth + 1);
@@ -423,12 +422,6 @@ pub const FdSafety = union(enum) {
                     if (i >= params.elements.len) break;
                     const src = params.elements[i];
                     copyFdSafetyState(state, field_gid, src);
-                }
-            },
-            .region => |r| {
-                // For arrays/regions: use uniform model - first element applies to all
-                if (params.elements.len > 0) {
-                    copyFdSafetyState(state, r.to, params.elements[0]);
                 }
             },
             else => {},
@@ -474,10 +467,6 @@ pub const FdSafety = union(enum) {
                 if (src_ref.* != .errorunion) return;
                 copyFdSafetyStateRecursive(state.refinements, e.to, src_ref.errorunion.to);
             },
-            .region => |r| {
-                if (src_ref.* != .region) return;
-                copyFdSafetyStateRecursive(state.refinements, r.to, src_ref.region.to);
-            },
             // Other types don't have fd_safety
             else => {},
         }
@@ -510,10 +499,6 @@ pub const FdSafety = union(enum) {
             .errorunion => |e| {
                 if (src_ref.* != .errorunion) return;
                 copyFdSafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
-            },
-            .region => |r| {
-                if (src_ref.* != .region) return;
-                copyFdSafetyStateRecursive(refinements, r.to, src_ref.region.to);
             },
             else => {},
         }
@@ -548,7 +533,7 @@ const debug = @import("builtin").mode == .Debug;
 
 /// Validates that fd_safety is correctly set on refinements.
 /// - ALLOWED: .scalar (file descriptors are integer values)
-/// - MUST BE NULL: .pointer, .optional, .errorunion, .struct, .union, .recursive, .fnptr, .allocator, .region
+/// - MUST BE NULL: .pointer, .optional, .errorunion, .struct, .union, .recursive, .fnptr, .allocator
 /// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
@@ -579,9 +564,6 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         },
         .allocator => |a| {
             if (a.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on allocator (idx={d})", .{idx});
-        },
-        .region => |r| {
-            if (r.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on region (idx={d})", .{idx});
         },
         // NO ANALYTE - trivial types
         .void, .noreturn, .unimplemented => {},

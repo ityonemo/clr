@@ -505,6 +505,13 @@ test "isAllocatorDestroyFqn matches Allocator.destroy patterns" {
     try std.testing.expect(!codegen.isAllocatorDestroyFqn("foo.destroy"));
 }
 
+test "isHashMapHeaderFqn matches HashMapUnmanaged.header patterns" {
+    try std.testing.expect(codegen.isHashMapHeaderFqn("hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).header"));
+    try std.testing.expect(codegen.isHashMapHeaderFqn("std.hash_map.HashMapUnmanaged([]const u8,u32,hash_map.StringContext,80).header"));
+    try std.testing.expect(!codegen.isHashMapHeaderFqn("hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).capacity"));
+    try std.testing.expect(!codegen.isHashMapHeaderFqn("my.HashMapUnmanaged(u32,u32).header"));
+}
+
 test "instLine for br with block and operand" {
     initTestAllocator();
     defer deinitTestAllocator();

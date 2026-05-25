@@ -26,6 +26,11 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     };
 }
 
+fn makeRegion(refinements: *Refinements, gid: Gid) Gid {
+    refinements.at(gid).setMultiplicity(.region);
+    return gid;
+}
+
 fn fullTestState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
     return .{
         .ctx = ctx,
@@ -54,6 +59,41 @@ test "alloc creates pointer with undefined pointee" {
     const pointee_gid = refinements.at(ptr_gid).pointer.to;
     const undef = refinements.at(pointee_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
+}
+
+test "hashmap_header marks result defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const metadata_payload_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } }),
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const metadata_gid = try refinements.appendEntity(.{ .optional = .{ .to = metadata_payload_gid } });
+    const size_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } });
+    const fields = try std.testing.allocator.alloc(Gid, 2);
+    fields[0] = metadata_gid;
+    fields[1] = size_gid;
+    const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .type_id = 100,
+        .fields = fields,
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = struct_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .hashmap_header = .{
+        .self = .{ .inst = 0 },
+        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = {} }} } } },
+    } });
+
+    const result_gid = results[1].refinement.?;
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(result_gid).pointer.analyte.undefined_safety.?));
+    const pointee_gid = refinements.at(result_gid).pointer.to;
+    const field_gid = refinements.at(pointee_gid).@"struct".fields[0];
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(field_gid).scalar.analyte.undefined_safety.?));
 }
 
 test "store with undefined type wrapper keeps state undefined" {
@@ -1054,7 +1094,7 @@ test "slice from pointer shares region and preserves defined state" {
     } });
 
     // Create a region pointing to the defined element
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a pointer to the region (like slice.ptr)
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
@@ -1082,7 +1122,7 @@ test "slice from pointer shares region and preserves defined state" {
     try std.testing.expectEqual(region_gid, slice_ref.pointer.to);
 
     // The region's element should still be defined
-    const slice_elem_gid = refinements.at(slice_ref.pointer.to).region.to;
+    const slice_elem_gid = slice_ref.pointer.to;
     const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
 }
@@ -1105,10 +1145,7 @@ test "slice from ptr_add result shares region and preserves defined state" {
     } });
 
     // Create a region pointing to the defined element
-    const region_gid = try refinements.appendEntity(.{ .region = .{
-        .to = elem_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a slice (pointer to region) - this is the input slice
     const input_slice_gid = try refinements.appendEntity(.{ .pointer = .{
@@ -1159,7 +1196,7 @@ test "slice from ptr_add result shares region and preserves defined state" {
     try std.testing.expectEqual(region_gid, slice_ref.pointer.to);
 
     // The region's element should still be defined
-    const slice_elem_gid = refinements.at(slice_ref.pointer.to).region.to;
+    const slice_elem_gid = slice_ref.pointer.to;
     const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
 }
@@ -1178,9 +1215,7 @@ test "struct_field_val with region field succeeds" {
     const region_elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .undefined_safety = .{ .defined = {} } },
     } });
-    const region_field_gid = try refinements.appendEntity(.{ .region = .{
-        .to = region_elem_gid,
-    } });
+    const region_field_gid = makeRegion(&refinements, region_elem_gid);
 
     const fields = try allocator.alloc(Gid, 2);
     // Note: fields is owned by the struct refinement and freed by refinements.deinit()
@@ -1217,7 +1252,7 @@ test "slice sets undefined_safety on result pointer" {
     } });
 
     // Create a region pointing to the defined element
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a pointer to the region - without undefined_safety set (simulating some edge case)
     const ptr_gid = try refinements.appendEntity(.{
@@ -1261,7 +1296,7 @@ test "ptr_add sets undefined_safety on result pointer" {
     } });
 
     // Create a region pointing to the defined element
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a pointer to the region - with undefined_safety set
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
@@ -1293,7 +1328,7 @@ test "ptr_sub sets undefined_safety on result pointer" {
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .undefined_safety = .{ .defined = {} } },
     } });
-    const region_gid = try refinements.appendEntity(.{ .region = .{ .to = elem_gid } });
+    const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
         .analyte = .{ .undefined_safety = .{ .defined = {} } },

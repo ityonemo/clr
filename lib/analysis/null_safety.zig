@@ -10,11 +10,11 @@ const State = @import("../lib.zig").State;
 
 /// NullSafety tracks null-checking state for optionals.
 pub const NullSafety = union(enum) {
-    // the result of null and non_null merged, or 
+    // the result of null and non_null merged, or
     // the result of a newly created nullable that hasn't been initialized.
     unknown: void,
     non_null: Meta,
-    @"null": Meta,
+    null: Meta,
 
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
@@ -112,7 +112,10 @@ pub const NullSafety = union(enum) {
 
         // Only narrow if state is unchecked (null) or .unknown - don't overwrite known state
         const ns = opt_ref.optional.analyte.null_safety;
-        if (ns != null and ns.? != .unknown) return;
+        if (ns != null and ns.? != .unknown) {
+            try narrowStructFieldValOrigin(state, opt_inst, ns.?);
+            return;
+        }
 
         // Determine if this is the non-null branch
         // is_non_null + true branch = non_null, is_non_null + false branch = null
@@ -122,8 +125,98 @@ pub const NullSafety = union(enum) {
         if (is_non_null_branch) {
             opt_ref.optional.analyte.null_safety = .{ .non_null = ctx.meta };
         } else {
-            opt_ref.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
+            opt_ref.optional.analyte.null_safety = .{ .null = ctx.meta };
         }
+        try narrowStructFieldValOrigin(state, opt_inst, opt_ref.optional.analyte.null_safety.?);
+    }
+
+    fn narrowStructFieldValOrigin(state: State, value_inst: usize, null_safety: NullSafety) !void {
+        const inst_tag = state.results[value_inst].inst_tag orelse return;
+        const field_val = switch (inst_tag) {
+            .struct_field_val => |payload| payload,
+            else => return,
+        };
+        const operand = field_val.operand orelse return;
+        const container_gid = state.results[operand].refinement orelse
+            std.debug.panic("struct_field_val origin instruction {d} has no refinement", .{operand});
+        const container_ref = state.refinements.at(container_gid);
+        const field_gid = switch (container_ref.*) {
+            .@"struct" => |s| s.fields[field_val.field_index],
+            .@"union" => |u| u.fields[field_val.field_index] orelse return,
+            else => |t| std.debug.panic("struct_field_val origin expected struct or union, got {s}", .{@tagName(t)}),
+        };
+        const field_ref = state.refinements.at(field_gid);
+        if (field_ref.* != .optional) return;
+        field_ref.optional.analyte.null_safety = null_safety;
+        try narrowPriorStructStoreCopies(state, operand, field_val.field_index, null_safety);
+    }
+
+    fn narrowPriorStructStoreCopies(state: State, operand_inst: usize, field_index: usize, null_safety: NullSafety) !void {
+        for (state.results) |result| {
+            const inst_tag = result.inst_tag orelse continue;
+            const store_params = switch (inst_tag) {
+                .store => |payload| payload,
+                else => continue,
+            };
+            const src_inst = switch (store_params.src) {
+                .inst => |src| src,
+                else => continue,
+            };
+            if (src_inst != operand_inst) continue;
+
+            const ptr_gid = switch (store_params.ptr) {
+                .inst => |ptr| state.results[ptr].refinement orelse continue,
+                .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse continue,
+                .fnptr => continue,
+            };
+            const ptr_ref = state.refinements.at(ptr_gid);
+            if (ptr_ref.* != .pointer) continue;
+
+            const dest_ref = state.refinements.at(ptr_ref.pointer.to);
+            if (dest_ref.* != .@"struct") continue;
+            if (field_index >= dest_ref.@"struct".fields.len) {
+                std.debug.panic("struct store copy field index {d} out of bounds", .{field_index});
+            }
+
+            const dest_field_gid = dest_ref.@"struct".fields[field_index];
+            const dest_field_ref = state.refinements.at(dest_field_gid);
+            if (dest_field_ref.* != .optional) continue;
+            dest_field_ref.optional.analyte.null_safety = null_safety;
+        }
+    }
+
+    pub fn hashmap_header(state: State, index: usize, params: tag.HashMapHeader) !void {
+        _ = index;
+        const metadata_gid = getHashMapMetadataGid(state, params.self);
+        const metadata_ref = state.refinements.at(metadata_gid);
+        if (metadata_ref.* != .optional) {
+            std.debug.panic("hashmap_header: expected metadata optional, got {s}", .{@tagName(metadata_ref.*)});
+        }
+        metadata_ref.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
+    }
+
+    fn getHashMapMetadataGid(state: State, src: tag.Src) Gid {
+        const self_gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("hashmap_header: self instruction {d} has no refinement", .{inst}),
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse
+                std.debug.panic("hashmap_header: self interned {d} has no global refinement", .{interned.ip_idx}),
+            .fnptr => @panic("hashmap_header: self cannot be a function pointer"),
+        };
+        const self_ref = state.refinements.at(self_gid);
+        const struct_gid = switch (self_ref.*) {
+            .pointer => |p| p.to,
+            .@"struct" => self_gid,
+            else => |t| std.debug.panic("hashmap_header: expected self struct or pointer to struct, got {s}", .{@tagName(t)}),
+        };
+        const struct_ref = state.refinements.at(struct_gid);
+        if (struct_ref.* != .@"struct") {
+            std.debug.panic("hashmap_header: expected self pointee struct, got {s}", .{@tagName(struct_ref.*)});
+        }
+        if (struct_ref.@"struct".fields.len == 0) {
+            @panic("hashmap_header: self struct has no metadata field");
+        }
+        return struct_ref.@"struct".fields[0];
     }
 
     /// remap_setup handler - narrows null_safety for remap result.
@@ -148,7 +241,7 @@ pub const NullSafety = union(enum) {
         if (is_success) {
             result_ref.optional.analyte.null_safety = .{ .non_null = ctx.meta };
         } else {
-            result_ref.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
+            result_ref.optional.analyte.null_safety = .{ .null = ctx.meta };
         }
     }
 
@@ -170,7 +263,7 @@ pub const NullSafety = union(enum) {
             try ctx.meta.print(ctx.writer, "optional unwrap of known null in ", .{});
         }
         switch (self) {
-            .@"null" => |meta| try meta.print(ctx.writer, "optional set to null in ", .{}),
+            .null => |meta| try meta.print(ctx.writer, "optional set to null in ", .{}),
             else => unreachable,
         }
         return error.NullUnwrap;
@@ -203,7 +296,7 @@ pub const NullSafety = union(enum) {
                 // (e.g., after branch merge). This is an error regardless of runtime checks.
                 return reportUncheckedUnwrap(ctx, results[src_idx].name_id);
             },
-            .@"null" => return ns.reportNullUnwrap(ctx, results[src_idx].name_id),
+            .null => return ns.reportNullUnwrap(ctx, results[src_idx].name_id),
             .non_null => {}, // Safe
         }
     }
@@ -252,21 +345,65 @@ pub const NullSafety = union(enum) {
 
         const pointee_idx = ptr_ref.pointer.to;
         const pointee = refinements.at(pointee_idx);
-        if (pointee.* != .optional) return;
 
-        // Check if we're storing null or a value
         switch (params.src) {
             .interned => |interned| {
-                if (interned.ty == .@"null") {
-                    pointee.optional.analyte.null_safety = .{ .@"null" = ctx.meta };
-                } else {
-                    pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
-                }
+                applyInternedNullSafety(refinements, pointee_idx, interned.ty, ctx.meta);
             },
             .inst, .fnptr => {
+                if (pointee.* != .optional) return;
                 // Runtime value or function pointer - mark as non_null
                 pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
             },
+        }
+    }
+
+    fn applyInternedNullSafety(refinements: *Refinements, dst_gid: Gid, src_ty: tag.Type, meta: Meta) void {
+        const dst_ref = refinements.at(dst_gid);
+        switch (dst_ref.*) {
+            .optional => |o| switch (src_ty) {
+                .null => |child_ty| {
+                    dst_ref.optional.analyte.null_safety = .{ .null = meta };
+                    applyInternedNullSafety(refinements, o.to, child_ty.*, meta);
+                },
+                .optional => |child_ty| {
+                    dst_ref.optional.analyte.null_safety = .{ .non_null = meta };
+                    applyInternedNullSafety(refinements, o.to, child_ty.*, meta);
+                },
+                .pointer => {
+                    dst_ref.optional.analyte.null_safety = .{ .non_null = meta };
+                    applyInternedNullSafety(refinements, o.to, src_ty, meta);
+                },
+                else => {},
+            },
+            .pointer => |p| switch (src_ty) {
+                .pointer => |child_ty| applyInternedNullSafety(refinements, p.to, child_ty.*, meta),
+                else => {},
+            },
+            .errorunion => |e| switch (src_ty) {
+                .errorunion => |child_ty| applyInternedNullSafety(refinements, e.to, child_ty.*, meta),
+                else => {},
+            },
+            .@"struct" => |s| switch (src_ty) {
+                .@"struct" => |struct_ty| {
+                    for (s.fields, 0..) |field_gid, i| {
+                        if (i >= struct_ty.fields.len) break;
+                        applyInternedNullSafety(refinements, field_gid, struct_ty.fields[i], meta);
+                    }
+                },
+                else => {},
+            },
+            .@"union" => |u| switch (src_ty) {
+                .@"union" => |union_ty| {
+                    for (u.fields, 0..) |maybe_field_gid, i| {
+                        const field_gid = maybe_field_gid orelse continue;
+                        if (i >= union_ty.variants.len) break;
+                        applyInternedNullSafety(refinements, field_gid, union_ty.variants[i], meta);
+                    }
+                },
+                else => {},
+            },
+            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -284,12 +421,6 @@ pub const NullSafety = union(enum) {
                         const src = params.elements[i];
                         copyNullSafetyState(state, field_gid, src);
                     }
-                }
-            },
-            .region => |r| {
-                // For arrays/regions: use uniform model - first element applies to all
-                if (params.elements.len > 0) {
-                    copyNullSafetyState(state, r.to, params.elements[0]);
                 }
             },
             else => {},
@@ -360,11 +491,6 @@ pub const NullSafety = union(enum) {
                     }
                 }
             },
-            .region => |r| {
-                if (src_ref.* == .region) {
-                    copyNullSafetyStateRecursive(refinements, r.to, src_ref.region.to);
-                }
-            },
             .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
@@ -431,7 +557,7 @@ pub const NullSafety = union(enum) {
 
         // Mark based on is_null_opt
         if (is_null_opt) {
-            ref.optional.analyte.null_safety = .{ .@"null" = .{
+            ref.optional.analyte.null_safety = .{ .null = .{
                 .function = "",
                 .file = loc.file,
                 .line = loc.line,
@@ -500,14 +626,13 @@ pub const NullSafety = union(enum) {
                     }
                 }
             },
-            .region => |r| initOptionalsUnknown(refinements, r.to),
         }
     }
 };
 
 /// Validate that a refinement conforms to null_safety rules:
 /// - MUST EXIST: .optional
-/// - MUST BE NULL: .scalar, .pointer, .errorunion, .struct, .union, .recursive, .fnptr, .allocator, .region
+/// - MUST BE NULL: .scalar, .pointer, .errorunion, .struct, .union, .recursive, .fnptr, .allocator
 /// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement) void {
     switch (refinement) {
@@ -528,7 +653,7 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("null_safety should only exist on optionals, got allocator", .{});
             }
         },
-        inline .pointer, .errorunion, .@"struct", .@"union", .recursive, .fnptr, .region => |data, t| {
+        inline .pointer, .errorunion, .@"struct", .@"union", .recursive, .fnptr => |data, t| {
             if (data.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got {s}", .{@tagName(t)});
             }

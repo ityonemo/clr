@@ -1,325 +1,271 @@
 # CLR Limitations
 
-## Currently Not Implemented, But Planned
+This document tracks known limits in CLR's analyzer model. It should describe
+current behavior, not aspirational architecture. Use `AGENTS.md` for the active
+sprint baseline and `FIXES_LOG.md` for completed fixes.
 
-### Cross-Function Global Mutation
+## Stdlib overrides
 
-Global variables are tracked within individual functions, but mutations to globals by called functions are not propagated back to callers.
+These are cases where stdlib code would look erroneous to CLR without
+stdlib-specific invariant facts. Usually, they are guarded by invariant
+conditions that can't be tracked simply by CLR (for example size != 0 guaranteeing nonnullability
+of an optional).  In the case of user code that looked like this you would 
+use a declaration (see below) to override the CLR issue.
 
-**What works**: Reading/writing globals within a single function, detecting use of undefined globals, tracking variant state of global unions within a function.
+Topics in this section should not necessarily be considered missing features
+in CLR but rather informational content relating to the limitations of CLR.
 
-**What doesn't work**: If function A calls function B which modifies a global, function A's view of the global is not updated after the call returns.
+### Allocators and fd operations
 
-**Planned fix**: May require inter-function dependency analysis to re-analyze callers when callees modify globals.
+CLR explicitly overrides stdlib's allocator functions and file descriptors as 
+part of its expected normal operation.  Mutexes may be added to this list in 
+the future.
 
-### Global Pointer Variables (Dereferencing)
+### Stdlib HashMap Optional Invariants
 
-When a global variable is itself a pointer (e.g., `var global_ptr: *u8 = &global_value;`), passing the pointer value directly does not properly track that it points to global memory.
+`HashMapUnmanaged.header` unwraps `self.metadata.?` assertively. That unwrap
+depends on HashMap invariants that ordinary AIR does not expose directly, so CLR
+models it through a narrow `hashmap_header` stdlib opcode instead of weakening
+general optional unwrap checking.
 
-**Example that should fail but doesn't**:
-```zig
-var global_value: u8 = 42;
-var global_ptr: *u8 = &global_value;  // Global pointer to global memory
+This is a stdlib-specific override. User code should eventually express similar
+facts through a declarative refinement/tag mechanism rather than hidden
+HashMap-specific rules.
 
-fn do_free(ptr: *u8) void {
-    allocator.destroy(ptr);  // Should fail - ptr points to global memory
-}
+### Stdlib Byte Reinterpretation
 
-pub fn main() void {
-    do_free(global_ptr);  // Passes the VALUE of global_ptr, not &global_ptr
-}
-```
+`std.mem.asBytes` intentionally reinterprets a pointer to an object as a byte
+region. Generic `bitcast` should continue to preserve the existing pointer
+shape, but a call to the stdlib function is explicit evidence that this
+conversion is intended. CLR should model `std.mem.asBytes` with a narrow stdlib
+override that creates a byte-region view over the same underlying memory rather
+than treating the result as ordinary pointer arithmetic on a single-item
+pointer.
 
-**Why it's not detected**: The current implementation marks pointees as `.global` when an `int_const` pointer is passed (like `&global_value`). But when passing `global_ptr`, the value is loaded from a global variable first, then passed. The loaded pointer value isn't recognized as pointing to global memory.
+## Current Active Gaps (planned to be addressed)
 
-**What works**: Passing `&global_value` directly (interned pointer) IS properly tracked.
+### Declarations
 
-**Future fix**: Track that global pointer variables contain values that point to global memory. May require analyzing the global's initial value from the InternPool.
+In the future, we will be implementing a "declarative statement" that
+sets the CLR-tracked state of a variable. These declarations should let user
+code express facts such as preconditions, postconditions, and local refinement
+assertions that CLR cannot infer from ordinary AIR alone.
 
-### Nested Arena Allocators
+### File Descriptor Alias And Closure Propagation
 
-Arena-style memory management is fully tracked, with one exception:
+FD state is tracked, but aliasing is incomplete. Close state is not reliably
+propagated to every copy, aggregate field, or returned value that refers to the
+same descriptor identity. Correct open/close examples can still report leaks.
 
-**Limitation**: Nested arenas (arena backed by another arena) - the child allocator deinit check only works for runtime allocators, not nested arena scenarios.
+This is intentionally punted until the FD aliasing/closure architecture is
+designed. The remaining known FD failures from the latest full integration
+baseline are `fd.bats` 123/126/129/132/133/136 and one undefined interaction at
+`undefined.bats` 343.
 
-All other arena operations work correctly: init, deinit, allocator(), leak detection, use-after-deinit, double-deinit, and cross-allocator mismatch detection.
+### Stack Escape And Returned Aggregate Provenance
 
-### Global Union Initial Values
+Returning pointers inside structs, unions, or globals is still conservative in
+some cases. Basic fieldParentPtr recovery for structs, unions, and global
+struct/union fields is covered, but returned pointers through aggregate values
+and merged pointers can still lose enough provenance to produce false positives.
 
-Global unions don't have their initial variant tracked. The analyzer extracts global types from the InternPool but not their initial values.
+This area overlaps with stack lifetime tracking: CLR detects some escaping stack
+pointers, but it does not yet have a complete tombstone model for stack memory
+after function return.
 
-**Example that triggers false positive**:
-```zig
-var global: Value = .{ .int = 42 };  // Initialized with .int
+### Alignment-Cast Lowering
 
-fn set_float() void {
-    global = .{ .float = 3.14 };
-}
+`@ptrCast(@alignCast(...))` lowers into AIR that bitcasts a pointer to an
+address-like scalar, masks low bits, and branches on the alignment check. Current
+analyses can misinterpret that sequence as ordinary pointer/int dataflow.
 
-fn checked_access() i32 {
-    if (global == .int) {
-        return global.int;  // FALSE POSITIVE: reports inactive variant access
-    }
-    return 0;
-}
-```
+Planned mitigation: add an AIR-to-analyzer interceptor that recognizes this
+compiler-generated alignment guard and no-ops the failure branch for current
+analyses. A future `alignment_safety` module can track the actual alignment
+proof separately.
 
-**Why**: After `set_float()` runs, the analysis knows `.float` is active but has no record of `.int` ever being initialized (the initial value isn't tracked). When the tag check proves `.int` is active, we can't update variant_safety because the field entity doesn't exist.
+### Pointer Arithmetic And Retagging
 
-**Workaround**: Ensure the variant you're checking was set in code the analyzer can see (not just the global initializer).
+`ptr_add` and `ptr_sub` both produce derived pointers into the same region.
+Neither operation proves that the pointer has returned to the allocation base.
+Freeing memory through a derived pointer should remain invalid unless a future
+explicit retag feature, or a narrow internal stdlib override, reestablishes
+base-allocation provenance.
 
-**Future fix**: Extract initial values from the InternPool during codegen and pass them to `initWithGlobals`. The initial value IS available in the InternPool - we just need to read it. This would also allow `const` unions to have their active variant set correctly from initialization.
+Pointer arithmetic must operate on a pointer-to-region. Non-pointer inputs and
+single-item pointer inputs should fail loudly with a clear analysis error.
 
-**Note**: Also need to verify that `var u: MyUnion = undefined;` does the right thing - all variants should be inactive and accessing any field should be an error until a variant is explicitly set.
+CLR does not perform pointer arithmetic bounds checking. It does not prove that
+the derived pointer remains within the region.
 
-### Global Field Pointer Tracking (fieldParentPtr)
+## Memory And Provenance Model Limits
 
-Pointers to global struct/union fields are computed at compile time and interned. No `struct_field_ptr` instruction is generated, so `fieldparentptr_safety` tracking is not set up.
+### No Rust-Style Ownership Transfer
 
-**Example that won't be tracked**:
-```zig
-var global_point: Point = .{ .x = 10, .y = 20 };
+CLR tracks provenance and safety, not exclusive ownership. More than one value
+or path may refer to the same allocation root GID. Once any path marks that root
+freed, the allocation's state collapses around that GID and later checks should
+use the collapsed state.
 
-fn get_x_ptr() *i32 {
-    return &global_point.x;  // Interned at comptime, no struct_field_ptr
-}
+Consequences:
 
-fn get_parent(x_ptr: *i32) *Point {
-    return @fieldParentPtr("x", x_ptr);  // Can't verify - no tracking
-}
-```
+- allocation root GID is the allocation identity;
+- `allocator_gid` is only for allocator mismatch detection;
+- pointer values should point at already-existing GIDs in their destination
+  `Refinements` table;
+- cross-table operations may merge/import structure, but should not transfer a
+  pointer value's `.to` target across tables.
 
-**Why**: Zig computes `&global.field` addresses at compile time and interns them directly. The address is embedded in the binary, so no runtime `struct_field_ptr` instruction is generated that would set up our tracking.
+Aliasing safety is separate from allocation memory safety and is not fully
+implemented yet.
 
-**Future fix**: Extract field pointer info from the InternPool during codegen. When an interned pointer points to a global struct field, we could set up `fieldparentptr_safety` based on the InternPool's knowledge of the pointer's origin.
+### Interprocedural Allocation Safety
+
+CLR has limited call-boundary propagation and several common allocation-return
+and callee-free cases are covered. It still does not perform full
+interprocedural analysis with function summaries, call graph ordering, and
+context-sensitive value tracking.
+
+This means some patterns involving allocations returned through complex
+aggregates, stored in globals, or modified by callees can still be conservative
+or incomplete.
 
 ### Global Allocation Leak Detection
 
-Allocations stored in global variables are exempt from leak detection. The analyzer tracks which refinements are reachable from globals and skips leak detection for those allocations entirely.
+Allocations reachable from globals are exempt from normal leak detection.
 
-**Impact**: Memory allocated and stored in a global variable will not be flagged as a leak, even if it is never freed.
+This avoids false positives for intentionally program-lifetime allocations, but
+it also means memory allocated into a global and never freed may not be reported
+as a leak.
 
-**Example**:
-```zig
-var global_ptr: ?*u8 = null;
+### Cross-Function Global Mutation
 
-pub fn main() void {
-    global_ptr = allocator.create(u8);  // Not flagged as leak
-    // Never freed - but no error reported
-}
-```
+Mutations to globals are tracked within a function, but a caller's view of a
+global is not generally updated after a callee mutates it.
 
-**Rationale**: Global-stored allocations often have program lifetime and are intentionally not freed. Detecting "true" leaks at program end would require whole-program analysis.
+Supporting this well likely requires inter-function dependency analysis or
+callee summaries for global side effects.
 
-**Future improvement**: Could add optional program-end leak detection that checks if global-reachable allocations are freed before `main` returns.
+### Global Pointer Values
 
-### Standard Library Random Functions
+Direct global addresses such as `&global_value` are handled better than pointer
+values loaded from global pointer variables. A loaded global pointer can lose the
+fact that its value points to global memory.
 
-Functions from `std.crypto.random` (e.g., `std.crypto.random.boolean()`, `std.crypto.random.int()`) are not properly analyzed and may cause false positives.
+Future work should preserve pointer-valued global initializer facts from the
+InternPool and import them when the global pointer value is loaded.
 
-**Why**: These functions use complex internal state and syscalls that the analyzer cannot fully track. The return values appear as "unimplemented" refinements, which can propagate and cause spurious undefined value errors.
+### Nested Arena Allocators
 
-**Workaround**: For test cases, use local variables instead:
-```zig
-// Instead of:
-if (std.crypto.random.boolean()) { ... }
+Arena-style memory management is mostly tracked, including init, deinit,
+allocator retrieval, leak detection, use-after-deinit, double-deinit, and
+cross-allocator mismatch detection. Nested arenas, where an arena is backed by
+another arena, remain less certain and need targeted tests before being treated
+as covered.
 
-// Use:
-fn someCondition() bool {
-    var x: bool = true;
-    _ = &x;  // Prevent comptime evaluation
-    return x;
-}
-```
+## Variant, Optional, And Aggregate Limits
+
+### Global Union Initial Values
+
+Global unions do not reliably have their initial active variant imported from
+the InternPool.
+
+If a global union is initialized only in a global initializer, a later checked
+field access may not have the expected variant state unless the variant was also
+set through code the analyzer sees.
+
+Future work should extract initial active union fields from the InternPool when
+initializing globals.
+
+### Optional Pointer AIR Semantics
+
+AIR instructions such as `is_non_null`, `is_null`, and `optional_payload` can
+appear around optional wrappers and pointer-like values. CLR's null-safety model
+should continue to distinguish optional state from raw pointer value state.
+
+Open questions:
+
+1. When does Zig emit these instructions for pointer values rather than
+   optionals?
+2. Which generated pointer checks should be modeled by null safety, and which
+   should be ignored or handled by another module?
+3. How should alignment or sentinel checks that look optional-like in AIR be
+   separated from actual optional unwraps?
+
+## AIR And Codegen Limits
 
 ### Partially Implemented AIR Tags
 
-The following AIR instruction tags are handled (don't crash) but produce `.unimplemented` refinements that may propagate and cause issues downstream:
+Some AIR instruction tags are handled only enough to avoid crashing and may
+produce `.unimplemented` refinements:
 
-- `dbg_inline_block` - Inlined function debug info (would require codegen to emit inlined function body)
-- `ret_addr` - Return address for stack traces
-- `stack_trace_frames` - Stack trace frame info
+- `dbg_inline_block`
+- `ret_addr`
+- `stack_trace_frames`
 
-These are unlikely to affect most code since they're primarily used for debugging and stack traces.
-
-## Needs Investigation
-
-### DbgVarPtr Global Support
-
-The `dbg_var_ptr.ptr` field is currently `?usize` (instruction index only). To support naming global variables in error messages, this may need conversion to `Src` type.
-
-**Already using Src**: `Store.ptr`, `Load.ptr`, `AllocDestroy.ptr`, `SetUnionTag.ptr`
-
-**Note**: Not all `ptr` fields need to be `Src`. Some are indices into local results (like `struct_field_ptr.base`) which will never be globals.
-
-### Move Semantics (Stack to Allocated)
-
-What happens when we move a value from stack to allocated memory? For example:
-```zig
-var stack_val: u8 = 42;  // .stack memory_safety
-container.field = stack_val;  // storing into .allocated field
-```
-
-The store should preserve the destination's `.allocated` memory_safety, but this needs verification and testing.
-
-### Free Checking at Program End vs Function End
-
-Currently, leak detection happens at function close (`onFinish`). Should we instead only perform free-checking at the end of the whole program? This would allow for patterns where allocations are returned to callers and freed elsewhere.
-
-**Questions**:
-1. How do we track allocations that are intentionally returned to the caller?
-2. Should `returned` allocations be exempt from local leak detection?
-3. Is there a use case for "program-level" leak detection vs "function-level"?
-
-### Tombstone for Out-of-Scope Functions
-
-When a function returns, do we need a `.tombstone` state for refinements that are no longer valid? This could prevent issues where:
-1. A pointer to a local variable escapes (stack escape)
-2. After the function returns, the pointer's target is no longer valid
-3. Accessing through that pointer should be detected as use-after-free
-
-**Questions**:
-1. Should we mark all stack allocations as "tombstoned" when a function returns?
-2. How does this interact with the existing stack escape detection?
-3. Would this overlap with or replace the current stack pointer tracking?
-
-### Review Function Branching Architecture
-
-The current early_returns implementation stores full State objects (with cloned refinements) at each return point, then merges them at function end. This allows detecting "conflicting" states when different return paths have different defined/undefined states for in-out parameters.
-
-**Questions to review**:
-1. Is storing full State objects the right approach, or should we only store what's needed (refinements)?
-2. The `splatMergeEarlyReturns` function rebuilds clean States because stored States may have stale pointers (results, branch_returns point to freed memory). Is there a cleaner architecture?
-3. Should `branchIsUnreachable` be split into variants for cond_br/switch_br vs early_returns contexts?
-4. The current approach iterates over all results and recursively merges. For large functions, this could be expensive. Is there a more targeted approach?
-
-## Desired But Unknown How to Implement
-
-### Ownership Transfer to Objects or Collections
-
-Passing allocation responsibility to objects or collections (e.g., inserting into an ArrayList that takes ownership) is not tracked. The analyzer cannot determine when an object or collection becomes responsible for freeing memory.
-
-## Not Planned for Near Future
-
-### Alignment Protection
-
-Detection of alignment violations (e.g., casting a pointer to a type with stricter alignment requirements) is not tracked.
-
-### Full Interprocedural Analysis
-
-CLR performs limited interprocedural analysis through the `arg_ptr` mechanism for pointer parameters. Full interprocedural analysis that tracks all values across function boundaries is not planned.
-
-Full interprocedural analysis would involve:
-- Building a complete call graph
-- Analyzing callees before callers
-- Creating "summaries" for each function (what it allocates, frees, escapes, modifies)
-- Tracking values through arbitrary call depth
-- Context-sensitive analysis: `foo(allocA)` vs `foo(allocB)` tracked separately
-
-**Workaround**: The analyzer focuses on detecting issues within individual function bodies and at function call boundaries.
-
-### Cross-Module Analysis
-
-Analysis is performed on a per-module basis. Tracking allocations or pointers that cross module boundaries (e.g., allocated in library A, freed in library B) is not supported.
-
-### Complex Aliasing Analysis
-
-Pointer aliasing analysis is limited. If two pointers may alias the same memory but through different paths, the analyzer may not track this relationship correctly.
-
-### Threading and Concurrency Analysis
-
-Detection of race conditions, data races, or other concurrency-related memory safety issues is not supported. The analyzer assumes single-threaded execution.
+These are mostly used for debug and stack-trace support and are unlikely to
+affect ordinary safety cases.
 
 ### Indirect Function Calls
 
-Function pointers are tracked with limited support:
+Function pointer refinements can track possible target functions, and indirect
+calls can dispatch through known targets with merged results. Limitations remain:
 
-**What works**:
-- Function pointer refinement type (`.fnptr`) tracks possible target functions
-- Storing function pointer constants (e.g., `var fp = &myFunction`)
-- Indirect calls dispatch to all possible target functions for analysis
-- Memory safety and undefined tracking through function pointer calls
-
-**What doesn't work**:
-- Virtual method dispatch (vtables) - vtable function pointers are not resolved
-- Dynamic function pointer assignment (runtime-computed targets)
-- Function pointers loaded from complex data structures
-
-**Limitation**: The analysis is conservative - if multiple functions could be called, all are analyzed and states merged. This may produce false positives when branches would never both execute in practice.
+- vtable-style virtual dispatch is not resolved;
+- runtime-computed targets may be unknown;
+- function pointers loaded from complex data structures may lose precision;
+- merging multiple possible targets can produce false positives when only one
+  target is feasible at runtime.
 
 ### Custom Allocator Protocols
 
-The analyzer specifically recognizes `std.mem.Allocator` operations. Custom allocator interfaces that don't use the standard protocol are not tracked.
+CLR recognizes standard `std.mem.Allocator`-style allocation operations. Custom
+allocator protocols that do not follow those patterns are not generally tracked.
+For example, if you do raw calls to C's `malloc`/`free` these memory will not be
+tracked.
+
+## Deliberate Non-Goals Or Coarse Models
+
+### Per-Element Region Tracking
+
+Arrays and slices use a uniform region model: all elements share one refinement
+state. Setting any element can mark the whole region defined; if the region is
+undefined, accessing any element can report undefined.
+
+This is deliberate. Per-element tracking would require one refinement per
+element and does not scale to large arrays or slices.  This may cause some
+problems if Zig's stdlib (or user code) uses an array instead of a tuple.
+For example, Zig's stdlib generates stdout/stdin as a pair using an array.
 
 ### Bounds Checking
 
-Slice and array bounds checking is not performed. Out-of-bounds access on regions is not detected.
-
-### Optional Pointers in AIR
-
-**Investigation needed**: AIR instructions `is_non_null`, `is_null`, and `optional_payload` can apply to BOTH optional types (`?T`) AND pointer types (`*T`). The current implementation handles both cases, but the semantics need further examination:
-
-- For optionals: These instructions check/unwrap the optional wrapper
-- For pointers: The semantics are unclear - possibly checking for null pointers?
-
-**Questions to investigate**:
-1. When does Zig generate `is_non_null` for a pointer vs an optional?
-2. What does `optional_payload` mean when applied to a pointer?
-3. Are there cases where pointer null checks should trigger null_safety analysis?
-
-**Current behavior**: The handlers check if the refinement is `.optional` or `.pointer` and only perform null_safety tracking for optionals. Pointers are handled but don't update null_safety state. This may need revision after investigation.
-
-### Pointer Arithmetic
-
-General pointer arithmetic safety is partially implemented. `ptr_add` and `ptr_sub` are blocked on pointers that don't point to regions (i.e., single-item pointers from `create`). Pointer arithmetic within allocated regions is allowed.
-
-Full pointer arithmetic bounds checking (ensuring the result stays within the region) is not tracked.
-
-### Resource Cleanup Beyond Memory
-
-Non-memory resources (file handles, sockets, mutexes) that aren't properly closed/released are not tracked.
+CLR does not perform array, slice, or pointer bounds checking. Zig's runtime
+safety checks and the compiler's own semantics cover some of this space, but CLR
+does not model it independently.
 
 ### Integer Overflow
 
 Potential integer overflow in arithmetic operations is not detected.
 
-### ConstCast
+### Threading And Concurrency
 
-@constCast may break assumptions that CLR is able to make about code/data propagation through dataflow.
+Race conditions, data races, and other concurrency hazards are not tracked. CLR
+currently assumes single-threaded execution for analysis purposes.
 
-### Per-Element Region Tracking
+### Const-Correctness
 
-Arrays and slices use a "uniform region" model where all elements share the same refinement state. This is a deliberate design choice, not a limitation to be improved:
-
-- Setting ANY element marks ALL elements as defined
-- If ANY element is undefined, accessing ANY element reports undefined
-- Calling a setter function on one element assumes all elements are set
-
-Example:
-```zig
-var arr: [3]u8 = undefined;
-arr[0] = 42;  // System assumes ALL elements are now defined
-return arr[2];  // No error (conservative: assumes defined)
-```
-
-This trade-off allows analysis to scale to any array size. Per-element tracking would require tracking N refinements per array, which doesn't scale and adds complexity without significant benefit.
-
-## Not Necessary (Handled by Zig)
-
-### Const-correctness
-
-General const-correctness is handled by Zig.
+General const-correctness is handled by Zig. CLR may still need to be careful
+that `@constCast` does not erase safety-relevant dataflow, but it is not a
+separate const checker.
 
 ### Error Value Propagation
 
-Tracking whether errors are properly handled is not implemented. Zig's error handling system (with `try`, `catch`, and explicit error returns) already enforces this at compile time.
+CLR does not try to detect whether errors are handled idiomatically. Zig's error
+handling system already enforces explicit propagation or handling at compile
+time.
 
 ### Exhaustive Switch Coverage
 
-Zig requires switches on enums and tagged unions to be exhaustive at compile time. Missing cases are a compile error, so CLR does not need to detect:
-
-- Missing enum cases in switch statements
-- Missing union tag cases
-- Unreachable patterns in switch arms
-
-CLR only needs to track state merging across switch branches, not validate that all cases are covered.
+Zig requires exhaustive switches over enums and tagged unions at compile time.
+CLR tracks state across switch branches; it does not need to validate missing
+cases.

@@ -1036,6 +1036,9 @@ pub fn _instLine(info: *const FnInfo, tag: Tag, datum: Data, inst_index: usize, 
             // when the return type is std.mem.Allocator. Arena linking is done in memory_safety.call().
             const call_parts = payloadCallParts(info, datum);
             const fqn = getCallFqn(info.ip, datum) orelse "";
+            if (isHashMapHeaderFqn(fqn)) {
+                break :blk clr_allocator.allocPrint(info.arena, "    try Inst.apply(state, {d}, .{{ .hashmap_header = .{{ .self = ({s})[0], .ty = {s} }} }});\n", .{ inst_index, call_parts.args, call_parts.return_type }, null);
+            }
             break :blk clr_allocator.allocPrint(info.arena, "    try Inst.call(state, {d}, {s}, {s}, {s}, \"{s}\");\n", .{ inst_index, call_parts.called, call_parts.return_type, call_parts.args, fqn }, null);
         },
         .store, .store_safe => blk: {
@@ -3168,6 +3171,13 @@ pub fn isAllocatorDupeFqn(fqn: []const u8) bool {
 /// dupeZ returns Error![:0]T - allocates copy with null terminator
 pub fn isAllocatorDupeZFqn(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.Allocator.dupeZ") != null;
+}
+
+/// Check if FQN is std.hash_map.HashMapUnmanaged.header.
+pub fn isHashMapHeaderFqn(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and
+        std.mem.endsWith(u8, fqn, ".header");
 }
 
 /// Compute a type_id from an FQN string.

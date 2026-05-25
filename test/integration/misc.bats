@@ -170,3 +170,10 @@ load test_helper
     run compile_and_run "$TEST_CASES/misc/block_nested_type_in_branch.zig"
     [ "$status" -eq 0 ]
 }
+
+@test "no memory-safety init hole for partially undefined aggregate initialization" {
+    # Partially undefined struct/array initializers should still initialize
+    # memory_safety on all refinement leaves. The undefined state is separate.
+    run compile_and_run "$TEST_CASES/misc/undefined_aggregate_memory_init.zig"
+    [ "$status" -eq 0 ]
+}

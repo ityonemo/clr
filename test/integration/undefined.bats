@@ -305,7 +305,7 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use of undefined value found in array_undefined_element.main" ]]
     [[ "$output" =~ "array_undefined_element.zig:4:" ]]
-    [[ "$output" =~ "undefined value assigned in array_undefined_element.main" ]]
+    [[ "$output" =~ "undefined value assigned to 'arr' in array_undefined_element.main" ]]
     [[ "$output" =~ "array_undefined_element.zig:2:" ]]
 }
 

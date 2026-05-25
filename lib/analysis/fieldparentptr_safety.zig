@@ -218,7 +218,7 @@ const debug = @import("builtin").mode == .Debug;
 
 /// Validates that fieldparentptr_safety is correctly set on refinements.
 /// - ALLOWED: .pointer (tracks where the pointer came from)
-/// - MUST BE NULL: .scalar, .optional, .errorunion, .struct, .union, .recursive, .fnptr, .allocator, .region
+/// - MUST BE NULL: .scalar, .optional, .errorunion, .struct, .union, .recursive, .fnptr, .allocator
 /// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
@@ -249,9 +249,6 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         },
         .allocator => |a| {
             if (a.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on allocator (idx={d})", .{idx});
-        },
-        .region => |r| {
-            if (r.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on region (idx={d})", .{idx});
         },
         // NO ANALYTE - trivial types
         .void, .noreturn, .unimplemented => {},

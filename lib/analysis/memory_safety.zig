@@ -323,6 +323,13 @@ pub const MemorySafety = union(enum) {
 
         const container_idx = base_ref.pointer.to;
         const container = refinements.at(container_idx);
+        switch (container.*) {
+            .scalar => {
+                setReinterpretedFieldPtrMemory(state, ptr_idx, base_idx);
+                return;
+            },
+            else => {},
+        }
         const container_analyte = getAnalytePtr(container);
         // If container has no memory_safety yet, leave result unset too.
         // Store operations will set the correct memory_safety later.
@@ -363,6 +370,37 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    fn setReinterpretedFieldPtrMemory(state: State, ptr_idx: Gid, base_idx: Gid) void {
+        const refinements = state.refinements;
+        const ptr_ref = refinements.at(ptr_idx);
+        if (ptr_ref.* != .pointer) return;
+        const base_ref = refinements.at(base_idx);
+        if (base_ref.* != .pointer) return;
+
+        const base_ms = base_ref.pointer.analyte.memory_safety orelse MemorySafety{ .stack = .{
+            .meta = state.ctx.meta,
+            .root_gid = null,
+        } };
+        const root_gid = base_ref.getGid();
+        const field_ms: MemorySafety = switch (base_ms) {
+            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = root_gid } },
+            .allocated => |a| .{ .allocated = .{
+                .meta = a.meta,
+                .allocator_gid = a.allocator_gid,
+                .type_id = a.type_id,
+                .freed = a.freed,
+                .root_gid = root_gid,
+            } },
+            .interned => |g| .{ .interned = g },
+            .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = root_gid } },
+            .placeholder => std.debug.panic("placeholder in struct_field_ptr - reinterpreted base pointer not initialized", .{}),
+        };
+
+        ptr_ref.pointer.analyte.memory_safety = field_ms;
+        paintSpatialMemory(refinements, ptr_ref.pointer.to, field_ms);
+        initPointerTargetsPlaceholder(refinements, ptr_ref.pointer.to);
+    }
+
     /// slice_ptr extracts the pointer from a slice.
     /// The resulting pointer is a derived pointer - it cannot be freed directly.
     /// We set root_gid on the pointer to the region, so free detection knows it's derived.
@@ -389,13 +427,13 @@ pub const MemorySafety = union(enum) {
         // Get the region this pointer points to
         const region_idx = ptr.to;
         const region = refinements.at(region_idx);
-        if (region.* != .region) {
+        if (region.getMultiplicity() != .region and ptr.raw_bytes == null) {
             paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
             return;
         }
 
         // Get the region's memory_safety - if none, set .interned (static data)
-        const region_ms = region.region.analyte.memory_safety orelse {
+        const region_ms = getAnalytePtrConst(region).memory_safety orelse {
             // Interned slice (string literal, etc.) - set .interned
             interned_init(refinements, ptr_idx);
             return;
@@ -741,7 +779,7 @@ pub const MemorySafety = union(enum) {
 
             // Check pointee for unfreed allocation
             const pointee = refinements.at(pointee_gid);
-            const ms = getAnalytePtr(pointee).memory_safety orelse continue;
+            const ms = getMemorySafety(pointee) orelse continue;
             if (ms != .allocated) continue;
 
             const allocation = ms.allocated;
@@ -791,12 +829,12 @@ pub const MemorySafety = union(enum) {
                 // heap memory (.allocated), that's fine to return.
                 const pointee_idx = p.to;
                 const pointee = refinements.at(pointee_idx);
-                if (getAnalytePtr(pointee).memory_safety) |*ms| {
-                    if (ms.* == .stack) {
+                if (getMemorySafety(pointee)) |ms| {
+                    if (ms == .stack) {
                         const sp = ms.stack;
                         const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
                         if (std.mem.eql(u8, sp.meta.function, func_name)) {
-                            return reportStackEscape(ms.*, ctx);
+                            return reportStackEscape(ms, ctx);
                         }
                     }
                 }
@@ -826,7 +864,6 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .region => |r| try checkReturnedStackEscape(refinements, r.to, ctx),
             .recursive => |r| try checkReturnedStackEscape(refinements, r.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
@@ -900,11 +937,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
-            .region => |r| {
-                // Cycle detection - should not happen if merge is correct
-                if (r.to == idx) @panic("region.to cycle detected - refinement structure is corrupted");
-                try checkStackEscapeRecursive(refinements, r.to, ctx, func_name);
-            },
             .recursive => |r| try checkStackEscapeRecursive(refinements, r.to, ctx, func_name),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
@@ -1062,10 +1094,6 @@ pub const MemorySafety = union(enum) {
                         markPayloadErrorStub(refinements, field_gid);
                     }
                 }
-            },
-            .region => |*r| {
-                r.analyte.memory_safety = .{ .error_stub = {} };
-                markPayloadErrorStub(refinements, r.to);
             },
             .optional => |*o| {
                 o.analyte.memory_safety = .{ .error_stub = {} };
@@ -1247,7 +1275,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkGlobalAllocationLeaks(refinements, o.to, ctx, orphan_ctx, checked_pointees),
             .errorunion => |e| try checkGlobalAllocationLeaks(refinements, e.to, ctx, orphan_ctx, checked_pointees),
-            .region => |r| try checkGlobalAllocationLeaks(refinements, r.to, ctx, orphan_ctx, checked_pointees),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
                     try checkGlobalAllocationLeaks(refinements, field_gid, ctx, orphan_ctx, checked_pointees);
@@ -1294,7 +1321,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| isReachableFromInner(refinements, target_gid, o.to, depth + 1),
             .errorunion => |e| isReachableFromInner(refinements, target_gid, e.to, depth + 1),
-            .region => |r| isReachableFromInner(refinements, target_gid, r.to, depth + 1),
             .@"struct" => |s| blk: {
                 for (s.fields) |field_gid| {
                     if (isReachableFromInner(refinements, target_gid, field_gid, depth + 1)) {
@@ -1340,7 +1366,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| collectReachableGids(refinements, o.to, reachable),
             .errorunion => |e| collectReachableGids(refinements, e.to, reachable),
-            .region => |r| collectReachableGids(refinements, r.to, reachable),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
                     collectReachableGids(refinements, field_gid, reachable);
@@ -1409,8 +1434,7 @@ pub const MemorySafety = union(enum) {
                 }
                 // Check pointee for allocation
                 const pointee = refinements.at(p.to);
-                const pointee_analyte = getAnalytePtrConst(pointee);
-                if (pointee_analyte.memory_safety) |ms| {
+                if (getMemorySafety(pointee)) |ms| {
                     if (ms == .allocated) {
                         allocs.put(allocationRootGid(p.to, ms.allocated), {}) catch return;
                     }
@@ -1419,7 +1443,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| collectReachableAllocationsInner(refinements, o.to, allocs, depth + 1),
             .errorunion => |e| collectReachableAllocationsInner(refinements, e.to, allocs, depth + 1),
-            .region => |r| collectReachableAllocationsInner(refinements, r.to, allocs, depth + 1),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
                     collectReachableAllocationsInner(refinements, field_gid, allocs, depth + 1);
@@ -1473,8 +1496,7 @@ pub const MemorySafety = union(enum) {
                 }
                 // Check pointee for allocation
                 const pointee = refinements.at(p.to);
-                const pointee_analyte = getAnalytePtrConst(pointee);
-                if (pointee_analyte.memory_safety) |ms| {
+                if (getMemorySafety(pointee)) |ms| {
                     if (ms == .allocated) {
                         if (allocationRootGid(p.to, ms.allocated) == allocation_root_gid) {
                             return true;
@@ -1485,18 +1507,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| return hasMatchingAllocationInner(refinements, o.to, allocation_root_gid, depth + 1),
             .errorunion => |e| return hasMatchingAllocationInner(refinements, e.to, allocation_root_gid, depth + 1),
-            .region => |r| {
-                // Check region's own memory_safety for allocation
-                if (r.analyte.memory_safety) |ms| {
-                    if (ms == .allocated) {
-                        if (allocationRootGid(gid, ms.allocated) == allocation_root_gid) {
-                            return true;
-                        }
-                    }
-                }
-                // Also recurse into element type
-                return hasMatchingAllocationInner(refinements, r.to, allocation_root_gid, depth + 1);
-            },
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
                     if (hasMatchingAllocationInner(refinements, field_gid, allocation_root_gid, depth + 1)) {
@@ -1548,7 +1558,6 @@ pub const MemorySafety = union(enum) {
             .pointer => |p| hasEquivalentAllocationInner(refinements, p.to, allocation, depth + 1),
             .optional => |o| hasEquivalentAllocationInner(refinements, o.to, allocation, depth + 1),
             .errorunion => |e| hasEquivalentAllocationInner(refinements, e.to, allocation, depth + 1),
-            .region => |r| hasEquivalentAllocationInner(refinements, r.to, allocation, depth + 1),
             .recursive => |r| r.to != 0 and hasEquivalentAllocationInner(refinements, r.to, allocation, depth + 1),
             .@"struct" => |s| blk: {
                 for (s.fields) |field_gid| {
@@ -1575,7 +1584,6 @@ pub const MemorySafety = union(enum) {
             .optional => |*o| &o.analyte,
             .errorunion => |*e| &e.analyte,
             .@"struct" => |*st| &st.analyte,
-            .region => |*r| &r.analyte,
             .recursive => |*rec| &rec.analyte,
             .@"union" => |*un| &un.analyte,
             .allocator => |*a| &a.analyte,
@@ -1593,12 +1601,26 @@ pub const MemorySafety = union(enum) {
             .optional => |o| o.analyte.memory_safety == null,
             .errorunion => |e| e.analyte.memory_safety == null,
             .@"struct" => |s| s.analyte.memory_safety == null,
-            .region => |r| r.analyte.memory_safety == null,
             .recursive => |rec| rec.analyte.memory_safety == null,
             .@"union" => |u| u.analyte.memory_safety == null,
             .allocator => |a| a.analyte.memory_safety == null,
             .fnptr => |f| f.analyte.memory_safety == null,
             .void, .noreturn, .unimplemented => true, // No analyte, so no memory_safety
+        };
+    }
+
+    fn getMemorySafety(ref: *Refinements.Refinement) ?MemorySafety {
+        return switch (ref.*) {
+            .scalar => |s| s.analyte.memory_safety,
+            .pointer => |p| p.analyte.memory_safety,
+            .optional => |o| o.analyte.memory_safety,
+            .errorunion => |e| e.analyte.memory_safety,
+            .@"struct" => |s| s.analyte.memory_safety,
+            .recursive => |rec| rec.analyte.memory_safety,
+            .@"union" => |u| u.analyte.memory_safety,
+            .allocator => |a| a.analyte.memory_safety,
+            .fnptr => |f| f.analyte.memory_safety,
+            .void, .noreturn, .unimplemented => null,
         };
     }
 
@@ -1616,7 +1638,6 @@ pub const MemorySafety = union(enum) {
             .errorunion => |*e| &e.analyte,
             .@"struct" => |*st| &st.analyte,
             .@"union" => |*u| &u.analyte,
-            .region => |*r| &r.analyte,
             .recursive => |*r| &r.analyte,
             .allocator => |*a| &a.analyte,
             .fnptr => |*f| &f.analyte,
@@ -1664,7 +1685,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| setFreedRecursive(refinements, o.to, free_meta),
             .errorunion => |e| setFreedRecursive(refinements, e.to, free_meta),
-            .region => |r| setFreedRecursive(refinements, r.to, free_meta),
             else => {},
         }
     }
@@ -1748,11 +1768,17 @@ pub const MemorySafety = union(enum) {
         const pointee_gid = ptr_ref.pointer.to;
         const pointee = refinements.at(pointee_gid);
 
-        // Get memory_safety from either region or scalar
+        // Get memory_safety from the pointee.
         const ms: ?MemorySafety = switch (pointee.*) {
-            .region => |r| r.analyte.memory_safety,
             .scalar => |s| s.analyte.memory_safety,
             .@"struct" => |s| s.analyte.memory_safety,
+            .@"union" => |u| u.analyte.memory_safety,
+            .pointer => |p| p.analyte.memory_safety,
+            .optional => |o| o.analyte.memory_safety,
+            .errorunion => |e| e.analyte.memory_safety,
+            .recursive => |r| r.analyte.memory_safety,
+            .allocator => |a| a.analyte.memory_safety,
+            .fnptr => |f| f.analyte.memory_safety,
             else => null,
         };
 
@@ -1809,8 +1835,8 @@ pub const MemorySafety = union(enum) {
         const ptr_ref = state.refinements.at(src_gid);
         if (ptr_ref.* != .pointer) return null;
         const region_ref = state.refinements.at(ptr_ref.pointer.to);
-        if (region_ref.* != .region) return null;
-        return region_ref.region.to;
+        if (region_ref.getMultiplicity() != .region and ptr_ref.pointer.raw_bytes == null) return null;
+        return ptr_ref.pointer.to;
     }
 
     /// Handle pointer/slice element pointer access - detect use-after-free for slices.
@@ -1852,12 +1878,12 @@ pub const MemorySafety = union(enum) {
         }
         const region_idx = base_refinement.pointer.to;
         const region_ref = refinements.at(region_idx);
-        if (region_ref.* != .region) {
+        if (region_ref.getMultiplicity() != .region and base_refinement.pointer.raw_bytes == null) {
             paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
             return;
         }
 
-        const ms = region_ref.region.analyte.memory_safety orelse {
+        const ms = getAnalytePtrConst(region_ref).memory_safety orelse {
             // Region has no memory_safety - set .interned (likely static data)
             interned_init(refinements, result_ref_idx);
             return;
@@ -1917,9 +1943,9 @@ pub const MemorySafety = union(enum) {
         if (base_refinement != .pointer) return;
         const region_idx = base_refinement.pointer.to;
         const region_ref = refinements.at(region_idx);
-        if (region_ref.* != .region) return;
+        if (region_ref.getMultiplicity() != .region and base_refinement.pointer.raw_bytes == null) return;
 
-        const ms = region_ref.region.analyte.memory_safety orelse return;
+        const ms = getAnalytePtrConst(region_ref).memory_safety orelse return;
         if (ms != .allocated) return;
 
         if (ms.allocated.freed) |free_site| {
@@ -2438,11 +2464,50 @@ pub const MemorySafety = union(enum) {
     /// Initialize memory_safety on a refinement created from a `.undefined` type wrapper.
     /// Undefined pointers are represented as placeholder pointer values until a real
     /// runtime value is stored into them.
-    pub fn init_undefined(ref: *Refinements.Refinement, meta: Meta) void {
+    pub fn init_undefined(refinements: *Refinements, ref: *Refinements.Refinement, meta: Meta) void {
         _ = meta;
+        setUndefinedPlaceholder(refinements, ref);
+    }
+
+    fn setUndefinedPlaceholder(refinements: *Refinements, ref: *Refinements.Refinement) void {
+        const placeholder: MemorySafety = .{ .placeholder = {} };
         switch (ref.*) {
-            .pointer => |*p| p.analyte.memory_safety = .{ .placeholder = {} },
-            else => {},
+            .scalar => |*s| s.analyte.memory_safety = placeholder,
+            .pointer => |*p| {
+                p.analyte.memory_safety = placeholder;
+                setUndefinedPlaceholder(refinements, refinements.at(p.to));
+            },
+            .optional => |o| {
+                ref.optional.analyte.memory_safety = placeholder;
+                setUndefinedPlaceholder(refinements, refinements.at(o.to));
+            },
+            .errorunion => |e| {
+                ref.errorunion.analyte.memory_safety = placeholder;
+                setUndefinedPlaceholder(refinements, refinements.at(e.to));
+            },
+            .@"struct" => |s| {
+                ref.@"struct".analyte.memory_safety = placeholder;
+                for (s.fields) |field_gid| {
+                    setUndefinedPlaceholder(refinements, refinements.at(field_gid));
+                }
+            },
+            .@"union" => |u| {
+                ref.@"union".analyte.memory_safety = placeholder;
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        setUndefinedPlaceholder(refinements, refinements.at(field_gid));
+                    }
+                }
+            },
+            .allocator => |*a| a.analyte.memory_safety = placeholder,
+            .fnptr => |*f| f.analyte.memory_safety = placeholder,
+            .recursive => |r| {
+                ref.recursive.analyte.memory_safety = placeholder;
+                if (r.to != 0) {
+                    setUndefinedPlaceholder(refinements, refinements.at(r.to));
+                }
+            },
+            .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -2479,6 +2544,16 @@ pub const MemorySafety = union(enum) {
 
     // Simple arithmetic/comparison operations - produce computed scalars
     pub fn bit_and(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn bit_or(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn xor(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
     }
@@ -2524,6 +2599,11 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn ctz(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn clz(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
     }
@@ -2903,14 +2983,6 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .region => |r| {
-                // For arrays/regions: use uniform model - first element applies to all
-                if (params.elements.len > 0) {
-                    copyMemorySafetyState(state, r.to, params.elements[0]);
-                } else {
-                    paintSpatialMemory(state.refinements, r.to, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
-                }
-            },
             else => {
                 // Fallback: initialize to stack (computed value)
                 paintSpatialMemory(state.refinements, result_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
@@ -3028,16 +3100,6 @@ pub const MemorySafety = union(enum) {
                     else => null,
                 };
             },
-            .region => |*r| {
-                r.analyte.memory_safety = switch (src_ref.*) {
-                    .region => |sr| sr.analyte.memory_safety,
-                    else => null,
-                };
-                if (src_ref.* == .region) {
-                    copyMemorySafetyStateRecursive(refinements, r.to, src_ref.region.to);
-                }
-                // If type mismatch, element keeps default null memory_safety
-            },
             .recursive => |*rec| {
                 rec.analyte.memory_safety = switch (src_ref.*) {
                     .recursive => |sr| sr.analyte.memory_safety,
@@ -3106,7 +3168,6 @@ pub const MemorySafety = union(enum) {
             .pointer => |p| containsReachableAllocation(refinements, p.to, depth + 1),
             .optional => |o| containsReachableAllocation(refinements, o.to, depth + 1),
             .errorunion => |e| containsReachableAllocation(refinements, e.to, depth + 1),
-            .region => |r| containsReachableAllocation(refinements, r.to, depth + 1),
             .recursive => |r| r.to != 0 and containsReachableAllocation(refinements, r.to, depth + 1),
             .@"struct" => |s| blk: {
                 for (s.fields) |field_gid| {
@@ -3198,10 +3259,6 @@ pub const MemorySafety = union(enum) {
             },
             .allocator => |*a| a.analyte.memory_safety = ms,
             .fnptr => |*f| f.analyte.memory_safety = ms,
-            .region => |r| {
-                ref.region.analyte.memory_safety = ms;
-                paintSpatialMemory(refinements, r.to, ms);
-            },
             .recursive => |r| {
                 ref.recursive.analyte.memory_safety = ms;
                 if (r.to != 0) {
@@ -3249,10 +3306,6 @@ pub const MemorySafety = union(enum) {
             .fnptr => |*f| {
                 if (f.analyte.memory_safety == null) f.analyte.memory_safety = ms;
             },
-            .region => |r| {
-                if (ref.region.analyte.memory_safety == null) ref.region.analyte.memory_safety = ms;
-                initNullSpatialMemory(refinements, r.to, ms);
-            },
             .recursive => |r| {
                 if (ref.recursive.analyte.memory_safety == null) ref.recursive.analyte.memory_safety = ms;
                 if (r.to != 0) {
@@ -3278,7 +3331,9 @@ pub const MemorySafety = union(enum) {
                 // Only set target to placeholder if it doesn't already have memory_safety set
                 // This prevents overwriting caller-owned entities that were aliased via store
                 const target_ref = refinements.at(p.to);
-                if (hasNoMemorySafety(target_ref)) {
+                if (getMemorySafety(target_ref)) |target_ms| {
+                    initNullSpatialMemory(refinements, p.to, target_ms);
+                } else {
                     paintSpatialMemory(refinements, p.to, .{ .placeholder = {} });
                 }
                 initPointerTargetsPlaceholder(refinements, p.to);
@@ -3297,7 +3352,6 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
-            .region => |r| initPointerTargetsPlaceholder(refinements, r.to),
             .recursive => |r| {
                 if (r.to != 0) {
                     initPointerTargetsPlaceholder(refinements, r.to);
@@ -3386,15 +3440,6 @@ pub const MemorySafety = union(enum) {
                     if (src_ref.fnptr.analyte.memory_safety) |ms| {
                         dest_ref.fnptr.analyte.memory_safety = ms;
                     }
-                }
-            },
-            .region => |dest_r| {
-                if (src_ref.* == .region) {
-                    const src_r = src_ref.region;
-                    if (src_r.analyte.memory_safety) |ms| {
-                        dest_ref.region.analyte.memory_safety = ms;
-                    }
-                    copyMemorySafetyRecursive(refinements, dest_r.to, src_r.to);
                 }
             },
             .recursive => |dest_r| {
@@ -3523,7 +3568,6 @@ pub const MemorySafety = union(enum) {
             .@"union" => |u| u.analyte.memory_safety,
             .allocator => |a| a.analyte.memory_safety,
             .fnptr => |f| f.analyte.memory_safety,
-            .region => |r| r.analyte.memory_safety,
             .recursive => |r| r.analyte.memory_safety,
             .void, .noreturn, .unimplemented => null,
         } orelse std.debug.panic("wrap_errunion_payload: payload has no memory_safety", .{});
@@ -3557,7 +3601,6 @@ pub const MemorySafety = union(enum) {
             .@"union" => |u| u.analyte.memory_safety,
             .allocator => |a| a.analyte.memory_safety,
             .fnptr => |f| f.analyte.memory_safety,
-            .region => |r| r.analyte.memory_safety,
             .recursive => |r| r.analyte.memory_safety,
             .void, .noreturn, .unimplemented => null,
         } orelse std.debug.panic("wrap_optional: payload has no memory_safety", .{});
@@ -3572,6 +3615,68 @@ pub const MemorySafety = union(enum) {
         };
 
         result_ref.optional.analyte.memory_safety = paint;
+    }
+
+    pub fn hashmap_header(state: State, index: usize, params: tag.HashMapHeader) !void {
+        const result_gid = state.results[index].refinement orelse
+            std.debug.panic("hashmap_header: result instruction {d} has no refinement", .{index});
+        const result_ref = state.refinements.at(result_gid);
+        if (result_ref.* != .pointer) {
+            std.debug.panic("hashmap_header: expected pointer result, got {s}", .{@tagName(result_ref.*)});
+        }
+
+        const metadata_ptr_gid = getHashMapMetadataPointerGid(state, params.self);
+        const metadata_ptr_ref = state.refinements.at(metadata_ptr_gid);
+        if (metadata_ptr_ref.* != .pointer) {
+            std.debug.panic("hashmap_header: expected metadata payload pointer, got {s}", .{@tagName(metadata_ptr_ref.*)});
+        }
+
+        const raw_pointer_ms = metadata_ptr_ref.pointer.analyte.memory_safety orelse
+            std.debug.panic("hashmap_header: metadata pointer has no memory_safety", .{});
+        const fallback_ms: MemorySafety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+        const pointer_ms = switch (raw_pointer_ms) {
+            .placeholder, .error_stub => fallback_ms,
+            else => raw_pointer_ms,
+        };
+        result_ref.pointer.analyte.memory_safety = pointer_ms;
+
+        const raw_pointee_ms = getMemorySafety(state.refinements.at(metadata_ptr_ref.pointer.to)) orelse pointer_ms;
+        const pointee_ms = switch (raw_pointee_ms) {
+            .placeholder, .error_stub => pointer_ms,
+            else => raw_pointee_ms,
+        };
+        paintSpatialMemory(state.refinements, result_ref.pointer.to, pointee_ms);
+        initPointerTargetsPlaceholder(state.refinements, result_ref.pointer.to);
+    }
+
+    fn getHashMapMetadataPointerGid(state: State, src: tag.Src) Gid {
+        const self_gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("hashmap_header: self instruction {d} has no refinement", .{inst}),
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse
+                std.debug.panic("hashmap_header: self interned {d} has no global refinement", .{interned.ip_idx}),
+            .fnptr => @panic("hashmap_header: self cannot be a function pointer"),
+        };
+        const self_ref = state.refinements.at(self_gid);
+        const struct_gid = switch (self_ref.*) {
+            .pointer => |p| p.to,
+            .@"struct" => self_gid,
+            else => |t| std.debug.panic("hashmap_header: expected self struct or pointer to struct, got {s}", .{@tagName(t)}),
+        };
+        const struct_ref = state.refinements.at(struct_gid);
+        if (struct_ref.* != .@"struct") {
+            std.debug.panic("hashmap_header: expected self pointee struct, got {s}", .{@tagName(struct_ref.*)});
+        }
+        if (struct_ref.@"struct".fields.len == 0) {
+            @panic("hashmap_header: self struct has no metadata field");
+        }
+
+        const metadata_gid = struct_ref.@"struct".fields[0];
+        const metadata_ref = state.refinements.at(metadata_gid);
+        if (metadata_ref.* != .optional) {
+            std.debug.panic("hashmap_header: expected metadata optional, got {s}", .{@tagName(metadata_ref.*)});
+        }
+        return metadata_ref.optional.to;
     }
 
     /// RetPtr creates a return value entity via typeToRefinement for struct/union returns
@@ -3804,13 +3909,13 @@ pub const MemorySafety = union(enum) {
         if (payload_ref.pointer.to != 0) {
             const region_gid = payload_ref.pointer.to;
             const region_ref = refinements.at(region_gid);
-            if (region_ref.* == .region) {
+            if (region_ref.getMultiplicity() == .region) {
                 switch (buf_ms) {
                     .stack => |stack| {
-                        region_ref.region.analyte.memory_safety = .{ .stack = stack };
+                        getAnalytePtr(region_ref).memory_safety = .{ .stack = stack };
                     },
                     .allocated => |alloc_ms| {
-                        region_ref.region.analyte.memory_safety = .{ .allocated = alloc_ms };
+                        getAnalytePtr(region_ref).memory_safety = .{ .allocated = alloc_ms };
                     },
                     .interned => |meta| {
                         paintSpatialMemory(refinements, region_gid, .{ .interned = meta });
@@ -3870,7 +3975,6 @@ pub const MemorySafety = union(enum) {
             },
             .optional => |o| try checkUseAfterFreeRecursive(refinements, o.to, ctx),
             .errorunion => |e| try checkUseAfterFreeRecursive(refinements, e.to, ctx),
-            .region => |r| try checkUseAfterFreeRecursive(refinements, r.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
         }
     }
@@ -4046,7 +4150,7 @@ pub const MemorySafety = union(enum) {
 
         // destroy expects single item (create), not slice (alloc)
         // Slice allocations have metadata ON the region; single-item have metadata on scalar/struct
-        if (pointee.* == .region) {
+        if (pointee.getMultiplicity() == .region) {
             return reportMethodMismatch(ctx, a, true, false);
         }
 
@@ -4078,9 +4182,8 @@ pub const MemorySafety = union(enum) {
         const ptr = &ptr_refinement.pointer;
         const region_ref = ptr.to;
         const region_refinement = state.refinements.at(region_ref);
-        if (region_refinement.* != .region) return; // Safety check
-        const region = &region_refinement.region;
-        const element_ref = region.to;
+        if (region_refinement.getMultiplicity() != .region) return; // Safety check
+        const element_ref = region_ref;
 
         // Get allocator GID, type_id, and arena_gid from the allocator argument
         var allocator_gid: ?Gid = null;
@@ -4148,8 +4251,8 @@ pub const MemorySafety = union(enum) {
             .root_gid = null,
         } });
 
-        // Set memory_safety on region (alloc allocations have metadata ON the region)
-        region.analyte.memory_safety = .{
+        // Set memory_safety on the region-multiplicity pointee.
+        getAnalytePtr(region_refinement).memory_safety = .{
             .allocated = .{
                 .meta = alloc_base.meta,
                 .allocator_gid = alloc_base.allocator_gid,
@@ -4245,8 +4348,6 @@ pub const MemorySafety = union(enum) {
                 },
                 .interned => return reportFreeGlobalMemory(ctx),
                 .error_stub => {
-                    std.debug.print("DEBUG: error_stub on ptr_refinement at freeSliceLike\n", .{});
-                    ctx.dumpStackTrace();
                     return error.InternedNoOp;
                 },
                 // Placeholder = never allocated - infeasible code path
@@ -4256,53 +4357,31 @@ pub const MemorySafety = union(enum) {
 
         const pointee_idx = ptr_refinement.pointer.to;
         const pointee_ref = refinements.at(pointee_idx);
-        const pointee_analyte: *Analyte = switch (pointee_ref.*) {
-            .region => |*r| blk: {
-                if (r.analyte.memory_safety) |*ms| {
-                    switch (ms.*) {
-                        .allocated => break :blk &r.analyte,
-                        .stack => |sp| return reportFreeStackMemory(ctx, sp),
-                        .interned => {
-                            if (allow_interned_noop) return error.InternedNoOp;
-                            return reportFreeGlobalMemory(ctx);
-                        },
-                        .error_stub => {
-                            std.debug.print("DEBUG: error_stub on region.ms at freeSliceLike\n", .{});
-                            std.debug.print("  ptr_idx={}, pointee_idx={}, pointer.to={}\n", .{ ptr_idx, pointee_idx, ptr_refinement.pointer.to });
-                            ctx.dumpStackTrace();
-                            return error.InternedNoOp;
-                        },
-                        // Placeholder = never allocated - infeasible code path
-                        .placeholder => return error.InvalidReallocInput,
-                    }
-                }
-                const element_ref = refinements.at(r.to);
-                const element_analyte = getAnalytePtr(element_ref);
-                if (element_analyte.memory_safety) |element_ms| {
-                    if (element_ms == .allocated) {
-                        return reportMethodMismatch(ctx, element_ms.allocated, false, true);
-                    }
-                }
-                return error.InvalidReallocInput;
-            },
-            .scalar => |*s| blk: {
-                if (s.analyte.memory_safety) |ms| {
-                    if (ms == .allocated) {
+        const pointee_analyte: *Analyte = getAnalytePtr(pointee_ref);
+        if (pointee_analyte.memory_safety) |*ms| {
+            switch (ms.*) {
+                .allocated => {
+                    if (pointee_ref.getMultiplicity() != .region and ptr_refinement.pointer.raw_bytes == null) {
                         return reportMethodMismatch(ctx, ms.allocated, false, true);
                     }
-                }
-                break :blk &s.analyte;
-            },
-            else => return error.InvalidReallocInput,
-        };
+                },
+                .stack => |sp| return reportFreeStackMemory(ctx, sp),
+                .interned => {
+                    if (allow_interned_noop) return error.InternedNoOp;
+                    return reportFreeGlobalMemory(ctx);
+                },
+                .error_stub => {
+                    return error.InternedNoOp;
+                },
+                .placeholder => return error.InvalidReallocInput,
+            }
+        }
 
         const ms_ptr = &(pointee_analyte.memory_safety orelse return error.InvalidReallocInput);
         switch (ms_ptr.*) {
             .stack => |sp| return reportFreeStackMemory(ctx, sp),
             .interned => return reportFreeGlobalMemory(ctx),
             .error_stub => {
-                std.debug.print("DEBUG: error_stub on pointee_analyte.ms at freeSliceLike\n", .{});
-                ctx.dumpStackTrace();
                 return error.InternedNoOp;
             },
             // Placeholder = never allocated - infeasible code path
@@ -4361,11 +4440,10 @@ pub const MemorySafety = union(enum) {
         if (new_ptr_ref.* != .pointer) return;
         const new_region_idx = new_ptr_ref.pointer.to;
         const new_region_ref = refinements.at(new_region_idx);
-        if (new_region_ref.* != .region) return;
-        const new_region = &new_region_ref.region;
-        const new_element_ref = new_region.to;
+        if (new_region_ref.getMultiplicity() != .region) return;
+        const new_element_ref = new_region_idx;
 
-        new_region.analyte.memory_safety = .{ .allocated = .{
+        getAnalytePtr(new_region_ref).memory_safety = .{ .allocated = .{
             .meta = state.ctx.meta,
             .allocator_gid = allocator_gid,
             .type_id = type_id,
@@ -4386,7 +4464,7 @@ pub const MemorySafety = union(enum) {
         _ = index; // free returns void
         if (args.len < 2) return;
         _ = freeSliceLike(state, args[0], args[1], false) catch |err| switch (err) {
-            error.InvalidReallocInput => return,
+            error.InternedNoOp, error.InvalidReallocInput => return,
             else => return err,
         };
     }
@@ -4580,7 +4658,7 @@ pub const MemorySafety = union(enum) {
 const debug = @import("builtin").mode == .Debug;
 
 /// Validates that memory_safety is correctly set on refinements.
-/// - MUST EXIST: .scalar, .pointer, .optional, .errorunion, .region, .recursive, .struct, .union, .fnptr, .allocator
+/// - MUST EXIST: .scalar, .pointer, .optional, .errorunion, .recursive, .struct, .union, .fnptr, .allocator
 /// - NO ANALYTE: .void, .noreturn, .unimplemented
 pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     if (!debug) return;
@@ -4603,7 +4681,7 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
             if (a.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on allocator (idx={d})", .{idx});
         },
         // Container types - no undefined_safety on themselves, just check memory_safety exists
-        inline .optional, .errorunion, .region, .recursive, .@"struct", .@"union" => |data, t| {
+        inline .optional, .errorunion, .recursive, .@"struct", .@"union" => |data, t| {
             if (data.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on {s} (idx={d})", .{ @tagName(t), idx });
         },
         // NO ANALYTE - trivial types
