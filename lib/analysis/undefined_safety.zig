@@ -502,13 +502,15 @@ pub const UndefinedSafety = union(enum) {
 
     // Vector reduce - check source for undefined
     pub const reduce = unOpHandler;
+    pub const transfer_op = unOpHandler;
 
     // Select (ternary) - check all three operands for undefined
     fn selectHandler(state: State, index: usize, params: anytype) !void {
-        _ = index;
         try checkSrcUndefined(state, params.mask);
         try checkSrcUndefined(state, params.a);
         try checkSrcUndefined(state, params.b);
+        const result_gid = state.results[index].refinement.?;
+        state.refinements.at(result_gid).scalar.analyte.undefined_safety = .{ .defined = {} };
     }
     pub const select = selectHandler;
 

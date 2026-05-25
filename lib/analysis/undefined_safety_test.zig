@@ -468,6 +468,220 @@ test "unop succeeds on defined operand" {
     }
 }
 
+fn expectInstResultDefined(refinements: *Refinements, results: []Inst, index: usize) !void {
+    const result_gid = results[index].refinement.?;
+    const result_undef = refinements.at(result_gid).scalar.analyte.undefined_safety;
+    try std.testing.expect(result_undef != null);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(result_undef.?));
+}
+
+test "SIMD cmp_vector succeeds on defined operands and marks result defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const defined1 = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const defined2 = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = defined1;
+    results[1].refinement = defined2;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 2, .{ .cmp_vector = .{ .lhs = .{ .inst = 0 }, .rhs = .{ .inst = 1 } } });
+    try expectInstResultDefined(&refinements, &results, 2);
+}
+
+test "SIMD cmp_vector errors on undefined operand" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const undef_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    const defined_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = undef_gid;
+    results[1].refinement = defined_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    const result = Inst.apply(state, 2, .{ .cmp_vector = .{ .lhs = .{ .inst = 0 }, .rhs = .{ .inst = 1 } } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
+test "SIMD reduce succeeds on defined operand and marks result defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const defined_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = defined_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .reduce = .{ .src = .{ .inst = 0 } } });
+    try expectInstResultDefined(&refinements, &results, 1);
+}
+
+test "SIMD reduce errors on undefined operand" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const undef_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = undef_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    const result = Inst.apply(state, 1, .{ .reduce = .{ .src = .{ .inst = 0 } } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
+test "SIMD splat succeeds on defined operand and marks result defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const defined_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = defined_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .splat = .{ .src = .{ .inst = 0 } } });
+    try expectInstResultDefined(&refinements, &results, 1);
+}
+
+test "SIMD splat errors on undefined operand" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const undef_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = undef_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    const result = Inst.apply(state, 1, .{ .splat = .{ .src = .{ .inst = 0 } } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
+test "select succeeds on defined operands and marks result defined" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const defined_mask = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const defined_a = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const defined_b = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 4;
+    results[0].refinement = defined_mask;
+    results[1].refinement = defined_a;
+    results[2].refinement = defined_b;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 3, .{ .select = .{
+        .mask = .{ .inst = 0 },
+        .a = .{ .inst = 1 },
+        .b = .{ .inst = 2 },
+    } });
+
+    try expectInstResultDefined(&refinements, &results, 3);
+}
+
+test "select errors on undefined mask" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const undef_mask = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    const defined_a = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const defined_b = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 4;
+    results[0].refinement = undef_mask;
+    results[1].refinement = defined_a;
+    results[2].refinement = defined_b;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    const result = Inst.apply(state, 3, .{ .select = .{
+        .mask = .{ .inst = 0 },
+        .a = .{ .inst = 1 },
+        .b = .{ .inst = 2 },
+    } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
+test "select errors on undefined selected operand" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const defined_mask = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+    const undef_a = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .undefined = .{ .meta = ctx.meta } } },
+    } });
+    const defined_b = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .undefined_safety = .{ .defined = {} } },
+    } });
+
+    var results = [_]Inst{.{}} ** 4;
+    results[0].refinement = defined_mask;
+    results[1].refinement = undef_a;
+    results[2].refinement = defined_b;
+
+    const state = testState(&ctx, &results, &refinements);
+
+    const result = Inst.apply(state, 3, .{ .select = .{
+        .mask = .{ .inst = 0 },
+        .a = .{ .inst = 1 },
+        .b = .{ .inst = 2 },
+    } });
+    try std.testing.expectError(error.UseBeforeAssign, result);
+}
+
 test "aggregate_init incorporates undefined state from source elements" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

@@ -4,6 +4,37 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Undefined-safety SIMD scalar result initialization
+
+**Date:** 2026-05-25
+
+**Symptom:**
+`std.mem.indexOfSentinel`'s SIMD path crashed in `testValid` because a scalar
+result from `select` had no `undefined_safety` state. Focused SIMD unit tests
+also showed `splat` accepted undefined input and left its result uninitialized.
+
+**Root Cause:**
+The undefined-safety `select` handler checked the mask and both selected values
+for undefined input, but unlike other scalar-producing operations it did not
+mark the result scalar as defined after a successful check. Vector `splat`
+dispatches through generic `transfer_op`, which had no undefined-safety handler.
+
+**The Fix:**
+`select` now marks its result scalar defined after validating all three inputs.
+`transfer_op` now uses the existing unary-operation handler, so `splat` and
+other transfer-style scalar operations check their source and mark their result
+defined.
+
+**Key Files Changed:**
+- `lib/analysis/undefined_safety.zig`
+- `lib/analysis/undefined_safety_test.zig`
+
+**Test Cases:**
+- `test/cases/misc/nested_block_optional_simd.zig`
+- `test/integration/misc.bats`
+
+---
+
 ## Fix: Clobber leaks and copied-argument allocation reachability
 
 **Date:** 2026-05-23

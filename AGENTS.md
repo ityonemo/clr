@@ -117,10 +117,13 @@ The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
 returned-pointer destroy handling, and labeled-switch branch-result import work
-is `356/365` passing (`9` failing), from
+is expected to be `357/365` passing (`8` failing) after the select
+undefined-safety fix. The last full measured baseline was `356/365` passing
+(`9` failing), from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-05-24. Treat remaining failures as real analyzer
-work, not compiler-cache failures.
+work, not compiler-cache failures. A focused `misc.bats` run after the SIMD
+undefined-safety fix confirmed `std.mem.indexOfSentinel` SIMD now passes.
 
 The largest incomplete areas are:
 
@@ -145,14 +148,13 @@ The largest incomplete areas are:
 - Current FD failures from the latest full run:
   - `fd.bats` 123/126/129/132/133/136 and `undefined.bats` 343. These remain
     punted until the FD aliasing/closure architecture is addressed.
-- Stdlib reductions. HashMap and indexOfSentinel/SIMD still expose gaps in
-  type/character preservation and analysis propagation. Packed struct init,
-  packed-struct scalar cross-call safety, memcpy/memset destination definition,
-  string literal equality, branch clobber, copied struct-argument allocation
-  reachability, and basic ArrayList usage are covered.
+- Stdlib reductions. HashMap still exposes gaps in type/character preservation
+  and analysis propagation. Packed struct init, packed-struct scalar cross-call
+  safety, `std.mem.indexOfSentinel` SIMD `select`/`splat` handling,
+  memcpy/memset destination definition, string literal equality, branch clobber,
+  copied struct-argument allocation reachability, and basic ArrayList usage are
+  covered.
 - Current stdlib/undefined/null failures from the latest full run:
-  - `misc.bats` 196: `std.mem.indexOfSentinel` SIMD path still fails in
-    undefined-safety after memory-safety initialization fixes.
   - `misc.bats` 210: `std.HashMap` basic usage currently reaches a
     null-safety unchecked optional unwrap in `HashMapUnmanaged.header`.
 - Alignment-cast lowering. `@ptrCast(@alignCast(...))` currently exposes AIR that
@@ -189,7 +191,6 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Recommended next focused sprint: decide between `std.mem.indexOfSentinel`
-   SIMD undefined-safety, `std.HashMap` optional/null-safety, and the
-   broader FD aliasing/closure architecture.
+1. Recommended next focused sprint: decide between `std.HashMap`
+   optional/null-safety and the broader FD aliasing/closure architecture.
 2. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
