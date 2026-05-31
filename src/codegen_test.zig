@@ -239,7 +239,7 @@ test "instLine for alloc" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .alloc, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });\n", result);
 }
 
 test "instLine for store" {
@@ -321,7 +321,7 @@ test "generateFunction produces complete function" {
         \\    const base_gid: Gid = @intCast(refinements.list.items.len);
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
-        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
         \\    try Inst.apply(state, 1, .{ .dbg_stmt = .{ .line = 1, .column = 3 } });
         \\    try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
         \\    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
@@ -339,7 +339,7 @@ test "epilogue generates correct output with typed return slot" {
     initTestAllocator();
     defer deinitTestAllocator();
 
-    const result = codegen.epilogue(123, ".{ .ty = .{ .scalar = {} } }");
+    const result = codegen.epilogue(123, ".{ .ty = .{ .scalar = .{} } }");
 
     const expected =
         \\const std = @import("std");
@@ -370,7 +370,7 @@ test "epilogue generates correct output with typed return slot" {
         \\
         \\    var refinements = Refinements.init(allocator);
         \\    defer refinements.deinit();
-        \\    const return_type: clr.Type = .{ .ty = .{ .scalar = {} } };
+        \\    const return_type: clr.Type = .{ .ty = .{ .scalar = .{} } };
         \\    const return_ref = clr.typeToRefinement(return_type, &refinements) catch Refinements.Refinement{ .scalar = .{} };
         \\    const return_gid = refinements.appendEntity(return_ref) catch 0;
         \\    clr.splatInitEntrypointReturnSlot(&refinements, return_gid, &ctx);
@@ -553,7 +553,7 @@ test "instLine for bitcast" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .bitcast, datum, 0, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .inst = 7 }, .ty = .{ .scalar = {} } } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .bitcast = .{ .src = .{ .inst = 7 }, .ty = .{ .scalar = .{} } } });\n", result);
 }
 
 test "instLine for unwrap_errunion_payload" {
@@ -957,7 +957,7 @@ test "instLine for struct_field_ptr_index_0" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_0, datum, 3, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = .{ .inst = 2 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 0 } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 3, .{ .struct_field_ptr = .{ .base = .{ .inst = 2 }, .field_index = 0, .ty = .{ .scalar = .{} }, .type_id = 0 } });\n", result);
 }
 
 test "instLine for struct_field_ptr_index_1" {
@@ -976,7 +976,7 @@ test "instLine for struct_field_ptr_index_1" {
     const info = testFnInfo(arena.allocator(), &name_map, &empty_field_map, &.{}, &.{}, &.{}, &.{});
     const result = codegen._instLine(&info, .struct_field_ptr_index_1, datum, 4, null);
 
-    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = .{ .inst = 1 }, .field_index = 1, .ty = .{ .scalar = {} }, .type_id = 0 } });\n", result);
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 4, .{ .struct_field_ptr = .{ .base = .{ .inst = 1 }, .field_index = 1, .ty = .{ .scalar = .{} }, .type_id = 0 } });\n", result);
 }
 
 test "instLine for get_union_tag" {
@@ -1164,10 +1164,10 @@ test "generateFunction with simple cond_br block" {
         \\    const base_gid: Gid = @intCast(refinements.list.items.len);
         \\    const state = State{ .ctx = ctx, .results = results, .refinements = refinements, .return_gid = return_gid, .base_gid = base_gid, .early_returns = &early_returns };
         \\
-        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-        \\    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 104, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
+        \\    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+        \\    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 104, .ty = .{ .undefined = .{ .to = &.{ .scalar = .{} } } } } } } });
         \\    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .void = {} } } });
-        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+        \\    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
         \\    try Inst.apply(state, 4, .{ .noop = .{} });
         \\    try Inst.apply(state, 5, .{ .noop = .{} });
         \\    try Inst.apply(state, 6, .{ .noop = .{} });
@@ -1193,13 +1193,13 @@ test "formatAllocatorType generates correct type string" {
 
     // Test with type_id = 12345
     const result1 = codegen.formatAllocatorType(arena.allocator(), 12345);
-    try std.testing.expectEqualStrings(".{ .allocator = 12345 }", result1);
+    try std.testing.expectEqualStrings(".{ .allocator = .{ .type_id = 12345 } }", result1);
 
     // Test with type_id = 0
     const result2 = codegen.formatAllocatorType(arena.allocator(), 0);
-    try std.testing.expectEqualStrings(".{ .allocator = 0 }", result2);
+    try std.testing.expectEqualStrings(".{ .allocator = .{ .type_id = 0 } }", result2);
 
     // Test with max u32
     const result3 = codegen.formatAllocatorType(arena.allocator(), 4294967295);
-    try std.testing.expectEqualStrings(".{ .allocator = 4294967295 }", result3);
+    try std.testing.expectEqualStrings(".{ .allocator = .{ .type_id = 4294967295 } }", result3);
 }

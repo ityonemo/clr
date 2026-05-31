@@ -42,7 +42,7 @@ test "alloc sets stack metadata on pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc creates a stack pointer
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 
     // Check pointer has stack metadata
     const ptr_gid = results[0].refinement.?;
@@ -55,7 +55,7 @@ test "undefined region type initializes placeholder memory_safety recursively" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    const ref = try tag.typeToRefinement(.{ .undefined = &.{ .region = &.{ .scalar = {} } } }, &refinements);
+    const ref = try tag.typeToRefinement(.{ .undefined = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } }, &refinements);
     const region_gid = try refinements.appendEntity(ref);
     const elem_gid = region_gid;
 
@@ -74,11 +74,11 @@ test "set_union_tag initializes pointer field targets as placeholders" {
     const union_type = tag.Type{ .@"union" = &.{
         .type_id = 100,
         .variants = &.{
-            .{ .scalar = {} },
-            .{ .pointer = &.{ .@"union" = &.{
+            .{ .scalar = .{} },
+            .{ .pointer = .{ .to = &.{ .@"union" = &.{
                 .type_id = 100,
-                .variants = &.{ .{ .scalar = {} }, .{ .pointer = &.{ .recursive = 100 } } },
-            } } },
+                .variants = &.{ .{ .scalar = .{} }, .{ .pointer = .{ .to = &.{ .recursive = 100 } } } },
+            } } } },
         },
     } };
 
@@ -91,7 +91,7 @@ test "set_union_tag initializes pointer field targets as placeholders" {
     try Inst.apply(state, 2, .{ .struct_field_ptr = .{
         .base = .{ .inst = 0 },
         .field_index = 1,
-        .ty = .{ .pointer = &union_type.@"union".variants[1] },
+        .ty = .{ .pointer = .{ .to = &union_type.@"union".variants[1] } },
         .type_id = 100,
     } });
 
@@ -160,7 +160,7 @@ test "hashmap_header inherits memory safety from metadata pointer" {
 
     try Inst.apply(state, 1, .{ .hashmap_header = .{
         .self = .{ .inst = 0 },
-        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = {} }} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
 
     const result_gid = results[1].refinement.?;
@@ -198,7 +198,7 @@ test "hashmap_header treats placeholder metadata as synthetic valid header" {
 
     try Inst.apply(state, 1, .{ .hashmap_header = .{
         .self = .{ .inst = 0 },
-        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = {} }} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
 
     const result_gid = results[1].refinement.?;
@@ -248,7 +248,7 @@ test "struct_field_ptr through reinterpreted region inherits base pointer memory
     try Inst.apply(state, 1, .{ .struct_field_ptr = .{
         .base = .{ .inst = 0 },
         .field_index = 0,
-        .ty = .{ .pointer = &.{ .scalar = {} } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{} } } },
         .type_id = 123,
     } });
 
@@ -282,7 +282,7 @@ test "struct_field_ptr through reinterpreted region initializes pointer field ta
     try Inst.apply(state, 1, .{ .struct_field_ptr = .{
         .base = .{ .inst = 0 },
         .field_index = 0,
-        .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } },
+        .ty = .{ .pointer = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } },
         .type_id = 123,
     } });
 
@@ -318,7 +318,7 @@ test "bitcast initializes missing children under initialized pointer target" {
 
     try Inst.apply(state, 1, .{ .bitcast = .{
         .src = .{ .inst = 0 },
-        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 123, .fields = &.{.{ .scalar = {} }} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .@"struct" = &.{ .type_id = 123, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
 
     try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(field_gid).scalar.analyte.memory_safety.?));
@@ -338,9 +338,9 @@ test "call intercepts mem.Allocator.create and sets allocation metadata" {
     const state = testState(&ctx, &results, &refinements);
 
     // Call mem.Allocator.create - Inst.call creates the return structure
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    const ptr_type: tag.Type = .{ .pointer = &scalar_type };
-    const return_type: tag.Type = .{ .errorunion = &ptr_type };
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    const ptr_type: tag.Type = .{ .pointer = .{ .to = &scalar_type } };
+    const return_type: tag.Type = .{ .errorunion = .{ .to = &ptr_type } };
     const args = &[_]tag.Src{.{ .inst = 0 }}; // allocator arg
     try Inst.call(state, 1, null, return_type, args, "std.mem.Allocator.create");
 
@@ -478,8 +478,8 @@ test "ret_load of struct with slice pointer field leaves no invalid orphaned mem
     const struct_ty: tag.Type = .{ .@"struct" = &.{
         .type_id = 2706,
         .fields = &.{
-            .{ .scalar = {} },
-            .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+            .{ .scalar = .{} },
+            .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
         },
     } };
     const return_ref = try tag.typeToRefinement(struct_ty, &refinements);
@@ -501,17 +501,17 @@ test "ret_load of struct with slice pointer field leaves no invalid orphaned mem
     try Inst.apply(state, 2, .{ .struct_field_ptr = .{
         .base = .{ .inst = 1 },
         .field_index = 1,
-        .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } },
+        .ty = .{ .pointer = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } },
         .type_id = 0,
     } });
     try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 2 }, .src = .{ .inst = 0 } } });
     try Inst.apply(state, 4, .{ .struct_field_ptr = .{
         .base = .{ .inst = 1 },
         .field_index = 0,
-        .ty = .{ .pointer = &.{ .scalar = {} } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{} } } },
         .type_id = 0,
     } });
-    try Inst.apply(state, 5, .{ .store = .{ .ptr = .{ .inst = 4 }, .src = .{ .interned = .{ .ip_idx = 109, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 5, .{ .store = .{ .ptr = .{ .inst = 4 }, .src = .{ .interned = .{ .ip_idx = 109, .ty = .{ .scalar = .{} } } } } });
     try Inst.apply(state, 6, .{ .ret_load = .{ .ptr = 1 } });
     try Inst.mergeEarlyReturns(state);
 
@@ -531,7 +531,7 @@ test "allocation returned through block break is not reported as callee leak" {
         .type_id = 100,
         .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
     } });
-    const return_ref = try tag.typeToRefinement(.{ .pointer = &.{ .scalar = {} } }, &refinements);
+    const return_ref = try tag.typeToRefinement(.{ .pointer = .{ .to = &.{ .scalar = .{} } } }, &refinements);
     const return_gid = try refinements.appendEntity(return_ref);
     tag.splatInitCallReturnSlot(&refinements, return_gid, &ctx);
 
@@ -549,8 +549,8 @@ test "allocation returned through block break is not reported as callee leak" {
         .restrict = .memory_safety,
     };
 
-    try Inst.call(state, 1, null, .{ .errorunion = &.{ .pointer = &.{ .scalar = {} } } }, &.{.{ .inst = 0 }}, "std.mem.Allocator.create");
-    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .pointer = &.{ .scalar = {} } } } });
+    try Inst.call(state, 1, null, .{ .errorunion = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{} } } } } }, &.{.{ .inst = 0 }}, "std.mem.Allocator.create");
+    try Inst.apply(state, 2, .{ .block = .{ .ty = .{ .pointer = .{ .to = &.{ .scalar = .{} } } } } });
     try Inst.apply(state, 3, .{ .unwrap_errunion_payload = .{ .src = .{ .inst = 1 } } });
     try Inst.apply(state, 4, .{ .br = .{ .block = 2, .src = .{ .inst = 3 } } });
     try Inst.apply(state, 5, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
@@ -645,7 +645,7 @@ test "slice from ptr_add is treated as derived pointer on free" {
     try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 } } });
     try Inst.apply(state, 3, .{ .slice = .{
         .ptr = .{ .inst = 2 },
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
     } });
 
     try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 4, null, .{ .void = {} }, &.{
@@ -681,7 +681,7 @@ test "slice from zero ptr_add preserves base pointer provenance on free" {
 
     try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 }, .offset_is_zero = true } });
     try Inst.apply(state, 3, .{ .slice = .{
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
         .ptr = .{ .inst = 2 },
     } });
 
@@ -720,7 +720,7 @@ test "ptr_sub from derived pointer remains derived on free" {
     try Inst.apply(state, 3, .{ .ptr_sub = .{ .ptr = .{ .inst = 2 } } });
     try Inst.apply(state, 4, .{ .slice = .{
         .ptr = .{ .inst = 3 },
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
     } });
 
     try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 5, null, .{ .void = {} }, &.{
@@ -756,21 +756,21 @@ test "ptr_sub derived provenance survives pointer slot store load before free" {
 
     try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 } } });
     try Inst.apply(state, 3, .{ .ptr_sub = .{ .ptr = .{ .inst = 2 } } });
-    try Inst.apply(state, 4, .{ .alloc = .{ .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } } } });
+    try Inst.apply(state, 4, .{ .alloc = .{ .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } });
     try Inst.apply(state, 5, .{ .store = .{ .ptr = .{ .inst = 4 }, .src = .{ .inst = 3 } } });
     try Inst.apply(state, 6, .{ .bitcast = .{
         .src = .{ .inst = 4 },
-        .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } },
+        .ty = .{ .pointer = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } },
     } });
     try Inst.apply(state, 7, .{ .load = .{ .ptr = .{ .inst = 6 } } });
     try Inst.apply(state, 8, .{ .ptr_add = .{ .ptr = .{ .inst = 7 }, .offset_is_zero = true } });
     try Inst.apply(state, 9, .{ .bitcast = .{
         .src = .{ .inst = 8 },
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
     } });
     try Inst.apply(state, 10, .{ .slice = .{
         .ptr = .{ .inst = 9 },
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
     } });
 
     try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 11, null, .{ .void = {} }, &.{
@@ -807,7 +807,7 @@ test "bitcast preserves derived pointer provenance on free" {
     try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 } } });
     try Inst.apply(state, 3, .{ .bitcast = .{
         .src = .{ .inst = 2 },
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
     } });
 
     try std.testing.expectError(error.FreeFieldPointer, Inst.call(state, 4, null, .{ .void = {} }, &.{
@@ -841,12 +841,13 @@ test "bitcast to optional pointer initializes copied pointer target memory safet
 
     const struct_type = core.Type{ .@"struct" = &.{
         .type_id = 1234,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .fields = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
+        .multiplicity = .region,
         .is_packed = true,
     } };
     try Inst.apply(state, 1, .{ .bitcast = .{
         .src = .{ .inst = 0 },
-        .ty = .{ .optional = &.{ .pointer = &.{ .region = &struct_type } } },
+        .ty = .{ .optional = .{ .to = &.{ .pointer = .{ .to = &struct_type } } } },
     } });
 
     const opt_ref = refinements.at(results[1].refinement.?);
@@ -1042,7 +1043,7 @@ test "early return ignores allocation reachable through copied argument" {
 
     try Inst.apply(state, 0, .{ .arg = .{ .value = arg_struct_gid, .name_id = 1 } });
     try Inst.apply(state, 0, .{ .cond_br = .{ .branch = true, .condition_idx = null } });
-    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 }
 
 test "divergent allocated pointer branch result does not orphan alternate allocation" {
@@ -1510,7 +1511,7 @@ test "block initializes memory_safety for pointer types" {
     var results = [_]Inst{.{}} ** 1;
     const state = testState(&ctx, &results, &refinements);
 
-    const nested_type = tag.Type{ .pointer = &.{ .region = &.{ .scalar = {} } } };
+    const nested_type = tag.Type{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } };
     try Inst.apply(state, 0, .{ .block = .{ .ty = nested_type } });
 
     const ptr_gid = results[0].refinement.?;
@@ -1649,7 +1650,7 @@ test "boolean ops set result memory_safety" {
 
     var results = [_]Inst{.{}} ** 3;
     const state = testState(&ctx, &results, &refinements);
-    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
     try Inst.apply(state, 0, .{ .bool_or = .{ .lhs = dummy_src, .rhs = dummy_src } });
     try Inst.apply(state, 1, .{ .bool_and = .{ .lhs = dummy_src, .rhs = dummy_src } });
@@ -1665,7 +1666,7 @@ test "scalar arithmetic and cast ops set result memory_safety" {
 
     var results = [_]Inst{.{}} ** 9;
     const state = testState(&ctx, &results, &refinements);
-    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
     try Inst.apply(state, 0, .{ .shr = .{ .lhs = dummy_src, .rhs = dummy_src } });
     try Inst.apply(state, 1, .{ .shl = .{ .lhs = dummy_src, .rhs = dummy_src } });
@@ -1689,7 +1690,7 @@ test "select and reduce set result memory_safety" {
 
     var results = [_]Inst{.{}} ** 2;
     const state = testState(&ctx, &results, &refinements);
-    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
     try Inst.apply(state, 0, .{ .select = .{ .mask = dummy_src, .a = dummy_src, .b = dummy_src } });
     try Inst.apply(state, 1, .{ .reduce = .{ .src = .{ .inst = 0 } } });
@@ -1720,7 +1721,7 @@ test "store interned pointer initializes destination pointer target memory_safet
     const state = testState(&ctx, &results, &refinements);
     try Inst.apply(state, 1, .{ .store = .{
         .ptr = .{ .inst = 0 },
-        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } } } },
+        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } },
     } });
 
     try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(pointer_slot_gid).pointer.analyte.memory_safety.?));
@@ -1749,7 +1750,7 @@ test "store interned struct initializes destination fields memory_safety" {
     const state = testState(&ctx, &results, &refinements);
     try Inst.apply(state, 1, .{ .store = .{
         .ptr = .{ .inst = 0 },
-        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = {} }} } } } },
+        .src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
 
     try std.testing.expectEqual(.interned, std.meta.activeTag(refinements.at(struct_gid).@"struct".analyte.memory_safety.?));
@@ -1860,10 +1861,10 @@ test "aggregate_init sets struct container memory_safety" {
 
     var results = [_]Inst{.{}} ** 2;
     const state = testState(&ctx, &results, &refinements);
-    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
     try Inst.apply(state, 0, .{ .aggregate_init = .{
-        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = {} }} } },
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .scalar = .{} }} } },
         .elements = &.{dummy_src},
     } });
 

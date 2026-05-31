@@ -55,10 +55,37 @@ pub const Meta = struct {
 /// Name identifier for types and variables.
 pub const Name = u32;
 
+pub const Multiplicity = enum {
+    // This GID strictly represents one item.
+    single,
+    // This GID strictly represents a collection of items.
+    region,
+};
+
+pub const TypePayload = struct {
+    multiplicity: Multiplicity = .single,
+};
+
+pub const PointerType = struct {
+    to: *const Type,
+    multiplicity: Multiplicity = .single,
+};
+
+pub const IndirectedType = struct {
+    to: *const Type,
+    multiplicity: Multiplicity = .single,
+};
+
+pub const AllocatorType = struct {
+    type_id: Name,
+    multiplicity: Multiplicity = .single,
+};
+
 /// Struct type descriptor with type_id for field name lookup.
 pub const StructType = struct {
     type_id: u32, // InternPool index for getFieldId lookup
     fields: []const Type,
+    multiplicity: Multiplicity = .single,
     is_packed: bool = false, // true for packed structs (read-modify-write initialization)
 };
 
@@ -66,23 +93,23 @@ pub const StructType = struct {
 pub const UnionType = struct {
     type_id: u32, // InternPool index for getFieldId lookup
     variants: []const Type,
+    multiplicity: Multiplicity = .single,
 };
 
 /// Type descriptor for AIR instructions. Propagates type information from
 /// codegen into instruction parameters for analysis modules.
 pub const Type = union(enum) {
-    scalar: void, // simple value type (int, float, bool, etc.)
-    pointer: *const Type, // pointer to inner type
-    optional: *const Type, // optional wrapping inner type
-    errorunion: *const Type, // error union with payload type
-    null: *const Type, // signals setting optional to null; inner is the optional's payload type
-    undefined: *const Type, // signals undefined value; inner is the actual type
-    region: *const Type, // slice/array region; inner is element type
+    scalar: TypePayload, // simple value type (int, float, bool, etc.)
+    pointer: PointerType, // pointer to inner type
+    optional: IndirectedType, // optional wrapping inner type
+    errorunion: IndirectedType, // error union with payload type
+    null: IndirectedType, // signals setting optional to null; inner is the optional's payload type
+    undefined: IndirectedType, // signals undefined value; inner is the actual type
     @"struct": *const StructType, // struct with type_id and field types
     @"union": *const UnionType, // union with type_id and variant types
-    allocator: Name, // pseudo-allocator, should always be pointed to, the allocator
+    allocator: AllocatorType, // pseudo-allocator, should always be pointed to, the allocator
     // pointer represents the pointer to metadata + pointer to vtable.
-    fnptr: void, // function pointer (choices stored in Src.fnptr)
+    fnptr: TypePayload, // function pointer (choices stored in Src.fnptr)
     recursive: Name, // self-referential type placeholder (Name unused, set to 0)
     void: void, // void type
     unimplemented: void, // placeholder for unhandled types (will crash if accessed)

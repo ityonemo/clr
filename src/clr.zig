@@ -82,7 +82,7 @@ pub const FuncMir = struct {
     entrypoint: bool = false,
     name_mappings: []const NameMap,
     field_mappings: []const FieldMap,
-    /// Return type string for entrypoints (e.g., ".{ .id = null, .ty = .{ .scalar = {} } }")
+    /// Return type string for entrypoints (e.g., ".{ .id = null, .ty = .{ .scalar = .{} } }")
     /// Used to initialize the return slot with proper type structure
     return_type: ?[]const u8 = null,
 };
@@ -478,13 +478,13 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
     // Wrap in .undefined if the global is undefined, or .null if it's a null optional
     // For .null, we need the INNER type (not the optional wrapper) since .null implies optional
     const final_type_str = if (is_undefined)
-        clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .undefined = &{s} }}", .{type_str}, null)
+        clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .undefined = .{{ .to = &{s} }} }}", .{type_str}, null)
     else if (is_null) blk: {
         // Extract the child type from the optional
         const type_key = ip.indexToKey(nav_type);
         const inner_type = if (type_key == .opt_type) type_key.opt_type else nav_type;
         const inner_type_str = clr_codegen.typeToStringForGlobal(arena.allocator(), ip, inner_type);
-        break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .null = &{s} }}", .{inner_type_str}, null);
+        break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .null = .{{ .to = &{s} }} }}", .{inner_type_str}, null);
     } else
         clr_allocator.allocator().dupe(u8, type_str) catch return;
 

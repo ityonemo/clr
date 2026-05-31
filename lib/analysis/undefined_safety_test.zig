@@ -49,7 +49,7 @@ test "alloc creates pointer with undefined pointee" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc creates a pointer to a scalar
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 
     // Check pointer was created
     const ptr_gid = results[0].refinement.?;
@@ -86,7 +86,7 @@ test "hashmap_header marks result defined" {
 
     try Inst.apply(state, 1, .{ .hashmap_header = .{
         .self = .{ .inst = 0 },
-        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = {} }} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
 
     const result_gid = results[1].refinement.?;
@@ -105,9 +105,9 @@ test "store with undefined type wrapper keeps state undefined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store with .undefined wrapper
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    const undef_type: tag.Type = .{ .undefined = &scalar_type };
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    const undef_type: tag.Type = .{ .undefined = .{ .to = &scalar_type } };
     try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = undef_type } } } });
 
     // Check the pointee's undefined state
@@ -125,8 +125,8 @@ test "store with defined value sets state to defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc at instruction 1, then store a defined value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Check the pointee's undefined state
     const pointee_gid = refinements.at(results[1].refinement.?).pointer.to;
@@ -143,7 +143,7 @@ test "load from undefined value returns error" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc creates undefined pointee
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 
     // Load from undefined should error
     const result = Inst.apply(state, 1, .{ .load = .{ .ptr = .{ .inst = 0 } } });
@@ -159,8 +159,8 @@ test "load from defined value succeeds" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc and store a defined value
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Load from defined should succeed
     try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
@@ -240,7 +240,7 @@ test "set_union_tag does not set undefined_safety on union container" {
     } });
     results[0].refinement = ptr_gid;
 
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
 
     const u = refinements.at(union_gid).@"union";
     try std.testing.expect(u.analyte.undefined_safety == null);
@@ -263,7 +263,7 @@ test "set_union_tag marks active field undefined" {
     } });
     results[0].refinement = ptr_gid;
 
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
 
     const field_gid = refinements.at(union_gid).@"union".fields[1].?;
     const us = refinements.at(field_gid).scalar.analyte.undefined_safety.?;
@@ -279,11 +279,11 @@ test "store with .null to optional sets inner to defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc at instruction 0 with optional type, then store null
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .optional = &scalar_type } } });
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .optional = .{ .to = &scalar_type } } } });
 
     // Store null to the optional - inner should be defined (null is a valid defined value)
-    const null_type: tag.Type = .{ .null = &scalar_type };
+    const null_type: tag.Type = .{ .null = .{ .to = &scalar_type } };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     // Check the pointee is an optional
@@ -743,7 +743,7 @@ test "aggregate_init incorporates undefined state from source elements" {
     // Create struct with two scalar fields using aggregate_init
     const struct_type = tag.Type{ .@"struct" = &.{
         .type_id = 100,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .fields = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
     } };
     const elements = &[_]tag.Src{ .{ .inst = 0 }, .{ .inst = 1 } };
     try Inst.apply(state, 2, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });
@@ -907,14 +907,14 @@ test "field value read from whole undefined union reports use before assign afte
 
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .@"union" = &.{
         .type_id = 100,
-        .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
     } } } });
     try Inst.apply(state, 1, .{ .store = .{
         .ptr = .{ .inst = 0 },
-        .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = &.{ .@"union" = &.{
+        .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = .{ .to = &.{ .@"union" = &.{
             .type_id = 100,
-            .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
-        } } } } },
+            .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
+        } } } } } },
     } });
     try Inst.apply(state, 2, .{ .load = .{ .ptr = .{ .inst = 0 } } });
     try Inst.apply(state, 3, .{ .get_union_tag = .{ .operand = 2 } });
@@ -922,12 +922,12 @@ test "field value read from whole undefined union reports use before assign afte
     try Inst.apply(state, 3, .{ .cond_br = .{
         .branch = true,
         .condition_idx = 3,
-        .union_tag = .{ .union_inst = 2, .field_index = 0, .field_type = .{ .scalar = {} } },
+        .union_tag = .{ .union_inst = 2, .field_index = 0, .field_type = .{ .scalar = .{} } },
     } });
     const result = Inst.apply(state, 4, .{ .struct_field_val = .{
         .operand = 2,
         .field_index = 0,
-        .ty = .{ .scalar = {} },
+        .ty = .{ .scalar = .{} },
     } });
     try std.testing.expectError(error.UseBeforeAssign, result);
 }
@@ -945,7 +945,7 @@ test "load with is_packed_rmw skips undefined check and marks result defined" {
     const state = testState(&ctx, &results, &refinements);
 
     // Alloc creates pointer to undefined scalar (simulating packed struct backing byte)
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 
     // Verify pointee is undefined
     const ptr_gid = results[0].refinement.?;
@@ -1109,7 +1109,7 @@ test "slice from pointer shares region and preserves defined state" {
 
     // Create a slice from the pointer - should share the same region
     try Inst.apply(state, 1, .{ .slice = .{
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
         .ptr = .{ .inst = 0 },
     } });
 
@@ -1162,13 +1162,13 @@ test "slice from ptr_add result shares region and preserves defined state" {
     try Inst.apply(state, 1, .{ .slice_ptr = .{ .slice = 0 } });
 
     // inst 2: alloc - create stack storage for pointer (ptr-to-ptr-to-region)
-    try Inst.apply(state, 2, .{ .alloc = .{ .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } } } });
+    try Inst.apply(state, 2, .{ .alloc = .{ .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } });
 
     // inst 3: store - store the slice_ptr result into alloc
     try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 2 }, .src = .{ .inst = 1 } } });
 
     // inst 4: bitcast - cast the alloc pointer type
-    try Inst.apply(state, 4, .{ .bitcast = .{ .src = .{ .inst = 2 }, .ty = .{ .pointer = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } } } });
+    try Inst.apply(state, 4, .{ .bitcast = .{ .src = .{ .inst = 2 }, .ty = .{ .pointer = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } } } });
 
     // inst 5: load - load the pointer through the bitcast
     try Inst.apply(state, 5, .{ .load = .{ .ptr = .{ .inst = 4 } } });
@@ -1185,7 +1185,7 @@ test "slice from ptr_add result shares region and preserves defined state" {
 
     // inst 7: slice - create slice from ptr_add result
     try Inst.apply(state, 7, .{ .slice = .{
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
         .ptr = .{ .inst = 6 },
     } });
 
@@ -1231,7 +1231,7 @@ test "struct_field_val with region field succeeds" {
     const state = testState(&ctx, &results, &refinements);
 
     // struct_field_val on the region field should succeed (not panic)
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 1, .ty = .{ .region = &.{ .scalar = {} } } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 1, .ty = .{ .scalar = .{ .multiplicity = .region } } } });
 
     // Result should have a refinement
     try std.testing.expect(results[1].refinement != null);
@@ -1269,7 +1269,7 @@ test "slice sets undefined_safety on result pointer" {
 
     // Create a slice from the pointer
     try Inst.apply(state, 1, .{ .slice = .{
-        .ty = .{ .pointer = &.{ .region = &.{ .scalar = {} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
         .ptr = .{ .inst = 0 },
     } });
 

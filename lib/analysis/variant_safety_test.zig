@@ -69,7 +69,7 @@ test "union_init sets only initialized variant active" {
 
     const union_type = tag.Type{ .@"union" = &.{
         .type_id = 200,
-        .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
     } };
     try Inst.apply(state, 1, .{ .union_init = .{
         .field_index = 1,
@@ -94,7 +94,7 @@ test "store of interned union value sets active variant" {
 
     const union_type = tag.Type{ .@"union" = &.{
         .type_id = 200,
-        .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
     } };
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = union_type } });
     try Inst.apply(state, 1, .{ .store = .{
@@ -135,7 +135,7 @@ test "set_union_tag sets active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
 
     // The union's active_metas should show field 1 active, field 0 inactive
     const union_ref = refinements.at(union_gid);
@@ -171,7 +171,7 @@ test "struct_field_ptr allows access to active variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Accessing the active field should succeed
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = .{} } } });
 }
 
 test "struct_field_ptr errors on inactive variant" {
@@ -202,8 +202,8 @@ test "struct_field_ptr errors on inactive variant" {
 
     // Accessing inactive field (field 1) should error
     // ty is a pointer type because struct_field_ptr returns pointer to field
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    const result = Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .pointer = &scalar_type } } });
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    const result = Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .pointer = .{ .to = &scalar_type } } } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -235,7 +235,7 @@ test "struct_field_val errors on inactive variant" {
     const state = testState(&ctx, &results, &refinements);
 
     // Accessing inactive field 0 via struct_field_val should error
-    const result = Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } } });
+    const result = Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = .{} } } });
     try std.testing.expectError(error.InactiveVariantAccess, result);
 }
 
@@ -269,7 +269,7 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
     const state = testState(&ctx, &results, &refinements);
 
     // Access any field when ambiguous - should error
-    const result = Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} } } });
+    const result = Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = .{} } } });
     try std.testing.expectError(error.AmbiguousVariantAccess, result);
 }
 
@@ -315,7 +315,7 @@ test "switch_br sets active variant" {
     try Inst.apply(state, 1, .{ .switch_br = .{
         .case_index = 1,
         .num_cases = 2,
-        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = {} } },
+        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = .{} } },
     } });
 
     // Check variant_safety was updated - only field 1 should be active
@@ -348,7 +348,7 @@ test "switch_br creates initialized active field when narrowing missing variant"
     try Inst.apply(state, 1, .{ .switch_br = .{
         .case_index = 1,
         .num_cases = 2,
-        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = {} } },
+        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = .{} } },
     } });
 
     const field_gid = refinements.at(union_gid).@"union".fields[1].?;
@@ -378,7 +378,7 @@ test "cond_br creates initialized active field when narrowing missing variant" {
     try Inst.apply(state, 1, .{ .cond_br = .{
         .branch = true,
         .condition_idx = null,
-        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = {} } },
+        .union_tag = .{ .union_inst = 0, .field_index = 1, .field_type = .{ .scalar = .{} } },
     } });
 
     const field_gid = refinements.at(union_gid).@"union".fields[1].?;
@@ -427,7 +427,7 @@ test "aggregate_init incorporates variant_safety state from source elements" {
     // Create struct with union field using aggregate_init
     const struct_type = tag.Type{ .@"struct" = &.{
         .type_id = 100,
-        .fields = &.{.{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } }},
+        .fields = &.{.{ .@"union" = &.{ .type_id = 200, .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } } } }},
     } };
     const elements = &[_]tag.Src{.{ .inst = 0 }};
     try Inst.apply(state, 1, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });

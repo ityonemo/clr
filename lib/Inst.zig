@@ -253,7 +253,7 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
     }
 
     // Mark as defined via analysis dispatch - use store tag
-    const store_payload = tag.Store{ .ptr = ptr, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .fnptr = {} } } } };
+    const store_payload = tag.Store{ .ptr = ptr, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .fnptr = .{} } } } };
     try tag.splat(.store, state, index, store_payload);
 
     // The store instruction itself gets void refinement
@@ -1233,7 +1233,7 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
 
 fn loopSwitchAllocCase0(state: State) anyerror!void {
     try Inst.apply(state, 0, .{ .loop_switch_br = .{ .case_index = 0, .num_cases = 1, .loop_switch_inst = 2 } });
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 }
 
 test "loop_switch imports branch-only pointer result target instead of preserving colliding gid" {
@@ -1275,7 +1275,7 @@ test "alloc creates pointer to typed pointee" {
 
     const state = testState(&ctx, results, &refinements);
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 
     // dbg_stmt sets instruction to void (no analysis tracking)
     try std.testing.expect(results[0].refinement != null);
@@ -1306,8 +1306,8 @@ test "load from undefined instruction reports use before assign" {
     const state = testState(&ctx, results, &refinements);
 
     // Set up: alloc creates pointer to future, store with .undefined transforms to scalar+undefined
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = &.{ .scalar = {} } } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .undefined = .{ .to = &.{ .scalar = .{} } } } } } } });
 
     // Load from undefined instruction should return error
     try std.testing.expectError(error.UseBeforeAssign, Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } }));
@@ -1330,8 +1330,8 @@ test "load from defined instruction does not report error" {
     const state = testState(&ctx, results, &refinements);
 
     // Set up: alloc then store a real value
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Load from defined instruction should NOT return error
     try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
@@ -1355,8 +1355,8 @@ test "all instructions get valid refinements after operations" {
 
     // Apply various operations that should all set refinements
     try Inst.apply(state, 0, .{ .dbg_stmt = .{ .line = 0, .column = 0 } });
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
     try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
     try Inst.apply(state, 4, .{ .block = .{ .ty = .{ .void = {} } } });
 
@@ -1376,7 +1376,7 @@ test "ret_safe writes return value to return slot" {
     // Global refinements table - return slot pre-allocated with typed slot
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
-    const return_type: tag.Type = .{ .pointer = &.{ .scalar = {} } };
+    const return_type: tag.Type = .{ .pointer = .{ .to = &.{ .scalar = .{} } } };
     const return_ref = try tag.typeToRefinement(return_type, &refinements);
     const return_gid = try refinements.appendEntity(return_ref);
 
@@ -1395,8 +1395,8 @@ test "ret_safe writes return value to return slot" {
     };
 
     // Allocate and store a value
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Return the value from instruction 0
     try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
@@ -1450,7 +1450,7 @@ test "ret_safe at entrypoint succeeds" {
     defer refinements.deinit();
 
     // Create typed return slot (like entrypoint would)
-    const return_type: tag.Type = .{ .pointer = &.{ .scalar = {} } };
+    const return_type: tag.Type = .{ .pointer = .{ .to = &.{ .scalar = .{} } } };
     const return_ref = try tag.typeToRefinement(return_type, &refinements);
     const return_gid = try refinements.appendEntity(return_ref);
 
@@ -1465,8 +1465,8 @@ test "ret_safe at entrypoint succeeds" {
     };
 
     // Allocate a value
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
-    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Return - should just succeed without error
     try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
@@ -1488,16 +1488,16 @@ test "allocator remap builds optional around copied old slice" {
 
     const state = testState(&ctx, results, &refinements);
 
-    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .region = &.{ .scalar = {} } } } });
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{ .multiplicity = .region } } } });
 
     const old_slice_gid = results[0].refinement.?;
     const old_region_gid = refinements.at(old_slice_gid).pointer.to;
 
-    const return_type: tag.Type = .{ .optional = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+    const return_type: tag.Type = .{ .optional = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } };
     const args = [_]tag.Src{
-        .{ .interned = .{ .ip_idx = 0, .ty = .{ .allocator = 0 } } },
+        .{ .interned = .{ .ip_idx = 0, .ty = .{ .allocator = .{ .type_id = 0 } } } },
         .{ .inst = 0 },
-        .{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = {} } } },
+        .{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = .{} } } },
     };
     try Inst.call(state, 1, null, return_type, &args, "std.mem.Allocator.remap");
 

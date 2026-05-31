@@ -1107,20 +1107,20 @@ pub const UndefinedSafety = union(enum) {
                 switch (refinements.at(idx).*) {
                     .pointer => |*p| {
                         p.analyte.undefined_safety = .{ .defined = {} };
-                        applyInternedType(refinements, p.to, inner.*, ctx);
+                        applyInternedType(refinements, p.to, inner.to.*, ctx);
                     },
                     else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .optional => |inner| {
                 switch (refinements.at(idx).*) {
-                    .optional => |o| applyInternedType(refinements, o.to, inner.*, ctx),
+                    .optional => |o| applyInternedType(refinements, o.to, inner.to.*, ctx),
                     else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
             .errorunion => |inner| {
                 switch (refinements.at(idx).*) {
-                    .errorunion => |e| applyInternedType(refinements, e.to, inner.*, ctx),
+                    .errorunion => |e| applyInternedType(refinements, e.to, inner.to.*, ctx),
                     else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
@@ -1157,7 +1157,6 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .void => {},
-            .region => |inner| applyInternedType(refinements, idx, inner.*, ctx),
             .recursive => {
                 // Recursive type reference - the actual structure is materialized elsewhere
                 // Just mark as defined like a scalar

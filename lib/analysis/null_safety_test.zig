@@ -128,7 +128,7 @@ test "cond_br narrows struct_field_val source field" {
     try Inst.apply(state, 1, .{ .struct_field_val = .{
         .operand = 0,
         .field_index = 0,
-        .ty = .{ .optional = &.{ .scalar = {} } },
+        .ty = .{ .optional = .{ .to = &.{ .scalar = .{} } } },
     } });
     try Inst.apply(state, 2, .{ .is_null = .{ .src = .{ .inst = 1 } } });
     try Inst.apply(state, 3, .{ .cond_br = .{ .condition_idx = 2, .branch = false } });
@@ -161,7 +161,7 @@ test "cond_br narrows prior struct store copy of checked field" {
     results[0].refinement = struct_gid;
     const state = testState(&ctx, &results, &refinements);
 
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = &.{ .scalar = {} } }} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = .{ .to = &.{ .scalar = .{} } } }} } } } });
     try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
     const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.to;
     const copied_field_gid = refinements.at(copied_struct_gid).@"struct".fields[0];
@@ -169,7 +169,7 @@ test "cond_br narrows prior struct store copy of checked field" {
     try Inst.apply(state, 3, .{ .struct_field_val = .{
         .operand = 0,
         .field_index = 0,
-        .ty = .{ .optional = &.{ .scalar = {} } },
+        .ty = .{ .optional = .{ .to = &.{ .scalar = .{} } } },
     } });
     try Inst.apply(state, 4, .{ .is_null = .{ .src = .{ .inst = 3 } } });
     try Inst.apply(state, 5, .{ .cond_br = .{ .condition_idx = 4, .branch = false } });
@@ -199,7 +199,7 @@ test "cond_br propagates already known struct field state to prior copy" {
     results[0].refinement = struct_gid;
     const state = testState(&ctx, &results, &refinements);
 
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = &.{ .scalar = {} } }} } } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = .{ .to = &.{ .scalar = .{} } } }} } } } });
     try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
     const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.to;
     const copied_field_gid = refinements.at(copied_struct_gid).@"struct".fields[0];
@@ -208,7 +208,7 @@ test "cond_br propagates already known struct field state to prior copy" {
     try Inst.apply(state, 3, .{ .struct_field_val = .{
         .operand = 0,
         .field_index = 0,
-        .ty = .{ .optional = &.{ .scalar = {} } },
+        .ty = .{ .optional = .{ .to = &.{ .scalar = .{} } } },
     } });
     try Inst.apply(state, 4, .{ .is_null = .{ .src = .{ .inst = 3 } } });
     try Inst.apply(state, 5, .{ .cond_br = .{ .condition_idx = 4, .branch = false } });
@@ -242,7 +242,7 @@ test "hashmap_header marks metadata non_null" {
 
     try Inst.apply(state, 1, .{ .hashmap_header = .{
         .self = .{ .inst = 0 },
-        .ty = .{ .pointer = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = {} }} } } },
+        .ty = .{ .pointer = .{ .to = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
 
     const ns = refinements.at(metadata_gid).optional.analyte.null_safety.?;
@@ -322,8 +322,8 @@ test "store to optional with null sets null state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Store null to the optional
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    const null_type: tag.Type = .{ .null = &scalar_type };
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    const null_type: tag.Type = .{ .null = .{ .to = &scalar_type } };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     const ns = refinements.at(opt_gid).optional.analyte.null_safety.?;
@@ -360,11 +360,11 @@ test "store interned struct with null optional field sets field null" {
 
     const struct_ty: tag.Type = .{ .@"struct" = &.{
         .type_id = 1,
-        .fields = &.{.{ .null = &.{ .scalar = {} } }},
+        .fields = &.{.{ .null = .{ .to = &.{ .scalar = .{} } } }},
     } };
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .@"struct" = &.{
         .type_id = 1,
-        .fields = &.{.{ .optional = &.{ .scalar = {} } }},
+        .fields = &.{.{ .optional = .{ .to = &.{ .scalar = .{} } } }},
     } } } });
     try Inst.apply(state, 1, .{ .store = .{
         .ptr = .{ .inst = 0 },
@@ -509,7 +509,7 @@ test "aggregate_init incorporates null_safety from source elements" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create struct with two optional fields using aggregate_init
-    const opt_type: tag.Type = .{ .optional = &.{ .scalar = {} } };
+    const opt_type: tag.Type = .{ .optional = .{ .to = &.{ .scalar = .{} } } };
     const struct_type = tag.Type{ .@"struct" = &.{
         .type_id = 100,
         .fields = &.{ opt_type, opt_type },

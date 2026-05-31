@@ -62,8 +62,8 @@ test "call intercepts posix.open and sets fd_safety.open state" {
     const state = testState(&ctx, &results, &refinements);
 
     // Call posix.open - Inst.call creates the return structure
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    const return_type: tag.Type = .{ .errorunion = &scalar_type };
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    const return_type: tag.Type = .{ .errorunion = .{ .to = &scalar_type } };
     try Inst.call(state, 0, null, return_type, &.{}, "std.posix.open");
 
     // Check the scalar (fd_t) has fd_safety.open state
@@ -110,8 +110,8 @@ test "call intercepts posix.socket and sets socket fd_type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Call posix.socket - Inst.call creates the return structure
-    const scalar_type: tag.Type = .{ .scalar = {} };
-    const return_type: tag.Type = .{ .errorunion = &scalar_type };
+    const scalar_type: tag.Type = .{ .scalar = .{} };
+    const return_type: tag.Type = .{ .errorunion = .{ .to = &scalar_type } };
     try Inst.call(state, 0, null, return_type, &.{}, "std.posix.socket");
 
     // Check the fd has socket type
@@ -143,7 +143,7 @@ test "aggregate_init incorporates fd_safety state from source elements" {
     // Create struct with the fd and other scalar
     const struct_type = tag.Type{ .@"struct" = &.{
         .type_id = 100,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .fields = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
     } };
     const elements = &[_]tag.Src{ .{ .inst = 0 }, .{ .inst = 1 } };
     try Inst.apply(state, 2, .{ .aggregate_init = .{ .ty = struct_type, .elements = elements } });

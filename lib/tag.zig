@@ -84,82 +84,93 @@ pub const InitState = enum { defined, undefined, runtime };
 /// be lost. In that one case, we still create structure here and then broadcast a dedicated
 /// `splatInitUndefined` so analyses can mark the fresh refinement appropriately.
 pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
-    return switch (ty) {
+    var result: Refinement = switch (ty) {
         .scalar => .{ .scalar = .{} },
         .void => .void,
-        .pointer => |child| {
-            const child_ref = try typeToRefinement(child.*, refinements);
+        .pointer => |child| blk: {
+            const child_ref = try typeToRefinement(child.to.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .pointer = .{ .to = child_idx } };
+            break :blk .{ .pointer = .{ .to = child_idx } };
         },
-        .optional => |child| {
-            const child_ref = try typeToRefinement(child.*, refinements);
+        .optional => |child| blk: {
+            const child_ref = try typeToRefinement(child.to.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .optional = .{ .to = child_idx } };
+            break :blk .{ .optional = .{ .to = child_idx } };
         },
-        .errorunion => |child| {
-            const child_ref = try typeToRefinement(child.*, refinements);
+        .errorunion => |child| blk: {
+            const child_ref = try typeToRefinement(child.to.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .errorunion = .{ .to = child_idx } };
+            break :blk .{ .errorunion = .{ .to = child_idx } };
         },
-        .null => |child| {
+        .null => |child| blk: {
             // .null always wraps the INNER type of an optional (e.g., *u8 for ?*u8)
             // We create an optional refinement around the inner type
             // Codegen ensures .null never wraps .optional directly
-            const child_ref = try typeToRefinement(child.*, refinements);
+            const child_ref = try typeToRefinement(child.to.*, refinements);
             const child_idx = try refinements.appendEntity(child_ref);
-            return .{ .optional = .{ .to = child_idx } };
+            break :blk .{ .optional = .{ .to = child_idx } };
         },
-        .undefined => |child| {
+        .undefined => |child| blk: {
             // .undefined wraps a type - recurse into the inner structural type, then
             // broadcast the dedicated undefined-init exception described above.
             // This handles per-field undefined for struct fields like .{ .x = 42, .y = undefined }.
-            var inner_ref = try typeToRefinement(child.*, refinements);
+            var inner_ref = try typeToRefinement(child.to.*, refinements);
             const empty_meta = Meta{ .file = "", .line = 0, .function = "" };
             splatInitUndefined(refinements, &inner_ref, empty_meta);
-            return inner_ref;
+            break :blk inner_ref;
         },
-        .allocator => |alloc_type_id| {
+        .allocator => |alloc_type| blk: {
             // Allocator refinement - type_id uniquely identifies allocator type
-            return .{ .allocator = .{ .type_id = alloc_type_id } };
+            break :blk .{ .allocator = .{ .type_id = alloc_type.type_id } };
         },
-        .region => |child| {
-            // Region (array/slice) - all elements share this single refinement.
-            // tag.Type.region remains a type DSL construct; runtime region-ness
-            // is represented by refinement multiplicity.
-            var child_ref = try typeToRefinement(child.*, refinements);
-            child_ref.setMultiplicity(.region);
-            return child_ref;
-        },
-        .@"struct" => |struct_type| {
+        .@"struct" => |struct_type| blk: {
             const allocator = refinements.list.allocator;
             const fields = allocator.alloc(Gid, struct_type.fields.len) catch @panic("out of memory");
             for (struct_type.fields, 0..) |field_type, i| {
                 fields[i] = try refinements.appendEntity(try typeToRefinement(field_type, refinements));
             }
-            return .{ .@"struct" = .{ .fields = fields, .type_id = struct_type.type_id } };
+            break :blk .{ .@"struct" = .{ .fields = fields, .type_id = struct_type.type_id } };
         },
-        .@"union" => |union_type| {
+        .@"union" => |union_type| blk: {
             const allocator = refinements.list.allocator;
             // Union variants start as inactive (null)
             const fields = allocator.alloc(?Gid, union_type.variants.len) catch @panic("out of memory");
             for (fields) |*f| {
                 f.* = null;
             }
-            return .{ .@"union" = .{ .fields = fields, .type_id = union_type.type_id } };
+            break :blk .{ .@"union" = .{ .fields = fields, .type_id = union_type.type_id } };
         },
-        .fnptr => {
+        .fnptr => blk: {
             // Function pointer type marker - choices come from Src.fnptr at store time
-            return .{ .fnptr = .{ .choices = &.{} } };
+            break :blk .{ .fnptr = .{ .choices = &.{} } };
         },
-        .recursive => {
+        .recursive => blk: {
             // Recursive type reference - return a placeholder .recursive refinement.
             // The actual pointer tracking happens through runtime assignments
             // (e.g., node.next = &other_node), not through type descriptions.
             // Traversal functions skip .recursive to avoid infinite loops.
-            return .{ .recursive = .{ .to = 0 } };
+            break :blk .{ .recursive = .{ .to = 0 } };
         },
         .unimplemented => .unimplemented,
+    };
+    result.setMultiplicity(typeMultiplicity(ty));
+    return result;
+}
+
+fn typeMultiplicity(ty: Type) core.Multiplicity {
+    return switch (ty) {
+        .scalar => |payload| payload.multiplicity,
+        .pointer => |payload| payload.multiplicity,
+        .optional => |payload| payload.multiplicity,
+        .errorunion => |payload| payload.multiplicity,
+        .null => |payload| payload.multiplicity,
+        .undefined => |payload| payload.multiplicity,
+        .allocator => |payload| payload.multiplicity,
+        .fnptr => |payload| payload.multiplicity,
+        .recursive => .single,
+        .@"struct" => |payload| payload.multiplicity,
+        .@"union" => |payload| payload.multiplicity,
+        .void, .unimplemented => .single,
     };
 }
 
@@ -291,7 +302,7 @@ pub const Bitcast = struct {
 
                 // The only structural exception is wrapping a pointer in an optional-pointer.
                 // Otherwise bitcast is just a valueCopy that preserves the existing pointee shape.
-                if (self.ty == .optional and state.refinements.at(src_gid).* == .pointer and self.ty.optional.* == .pointer) {
+                if (self.ty == .optional and state.refinements.at(src_gid).* == .pointer and self.ty.optional.to.* == .pointer) {
                     const copied_ptr_gid = try state.refinements.valueCopy(src_gid);
                     const opt_gid = try state.refinements.appendEntity(.{
                         .optional = .{ .to = copied_ptr_gid },
@@ -708,7 +719,7 @@ pub const StructFieldPtr = struct {
                     // Field is inactive - create entity for it and initialize
                     // For tagged unions, the analysis module (variant_safety) will report the error
                     // For untagged unions, this creates the entity on first access
-                    const new_field_ref = try typeToRefinement(self.ty.pointer.*, state.refinements);
+                    const new_field_ref = try typeToRefinement(self.ty.pointer.to.*, state.refinements);
                     const new_idx = try state.refinements.appendEntity(new_field_ref);
                     splatInit(state.refinements, new_idx, state.ctx, .runtime);
                     // Persist in union's fields array (for untagged unions, this is correct;
@@ -2092,18 +2103,21 @@ pub const ArrayElemVal = struct {
                 if (state.refinements.getGlobal(interned.ip_idx)) |gid| {
                     break :blk gid;
                 }
-                // Not tracked - comptime constant array, create element from type
-                // The type is .region containing the element type
+                // Not tracked - comptime constant array, create element from the
+                // region-multiplicity value or pointer pointee type.
                 const element_type = switch (interned.ty) {
-                    .region => |elem| elem.*,
-                    .pointer => |inner| switch (inner.*) {
-                        .region => |elem| elem.*,
-                        else => @panic("ArrayElemVal: interned pointer must point to region"),
+                    .pointer => |inner| blk_elem: {
+                        if (typeMultiplicity(inner.to.*) != .region) @panic("ArrayElemVal: interned pointer must point to region");
+                        break :blk_elem inner.to.*;
                     },
-                    else => @panic("ArrayElemVal: interned type must be region or pointer to region"),
+                    else => blk_elem: {
+                        if (typeMultiplicity(interned.ty) != .region) @panic("ArrayElemVal: interned type must be region or pointer to region");
+                        break :blk_elem interned.ty;
+                    },
                 };
                 const element_ref = try typeToRefinement(element_type, state.refinements);
                 const element_gid = try state.refinements.appendEntity(element_ref);
+                state.refinements.at(element_gid).setMultiplicity(.single);
                 // Comptime values have interned memory_safety
                 splatInitInterned(state.refinements, element_gid);
                 state.results[index].refinement = element_gid;
@@ -2588,7 +2602,7 @@ pub const SliceFieldPtr = struct {
         // For ptr_slice_ptr_ptr: slice is a pointer (pointer → region) AND result is pointer to pointer
         // Create a pointer whose .to is the slice GID, so stores update the original slice
         // But for ptr_slice_len_ptr, result is pointer to SCALAR, so we need type-based creation
-        const result_is_ptr_to_ptr = self.ty == .pointer and self.ty.pointer.* == .pointer;
+        const result_is_ptr_to_ptr = self.ty == .pointer and self.ty.pointer.to.* == .pointer;
         if (slice_ref.* == .pointer and result_is_ptr_to_ptr) {
             // Create pointer pointing to the existing slice entity
             // DON'T call splatInit here - that would traverse into the existing slice
@@ -3539,7 +3553,7 @@ test "dbg_var_ptr sets name on target instruction" {
     const state = testState(&ctx, &results, &refinements);
 
     // First alloc to create a pointer
-    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
     try std.testing.expect(results[1].name_id == null);
 
     // dbg_var_ptr should set the name_id on the target instruction
@@ -3610,7 +3624,7 @@ test "br valueCopies source refinement into block" {
     const state = testState(&ctx, &results, &refinements);
 
     // Create a block at index 0
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = .{} } } });
 
     // Create a value at index 1
     _ = try Inst.clobberInst(&refinements, &results, 1, .{ .scalar = .{} });
@@ -3762,7 +3776,7 @@ test "struct_field_val valueCopies field" {
     try Inst.apply(state, 1, .{ .struct_field_val = .{
         .operand = 0,
         .field_index = 0,
-        .ty = .{ .scalar = {} },
+        .ty = .{ .scalar = .{} },
     } });
 
     try std.testing.expect(results[1].refinement.? != field_gid);
@@ -3778,7 +3792,7 @@ test "aggregate_init preserves tracked interned allocator identity" {
     defer ctx.deinit();
 
     const global_defs = [_]Refinements.GlobalDef{
-        .{ .ip_idx = 1, .ty = .{ .allocator = 517906155 }, .loc = .{}, .children = .{ .scalar = {} } },
+        .{ .ip_idx = 1, .ty = .{ .allocator = .{ .type_id = 517906155 } }, .loc = .{}, .children = .{ .scalar = {} } },
     };
     var refinements = Refinements.initWithGlobals(allocator, &ctx, &global_defs);
     defer refinements.deinit();
@@ -3787,8 +3801,8 @@ test "aggregate_init preserves tracked interned allocator identity" {
     const state = testState(&ctx, &results, &refinements);
 
     try Inst.apply(state, 0, .{ .aggregate_init = .{
-        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = 2705 }} } },
-        .elements = &.{.{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = {} } } }},
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = .{ .type_id = 2705 } }} } },
+        .elements = &.{.{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = .{} } } }},
     } });
 
     const struct_gid = results[0].refinement.?;
@@ -3805,7 +3819,7 @@ test "store struct preserves allocator field identity" {
     defer ctx.deinit();
 
     const global_defs = [_]Refinements.GlobalDef{
-        .{ .ip_idx = 1, .ty = .{ .allocator = 517906155 }, .loc = .{}, .children = .{ .scalar = {} } },
+        .{ .ip_idx = 1, .ty = .{ .allocator = .{ .type_id = 517906155 } }, .loc = .{}, .children = .{ .scalar = {} } },
     };
     var refinements = Refinements.initWithGlobals(allocator, &ctx, &global_defs);
     defer refinements.deinit();
@@ -3813,11 +3827,11 @@ test "store struct preserves allocator field identity" {
     var results = [_]Inst{.{}} ** 4;
     const state = testState(&ctx, &results, &refinements);
 
-    const struct_ty: Type = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = 2705 }} } };
+    const struct_ty: Type = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = .{ .type_id = 2705 } }} } };
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = struct_ty } });
     try Inst.apply(state, 1, .{ .aggregate_init = .{
         .ty = struct_ty,
-        .elements = &.{.{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = {} } } }},
+        .elements = &.{.{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = .{} } } }},
     } });
     try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .inst = 1 } } });
     try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 0 } } });
@@ -3851,7 +3865,7 @@ test "wrap_optional valueCopies inst payload" {
 
     try Inst.apply(state, 1, .{ .wrap_optional = .{
         .src = .{ .inst = 0 },
-        .ty = .{ .optional = &.{ .scalar = {} } },
+        .ty = .{ .optional = .{ .to = &.{ .scalar = .{} } } },
     } });
 
     const result_gid = results[1].refinement.?;
@@ -3885,7 +3899,7 @@ test "wrap_errunion_payload valueCopies inst payload" {
 
     try Inst.apply(state, 1, .{ .wrap_errunion_payload = .{
         .src = .{ .inst = 0 },
-        .ty = .{ .errorunion = &.{ .scalar = {} } },
+        .ty = .{ .errorunion = .{ .to = &.{ .scalar = .{} } } },
     } });
 
     const result_gid = results[1].refinement.?;
@@ -3914,8 +3928,8 @@ test "wrap_optional valueCopies tracked global payload" {
     try refinements.global_map.put(42, global_gid);
 
     try Inst.apply(state, 0, .{ .wrap_optional = .{
-        .src = .{ .interned = .{ .ip_idx = 42, .ty = .{ .scalar = {} } } },
-        .ty = .{ .optional = &.{ .scalar = {} } },
+        .src = .{ .interned = .{ .ip_idx = 42, .ty = .{ .scalar = .{} } } },
+        .ty = .{ .optional = .{ .to = &.{ .scalar = .{} } } },
     } });
 
     const result_gid = results[0].refinement.?;
@@ -3944,8 +3958,8 @@ test "wrap_errunion_payload valueCopies tracked global payload" {
     try refinements.global_map.put(43, global_gid);
 
     try Inst.apply(state, 0, .{ .wrap_errunion_payload = .{
-        .src = .{ .interned = .{ .ip_idx = 43, .ty = .{ .scalar = {} } } },
-        .ty = .{ .errorunion = &.{ .scalar = {} } },
+        .src = .{ .interned = .{ .ip_idx = 43, .ty = .{ .scalar = .{} } } },
+        .ty = .{ .errorunion = .{ .to = &.{ .scalar = .{} } } },
     } });
 
     const result_gid = results[0].refinement.?;
@@ -3971,7 +3985,7 @@ test "Simple tags produce scalar" {
 
     // BinOp and UnOp tags should produce scalar refinements
     // Use interned source (comptime constant) as dummy operands
-    const dummy_src = Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = {} } } };
+    const dummy_src = Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
     try Inst.apply(state, 0, .{ .bit_and = .{ .lhs = dummy_src, .rhs = dummy_src } });
     try Inst.apply(state, 1, .{ .cmp_eq = .{ .lhs = dummy_src, .rhs = dummy_src } });
@@ -4002,7 +4016,7 @@ test "block creates refinement based on type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Block with scalar type
-    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 0, .{ .block = .{ .ty = .{ .scalar = .{} } } });
     try std.testing.expect(results[0].refinement != null);
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(results[0].refinement.?).*));
 
@@ -4061,7 +4075,7 @@ test "struct_field_ptr gets pointer to struct field" {
     results[0].refinement = ptr_eidx;
 
     // struct_field_ptr should return pointer to field 1
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
 
     try std.testing.expect(results[1].refinement != null);
     const result_ref = refinements.at(results[1].refinement.?);
@@ -4097,7 +4111,7 @@ test "struct_field_val extracts field value from struct" {
     results[0].refinement = struct_eidx;
 
     // struct_field_val should extract field 0
-    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .struct_field_val = .{ .operand = 0, .field_index = 0, .ty = .{ .scalar = .{} } } });
 
     // Result should be a copied field value
     try std.testing.expect(results[1].refinement.? != field0_eidx);
@@ -4131,7 +4145,7 @@ test "set_union_tag updates union variant" {
     results[0].refinement = ptr_gid;
 
     // set_union_tag should update the active variant
-    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
 
     // The union's active field should be set (field 1), others null
     const union_ref = refinements.at(union_gid);
@@ -4199,7 +4213,7 @@ test "union_init creates union with active variant" {
 
     // union_init should create a union with active variant set
     try Inst.apply(state, 1, .{ .union_init = .{
-        .ty = .{ .@"union" = &.{ .type_id = 0, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } },
+        .ty = .{ .@"union" = &.{ .type_id = 0, .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } } } },
         .field_index = 1,
         .init = .{ .inst = 0 },
         .type_id = 0,
@@ -4233,9 +4247,9 @@ test "union_init valueCopies tracked global payload" {
     try refinements.global_map.put(44, global_gid);
 
     try Inst.apply(state, 0, .{ .union_init = .{
-        .ty = .{ .@"union" = &.{ .type_id = 0, .variants = &.{ .{ .scalar = {} }, .{ .scalar = {} } } } },
+        .ty = .{ .@"union" = &.{ .type_id = 0, .variants = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } } } },
         .field_index = 0,
-        .init = .{ .interned = .{ .ip_idx = 44, .ty = .{ .scalar = {} } } },
+        .init = .{ .interned = .{ .ip_idx = 44, .ty = .{ .scalar = .{} } } },
         .type_id = 0,
     } });
 
@@ -4318,7 +4332,7 @@ test "ret_safe with deeply nested type (3 levels) with early_returns" {
 
     // The type that causes the crash: 3 levels of nesting
     // .null -> .pointer -> .region -> .scalar
-    const nested_type: Type = .{ .null = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+    const nested_type: Type = .{ .null = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } };
 
     // Call ret_safe with the deeply nested type
     try Inst.apply(state, 0, .{ .ret_safe = .{
@@ -4354,7 +4368,7 @@ test "typeToRefinement on cloned table with 3-level nested type" {
     }
 
     // The type that causes the crash: 3 levels of nesting
-    const nested_type: Type = .{ .null = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+    const nested_type: Type = .{ .null = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } };
 
     // Call typeToRefinement directly on the cloned table
     const result = try typeToRefinement(nested_type, cloned);
@@ -4390,7 +4404,7 @@ test "reallocation bug: assign typeToRefinement result to slot in same table" {
     // The LHS (cloned.at(return_gid)) is evaluated first, returning a pointer.
     // Then typeToRefinement appends entities, potentially reallocating.
     // The pointer becomes dangling if reallocation occurred.
-    const nested_type: Type = .{ .null = &.{ .pointer = &.{ .region = &.{ .scalar = {} } } } };
+    const nested_type: Type = .{ .null = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } };
 
     // This is the buggy pattern from ret_safe line 1051:
     // cloned.at(return_gid).* = try typeToRefinement(interned.ty, cloned);
@@ -4474,11 +4488,11 @@ test "bitcast preserves existing region element refinement" {
     // existing scalar element shape.
     const struct_type = Type{ .@"struct" = &.{
         .type_id = 1234,
-        .fields = &.{ .{ .scalar = {} }, .{ .scalar = {} } },
+        .fields = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
+        .multiplicity = .region,
         .is_packed = true,
     } };
-    const region_type = Type{ .region = &struct_type };
-    const ptr_type = Type{ .pointer = &region_type };
+    const ptr_type = Type{ .pointer = .{ .to = &struct_type } };
 
     // Bitcast from [*]u8 to [*]Struct view
     try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .inst = 0 }, .ty = ptr_type } });
@@ -4695,7 +4709,7 @@ test "bitcast from [*]T to *T preserves region structure" {
 
     // Dest type: pointer → struct (single-item pointer, no region wrapper)
     const struct_type = Type{ .@"struct" = &.{ .type_id = 123, .fields = &.{} } };
-    const ptr_type = Type{ .pointer = &struct_type };
+    const ptr_type = Type{ .pointer = .{ .to = &struct_type } };
 
     // Bitcast from [*]Header to *Header
     try Inst.apply(state, 1, .{ .bitcast = .{ .src = .{ .inst = 0 }, .ty = ptr_type } });

@@ -43,7 +43,7 @@ test "struct_field_ptr records origin on field pointer" {
     const state = testState(&ctx, &results, &refinements);
 
     // struct_field_ptr should record origin info (type_id must match struct's type_id)
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 100 } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = .{} }, .type_id = 100 } });
 
     // Check the field pointer has fieldparentptr_safety set
     const field_ptr_gid = results[1].refinement.?;
@@ -70,10 +70,10 @@ test "field_parent_ptr succeeds when origin matches" {
     const state = testState(&ctx, &results, &refinements);
 
     // Get field pointer (type_id must match struct's type_id)
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 100 } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = .{} }, .type_id = 100 } });
 
     // field_parent_ptr with matching container type and field index should succeed
-    try Inst.apply(state, 2, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 1 }, .type_id = 100, .field_index = 0, .ty = .{ .scalar = {} } } });
+    try Inst.apply(state, 2, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 1 }, .type_id = 100, .field_index = 0, .ty = .{ .scalar = .{} } } });
 }
 
 test "field_parent_ptr errors on wrong field index" {
@@ -93,10 +93,10 @@ test "field_parent_ptr errors on wrong field index" {
     const state = testState(&ctx, &results, &refinements);
 
     // Get field pointer to field 0 (type_id must match struct's type_id)
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 100 } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = .{} }, .type_id = 100 } });
 
     // field_parent_ptr with wrong field index should error
-    const result = Inst.apply(state, 2, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 1 }, .type_id = 100, .field_index = 1, .ty = .{ .scalar = {} } } });
+    const result = Inst.apply(state, 2, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 1 }, .type_id = 100, .field_index = 1, .ty = .{ .scalar = .{} } } });
     try std.testing.expectError(error.FieldParentPtrFieldMismatch, result);
 }
 
@@ -113,7 +113,7 @@ test "field_parent_ptr errors on non-field pointer" {
     const state = testState(&ctx, &results, &refinements);
 
     // field_parent_ptr with pointer that doesn't have origin info should error
-    const result = Inst.apply(state, 1, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 0 }, .type_id = 100, .field_index = 0, .ty = .{ .scalar = {} } } });
+    const result = Inst.apply(state, 1, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 0 }, .type_id = 100, .field_index = 0, .ty = .{ .scalar = .{} } } });
     try std.testing.expectError(error.InvalidFieldParentPtr, result);
 }
 
@@ -147,9 +147,9 @@ test "field_parent_ptr errors on wrong container type" {
     const state = testState(&ctx, &results, &refinements);
 
     // Get field pointer (type_id = 100 matches struct)
-    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = {} }, .type_id = 100 } });
+    try Inst.apply(state, 1, .{ .struct_field_ptr = .{ .base = .{ .inst = 0 }, .field_index = 0, .ty = .{ .scalar = .{} }, .type_id = 100 } });
 
     // field_parent_ptr with wrong type_id (200 != 100) should error
-    const result = Inst.apply(state, 2, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 1 }, .type_id = 200, .field_index = 0, .ty = .{ .scalar = {} } } });
+    const result = Inst.apply(state, 2, .{ .field_parent_ptr = .{ .field_ptr = .{ .inst = 1 }, .type_id = 200, .field_index = 0, .ty = .{ .scalar = .{} } } });
     try std.testing.expectError(error.FieldParentPtrTypeMismatch, result);
 }

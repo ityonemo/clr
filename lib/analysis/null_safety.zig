@@ -65,7 +65,7 @@ pub const NullSafety = union(enum) {
 
     /// bitcast from a pointer to an optional-pointer preserves a definitely non-null value.
     pub fn bitcast(state: State, index: usize, params: tag.Bitcast) !void {
-        if (params.ty != .optional or params.ty.optional.* != .pointer) return;
+        if (params.ty != .optional or params.ty.optional.to.* != .pointer) return;
 
         const result_gid = state.results[index].refinement orelse return;
         const result_ref = state.refinements.at(result_gid);
@@ -364,11 +364,11 @@ pub const NullSafety = union(enum) {
             .optional => |o| switch (src_ty) {
                 .null => |child_ty| {
                     dst_ref.optional.analyte.null_safety = .{ .null = meta };
-                    applyInternedNullSafety(refinements, o.to, child_ty.*, meta);
+                    applyInternedNullSafety(refinements, o.to, child_ty.to.*, meta);
                 },
                 .optional => |child_ty| {
                     dst_ref.optional.analyte.null_safety = .{ .non_null = meta };
-                    applyInternedNullSafety(refinements, o.to, child_ty.*, meta);
+                    applyInternedNullSafety(refinements, o.to, child_ty.to.*, meta);
                 },
                 .pointer => {
                     dst_ref.optional.analyte.null_safety = .{ .non_null = meta };
@@ -377,11 +377,11 @@ pub const NullSafety = union(enum) {
                 else => {},
             },
             .pointer => |p| switch (src_ty) {
-                .pointer => |child_ty| applyInternedNullSafety(refinements, p.to, child_ty.*, meta),
+                .pointer => |child_ty| applyInternedNullSafety(refinements, p.to, child_ty.to.*, meta),
                 else => {},
             },
             .errorunion => |e| switch (src_ty) {
-                .errorunion => |child_ty| applyInternedNullSafety(refinements, e.to, child_ty.*, meta),
+                .errorunion => |child_ty| applyInternedNullSafety(refinements, e.to, child_ty.to.*, meta),
                 else => {},
             },
             .@"struct" => |s| switch (src_ty) {
