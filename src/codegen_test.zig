@@ -361,6 +361,11 @@ test "epilogue generates correct output with typed return slot" {
         \\    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
         \\    defer _ = gpa.deinit();
         \\    const allocator = gpa.allocator();
+        \\    clr.initAnalyses(allocator) catch |err| {
+        \\        std.debug.print("Error: {}\\n", .{err});
+        \\        std.process.exit(1);
+        \\    };
+        \\    defer clr.deinitAnalyses();
         \\    file_writer = std.fs.File.stdout().writer(&writer_buf);
         \\    defer file_writer.interface.flush() catch {};
         \\    var ctx = Context.init(allocator, &file_writer.interface);

@@ -28,6 +28,20 @@ pub const analyses =.{
     fd_safety_analysis.FdSafety 
 };
 
+/// Initialize module-level state for all analyses.
+pub fn initModules(allocator: std.mem.Allocator) !void {
+    inline for (analyses) |Analysis| {
+        try Analysis.initModule(allocator);
+    }
+}
+
+/// Free module-level state for all analyses.
+pub fn deinitModules() void {
+    inline for (analyses) |Analysis| {
+        Analysis.deinitModule();
+    }
+}
+
 /// Deep copy the analyte, calling .copy() on each analysis type.
 pub fn copy(self: Analyte, allocator: std.mem.Allocator) error{OutOfMemory}!Analyte {
     var result: Analyte = .{};

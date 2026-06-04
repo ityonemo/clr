@@ -51,6 +51,12 @@ pub const VariantSafety = struct {
     undefined_meta: ?Meta = null,
     name_when_set: ?[]const u8 = null,
 
+    pub fn initModule(allocator: std.mem.Allocator) !void {
+        _ = allocator;
+    }
+
+    pub fn deinitModule() void {}
+
     /// Deep copy - allocates new slice for active_metas.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         const new_active_metas = try allocator.alloc(?Meta, self.active_metas.len);

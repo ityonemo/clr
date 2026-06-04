@@ -24,6 +24,12 @@ pub const UndefinedSafety = union(enum) {
         name_when_set: ?[]const u8 = null, // Full path name (arena-allocated at store time)
     },
 
+    pub fn initModule(allocator: std.mem.Allocator) !void {
+        _ = allocator;
+    }
+
+    pub fn deinitModule() void {}
+
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         _ = allocator;
@@ -1911,7 +1917,7 @@ pub const UndefinedSafety = union(enum) {
         if (ref.* == .pointer) {
             const region_ref = refinements.at(ref.pointer.to);
             if (region_ref.getMultiplicity() == .region or ref.pointer.raw_bytes != null) {
-                setDefinedRecursive(refinements, ref.pointer.to);
+                setDefinedRecursive(refinements, gid);
             }
         }
     }

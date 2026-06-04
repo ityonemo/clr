@@ -61,6 +61,12 @@ pub const MemorySafety = union(enum) {
     /// still undefined.
     placeholder: void,
 
+    pub fn initModule(allocator: std.mem.Allocator) !void {
+        _ = allocator;
+    }
+
+    pub fn deinitModule() void {}
+
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         _ = allocator;

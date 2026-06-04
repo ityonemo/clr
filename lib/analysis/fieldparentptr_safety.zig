@@ -12,6 +12,12 @@ pub const FieldParentPtrSafety = struct {
     field_index: usize, // Which field of the container
     container_type_id: Tid, // Type id for type identity & name lookup
 
+    pub fn initModule(allocator: std.mem.Allocator) !void {
+        _ = allocator;
+    }
+
+    pub fn deinitModule() void {}
+
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         _ = allocator;

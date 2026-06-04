@@ -10,13 +10,22 @@ const gates = @import("gates.zig");
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 
-// =========================================================================
-// State types
-// =========================================================================
-
-pub const Close = struct {
-    meta: Meta,
-};
+// strategy:
+// FdSafety effectively tracks a list of file descriptor create points.
+// Each analyte holds a reference to an index into this list.  Only 
+// "scalar" refinements may have an FdSafety analyte.  If an fd is reinterpreted
+// as any other datatype it should trigger a failure.
+//
+// safety:
+// prevent double-close.
+// prevent use-after-close.
+//
+// leaks: 
+// when a refinement with a file descriptor goes out of scope, we check to see if
+// it's closed.  If it's not closed and no other refinements in the table hold on
+// to the same reference, then we trigger a leak warning.
+//
+// aliasing:  not implemented yet.
 
 pub const FdType = enum {
     file, // posix.open/openat
@@ -24,18 +33,56 @@ pub const FdType = enum {
     pipe, // posix.pipe/pipe2
     epoll, // posix.epoll_create
     dup, // posix.dup/dup2
+    // note: leakage of stdio is tolerated.
+    stdio, // any function that returns stdin or stdout.
 };
 
 pub const Open = struct {
     meta: Meta, // Where fd was opened
     fd_type: FdType, // Type of fd (file, socket, pipe, etc.)
-    closed: ?Close = null, // null = still open
-    // Note: returned field removed - use connectivity tracking instead
 };
 
-pub const FdSafety = union(enum) {
-    untracked: void,
-    open: Open,
+pub const Closed = struct {
+    meta: Meta,
+};
+
+pub const TrackedFd = struct {
+    opened: Open,
+    closed: ?Closed = null,
+};
+
+const FdRef = usize;
+var tracked: std.ArrayListUnmanaged(TrackedFd) = .empty;
+var list_allocator: std.mem.Allocator = undefined;
+var initialized = false;
+
+pub const FdSafety = struct {
+    ref: FdRef,
+
+    pub fn initModule(allocator: std.mem.Allocator) !void {
+        list_allocator = allocator;
+        if (initialized) {
+            tracked.clearRetainingCapacity();
+        } else {
+            tracked = .empty;
+            initialized = true;
+        }
+    }
+
+    pub fn deinitModule() void {
+        if (!initialized) return;
+        tracked.deinit(list_allocator);
+        tracked = .empty;
+        initialized = false;
+    }
+
+    pub fn createForTest(open: Open) !FdSafety {
+        return try createTracked(open);
+    }
+
+    pub fn getForTest(self: FdSafety) TrackedFd {
+        return getTracked(self.ref).*;
+    }
 
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
@@ -45,13 +92,9 @@ pub const FdSafety = union(enum) {
 
     /// Hash this analysis state for memoization.
     pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
-        hasher.update(&.{@intFromEnum(self)});
-        switch (self) {
-            .open => |o| {
-                hasher.update(&.{@as(u8, if (o.closed != null) 1 else 0)});
-            },
-            .untracked => {},
-        }
+        hasher.update(std.mem.asBytes(&self.ref));
+        const fd = getTrackedOrNull(self.ref) orelse return;
+        hasher.update(&.{@as(u8, if (fd.closed != null) 1 else 0)});
     }
 
     /// Runtime call filter for fd operations.
@@ -137,11 +180,10 @@ pub const FdSafety = union(enum) {
         const fd_ref = state.refinements.at(fd_idx);
         if (fd_ref.* != .scalar) return;
 
-        // Set fd_safety on the scalar (the fd value)
-        fd_ref.scalar.analyte.fd_safety = .{ .open = .{
+        fd_ref.scalar.analyte.fd_safety = try createTracked(.{
             .meta = state.ctx.meta,
             .fd_type = fd_type,
-        } };
+        });
     }
 
     /// Handle posix.pipe calls.
@@ -165,10 +207,10 @@ pub const FdSafety = union(enum) {
             for (payload_ref.@"struct".fields) |field_gid| {
                 const field_ref = state.refinements.at(field_gid);
                 if (field_ref.* == .scalar) {
-                    field_ref.scalar.analyte.fd_safety = .{ .open = .{
+                    field_ref.scalar.analyte.fd_safety = try createTracked(.{
                         .meta = state.ctx.meta,
                         .fd_type = .pipe,
-                    } };
+                    });
                 }
             }
         }
@@ -191,16 +233,16 @@ pub const FdSafety = union(enum) {
         const fd_ref = state.refinements.at(fd_idx);
         if (fd_ref.* != .scalar) return;
 
-        const fd_state = &(fd_ref.scalar.analyte.fd_safety orelse return);
-        if (fd_state.* != .open) return;
+        const fd_safety = fd_ref.scalar.analyte.fd_safety orelse return;
+        const fd_state = getTracked(fd_safety.ref);
 
         // Check for double-close
-        if (fd_state.open.closed) |prev_close| {
-            return reportDoubleClose(state.ctx, fd_state.open, prev_close);
+        if (fd_state.closed) |prev_close| {
+            return reportDoubleClose(state.ctx, fd_state.opened, prev_close);
         }
 
         // Mark as closed
-        fd_state.open.closed = .{ .meta = state.ctx.meta };
+        fd_state.closed = .{ .meta = state.ctx.meta };
     }
 
     /// Check fd arguments for use-after-close.
@@ -216,12 +258,12 @@ pub const FdSafety = union(enum) {
         const fd_ref = state.refinements.at(fd_idx);
         if (fd_ref.* != .scalar) return;
 
-        const fd_state = fd_ref.scalar.analyte.fd_safety orelse return;
-        if (fd_state != .open) return;
+        const fd_safety = fd_ref.scalar.analyte.fd_safety orelse return;
+        const fd_state = getTracked(fd_safety.ref);
 
         // Check for use-after-close
-        if (fd_state.open.closed) |close_site| {
-            return reportUseAfterClose(state.ctx, fd_state.open, close_site);
+        if (fd_state.closed) |close_site| {
+            return reportUseAfterClose(state.ctx, fd_state.opened, close_site);
         }
     }
 
@@ -273,56 +315,11 @@ pub const FdSafety = union(enum) {
         _ = return_gid;
     }
 
-    /// FD identity based on where/when it was opened.
-    /// Used instead of GID for connectivity tracking because ret_safe deep-copies values.
-    const FdIdentity = struct {
-        file: []const u8,
-        line: u32,
-        column: ?u32,
-        fd_type: FdType,
-
-        pub fn fromOpen(open: Open) FdIdentity {
-            return .{
-                .file = open.meta.file,
-                .line = open.meta.line,
-                .column = open.meta.column,
-                .fd_type = open.fd_type,
-            };
-        }
-
-        pub fn eql(self: FdIdentity, other: FdIdentity) bool {
-            return std.mem.eql(u8, self.file, other.file) and
-                self.line == other.line and
-                self.column == other.column and
-                self.fd_type == other.fd_type;
-        }
-
-        pub fn hash(self: FdIdentity) u64 {
-            var h = std.hash.Wyhash.init(0);
-            h.update(self.file);
-            h.update(std.mem.asBytes(&self.line));
-            if (self.column) |c| h.update(std.mem.asBytes(&c));
-            h.update(std.mem.asBytes(&self.fd_type));
-            return h.final();
-        }
-    };
-
-    const FdIdentityContext = struct {
-        pub fn hash(_: FdIdentityContext, key: FdIdentity) u64 {
-            return key.hash();
-        }
-        pub fn eql(_: FdIdentityContext, a: FdIdentity, b: FdIdentity) bool {
-            return a.eql(b);
-        }
-    };
-
     /// End-of-function checks - detect fd leaks.
     pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements, return_gid: Gid) !void {
-        // Build set of FD identities reachable from return value (transferred to caller, not leaks)
-        // We use FD identity (meta) instead of GID because ret_safe deep-copies values.
-        var return_fd_metas = std.HashMap(FdIdentity, void, FdIdentityContext, 80).init(ctx.allocator);
-        defer return_fd_metas.deinit();
-        collectReachableFds(refinements, return_gid, &return_fd_metas);
+        var returned_fds = std.AutoHashMap(FdRef, void).init(ctx.allocator);
+        defer returned_fds.deinit();
+        collectReachableFds(refinements, return_gid, &returned_fds);
 
         // Check for fd leaks (open fds not closed, not returned)
         for (results) |inst| {
@@ -334,29 +331,26 @@ pub const FdSafety = union(enum) {
                 if (std.meta.activeTag(inst_tag) == .arg) continue;
             }
 
-            try checkFdLeakRecursive(refinements, idx, ctx, &return_fd_metas);
+            try checkFdLeakRecursive(refinements, idx, ctx, &returned_fds);
         }
     }
 
-    fn checkFdLeakRecursive(refinements: *Refinements, gid: Gid, ctx: *Context, return_fd_metas: *std.HashMap(FdIdentity, void, FdIdentityContext, 80)) !void {
+    fn checkFdLeakRecursive(refinements: *Refinements, gid: Gid, ctx: *Context, returned_fds: *std.AutoHashMap(FdRef, void)) !void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .scalar => {
-                const fd = ref.scalar.analyte.fd_safety orelse return;
-                if (fd != .open) return;
-                if (fd.open.closed != null) return;
+                const fd_safety = ref.scalar.analyte.fd_safety orelse return;
+                const fd = getTracked(fd_safety.ref);
+                if (fd.closed != null) return;
+                if (returned_fds.contains(fd_safety.ref)) return;
 
-                // Skip if this FD identity is reachable from return value
-                const fd_id = FdIdentity.fromOpen(fd.open);
-                if (return_fd_metas.contains(fd_id)) return;
-
-                return reportFdLeak(ctx, fd.open);
+                return reportFdLeak(ctx, fd.opened);
             },
-            .errorunion => try checkFdLeakRecursive(refinements, ref.errorunion.to, ctx, return_fd_metas),
-            .optional => try checkFdLeakRecursive(refinements, ref.optional.to, ctx, return_fd_metas),
+            .errorunion => try checkFdLeakRecursive(refinements, ref.errorunion.to, ctx, returned_fds),
+            .optional => try checkFdLeakRecursive(refinements, ref.optional.to, ctx, returned_fds),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
-                    try checkFdLeakRecursive(refinements, field_gid, ctx, return_fd_metas);
+                    try checkFdLeakRecursive(refinements, field_gid, ctx, returned_fds);
                 }
             },
             else => {},
@@ -364,14 +358,14 @@ pub const FdSafety = union(enum) {
     }
 
     /// Recursively collect FD identities from a refinement tree.
-    fn collectReachableFds(refinements: *Refinements, gid: Gid, fds: *std.HashMap(FdIdentity, void, FdIdentityContext, 80)) void {
+    fn collectReachableFds(refinements: *Refinements, gid: Gid, fds: *std.AutoHashMap(FdRef, void)) void {
         collectReachableFdsInner(refinements, gid, fds, 0);
     }
 
     fn collectReachableFdsInner(
         refinements: *Refinements,
         gid: Gid,
-        fds: *std.HashMap(FdIdentity, void, FdIdentityContext, 80),
+        fds: *std.AutoHashMap(FdRef, void),
         depth: usize,
     ) void {
         if (depth > 100) return;
@@ -382,9 +376,7 @@ pub const FdSafety = union(enum) {
             .scalar => {
                 // Check for FD state
                 if (ref.scalar.analyte.fd_safety) |fd| {
-                    if (fd == .open) {
-                        fds.put(FdIdentity.fromOpen(fd.open), {}) catch return;
-                    }
+                    fds.put(fd.ref, {}) catch return;
                 }
             },
             .pointer => |p| collectReachableFdsInner(refinements, p.to, fds, depth + 1),
@@ -504,18 +496,81 @@ pub const FdSafety = union(enum) {
         }
     }
 
+    pub fn bit_and(state: State, index: usize, params: tag.BinOp(.bit_and)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn bit_or(state: State, index: usize, params: tag.BinOp(.bit_or)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn xor(state: State, index: usize, params: tag.BinOp(.xor)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn min(state: State, index: usize, params: tag.BinOp(.min)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn max(state: State, index: usize, params: tag.BinOp(.max)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn add(state: State, index: usize, params: tag.BinOp(.add)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn sub(state: State, index: usize, params: tag.BinOp(.sub)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn mul(state: State, index: usize, params: tag.BinOp(.mul)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn div(state: State, index: usize, params: tag.BinOp(.div)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn mod(state: State, index: usize, params: tag.BinOp(.mod)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn rem(state: State, index: usize, params: tag.BinOp(.rem)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn shl(state: State, index: usize, params: tag.BinOp(.shl)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn shr(state: State, index: usize, params: tag.BinOp(.shr)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn add_with_overflow(state: State, index: usize, params: tag.OverflowOp(.add_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn sub_with_overflow(state: State, index: usize, params: tag.OverflowOp(.sub_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn mul_with_overflow(state: State, index: usize, params: tag.OverflowOp(.mul_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn shl_with_overflow(state: State, index: usize, params: tag.OverflowOp(.shl_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+
+    pub fn not(state: State, index: usize, params: tag.UnOp(.not)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn trunc(state: State, index: usize, params: tag.UnOp(.trunc)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn ctz(state: State, index: usize, params: tag.UnOp(.ctz)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn sqrt(state: State, index: usize, params: tag.UnOp(.sqrt)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn sin(state: State, index: usize, params: tag.UnOp(.sin)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn cos(state: State, index: usize, params: tag.UnOp(.cos)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn tan(state: State, index: usize, params: tag.UnOp(.tan)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn exp(state: State, index: usize, params: tag.UnOp(.exp)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn exp2(state: State, index: usize, params: tag.UnOp(.exp2)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn log(state: State, index: usize, params: tag.UnOp(.log)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn log2(state: State, index: usize, params: tag.UnOp(.log2)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn log10(state: State, index: usize, params: tag.UnOp(.log10)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn floor(state: State, index: usize, params: tag.UnOp(.floor)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn ceil(state: State, index: usize, params: tag.UnOp(.ceil)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn round(state: State, index: usize, params: tag.UnOp(.round)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn trunc_float(state: State, index: usize, params: tag.UnOp(.trunc_float)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn neg(state: State, index: usize, params: tag.UnOp(.neg)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn abs(state: State, index: usize, params: tag.UnOp(.abs)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn popcount(state: State, index: usize, params: tag.UnOp(.popcount)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn byte_swap(state: State, index: usize, params: tag.UnOp(.byte_swap)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn bit_reverse(state: State, index: usize, params: tag.UnOp(.bit_reverse)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn clz(state: State, index: usize, params: tag.UnOp(.clz)) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn reduce(state: State, index: usize, params: tag.Reduce) !void { try checkUnaryMath(state, index, params.src); }
+
+    fn checkBinMath(state: State, index: usize, lhs: tag.Src, rhs: tag.Src) !void {
+        try checkFdMathSrc(state, index, lhs);
+        try checkFdMathSrc(state, index, rhs);
+    }
+
+    fn checkUnaryMath(state: State, index: usize, src: tag.Src) !void {
+        try checkFdMathSrc(state, index, src);
+    }
+
+    fn checkFdMathSrc(state: State, index: usize, src: tag.Src) !void {
+        _ = index;
+        const gid: Gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse return,
+            .interned, .fnptr => return,
+        };
+        const ref = state.refinements.at(gid);
+        if (ref.* != .scalar) return;
+        if (ref.scalar.analyte.fd_safety == null) return;
+        return reportFdMath(state.ctx);
+    }
+
     // =========================================================================
     // Error Reporting
     // =========================================================================
 
-    fn reportDoubleClose(ctx: *Context, fd_state: Open, prev_close: Close) anyerror {
+    fn reportDoubleClose(ctx: *Context, fd_state: Open, prev_close: Closed) anyerror {
         try ctx.meta.print(ctx.writer, "double close in ", .{});
         try prev_close.meta.print(ctx.writer, "previously closed in ", .{});
         try fd_state.meta.print(ctx.writer, "originally opened in ", .{});
         return error.DoubleClose;
     }
 
-    fn reportUseAfterClose(ctx: *Context, fd_state: Open, close_site: Close) anyerror {
+    fn reportUseAfterClose(ctx: *Context, fd_state: Open, close_site: Closed) anyerror {
         try ctx.meta.print(ctx.writer, "use after close in ", .{});
         try close_site.meta.print(ctx.writer, "closed in ", .{});
         try fd_state.meta.print(ctx.writer, "opened in ", .{});
@@ -527,7 +582,29 @@ pub const FdSafety = union(enum) {
         try fd_state.meta.print(ctx.writer, "opened in ", .{});
         return error.FdLeak;
     }
+
+    fn reportFdMath(ctx: *Context) anyerror {
+        try ctx.meta.print(ctx.writer, "fd used in mathematical operation in ", .{});
+        return error.FdMath;
+    }
 };
+
+fn createTracked(open: Open) !FdSafety {
+    if (!initialized) @panic("FdSafety module not initialized");
+    const ref = tracked.items.len;
+    try tracked.append(list_allocator, .{ .opened = open });
+    return .{ .ref = ref };
+}
+
+fn getTracked(ref: FdRef) *TrackedFd {
+    return getTrackedOrNull(ref) orelse @panic("invalid fd_safety ref");
+}
+
+fn getTrackedOrNull(ref: FdRef) ?*TrackedFd {
+    if (!initialized) return null;
+    if (ref >= tracked.items.len) return null;
+    return &tracked.items[ref];
+}
 
 const debug = @import("builtin").mode == .Debug;
 

@@ -5,12 +5,15 @@ const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
 const tag = @import("../tag.zig");
 const Gid = Refinements.Gid;
+const fd_safety_mod = @import("fd_safety.zig");
+const FdSafety = fd_safety_mod.FdSafety;
 
 var test_buf: [4096]u8 = undefined;
 var test_discarding = std.Io.Writer.Discarding.init(&test_buf);
 
 fn initTest() struct { Context, Refinements } {
     const allocator = std.testing.allocator;
+    FdSafety.initModule(allocator) catch unreachable;
     var ctx = Context.init(allocator, &test_discarding.writer);
     ctx.meta.function = "test_func";
     return .{ ctx, Refinements.init(allocator) };
@@ -28,13 +31,13 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
 
 test "ret_safe does not modify fd_safety state (connectivity tracking handles leaks)" {
     var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
     defer ctx.deinit();
     defer refinements.deinit();
 
     // Create a scalar with fd_safety.open state
-    const FdSafety = @import("fd_safety.zig").FdSafety;
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = FdSafety{ .open = .{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 }, .fd_type = .file } } },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 }, .fd_type = .file }) },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -48,12 +51,12 @@ test "ret_safe does not modify fd_safety state (connectivity tracking handles le
     // Check the fd state is unchanged (still open, not closed)
     const fd_ref = refinements.at(fd_gid);
     const fd_safety = fd_ref.scalar.analyte.fd_safety.?;
-    try std.testing.expect(fd_safety == .open);
-    try std.testing.expect(fd_safety.open.closed == null);
+    try std.testing.expect(fd_safety.getForTest().closed == null);
 }
 
 test "call intercepts posix.open and sets fd_safety.open state" {
     var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
     defer ctx.deinit();
     defer refinements.deinit();
 
@@ -70,19 +73,18 @@ test "call intercepts posix.open and sets fd_safety.open state" {
     const eu_gid = results[0].refinement.?;
     const scalar_gid = refinements.at(eu_gid).errorunion.to;
     const fd_safety = refinements.at(scalar_gid).scalar.analyte.fd_safety.?;
-    try std.testing.expect(fd_safety == .open);
-    try std.testing.expect(fd_safety.open.fd_type == .file);
+    try std.testing.expect(fd_safety.getForTest().opened.fd_type == .file);
 }
 
 test "call intercepts posix.close and marks fd as closed" {
     var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
     defer ctx.deinit();
     defer refinements.deinit();
 
     // Create fd with open state
-    const FdSafety = @import("fd_safety.zig").FdSafety;
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = FdSafety{ .open = .{ .meta = ctx.meta, .fd_type = .file } } },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -96,12 +98,12 @@ test "call intercepts posix.close and marks fd as closed" {
 
     // Check the fd is marked as closed (open.closed is not null)
     const fd_safety = refinements.at(fd_gid).scalar.analyte.fd_safety.?;
-    try std.testing.expect(fd_safety == .open);
-    try std.testing.expect(fd_safety.open.closed != null);
+    try std.testing.expect(fd_safety.getForTest().closed != null);
 }
 
 test "call intercepts posix.socket and sets socket fd_type" {
     var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
     defer ctx.deinit();
     defer refinements.deinit();
 
@@ -118,19 +120,18 @@ test "call intercepts posix.socket and sets socket fd_type" {
     const eu_gid = results[0].refinement.?;
     const scalar_gid = refinements.at(eu_gid).errorunion.to;
     const fd_safety = refinements.at(scalar_gid).scalar.analyte.fd_safety.?;
-    try std.testing.expect(fd_safety == .open);
-    try std.testing.expect(fd_safety.open.fd_type == .socket);
+    try std.testing.expect(fd_safety.getForTest().opened.fd_type == .socket);
 }
 
 test "aggregate_init incorporates fd_safety state from source elements" {
     var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
     defer ctx.deinit();
     defer refinements.deinit();
 
     // Create source scalars - one with fd_safety set
-    const FdSafety = @import("fd_safety.zig").FdSafety;
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = FdSafety{ .open = .{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 }, .fd_type = .file } } },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 }, .fd_type = .file }) },
     } });
     const other_gid = try refinements.appendEntity(.{ .scalar = .{} });
 
@@ -154,5 +155,52 @@ test "aggregate_init incorporates fd_safety state from source elements" {
     const field0_gid = struct_ref.@"struct".fields[0];
     const field0_fd = refinements.at(field0_gid).scalar.analyte.fd_safety;
     try std.testing.expect(field0_fd != null);
-    try std.testing.expect(field0_fd.? == .open);
+    try std.testing.expect(field0_fd.?.ref == refinements.at(fd_gid).scalar.analyte.fd_safety.?.ref);
+}
+
+test "close through copied fd handle closes original safety state" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const fd_handle = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file });
+    const original_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = fd_handle },
+    } });
+    const copied_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = fd_handle },
+    } });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = original_gid;
+    results[1].refinement = copied_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try Inst.call(state, 2, null, .{ .void = {} }, &.{.{ .inst = 1 }}, "std.posix.close");
+
+    const original_fd = refinements.at(original_gid).scalar.analyte.fd_safety.?;
+    try std.testing.expect(original_fd.getForTest().closed != null);
+}
+
+test "mathematical operation on fd scalar reports error" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const fd_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+    } });
+    const rhs_gid = try refinements.appendEntity(.{ .scalar = .{} });
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = fd_gid;
+    results[1].refinement = rhs_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try std.testing.expectError(error.FdMath, Inst.apply(state, 2, .{ .add = .{
+        .lhs = .{ .inst = 0 },
+        .rhs = .{ .inst = 1 },
+    } }));
 }
