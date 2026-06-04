@@ -111,7 +111,7 @@ also run `zig test lib/lib.zig`.
 Integration tests should assert exit status, error type, function name, source
 location, and relevant context messages where applicable.
 
-## Current Implementation Risks
+## Current Baseline And Risks
 
 The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
@@ -122,35 +122,31 @@ stdlib overrides is `367/367` passing. The last full measured baseline was from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-06-04.
 
-The largest incomplete areas are:
+Keep `LIMITATIONS.md` accurate as the public inventory of supported behavior and
+known gaps. The main engineering risks to keep in mind are:
 
 - Interprocedural allocation safety. The earlier error-path allocation metadata,
   GPA cleanup, and ArrayList basic false positives no longer reproduce. Avoid
   Rust-style ownership terminology here; the analyzer tracks allocation identity,
   free state, allocator mismatch state, and reachability.
-- Current memory-safety failures from the latest full run:
-  - None confirmed in the latest full run.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic
   struct, union, and global struct/union field recovery is covered, but returned
   pointers through aggregate values and merged pointers still expose provenance
   gaps.
-- Current field/stack provenance failures from the latest full run:
-  - None confirmed. The prior `stack_pointer.bats` 259 passed in the latest full
-    run.
 - FD closure propagation. FD state now passes the current integration coverage,
-  including aliases/returned values covered by the suite, but the broader FD
-  aliasing model still deserves architectural review before expanding surface
-  area.
-- Current FD failures from the latest full run:
-  - None confirmed in the latest full run.
+  including stores, aggregate initialization, scalar fields, returned values,
+  pipes, and aliases covered by the suite. The broader FD aliasing model still
+  deserves architectural review before expanding surface area.
 - Stdlib reductions. Packed struct init, packed-struct scalar cross-call safety,
   `std.mem.indexOfSentinel` SIMD `select`/`splat` handling, memcpy/memset
   destination definition, string literal equality, branch clobber, copied
   struct-argument allocation reachability, basic ArrayList usage, basic HashMap
   usage, and `std.mem.asBytes(&scalar)` byte views are covered.
-- Current stdlib/undefined/null failures from the latest full run:
-  - None confirmed in the latest full run.
+- Global union initialization. Basic active-variant import from generated global
+  refinement structure is covered, but this remains sensitive to new InternPool
+  shapes. Document any newly discovered shape in `LIMITATIONS.md` and cover it
+  with a focused case.
 - Alignment-cast lowering. `@ptrCast(@alignCast(...))` currently exposes AIR that
   bitcasts a pointer to an address-like scalar, masks low bits, and branches on
   the alignment check. Add an AIR-to-analyzer interceptor that recognizes this
@@ -165,6 +161,10 @@ The largest incomplete areas are:
   must preserve the pointer value's memory-safety refinement.
 - Stack escape false positives. Returning passed-in or heap-backed pointers inside
   structs/unions/globals is still too conservative in several cases.
+- AIR/codegen coverage. `intcast` currently produces `.unimplemented` and does
+  not inherit operand safety state. Type extraction failures, such as allocator
+  `create` payload types or slice element reconstruction, should fail loudly or
+  produce documented `.unimplemented` refinements instead of guessing structure.
 
 Problematic patterns to fix before adding more surface area:
 

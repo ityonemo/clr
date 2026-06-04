@@ -2399,7 +2399,7 @@ pub const AnyTag = union(enum) {
     wrap_errunion_err: WrapErrunionErr,
     wrap_errunion_payload: WrapErrunionPayload,
 
-    // Union tags - variant safety not implemented yet
+    // Union tags - variant safety tracks active variants and branch narrowing
     set_union_tag: SetUnionTag,
     get_union_tag: GetUnionTag,
     union_init: UnionInit,

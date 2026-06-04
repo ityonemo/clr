@@ -8,17 +8,17 @@ sprint baseline and `FIXES_LOG.md` for completed fixes.
 
 These are cases where stdlib code would look erroneous to CLR without
 stdlib-specific invariant facts. Usually, they are guarded by invariant
-conditions that can't be tracked simply by CLR (for example size != 0 guaranteeing nonnullability
-of an optional).  In the case of user code that looked like this you would 
-use a declaration (see below) to override the CLR issue.
+conditions that can't be tracked simply by CLR, for example a size check
+guaranteeing nonnullability of an optional. In the case of user code that looked
+like this you would use a declaration (see below) to override the CLR issue.
 
 Topics in this section should not necessarily be considered missing features
 in CLR but rather informational content relating to the limitations of CLR.
 
 ### Allocators and fd operations
 
-CLR explicitly overrides stdlib's allocator functions and file descriptors as 
-part of its expected normal operation.  Mutexes may be added to this list in 
+CLR explicitly overrides stdlib's allocator and file descriptor functions as
+part of its expected normal operation. Mutexes may be added to this list in
 the future.
 
 ### Stdlib HashMap Invariants
@@ -52,14 +52,16 @@ assertions that CLR cannot infer from ordinary AIR alone.
 
 ### File Descriptor Alias And Closure Propagation
 
-FD state is tracked, but aliasing is incomplete. Close state is not reliably
-propagated to every copy, aggregate field, or returned value that refers to the
-same descriptor identity. Correct open/close examples can still report leaks.
+FD state is tracked for the covered stdlib/POSIX open, close, read/write,
+flock, dup, socket, accept, epoll, and pipe patterns. Basic propagation through
+stores, aggregate initialization, returned values, and scalar fields is covered
+by the current integration suite.
 
-This is intentionally punted until the FD aliasing/closure architecture is
-designed. The remaining known FD failures from the latest full integration
-baseline are `fd.bats` 123/126/129/132/133/136 and one undefined interaction at
-`undefined.bats` 343.
+The remaining architecture work is descriptor aliasing and closure propagation.
+The broader model is still not a general descriptor alias analysis: copies or
+transformations that lose the tracked scalar FD refinement can also lose
+close/use/leak state, and raw syscalls or custom wrappers are only checked when
+they lower through a recognized override.
 
 ### Stack Escape And Returned Aggregate Provenance
 
@@ -131,11 +133,13 @@ or incomplete.
 
 ### Global Allocation Leak Detection
 
-Allocations reachable from globals are exempt from normal leak detection.
+Allocations reachable from globals are exempt from normal leak detection outside
+the entrypoint. At the entrypoint, CLR also checks allocations stored through
+global entities before program exit.
 
-This avoids false positives for intentionally program-lifetime allocations, but
-it also means memory allocated into a global and never freed may not be reported
-as a leak.
+This avoids false positives for intentionally program-lifetime allocations inside
+library-style functions, but it also means memory allocated into a global from a
+non-entrypoint function and never freed may not be reported there as a leak.
 
 ### Cross-Function Global Mutation
 
@@ -166,15 +170,16 @@ as covered.
 
 ### Global Union Initial Values
 
-Global unions do not reliably have their initial active variant imported from
-the InternPool.
+Basic global union initial active variants are imported from the generated
+global refinement structure and are covered for the current integration suite.
 
-If a global union is initialized only in a global initializer, a later checked
-field access may not have the expected variant state unless the variant was also
-set through code the analyzer sees.
+This area is still sensitive to InternPool shape. If a global union initializer
+cannot be represented as a `GlobalDef.union_field` with an active field entity,
+CLR may lose the initial active variant and later checked field access can be
+conservative or incomplete.
 
-Future work should extract initial active union fields from the InternPool when
-initializing globals.
+Future work should keep adding targeted global-union initializer shapes as they
+appear in real AIR.
 
 ### Optional Pointer AIR Semantics
 
@@ -199,11 +204,24 @@ Some AIR instruction tags are handled only enough to avoid crashing and may
 produce `.unimplemented` refinements:
 
 - `dbg_inline_block`
+- `intcast`
 - `ret_addr`
 - `stack_trace_frames`
 
-These are mostly used for debug and stack-trace support and are unlikely to
-affect ordinary safety cases.
+The debug and stack-trace tags are unlikely to affect ordinary safety cases.
+`intcast` is more significant: it currently does not inherit undefined or other
+value safety state from its operand, so safety state can be lost across integer
+casts until that handler is completed.
+
+### Codegen Type Extraction Gaps
+
+Some generated analyzer tags depend on extracting precise type information from
+AIR and the InternPool. When type extraction fails, CLR should prefer a loud
+`.unimplemented` refinement or analysis failure over guessing a scalar shape.
+
+Known examples include allocator `create` payload type extraction and slice
+element type reconstruction. These are correctness boundaries in the AIR-to-CLR
+translation layer rather than intentional safety allowances.
 
 ### Indirect Function Calls
 
@@ -232,7 +250,7 @@ state. Setting any element can mark the whole region defined; if the region is
 undefined, accessing any element can report undefined.
 
 This is deliberate. Per-element tracking would require one refinement per
-element and does not scale to large arrays or slices.  This may cause some
+element and does not scale to large arrays or slices. This may cause some
 problems if Zig's stdlib (or user code) uses an array instead of a tuple.
 For example, Zig's stdlib generates stdout/stdin as a pair using an array.
 
