@@ -1325,6 +1325,8 @@ pub const Store = struct {
                     // Storing pointer into pointer slot - share the target
                     if (src.* == .pointer) {
                         p.to = src.pointer.to;
+                        p.raw_bytes = src.pointer.raw_bytes;
+                        p.packed_field = src.pointer.packed_field;
                     }
                 },
                 .optional => |*o| {
@@ -1946,7 +1948,10 @@ pub const Slice = struct {
                 // This is critical for sliceAsBytes - the data is the same, just reinterpreted
                 const region_gid = src_ptr_ref.pointer.to;
                 // Create new pointer pointing to the same region
-                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{ .to = region_gid } });
+                _ = try Inst.clobberInst(state.refinements, state.results, index, .{ .pointer = .{
+                    .to = region_gid,
+                    .raw_bytes = src_ptr_ref.pointer.raw_bytes,
+                } });
                 try splat(.slice, state, index, self);
                 return;
             }
@@ -4545,6 +4550,144 @@ test "ptr_add on pointer to region returns pointer to same region" {
     const result_ref = refinements.at(result_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
     try std.testing.expectEqual(region_gid, result_ref.pointer.to);
+}
+
+test "raw_bytes pointer to single object supports byte-view pointer arithmetic" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 4;
+    const state = testState(&ctx, &results, &refinements);
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const byte_view_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = scalar_gid,
+        .raw_bytes = .readonly,
+    } });
+    results[0].refinement = byte_view_gid;
+
+    try Inst.apply(state, 1, .{ .array_to_slice = .{ .source = .{ .inst = 0 } } });
+    const slice_ref = refinements.at(results[1].refinement.?);
+    try std.testing.expect(slice_ref.pointer.analyte.undefined_safety != null);
+    try Inst.apply(state, 2, .{ .slice_ptr = .{ .slice = 1 } });
+    try Inst.apply(state, 3, .{ .ptr_add = .{ .ptr = .{ .inst = 2 }, .offset_is_zero = false } });
+
+    const result_gid = results[3].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(scalar_gid, result_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.raw_bytes.?);
+    try std.testing.expectEqual(.single, refinements.at(scalar_gid).getMultiplicity());
+}
+
+test "raw_bytes pointer to single object supports byte-view element pointer" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const byte_view_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = scalar_gid,
+        .raw_bytes = .readonly,
+    } });
+    results[0].refinement = byte_view_gid;
+
+    try Inst.apply(state, 1, .{ .ptr_elem_ptr = .{ .base = .{ .inst = 0 } } });
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(scalar_gid, result_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.raw_bytes.?);
+    try std.testing.expectEqual(.single, refinements.at(scalar_gid).getMultiplicity());
+}
+
+test "store and load preserve raw_bytes pointer view" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 5;
+    const state = testState(&ctx, &results, &refinements);
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const byte_view_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = scalar_gid,
+        .raw_bytes = .readonly,
+    } });
+    results[0].refinement = byte_view_gid;
+
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
+    try Inst.apply(state, 3, .{ .load = .{ .ptr = .{ .inst = 1 } } });
+    try Inst.apply(state, 4, .{ .ptr_add = .{ .ptr = .{ .inst = 3 }, .offset_is_zero = false } });
+
+    const loaded_ref = refinements.at(results[3].refinement.?);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(loaded_ref.*));
+    try std.testing.expectEqual(scalar_gid, loaded_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, loaded_ref.pointer.raw_bytes.?);
+
+    const result_ref = refinements.at(results[4].refinement.?);
+    try std.testing.expectEqual(scalar_gid, result_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.raw_bytes.?);
+}
+
+test "slice preserves raw_bytes pointer view" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 3;
+    const state = testState(&ctx, &results, &refinements);
+
+    const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const byte_view_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = scalar_gid,
+        .raw_bytes = .readonly,
+    } });
+    results[0].refinement = byte_view_gid;
+
+    try Inst.apply(state, 1, .{ .slice = .{
+        .ty = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
+        .ptr = .{ .inst = 0 },
+    } });
+    try Inst.apply(state, 2, .{ .ptr_add = .{ .ptr = .{ .inst = 1 }, .offset_is_zero = false } });
+
+    const sliced_ref = refinements.at(results[1].refinement.?);
+    try std.testing.expectEqual(scalar_gid, sliced_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, sliced_ref.pointer.raw_bytes.?);
+
+    const result_ref = refinements.at(results[2].refinement.?);
+    try std.testing.expectEqual(scalar_gid, result_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.raw_bytes.?);
 }
 
 test "ptr_sub on pointer to region returns pointer to same region" {

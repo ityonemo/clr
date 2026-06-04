@@ -96,6 +96,31 @@ test "hashmap_header marks result defined" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(field_gid).scalar.analyte.undefined_safety.?));
 }
 
+test "call intercepts HashMap Metadata predicate and marks result defined" {
+    const UndefinedSafetyAnalysis = @import("undefined_safety.zig").UndefinedSafety;
+
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const result_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    results[0].refinement = result_gid;
+
+    const intercepted = try UndefinedSafetyAnalysis.call(
+        state,
+        0,
+        .{ .scalar = .{} },
+        &.{},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).Metadata.isUsed",
+    );
+
+    try std.testing.expect(intercepted);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(result_gid).scalar.analyte.undefined_safety.?));
+}
+
 test "store with undefined type wrapper keeps state undefined" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

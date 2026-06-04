@@ -143,6 +143,10 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     // They need valid memory_safety so testValid doesn't fail on them.
     tag.splatInitCallReturnSlot(state.refinements, return_slot, state.ctx);
 
+    if (gates.isMemAsBytes(fqn)) {
+        try rewriteMemAsBytesResult(state, index, args);
+    }
+
     // Dispatch to analysis modules' runtime call filters
     // If any module intercepts (returns true), skip normal function execution
     if (try splatCall(state, index, return_type, args, fqn)) {
@@ -184,6 +188,29 @@ pub fn call(state: State, index: usize, called: anytype, return_type: tag.Type, 
     tag.splatCallReturn(state.refinements, return_gid);
     // Update result with actual returned GID (may differ from return_slot)
     state.results[index].refinement = return_gid;
+}
+
+fn rewriteMemAsBytesResult(state: State, index: usize, args: []const tag.Src) !void {
+    if (args.len < 1) return;
+
+    const src_ptr_gid: Gid = switch (args[0]) {
+        .inst => |inst| state.results[inst].refinement orelse return,
+        .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
+        .fnptr => return,
+    };
+
+    const src_ptr_ref = state.refinements.at(src_ptr_gid);
+    if (src_ptr_ref.* != .pointer) return;
+
+    const result_gid = state.results[index].refinement orelse return;
+    const old_result = state.refinements.at(result_gid).*;
+    const old_analyte = if (old_result == .pointer) old_result.pointer.analyte else Analyte{};
+
+    state.refinements.at(result_gid).* = .{ .pointer = .{
+        .to = src_ptr_ref.pointer.to,
+        .analyte = old_analyte,
+        .raw_bytes = .readonly,
+    } };
 }
 
 /// Dispatch call info to all analysis modules' runtime filters.
@@ -1511,4 +1538,39 @@ test "allocator remap builds optional around copied old slice" {
     const payload_ref = refinements.at(payload_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(payload_ref.*));
     try std.testing.expectEqual(old_region_gid, payload_ref.pointer.to);
+}
+
+test "mem.asBytes call rewrite creates valid raw-byte pointer view" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    const results = try make_results_list(allocator, 2);
+    defer clear_results_list(results, allocator);
+
+    const state = testState(&ctx, results, &refinements);
+
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+
+    const src_ptr_gid = results[0].refinement.?;
+    const src_pointee_gid = refinements.at(src_ptr_gid).pointer.to;
+    const return_type: tag.Type = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } };
+    const args = [_]tag.Src{.{ .inst = 0 }};
+
+    try Inst.call(state, 1, null, return_type, &args, "mem.asBytes");
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
+    try std.testing.expectEqual(src_pointee_gid, result_ref.pointer.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.raw_bytes.?);
+    try std.testing.expect(result_ref.pointer.analyte.undefined_safety != null);
+    try std.testing.expect(result_ref.pointer.analyte.memory_safety != null);
+    refinements.testValid(state.base_gid);
 }

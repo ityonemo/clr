@@ -457,6 +457,56 @@ test "call is no-op for null_safety" {
     try std.testing.expect(intercepted == false);
 }
 
+test "call intercepts HashMapUnmanaged.getIndex with unknown optional result" {
+    const NullSafetyAnalysis = @import("null_safety.zig").NullSafety;
+
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const payload_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const result_gid = try refinements.appendEntity(.{ .optional = .{ .to = payload_gid } });
+    results[0].refinement = result_gid;
+    tag.splatInit(&refinements, result_gid, &ctx, .runtime);
+
+    const intercepted = try NullSafetyAnalysis.call(
+        state,
+        0,
+        .{ .optional = .{ .to = &.{ .scalar = .{} } } },
+        &.{},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).getIndex",
+    );
+
+    try std.testing.expect(intercepted);
+    const ns = refinements.at(result_gid).optional.analyte.null_safety.?;
+    try std.testing.expectEqual(.unknown, std.meta.activeTag(ns));
+}
+
+test "call intercepts HashMap capacity-assume lookup helper" {
+    const NullSafetyAnalysis = @import("null_safety.zig").NullSafety;
+
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+    results[0].refinement = try refinements.appendEntity(.{ .void = {} });
+
+    const intercepted = try NullSafetyAnalysis.call(
+        state,
+        0,
+        .{ .void = {} },
+        &.{},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).getOrPutAssumeCapacityAdapted",
+    );
+
+    try std.testing.expect(intercepted);
+}
+
 test "optional_payload succeeds when preceded by is_non_null assertion on same source" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

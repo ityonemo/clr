@@ -21,12 +21,12 @@ CLR explicitly overrides stdlib's allocator functions and file descriptors as
 part of its expected normal operation.  Mutexes may be added to this list in 
 the future.
 
-### Stdlib HashMap Optional Invariants
+### Stdlib HashMap Invariants
 
-`HashMapUnmanaged.header` unwraps `self.metadata.?` assertively. That unwrap
-depends on HashMap invariants that ordinary AIR does not expose directly, so CLR
-models it through a narrow `hashmap_header` stdlib opcode instead of weakening
-general optional unwrap checking.
+`HashMapUnmanaged.header`, `getIndex`, and some capacity-assumed insertion
+helpers depend on HashMap invariants that ordinary AIR does not expose directly.
+CLR models those paths through narrow stdlib overrides instead of weakening
+general optional unwrap, pointer arithmetic, packed metadata, or leak checking.
 
 This is a stdlib-specific override. User code should eventually express similar
 facts through a declarative refinement/tag mechanism rather than hidden
@@ -35,12 +35,11 @@ HashMap-specific rules.
 ### Stdlib Byte Reinterpretation
 
 `std.mem.asBytes` intentionally reinterprets a pointer to an object as a byte
-region. Generic `bitcast` should continue to preserve the existing pointer
-shape, but a call to the stdlib function is explicit evidence that this
-conversion is intended. CLR should model `std.mem.asBytes` with a narrow stdlib
-override that creates a byte-region view over the same underlying memory rather
-than treating the result as ordinary pointer arithmetic on a single-item
-pointer.
+view. Generic `bitcast` should continue to preserve the existing pointer shape,
+but a call to the stdlib function is explicit evidence that byte indexing is
+intended. CLR models `std.mem.asBytes` with a narrow stdlib override that creates
+a raw-byte pointer view over the same underlying memory, without changing the
+underlying object's multiplicity.
 
 ## Current Active Gaps (planned to be addressed)
 

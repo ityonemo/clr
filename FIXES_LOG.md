@@ -4,6 +4,44 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: std.mem.asBytes scalar views and std.HashMap basic usage
+
+**Date:** 2026-06-04
+
+**Symptom:**
+`std.mem.asBytes(&scalar)` produced pointer-arithmetic failures because the
+result was treated as ordinary indexing over a single-item pointee. After that
+was fixed, `std.HashMap` basic usage exposed a sequence of stdlib-internal false
+positives: unchecked optional unwraps, packed metadata undefined reads, leaks
+from HashMap insertion helpers, pointer arithmetic in deallocate, and invalid
+root-gid traversal during reachability collection.
+
+**Root Cause:**
+`asBytes` needs a pointer-level raw-byte view without changing the underlying
+object's multiplicity. HashMap also relies on invariants that ordinary AIR does
+not represent directly: metadata non-nullness, capacity-assumed insertion,
+metadata predicate/mutator semantics, keys/values pointer views, and deallocate
+recovering the base allocation internally.
+
+**The Fix:**
+- Added an `Inst.call` structural rewrite for `std.mem.asBytes` so the result is
+  a `.raw_bytes` pointer to the original pointee.
+- Preserved `.raw_bytes` through pointer stores/loads and slices, and taught
+  undefined-safety that `array_to_slice` creates a defined pointer value.
+- Added narrow HashMap stdlib gates for `getIndex`, metadata predicates and
+  mutators, keys/values accessors, capacity-assumed insertion helpers, public
+  `HashMap.put`, and `HashMapUnmanaged.deallocate`.
+- Reused the HashMap metadata pointer to paint returned keys/values pointer views
+  and to mark the backing allocation freed during deallocate.
+- Guarded reachability collection against `INVALID_GID`/out-of-range roots.
+
+**Tests:**
+- `zig test lib/lib.zig` (`219` tests)
+- `bats -f "no false positive for std.HashMap basic usage|no false positive for std.mem.asBytes over scalar" test/integration/misc.bats`
+- `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local ./run_integration.sh` (`367/367`)
+
+---
+
 ## Fix: Undefined-safety SIMD scalar result initialization
 
 **Date:** 2026-05-25

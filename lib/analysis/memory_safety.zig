@@ -1351,6 +1351,7 @@ pub const MemorySafety = union(enum) {
 
     /// Recursively collect all GIDs reachable via .to fields from a starting GID.
     fn collectReachableGids(refinements: *Refinements, gid: Gid, reachable: *std.AutoHashMap(Gid, void)) void {
+        if (gid == core.INVALID_GID or gid >= refinements.list.items.len) return;
         // Already visited
         if (reachable.contains(gid)) return;
         reachable.put(gid, {}) catch return;
@@ -3626,12 +3627,42 @@ pub const MemorySafety = union(enum) {
     pub fn hashmap_header(state: State, index: usize, params: tag.HashMapHeader) !void {
         const result_gid = state.results[index].refinement orelse
             std.debug.panic("hashmap_header: result instruction {d} has no refinement", .{index});
+        paintHashMapPointerView(state, result_gid, params.self);
+    }
+
+    fn handleHashMapPointerAccessor(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) return;
+        const result_gid = state.results[index].refinement orelse return;
+        paintHashMapPointerView(state, result_gid, args[0]);
+    }
+
+    fn handleHashMapDeallocate(state: State, args: []const tag.Src) void {
+        if (args.len < 1) return;
+        const metadata_ptr_gid = getHashMapMetadataPointerGid(state, args[0]);
+        const metadata_ptr_ref = state.refinements.at(metadata_ptr_gid);
+        if (metadata_ptr_ref.* != .pointer) {
+            std.debug.panic("hashmap_deallocate: expected metadata payload pointer, got {s}", .{@tagName(metadata_ptr_ref.*)});
+        }
+
+        const metadata_region_gid = metadata_ptr_ref.pointer.to;
+        const region_ref = state.refinements.at(metadata_region_gid);
+        const analyte = getAnalytePtr(region_ref);
+        const ms = analyte.memory_safety orelse return;
+        if (ms != .allocated) return;
+        var allocation = ms.allocated;
+        if (allocation.freed == null) {
+            allocation.freed = .{ .meta = state.ctx.meta };
+        }
+        analyte.memory_safety = .{ .allocated = allocation };
+    }
+
+    fn paintHashMapPointerView(state: State, result_gid: Gid, self: tag.Src) void {
         const result_ref = state.refinements.at(result_gid);
         if (result_ref.* != .pointer) {
             std.debug.panic("hashmap_header: expected pointer result, got {s}", .{@tagName(result_ref.*)});
         }
 
-        const metadata_ptr_gid = getHashMapMetadataPointerGid(state, params.self);
+        const metadata_ptr_gid = getHashMapMetadataPointerGid(state, self);
         const metadata_ptr_ref = state.refinements.at(metadata_ptr_gid);
         if (metadata_ptr_ref.* != .pointer) {
             std.debug.panic("hashmap_header: expected metadata payload pointer, got {s}", .{@tagName(metadata_ptr_ref.*)});
@@ -3809,6 +3840,29 @@ pub const MemorySafety = union(enum) {
             return true;
         }
 
+        if (gates.isMemAsBytes(fqn)) {
+            handleMemAsBytes(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapMetadataMutator(fqn)) {
+            return true;
+        }
+
+        if (gates.isHashMapStorageMutator(fqn)) {
+            return true;
+        }
+
+        if (gates.isHashMapDeallocate(fqn)) {
+            handleHashMapDeallocate(state, args);
+            return true;
+        }
+
+        if (gates.isHashMapKeysOrValues(fqn)) {
+            handleHashMapPointerAccessor(state, index, args);
+            return true;
+        }
+
         // ArenaAllocator.init: creates arena, checks child allocator not deinited
         if (gates.isArenaInit(fqn)) {
             try handleArenaInit(state, index, args);
@@ -3850,6 +3904,30 @@ pub const MemorySafety = union(enum) {
         }
 
         return false;
+    }
+
+    /// std.mem.asBytes structural raw-byte pointer shaping is handled by Inst.call.
+    /// This analysis only propagates memory metadata from the source pointer value.
+    fn handleMemAsBytes(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) return;
+
+        const results = state.results;
+        const refinements = state.refinements;
+
+        const src_ptr_gid: Gid = switch (args[0]) {
+            .inst => |inst| results[inst].refinement orelse return,
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .fnptr => return,
+        };
+        const src_ptr_ref = refinements.at(src_ptr_gid);
+        if (src_ptr_ref.* != .pointer) return;
+
+        const result_gid = results[index].refinement orelse return;
+        const result_ref = refinements.at(result_gid);
+        if (result_ref.* != .pointer) return;
+        if (src_ptr_ref.pointer.analyte.memory_safety) |ms| {
+            result_ref.pointer.analyte.memory_safety = ms;
+        }
     }
 
     /// Handle bufPrint/bufPrintZ - returns slice into buffer (first arg)

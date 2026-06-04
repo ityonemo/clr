@@ -389,6 +389,181 @@ test "call intercepts mem.Allocator.destroy and marks allocation freed" {
     try std.testing.expect(ms.allocated.freed != null);
 }
 
+test "call intercepts HashMap Metadata mutator" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+    results[0].refinement = return_gid;
+
+    const intercepted = try MemorySafety.call(
+        state,
+        0,
+        .{ .void = {} },
+        &.{},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).Metadata.fill",
+    );
+
+    try std.testing.expect(intercepted);
+}
+
+test "call intercepts HashMap keys accessor with metadata-backed pointer view" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const metadata_region_gid = try refinements.appendEntity(.{ .scalar = .{
+        .multiplicity = .region,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const metadata_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = metadata_region_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = metadata_region_gid,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const metadata_gid = try refinements.appendEntity(.{ .optional = .{ .to = metadata_ptr_gid } });
+    const size_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const fields = try std.testing.allocator.alloc(Gid, 2);
+    fields[0] = metadata_gid;
+    fields[1] = size_gid;
+    const self_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 200, .fields = fields } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = self_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    const result_region_gid = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
+    const result_gid = try refinements.appendEntity(.{ .pointer = .{ .to = result_region_gid } });
+    results[1].refinement = result_gid;
+
+    const intercepted = try MemorySafety.call(
+        state,
+        1,
+        .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } },
+        &.{.{ .inst = 0 }},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).keys",
+    );
+
+    try std.testing.expect(intercepted);
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expect(result_ref.pointer.analyte.memory_safety != null);
+    const pointee_ms = refinements.at(result_ref.pointer.to).scalar.analyte.memory_safety.?;
+    try std.testing.expect(pointee_ms != .placeholder);
+}
+
+test "call intercepts HashMap capacity-assume mutator" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+    results[0].refinement = return_gid;
+
+    const intercepted = try MemorySafety.call(
+        state,
+        0,
+        .{ .void = {} },
+        &.{},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).putAssumeCapacityNoClobberContext",
+    );
+
+    try std.testing.expect(intercepted);
+}
+
+test "call intercepts public HashMap put" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    results[0].refinement = try refinements.appendEntity(.{ .void = {} });
+
+    const intercepted = try MemorySafety.call(
+        state,
+        0,
+        .{ .void = {} },
+        &.{},
+        "hash_map.HashMap(u32,u32,hash_map.AutoContext(u32),80).put",
+    );
+
+    try std.testing.expect(intercepted);
+}
+
+test "call intercepts HashMap deallocate and frees metadata allocation" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const metadata_region_gid = try refinements.appendEntity(.{ .scalar = .{
+        .multiplicity = .region,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const metadata_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = metadata_region_gid,
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = metadata_region_gid,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const metadata_gid = try refinements.appendEntity(.{ .optional = .{ .to = metadata_ptr_gid } });
+    const size_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const fields = try std.testing.allocator.alloc(Gid, 2);
+    fields[0] = metadata_gid;
+    fields[1] = size_gid;
+    const self_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 200, .fields = fields } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = self_gid;
+    results[1].refinement = try refinements.appendEntity(.{ .void = {} });
+    const state = testState(&ctx, &results, &refinements);
+
+    const intercepted = try MemorySafety.call(
+        state,
+        1,
+        .{ .void = {} },
+        &.{ .{ .inst = 0 }, .{ .inst = 0 } },
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).deallocate",
+    );
+
+    try std.testing.expect(intercepted);
+    const ms = refinements.at(metadata_region_gid).scalar.analyte.memory_safety.?;
+    try std.testing.expect(ms == .allocated);
+    try std.testing.expect(ms.allocated.freed != null);
+}
+
 test "destroy of interned pointer reports global memory free" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -556,6 +731,81 @@ test "allocation returned through block break is not reported as callee leak" {
     try Inst.apply(state, 5, .{ .ret_safe = .{ .src = .{ .inst = 2 } } });
     try Inst.mergeEarlyReturns(state);
     try Inst.onFinish(state);
+}
+
+test "local pointer slot containing argument allocation is not reported as callee leak" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+    try ctx.push_fn("stores_arg_pointer");
+    defer ctx.pop_fn();
+
+    const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const allocated_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .allocated = .{
+            .meta = ctx.meta,
+            .root_gid = null,
+            .allocator_gid = alloc_gid,
+            .type_id = 100,
+        } } },
+    } });
+    const arg_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = allocated_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+
+    var results = [_]Inst{.{}} ** 4;
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = return_gid,
+        .early_returns = &early_returns,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 0, .{ .arg = .{ .value = arg_ptr_gid, .name_id = 0 } });
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .pointer = .{ .to = &.{ .scalar = .{} } } } } });
+    try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
+    try Inst.apply(state, 3, .{ .ret_safe = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });
+    try Inst.mergeEarlyReturns(state);
+
+    try Inst.onFinish(state);
+}
+
+test "ret_safe ignores invalid root gid while collecting argument reachability" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const pointee_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = pointee_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = core.INVALID_GID } } },
+    } });
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = return_gid,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 0, .{ .arg = .{ .value = ptr_gid, .name_id = 0 } });
+    try Inst.apply(state, 1, .{ .ret_safe = .{ .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .void = {} } } } } });
 }
 
 test "reachable allocations are tracked by allocation root gid, not allocator gid" {

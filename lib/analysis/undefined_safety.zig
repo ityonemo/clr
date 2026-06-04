@@ -228,6 +228,17 @@ pub const UndefinedSafety = union(enum) {
         // The region's undefined state is already set from the source pointer
     }
 
+    pub fn array_to_slice(state: State, index: usize, params: tag.ArrayToSlice) !void {
+        _ = params;
+        const results = state.results;
+        const refinements = state.refinements;
+        // The slice pointer itself is defined; the pointee state remains whatever
+        // the source pointer's region/object already carried.
+        const ptr_idx = results[index].refinement.?;
+        const ptr = &refinements.at(ptr_idx).pointer;
+        ptr.analyte.undefined_safety = .{ .defined = {} };
+    }
+
     pub fn ptr_add(state: State, index: usize, params: tag.PtrAdd) !void {
         _ = params;
         const results = state.results;
@@ -1752,6 +1763,11 @@ pub const UndefinedSafety = union(enum) {
             return false; // memory_safety.call() intercepts
         }
 
+        if (gates.isHashMapMetadataPredicate(fqn)) {
+            handleDefinedScalarResult(state, index);
+            return true;
+        }
+
         // POSIX fd functions - check for undefined fd arguments
         if (gates.isPosixClose(fqn)) {
             // close(fd) - arg[0] is fd
@@ -1927,6 +1943,13 @@ pub const UndefinedSafety = union(enum) {
         const result_idx = state.results[index].refinement orelse return;
         // fd functions return errorunion -> scalar (fd_t)
         // Mark the entire result tree as defined
+        setDefinedRecursive(state.refinements, result_idx);
+    }
+
+    /// Handle stdlib predicates whose lowered packed-field extraction can obscure
+    /// the HashMap metadata initialization invariant.
+    fn handleDefinedScalarResult(state: State, index: usize) void {
+        const result_idx = state.results[index].refinement orelse return;
         setDefinedRecursive(state.refinements, result_idx);
     }
 

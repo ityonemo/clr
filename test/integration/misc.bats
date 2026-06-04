@@ -123,6 +123,14 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no false positive for std.mem.asBytes over scalar" {
+    # asBytes(&value) creates a byte-access pointer view over a single object.
+    # Pointer arithmetic should be valid through the byte view without changing
+    # the original object's multiplicity to region.
+    run compile_and_run "$TEST_CASES/std/asbytes_scalar.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive for std.ArrayList basic usage" {
     # Tests basic ArrayList operations: append, pop, clear.
     run compile_and_run "$TEST_CASES/std/arraylist_basic.zig"

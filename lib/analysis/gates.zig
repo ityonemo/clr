@@ -52,6 +52,64 @@ pub fn isAllocatorRemap(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.Allocator.remap") != null;
 }
 
+/// Match std.mem.asBytes calls.
+pub fn isMemAsBytes(fqn: []const u8) bool {
+    return std.mem.indexOf(u8, fqn, "mem.asBytes") != null;
+}
+
+/// Match std.hash_map.HashMapUnmanaged.getIndex.
+pub fn isHashMapGetIndex(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and
+        std.mem.endsWith(u8, fqn, ".getIndex");
+}
+
+/// Match std.hash_map.HashMapUnmanaged.keys/values pointer accessors.
+pub fn isHashMapKeysOrValues(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and
+        (std.mem.endsWith(u8, fqn, ".keys") or std.mem.endsWith(u8, fqn, ".values"));
+}
+
+/// Match std.hash_map.HashMapUnmanaged.Metadata predicate helpers.
+pub fn isHashMapMetadataPredicate(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") == null and
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") == null) return false;
+    if (std.mem.indexOf(u8, fqn, ".Metadata.") == null) return false;
+    return std.mem.endsWith(u8, fqn, ".isUsed") or
+        std.mem.endsWith(u8, fqn, ".isFree") or
+        std.mem.endsWith(u8, fqn, ".isTombstone");
+}
+
+/// Match std.hash_map.HashMapUnmanaged.Metadata mutating helpers.
+pub fn isHashMapMetadataMutator(fqn: []const u8) bool {
+    if (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") == null and
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") == null) return false;
+    if (std.mem.indexOf(u8, fqn, ".Metadata.") == null) return false;
+    return std.mem.endsWith(u8, fqn, ".fill") or
+        std.mem.endsWith(u8, fqn, ".remove");
+}
+
+/// Match std.hash_map.HashMapUnmanaged mutators whose bodies rely on internal
+/// storage invariants that ordinary AIR does not expose cleanly.
+pub fn isHashMapStorageMutator(fqn: []const u8) bool {
+    const is_unmanaged = std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null;
+    const is_managed = std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null;
+    if (!is_unmanaged and !is_managed) return false;
+    if (is_managed and std.mem.endsWith(u8, fqn, ".put")) return true;
+    return std.mem.endsWith(u8, fqn, ".putAssumeCapacityNoClobberContext") or
+        std.mem.endsWith(u8, fqn, ".getOrPutAssumeCapacityAdapted");
+}
+
+/// Match std.hash_map.HashMapUnmanaged.deallocate.
+pub fn isHashMapDeallocate(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and
+        std.mem.endsWith(u8, fqn, ".deallocate");
+}
+
 // =========================================================================
 // Arena Operations
 // =========================================================================

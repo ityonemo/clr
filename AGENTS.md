@@ -116,14 +116,11 @@ location, and relevant context messages where applicable.
 The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
-returned-pointer destroy handling, and labeled-switch branch-result import work
-is expected to be `357/365` passing (`8` failing) after the select
-undefined-safety fix. The last full measured baseline was `356/365` passing
-(`9` failing), from
+returned-pointer destroy handling, labeled-switch branch-result import work,
+FD safety refactoring, std.mem.asBytes raw-byte pointer handling, and HashMap
+stdlib overrides is `367/367` passing. The last full measured baseline was from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
-./run_integration.sh` on 2026-05-24. Treat remaining failures as real analyzer
-work, not compiler-cache failures. A focused `misc.bats` run after the SIMD
-undefined-safety fix confirmed `std.mem.indexOfSentinel` SIMD now passes.
+./run_integration.sh` on 2026-06-04.
 
 The largest incomplete areas are:
 
@@ -132,8 +129,7 @@ The largest incomplete areas are:
   Rust-style ownership terminology here; the analyzer tracks allocation identity,
   free state, allocator mismatch state, and reachability.
 - Current memory-safety failures from the latest full run:
-  - No narrow allocator false positives are currently confirmed outside the
-    remaining stdlib HashMap/null-safety case.
+  - None confirmed in the latest full run.
 - Field pointer provenance. `fieldParentPtr` tracking depends on
   `struct_field_ptr` producing a pointer with field origin metadata. Basic
   struct, union, and global struct/union field recovery is covered, but returned
@@ -142,21 +138,19 @@ The largest incomplete areas are:
 - Current field/stack provenance failures from the latest full run:
   - None confirmed. The prior `stack_pointer.bats` 259 passed in the latest full
     run.
-- FD closure propagation. FD state is scalar-only and copied through some stores
-  and aggregate inits, but close state is not reliably propagated to all aliases
-  or returned values. Correct open/close examples still report leaks.
+- FD closure propagation. FD state now passes the current integration coverage,
+  including aliases/returned values covered by the suite, but the broader FD
+  aliasing model still deserves architectural review before expanding surface
+  area.
 - Current FD failures from the latest full run:
-  - `fd.bats` 123/126/129/132/133/136 and `undefined.bats` 343. These remain
-    punted until the FD aliasing/closure architecture is addressed.
-- Stdlib reductions. HashMap still exposes gaps in type/character preservation
-  and analysis propagation. Packed struct init, packed-struct scalar cross-call
-  safety, `std.mem.indexOfSentinel` SIMD `select`/`splat` handling,
-  memcpy/memset destination definition, string literal equality, branch clobber,
-  copied struct-argument allocation reachability, and basic ArrayList usage are
-  covered.
+  - None confirmed in the latest full run.
+- Stdlib reductions. Packed struct init, packed-struct scalar cross-call safety,
+  `std.mem.indexOfSentinel` SIMD `select`/`splat` handling, memcpy/memset
+  destination definition, string literal equality, branch clobber, copied
+  struct-argument allocation reachability, basic ArrayList usage, basic HashMap
+  usage, and `std.mem.asBytes(&scalar)` byte views are covered.
 - Current stdlib/undefined/null failures from the latest full run:
-  - `misc.bats` 210: `std.HashMap` basic usage currently reaches a
-    null-safety unchecked optional unwrap in `HashMapUnmanaged.header`.
+  - None confirmed in the latest full run.
 - Alignment-cast lowering. `@ptrCast(@alignCast(...))` currently exposes AIR that
   bitcasts a pointer to an address-like scalar, masks low bits, and branches on
   the alignment check. Add an AIR-to-analyzer interceptor that recognizes this
@@ -191,6 +185,7 @@ Problematic patterns to fix before adding more surface area:
 
 Good next targets:
 
-1. Recommended next focused sprint: decide between `std.HashMap`
-   optional/null-safety and the broader FD aliasing/closure architecture.
-2. Leave FD aliasing until later unless a narrower FD bug blocks another fix.
+1. Recommended next focused sprint: choose the next architectural gap now that
+   full integration is green. FD aliasing remains a good later target, but it no
+   longer blocks the current suite.
+2. Keep HashMap stdlib overrides narrow; broaden them only with focused tests.

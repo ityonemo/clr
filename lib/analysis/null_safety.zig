@@ -7,6 +7,7 @@ const Meta = core.Meta;
 const tag = @import("../tag.zig");
 const Context = @import("../Context.zig");
 const State = @import("../lib.zig").State;
+const gates = @import("gates.zig");
 
 /// NullSafety tracks null-checking state for optionals.
 pub const NullSafety = union(enum) {
@@ -592,12 +593,19 @@ pub const NullSafety = union(enum) {
         args: []const tag.Src,
         fqn: []const u8,
     ) anyerror!bool {
-        _ = state;
-        _ = index;
         _ = return_type;
         _ = args;
-        _ = fqn;
-        // No null_safety-specific call intercepts currently needed
+
+        if (gates.isHashMapGetIndex(fqn)) {
+            const result_gid = state.results[index].refinement orelse return true;
+            initOptionalsUnknown(state.refinements, result_gid);
+            return true;
+        }
+
+        if (gates.isHashMapStorageMutator(fqn)) {
+            return true;
+        }
+
         return false;
     }
 
