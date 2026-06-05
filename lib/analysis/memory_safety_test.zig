@@ -33,6 +33,10 @@ fn makeRegion(refinements: *Refinements, gid: Gid) Gid {
     return gid;
 }
 
+fn shouldNotExecuteProcessArgsOverride(_: *Context, _: *Refinements, _: Gid, _: []const Gid) anyerror!Gid {
+    return error.ProcessArgsOverrideDidNotIntercept;
+}
+
 test "alloc sets stack metadata on pointee" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
@@ -509,6 +513,81 @@ test "call intercepts public HashMap put" {
     );
 
     try std.testing.expect(intercepted);
+}
+
+test "call intercepts process args iterator init" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+
+    const return_type = tag.Type{ .@"struct" = &.{
+        .type_id = 2709,
+        .fields = &.{ .{ .scalar = .{} }, .{ .scalar = .{} } },
+    } };
+
+    try Inst.call(
+        state,
+        0,
+        shouldNotExecuteProcessArgsOverride,
+        return_type,
+        &.{},
+        "process.ArgIteratorPosix.init",
+    );
+
+    const result_gid = results[0].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expect(result_ref.* == .scalar);
+    try std.testing.expectEqual(.interned, std.meta.activeTag(result_ref.scalar.analyte.memory_safety.?));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(result_ref.scalar.analyte.undefined_safety.?));
+}
+
+test "call intercepts process args iterator next" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const iterator_slot_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{
+            .undefined_safety = .{ .defined = {} },
+            .memory_safety = .{ .interned = ctx.meta },
+        },
+    } });
+    const iterator_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = iterator_slot_gid,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = iterator_ptr_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    const return_type = tag.Type{ .optional = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } };
+
+    try Inst.call(
+        state,
+        1,
+        shouldNotExecuteProcessArgsOverride,
+        return_type,
+        &.{.{ .inst = 0 }},
+        "process.ArgIteratorPosix.next",
+    );
+
+    const result_gid = results[1].refinement.?;
+    const result_ref = refinements.at(result_gid);
+    try std.testing.expect(result_ref.* == .optional);
+    try std.testing.expectEqual(.interned, std.meta.activeTag(result_ref.optional.analyte.memory_safety.?));
+
+    const payload_ref = refinements.at(result_ref.optional.to);
+    try std.testing.expect(payload_ref.* == .pointer);
+    try std.testing.expectEqual(.interned, std.meta.activeTag(payload_ref.pointer.analyte.memory_safety.?));
+
+    const region_ref = refinements.at(payload_ref.pointer.to);
+    try std.testing.expect(region_ref.* == .scalar);
+    try std.testing.expectEqual(.region, region_ref.scalar.multiplicity);
+    try std.testing.expectEqual(.interned, std.meta.activeTag(region_ref.scalar.analyte.memory_safety.?));
 }
 
 test "call intercepts HashMap deallocate and frees metadata allocation" {

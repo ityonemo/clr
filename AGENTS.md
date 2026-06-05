@@ -78,6 +78,11 @@ Do not use `-femit-air` or `--verbose-air` directly; use the helper scripts.
   Codex.
 - Treat `.air.zig` files, `.zig-cache/`, and `zig-out/` as generated artifacts.
 - Do not modify `zig/` unless the task explicitly requires compiler changes.
+- Do not change runtime data-structure types in `lib/` without asking first.
+  This includes adding fields or union/enum cases to analysis state,
+  `Refinements` entities, `Analyte`, `Inst`, or other shared runtime structures.
+  Prefer using existing state representations and stdlib boundary overrides when
+  they fit the compiler-enforced Zig type shape.
 - Be careful with dirty worktrees; preserve user changes and avoid reverting
   unrelated files.
 

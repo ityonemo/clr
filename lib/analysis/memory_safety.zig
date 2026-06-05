@@ -1334,7 +1334,7 @@ pub const MemorySafety = union(enum) {
                     const root_gid = switch (ms) {
                         .allocated => |a| a.root_gid,
                         .stack => |s| s.root_gid,
-                        .interned, .error_stub => null,
+                        .interned, .error_stub, .placeholder => null,
                     };
                     if (root_gid) |root| {
                         if (isReachableFromInner(refinements, target_gid, root, depth + 1)) {
@@ -3812,6 +3812,28 @@ pub const MemorySafety = union(enum) {
         args: []const tag.Src,
         fqn: []const u8,
     ) anyerror!bool {
+        // std.process.args constructs an iterator from OS-owned argv state. CLR
+        // treats the iterator as an opaque scalar/interned boundary instead of
+        // modeling its private stdlib layout. The self argument to skip/next is
+        // already constrained by Zig's type checker and member-call lowering, so
+        // this override should not grow a custom runtime token type.
+        if (gates.isProcessArgsInit(fqn)) {
+            try handleProcessArgsInit(state, index);
+            return true;
+        }
+
+        if (gates.isProcessArgsSkip(fqn)) {
+            requireProcessArgsSelf(args);
+            setResultStack(state, index);
+            return true;
+        }
+
+        if (gates.isProcessArgsNext(fqn)) {
+            requireProcessArgsSelf(args);
+            handleProcessArgsNext(state, index);
+            return true;
+        }
+
         if (gates.isAllocatorCreate(fqn)) {
             try handleAllocCreate(state, index, args);
             return true;
@@ -3922,6 +3944,58 @@ pub const MemorySafety = union(enum) {
         }
 
         return false;
+    }
+
+    fn handleProcessArgsInit(state: State, index: usize) !void {
+        const result_gid = try Inst.clobberInst(state.refinements, state.results, index, .{ .scalar = .{
+            .analyte = .{
+                .undefined_safety = .{ .defined = {} },
+                .memory_safety = .{ .interned = state.ctx.meta },
+            },
+        } });
+        _ = result_gid;
+    }
+
+    fn handleProcessArgsNext(state: State, index: usize) void {
+        const result_gid = requireResult(state, index, "memory_safety.process_args_next");
+        const ms: MemorySafety = .{ .interned = state.ctx.meta };
+        paintSpatialMemory(state.refinements, result_gid, ms);
+        paintProcessArgsReturnedMemory(state.refinements, result_gid, ms);
+    }
+
+    fn paintProcessArgsReturnedMemory(refinements: *Refinements, gid: Gid, ms: MemorySafety) void {
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .pointer => |p| paintSpatialMemory(refinements, p.to, ms),
+            .optional => |o| paintProcessArgsReturnedMemory(refinements, o.to, ms),
+            .errorunion => |e| paintProcessArgsReturnedMemory(refinements, e.to, ms),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    paintProcessArgsReturnedMemory(refinements, field_gid, ms);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        paintProcessArgsReturnedMemory(refinements, field_gid, ms);
+                    }
+                }
+            },
+            .recursive => |r| {
+                if (r.to != 0) {
+                    paintProcessArgsReturnedMemory(refinements, r.to, ms);
+                }
+            },
+            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+        }
+    }
+
+    fn requireProcessArgsSelf(args: []const tag.Src) void {
+        if (args.len < 1) @panic("process args iterator operation missing self argument");
+        switch (args[0]) {
+            .inst, .interned => {},
+            .fnptr => @panic("process args iterator self cannot be a function pointer"),
+        }
     }
 
     /// std.mem.asBytes structural raw-byte pointer shaping is handled by Inst.call.

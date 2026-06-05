@@ -57,6 +57,28 @@ pub fn isMemAsBytes(fqn: []const u8) bool {
     return std.mem.indexOf(u8, fqn, "mem.asBytes") != null;
 }
 
+/// Match std.process.args and its platform iterator initialization helpers.
+pub fn isProcessArgsInit(fqn: []const u8) bool {
+    return std.mem.eql(u8, fqn, "process.args") or
+        std.mem.eql(u8, fqn, "process.ArgIterator.init") or
+        std.mem.eql(u8, fqn, "process.ArgIteratorPosix.init") or
+        std.mem.eql(u8, fqn, "process.ArgIteratorWindows.init");
+}
+
+/// Match std.process.ArgIterator skip helpers.
+pub fn isProcessArgsSkip(fqn: []const u8) bool {
+    return std.mem.eql(u8, fqn, "process.ArgIterator.skip") or
+        std.mem.eql(u8, fqn, "process.ArgIteratorPosix.skip") or
+        std.mem.eql(u8, fqn, "process.ArgIteratorWindows.skip");
+}
+
+/// Match std.process.ArgIterator next helpers.
+pub fn isProcessArgsNext(fqn: []const u8) bool {
+    return std.mem.eql(u8, fqn, "process.ArgIterator.next") or
+        std.mem.eql(u8, fqn, "process.ArgIteratorPosix.next") or
+        std.mem.eql(u8, fqn, "process.ArgIteratorWindows.next");
+}
+
 /// Match std.hash_map.HashMapUnmanaged.getIndex.
 pub fn isHashMapGetIndex(fqn: []const u8) bool {
     return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or

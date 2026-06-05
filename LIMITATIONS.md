@@ -41,6 +41,32 @@ intended. CLR models `std.mem.asBytes` with a narrow stdlib override that create
 a raw-byte pointer view over the same underlying memory, without changing the
 underlying object's multiplicity.
 
+### Process Argument Boundaries
+
+`std.process.args` and its `ArgIterator` helpers are treated as an opaque stdlib
+boundary. CLR does not model the iterator's internal stdlib layout. Instead, the
+args/init path produces an opaque scalar marked `.interned`, and iterator
+operations such as `skip` and `next` only require the compiler-lowered self
+argument to exist.
+
+This relies on Zig's own type system and member-call lowering. User code cannot
+pass an arbitrary unrelated scalar as the first `self` parameter to
+`ArgIterator.next` in well-typed Zig; the AIR call shape has already passed the
+compiler's type checks before CLR sees it. Because of that, CLR does not add a
+custom runtime memory-safety tag just to distinguish the iterator handle. The
+handle is opaque to CLR and non-user-managed, which is exactly what `.interned`
+already means for this analysis.
+
+Argument strings returned by `next` are process-owned runtime memory. CLR models
+that returned string memory as `.interned`: not literally compile-time interned,
+but non-user-managed and not valid to free or destroy. Environment-variable
+iteration should use the same model when support is added.
+
+This intentionally does not prove safety for user-constructed values that happen
+to have the same shape as the stdlib iterator outside the compiler-typed
+`std.process` API surface. The override is a narrow stdlib boundary, not a
+general structural proof of `ArgIterator` layout.
+
 ## Current Active Gaps (planned to be addressed)
 
 ### Declarations

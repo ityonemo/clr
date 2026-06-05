@@ -143,6 +143,14 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no analyzer panic for std.process.args" {
+    # std.process.args initializes an ArgIterator from OS-provided argv state.
+    # CLR should treat that as a stdlib boundary rather than requiring an
+    # imported global refinement for the platform interned pointer.
+    run compile_and_run "$TEST_CASES/std/process_args.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive for memcpy marking destination as defined" {
     # After @memcpy, the destination region should have the same defined state as the source.
     run compile_and_run "$TEST_CASES/undefined_safety/memcpy_marks_dest_defined.zig"

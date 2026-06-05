@@ -19,13 +19,13 @@ fd_safety: ?fd_safety_analysis.FdSafety = null,
 
 /// enumerated list of modes.  These two MUST be kept in sync.
 pub const Mode = enum { undefined_safety, memory_safety, null_safety, variant_safety, fieldparentptr_safety, fd_safety };
-pub const analyses =.{ 
-    undefined_safety_analysis.UndefinedSafety, 
-    memory_safety_analysis.MemorySafety, 
-    null_safety_analysis.NullSafety, 
-    variant_safety_analysis.VariantSafety, 
-    fieldparentptr_safety_analysis.FieldParentPtrSafety, 
-    fd_safety_analysis.FdSafety 
+pub const analyses = .{
+    undefined_safety_analysis.UndefinedSafety,
+    memory_safety_analysis.MemorySafety,
+    null_safety_analysis.NullSafety,
+    variant_safety_analysis.VariantSafety,
+    fieldparentptr_safety_analysis.FieldParentPtrSafety,
+    fd_safety_analysis.FdSafety,
 };
 
 /// Initialize module-level state for all analyses.
