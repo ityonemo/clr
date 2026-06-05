@@ -67,6 +67,21 @@ pub const MemorySafety = union(enum) {
 
     pub fn deinitModule() void {}
 
+    fn requireResult(state: State, index: usize, comptime context: []const u8) Gid {
+        return state.results[index].refinement orelse
+            std.debug.panic("{s}: result instruction {d} has no refinement", .{ context, index });
+    }
+
+    fn requireInst(state: State, inst: usize, comptime context: []const u8) Gid {
+        return state.results[inst].refinement orelse
+            std.debug.panic("{s}: source instruction {d} has no refinement", .{ context, inst });
+    }
+
+    fn requireGlobal(refinements: *Refinements, interned: tag.Interned, comptime context: []const u8) Gid {
+        return refinements.getGlobal(interned.ip_idx) orelse
+            std.debug.panic("{s}: interned {d} has no global refinement", .{ context, interned.ip_idx });
+    }
+
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         _ = allocator;
@@ -121,7 +136,7 @@ pub const MemorySafety = union(enum) {
             .interned => |interned| {
                 switch (interned.ty) {
                     .pointer, .@"struct" => {
-                        const ptr_refinement_idx = results[ptr].refinement orelse return;
+                        const ptr_refinement_idx = requireInst(state, ptr, "memory_safety.store interned destination");
                         const ptr_ref = refinements.at(ptr_refinement_idx);
                         if (ptr_ref.* == .pointer) {
                             const dest_idx = ptr_ref.pointer.to;
@@ -140,10 +155,10 @@ pub const MemorySafety = union(enum) {
             .fnptr => return,
         };
 
-        const src_refinement_idx = results[src].refinement orelse return;
+        const src_refinement_idx = requireInst(state, src, "memory_safety.store source");
         const src_refinement = refinements.at(src_refinement_idx);
 
-        const ptr_refinement_idx = results[ptr].refinement orelse return;
+        const ptr_refinement_idx = requireInst(state, ptr, "memory_safety.store pointer");
         const ptr_ref = refinements.at(ptr_refinement_idx);
         if (ptr_ref.* != .pointer) return;
 
@@ -257,7 +272,7 @@ pub const MemorySafety = union(enum) {
     pub fn dbg_var_ptr(state: State, index: usize, params: tag.DbgVarPtrParams) !void {
         _ = index;
         const inst = params.ptr orelse return;
-        const ptr_idx = state.results[inst].refinement orelse return;
+        const ptr_idx = requireInst(state, inst, "memory_safety.dbg_var_ptr");
         const ptr_ref = state.refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
 
@@ -300,7 +315,7 @@ pub const MemorySafety = union(enum) {
     /// root_gid points to the CONTAINER so field_parent_ptr can recover the parent.
     pub fn struct_field_ptr(state: State, index: usize, params: tag.StructFieldPtr) !void {
         const refinements = state.refinements;
-        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr_idx = requireResult(state, index, "memory_safety.struct_field_ptr");
         const ptr = &refinements.at(ptr_idx).pointer;
 
         // Get container from base pointer - only handle instruction bases
@@ -414,7 +429,7 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
 
         // Get the result pointer
-        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr_idx = requireResult(state, index, "memory_safety.slice_ptr");
         const ptr = &refinements.at(ptr_idx).pointer;
 
         if (params.slice) |slice_inst| {
@@ -474,7 +489,7 @@ pub const MemorySafety = union(enum) {
         const refinements = state.refinements;
 
         // Get the result pointer
-        const ptr_idx = state.results[index].refinement orelse return;
+        const ptr_idx = requireResult(state, index, "memory_safety.slice_field_ptr");
         const ptr = &refinements.at(ptr_idx).pointer;
 
         // Get the source pointer (pointer to slice)
@@ -547,7 +562,7 @@ pub const MemorySafety = union(enum) {
         };
         const ptr_ref = refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
-        const result_gid = state.results[index].refinement orelse return;
+        const result_gid = requireResult(state, index, "memory_safety.pointer_arithmetic");
         const result_ref = refinements.at(result_gid);
         if (result_ref.* != .pointer) return;
 
@@ -605,7 +620,7 @@ pub const MemorySafety = union(enum) {
             .error_stub => return,
             .placeholder => std.debug.panic("placeholder in field_parent_ptr - entity not initialized", .{}),
         } else null;
-        const result_idx = state.results[index].refinement orelse return;
+        const result_idx = requireResult(state, index, "memory_safety.field_parent_ptr");
         const skeleton_parent_gid = refinements.at(result_idx).pointer.to;
         const rooted_parent = if (parent_gid) |root_gid| refinements.findByGid(root_gid) else null;
         const origin = ptr_ref.pointer.analyte.fieldparentptr_safety orelse return;
@@ -625,7 +640,8 @@ pub const MemorySafety = union(enum) {
         // Copy parent's memory_safety to the result pointer
         // This is now pointing at the root, so root_gid = null
         const parent_analyte = getAnalytePtr(refinements.at(parent_eidx));
-        const parent_ms = parent_analyte.memory_safety orelse return;
+        const parent_ms = parent_analyte.memory_safety orelse
+            std.debug.panic("memory_safety.field_parent_ptr: parent gid {d} has no memory_safety", .{parent_eidx});
         result_ptr.analyte.memory_safety = switch (parent_ms) {
             .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = null } },
             .allocated => |a| .{ .allocated = .{
@@ -893,7 +909,8 @@ pub const MemorySafety = union(enum) {
         const ctx = state.ctx;
 
         // Get the ret_ptr pointer and its pointee (the struct/union being returned)
-        const ptr_refinement_idx = results[params.ptr].refinement orelse return;
+        const ptr_refinement_idx = results[params.ptr].refinement orelse
+            std.debug.panic("memory_safety.ret_load: ret ptr instruction {d} has no refinement", .{params.ptr});
         const ptr_refinement = refinements.at(ptr_refinement_idx);
         if (ptr_refinement.* != .pointer) return;
 
@@ -1057,7 +1074,8 @@ pub const MemorySafety = union(enum) {
             .inst => |i| i,
             else => return, // Comptime - no tracking needed
         };
-        const eu_gid = results[src_inst].refinement orelse return;
+        const eu_gid = results[src_inst].refinement orelse
+            std.debug.panic("memory_safety.cond_br: errorunion instruction {d} has no refinement", .{src_inst});
         const eu_ref = refinements.at(eu_gid);
         if (eu_ref.* != .errorunion) return;
 
@@ -1070,7 +1088,8 @@ pub const MemorySafety = union(enum) {
             else => {},
         }
 
-        const payload_ms = getAnalytePtr(payload_ref).memory_safety orelse return;
+        const payload_ms = getAnalytePtr(payload_ref).memory_safety orelse
+            std.debug.panic("memory_safety.cond_br: errorunion payload gid {d} has no memory_safety", .{payload_gid});
         if (payload_ms != .allocated and payload_ms != .error_stub) return;
 
         // On error path, the allocation didn't happen - mark the payload as phantom.
@@ -1699,17 +1718,16 @@ pub const MemorySafety = union(enum) {
     /// Handle load - detect use-after-free.
     /// Checks the POINTEE's allocation state (via ptr.to) for freed status.
     pub fn load(state: State, index: usize, params: tag.Load) !void {
-        const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
 
-        const result_idx = results[index].refinement orelse return;
+        const result_idx = requireResult(state, index, "memory_safety.load");
         const result_ref = refinements.at(result_idx);
 
         // Get ptr_idx from ptr - untracked interned loads have no memory safety tracking needed
         const ptr_idx: Gid = switch (params.ptr) {
-            .inst => |ptr| results[ptr].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .inst => |ptr| requireInst(state, ptr, "memory_safety.load pointer"),
+            .interned => |interned| requireGlobal(refinements, interned, "memory_safety.load pointer"),
             .fnptr => return, // No memory safety tracking for interned constants
         };
         const ptr_refinement = refinements.at(ptr_idx);
@@ -1763,8 +1781,8 @@ pub const MemorySafety = union(enum) {
         const ctx = state.ctx;
 
         const ptr_gid: Gid = switch (src) {
-            .inst => |inst| state.results[inst].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .inst => |inst| requireInst(state, inst, "memory_safety.checkPtrUseAfterFree"),
+            .interned => |interned| requireGlobal(refinements, interned, "memory_safety.checkPtrUseAfterFree"),
             .fnptr => return,
         };
 
@@ -1855,7 +1873,7 @@ pub const MemorySafety = union(enum) {
         const ctx = state.ctx;
 
         // Set memory_safety on result pointer
-        const result_ref_idx = results[index].refinement orelse return;
+        const result_ref_idx = requireResult(state, index, "memory_safety.ptr_elem_ptr");
         const result_ref = refinements.at(result_ref_idx);
         if (result_ref.* != .pointer) return;
 
@@ -1935,13 +1953,12 @@ pub const MemorySafety = union(enum) {
     /// For slices, the base is pointer → region → element.
     pub fn array_elem_val(state: State, index: usize, params: tag.ArrayElemVal) !void {
         _ = index;
-        const results = state.results;
         const refinements = state.refinements;
         const ctx = state.ctx;
 
         const base_ref: Gid = switch (params.base) {
-            .inst => |idx| results[idx].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .inst => |idx| requireInst(state, idx, "memory_safety.array_elem_val base"),
+            .interned => |interned| requireGlobal(refinements, interned, "memory_safety.array_elem_val base"),
             .fnptr => return, // interned constant, can't track
         };
         const base_refinement = refinements.at(base_ref).*;
@@ -1952,7 +1969,8 @@ pub const MemorySafety = union(enum) {
         const region_ref = refinements.at(region_idx);
         if (region_ref.getMultiplicity() != .region and base_refinement.pointer.raw_bytes == null) return;
 
-        const ms = getAnalytePtrConst(region_ref).memory_safety orelse return;
+        const ms = getAnalytePtrConst(region_ref).memory_safety orelse
+            std.debug.panic("memory_safety.array_elem_val: region gid {d} has no memory_safety", .{region_idx});
         if (ms != .allocated) return;
 
         if (ms.allocated.freed) |free_site| {

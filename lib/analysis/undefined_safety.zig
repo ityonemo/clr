@@ -30,6 +30,16 @@ pub const UndefinedSafety = union(enum) {
 
     pub fn deinitModule() void {}
 
+    fn requireResult(state: State, index: usize, comptime context: []const u8) Gid {
+        return state.results[index].refinement orelse
+            std.debug.panic("{s}: result instruction {d} has no refinement", .{ context, index });
+    }
+
+    fn requireInst(state: State, inst: usize, comptime context: []const u8) Gid {
+        return state.results[inst].refinement orelse
+            std.debug.panic("{s}: source instruction {d} has no refinement", .{ context, inst });
+    }
+
     /// Trivial copy - no heap allocations to duplicate.
     pub fn copy(self: @This(), allocator: std.mem.Allocator) error{OutOfMemory}!@This() {
         _ = allocator;
@@ -208,10 +218,9 @@ pub const UndefinedSafety = union(enum) {
 
     pub fn slice_field_ptr(state: State, index: usize, params: tag.SliceFieldPtr) !void {
         _ = params;
-        const results = state.results;
         const refinements = state.refinements;
         // The pointer itself is defined (it exists and points to a valid slice component)
-        const ptr_idx = results[index].refinement orelse return;
+        const ptr_idx = requireResult(state, index, "undefined_safety.slice_field_ptr");
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
         // The pointee's undefined state is set by the tag handler via splatInit
@@ -241,10 +250,9 @@ pub const UndefinedSafety = union(enum) {
 
     pub fn ptr_add(state: State, index: usize, params: tag.PtrAdd) !void {
         _ = params;
-        const results = state.results;
         const refinements = state.refinements;
         // The pointer itself is defined (it exists and points to a valid element)
-        const ptr_idx = results[index].refinement orelse return;
+        const ptr_idx = requireResult(state, index, "undefined_safety.ptr_add");
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
         // The region's undefined state is already set from the source pointer
@@ -252,9 +260,8 @@ pub const UndefinedSafety = union(enum) {
 
     pub fn ptr_sub(state: State, index: usize, params: tag.PtrSub) !void {
         _ = params;
-        const results = state.results;
         const refinements = state.refinements;
-        const ptr_idx = results[index].refinement orelse return;
+        const ptr_idx = requireResult(state, index, "undefined_safety.ptr_sub");
         const ptr = &refinements.at(ptr_idx).pointer;
         ptr.analyte.undefined_safety = .{ .defined = {} };
     }
@@ -368,10 +375,8 @@ pub const UndefinedSafety = union(enum) {
             // No operand - can't determine source, assume defined
             return;
         };
-        const src_gid = results[operand].refinement orelse {
-            // No refinement on source - assume defined
-            return;
-        };
+        const src_gid = results[operand].refinement orelse
+            std.debug.panic("undefined_safety.get_union_tag: operand instruction {d} has no refinement", .{operand});
         const src_ref = refinements.at(src_gid);
 
         // Check if the source is a union
@@ -580,14 +585,15 @@ pub const UndefinedSafety = union(enum) {
     /// Check if a Src operand is undefined and error if so
     fn checkSrcUndefined(state: State, src: tag.Src) !void {
         const gid: Gid = switch (src) {
-            .inst => |inst| state.results[inst].refinement orelse return,
+            .inst => |inst| requireInst(state, inst, "undefined_safety.checkSrcUndefined"),
             .interned, .fnptr => return, // Interned values are always defined
         };
 
         const ref = state.refinements.at(gid);
         switch (ref.*) {
             .scalar => |s| {
-                const undef = s.analyte.undefined_safety orelse return;
+                const undef = s.analyte.undefined_safety orelse
+                    std.debug.panic("undefined_safety.checkSrcUndefined: scalar gid {d} has no undefined_safety", .{gid});
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(state.ctx),
                     .inconsistent => return undef.reportInconsistentBranches(state.ctx),
@@ -595,7 +601,8 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .pointer => |p| {
-                const undef = p.analyte.undefined_safety orelse return;
+                const undef = p.analyte.undefined_safety orelse
+                    std.debug.panic("undefined_safety.checkSrcUndefined: pointer gid {d} has no undefined_safety", .{gid});
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(state.ctx),
                     .inconsistent => return undef.reportInconsistentBranches(state.ctx),
@@ -609,7 +616,7 @@ pub const UndefinedSafety = union(enum) {
     /// aggregate_init creates a struct/array from element values.
     /// Copy undefined_safety state from each source element to the corresponding field.
     pub fn aggregate_init(state: State, index: usize, params: tag.AggregateInit) !void {
-        const result_gid = state.results[index].refinement orelse return;
+        const result_gid = requireResult(state, index, "undefined_safety.aggregate_init");
         const result_ref = state.refinements.at(result_gid);
 
         switch (result_ref.*) {
@@ -628,7 +635,7 @@ pub const UndefinedSafety = union(enum) {
     /// Copy undefined_safety state from a source to a destination refinement.
     fn copyUndefinedState(state: State, dst_gid: Gid, src: tag.Src) void {
         const src_gid: ?Gid = switch (src) {
-            .inst => |inst| state.results[inst].refinement,
+            .inst => |inst| requireInst(state, inst, "undefined_safety.copyUndefinedState"),
             .interned => null, // Interned values are comptime - always defined
             .fnptr => null, // Function pointers are always defined
         };

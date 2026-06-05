@@ -64,7 +64,8 @@ pub const NullSafety = union(enum) {
     /// wrap_optional constructs a known non-null optional.
     pub fn wrap_optional(state: State, index: usize, params: tag.WrapOptional) !void {
         _ = params;
-        const result_gid = state.results[index].refinement orelse return;
+        const result_gid = state.results[index].refinement orelse
+            std.debug.panic("null_safety.wrap_optional: result instruction {d} has no refinement", .{index});
         const result_ref = state.refinements.at(result_gid);
         if (result_ref.* != .optional) return;
         result_ref.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
@@ -74,12 +75,14 @@ pub const NullSafety = union(enum) {
     pub fn bitcast(state: State, index: usize, params: tag.Bitcast) !void {
         if (params.ty != .optional or params.ty.optional.to.* != .pointer) return;
 
-        const result_gid = state.results[index].refinement orelse return;
+        const result_gid = state.results[index].refinement orelse
+            std.debug.panic("null_safety.bitcast: result instruction {d} has no refinement", .{index});
         const result_ref = state.refinements.at(result_gid);
         if (result_ref.* != .optional) return;
 
         const src_gid: ?Gid = switch (params.src) {
-            .inst => |inst| state.results[inst].refinement,
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("null_safety.bitcast: source instruction {d} has no refinement", .{inst}),
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
             .fnptr => null,
         };
@@ -113,7 +116,8 @@ pub const NullSafety = union(enum) {
             .inst => |i| i,
             else => return, // Comptime - no tracking needed
         };
-        const opt_gid = results[opt_inst].refinement orelse return;
+        const opt_gid = results[opt_inst].refinement orelse
+            std.debug.panic("null_safety.cond_br: optional instruction {d} has no refinement", .{opt_inst});
         const opt_ref = refinements.at(opt_gid);
         if (opt_ref.* != .optional) return;
 
@@ -149,7 +153,8 @@ pub const NullSafety = union(enum) {
         const container_ref = state.refinements.at(container_gid);
         const field_gid = switch (container_ref.*) {
             .@"struct" => |s| s.fields[field_val.field_index],
-            .@"union" => |u| u.fields[field_val.field_index] orelse return,
+            .@"union" => |u| u.fields[field_val.field_index] orelse
+                std.debug.panic("null_safety.narrowStructFieldValOrigin: union field {d} has no active field entity", .{field_val.field_index}),
             else => |t| std.debug.panic("struct_field_val origin expected struct or union, got {s}", .{@tagName(t)}),
         };
         const field_ref = state.refinements.at(field_gid);

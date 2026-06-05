@@ -163,13 +163,16 @@ pub const VariantSafety = struct {
     }
 
     pub fn union_init(state: State, index: usize, params: tag.UnionInit) !void {
-        const result_gid = state.results[index].refinement orelse return;
+        const result_gid = state.results[index].refinement orelse
+            std.debug.panic("variant_safety.union_init: result instruction {d} has no refinement", .{index});
         const ref = state.refinements.at(result_gid);
         if (ref.* != .@"union") return;
 
         const u = &ref.@"union";
         const vs = ensureState(state.refinements, u);
-        if (params.field_index >= vs.active_metas.len) return;
+        if (params.field_index >= vs.active_metas.len) {
+            std.debug.panic("variant_safety.union_init: field index {d} out of bounds ({d})", .{ params.field_index, vs.active_metas.len });
+        }
         for (vs.active_metas) |*m| m.* = null;
         vs.active_metas[params.field_index] = state.ctx.meta;
         vs.undefined_meta = null;
@@ -189,8 +192,10 @@ pub const VariantSafety = struct {
         if (!is_undef and active_union_field == null) return;
 
         const ptr_gid: Gid = switch (params.ptr) {
-            .inst => |ptr| state.results[ptr].refinement orelse return,
-            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
+            .inst => |ptr| state.results[ptr].refinement orelse
+                std.debug.panic("variant_safety.store: ptr instruction {d} has no refinement", .{ptr}),
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse
+                std.debug.panic("variant_safety.store: interned ptr {d} has no global refinement", .{interned.ip_idx}),
             .fnptr => return,
         };
         const ptr_ref = state.refinements.at(ptr_gid);
@@ -210,7 +215,9 @@ pub const VariantSafety = struct {
                 .interned, .fnptr => null,
             };
         } else if (active_union_field) |field_index| {
-            if (field_index >= vs.active_metas.len) return;
+            if (field_index >= vs.active_metas.len) {
+                std.debug.panic("variant_safety.store: active union field {d} out of bounds ({d})", .{ field_index, vs.active_metas.len });
+            }
             for (vs.active_metas) |*m| m.* = null;
             vs.active_metas[field_index] = state.ctx.meta;
             vs.undefined_meta = null;
@@ -263,7 +270,8 @@ pub const VariantSafety = struct {
         if (!params.branch) return; // Only update on true branch
 
         // Find the union's refinement via the operand instruction
-        const union_eidx = results[union_check.union_inst].refinement orelse return;
+        const union_eidx = results[union_check.union_inst].refinement orelse
+            std.debug.panic("variant_safety.cond_br: union instruction {d} has no refinement", .{union_check.union_inst});
         const union_ref = refinements.at(union_eidx);
         if (union_ref.* != .@"union") return;
 
@@ -278,7 +286,9 @@ pub const VariantSafety = struct {
         const vs = ensureState(refinements, u);
 
         // Check field index bounds
-        if (field_index >= u.fields.len) return;
+        if (field_index >= u.fields.len) {
+            std.debug.panic("variant_safety.cond_br: field index {d} out of bounds ({d})", .{ field_index, u.fields.len });
+        }
 
         var has_known_active = false;
         for (vs.active_metas) |m| {
@@ -294,7 +304,8 @@ pub const VariantSafety = struct {
 
             // Re-fetch union and update local copy's variant_safety
             const u_ref = &refinements.at(union_eidx).@"union";
-            const vs_ref = &(u_ref.analyte.variant_safety orelse return);
+            const vs_ref = &(u_ref.analyte.variant_safety orelse
+                std.debug.panic("variant_safety.cond_br: narrowed union lost variant_safety", .{}));
             for (vs_ref.active_metas) |*meta| {
                 meta.* = null;
             }
@@ -311,8 +322,10 @@ pub const VariantSafety = struct {
         const load_src = inst_tag.load.ptr;
         if (has_known_active and load_src != .interned) return;
         const src_ptr_gid: Gid = switch (load_src) {
-            .inst => |inst| results[inst].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .inst => |inst| results[inst].refinement orelse
+                std.debug.panic("variant_safety.cond_br: load source instruction {d} has no refinement", .{inst}),
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse
+                std.debug.panic("variant_safety.cond_br: load source interned {d} has no global refinement", .{interned.ip_idx}),
             .fnptr => return,
         };
 
@@ -323,13 +336,16 @@ pub const VariantSafety = struct {
         const source_u = &source_union_ref.@"union";
 
         // Check field index bounds
-        if (field_index >= source_u.fields.len) return;
+        if (field_index >= source_u.fields.len) {
+            std.debug.panic("variant_safety.cond_br: source field index {d} out of bounds ({d})", .{ field_index, source_u.fields.len });
+        }
 
         try ensureVariantField(refinements, source_pointee_gid, field_index, union_check.field_type, ctx);
 
         // Re-fetch union and clear all active variants, set only this one
         const source_u_ref = &refinements.at(source_pointee_gid).@"union";
-        const source_vs_ref = &(source_u_ref.analyte.variant_safety orelse return);
+        const source_vs_ref = &(source_u_ref.analyte.variant_safety orelse
+            std.debug.panic("variant_safety.cond_br: source union lost variant_safety", .{}));
         for (source_vs_ref.active_metas) |*meta| {
             meta.* = null;
         }
@@ -353,7 +369,8 @@ pub const VariantSafety = struct {
         const union_check = params.union_tag orelse return;
 
         // Find the union's refinement via the operand instruction
-        const union_eidx = results[union_check.union_inst].refinement orelse return;
+        const union_eidx = results[union_check.union_inst].refinement orelse
+            std.debug.panic("variant_safety.switch_br: union instruction {d} has no refinement", .{union_check.union_inst});
         const union_ref = refinements.at(union_eidx);
 
         // Only update for union refinements
@@ -374,7 +391,8 @@ pub const VariantSafety = struct {
             .interned => |interned| refinements.getGlobal(interned.ip_idx),
             .fnptr => null,
         };
-        const ptr_ref = ptr_gid orelse return;
+        const ptr_ref = ptr_gid orelse
+            std.debug.panic("variant_safety.switch_br: load source has no refinement", .{});
         const pointee_gid = refinements.at(ptr_ref).pointer.to;
 
         // Only update if pointee is a union (it should be)
@@ -390,16 +408,20 @@ pub const VariantSafety = struct {
         if (union_ref.* != .@"union") return;
 
         const u = &union_ref.@"union";
-        const vs = &(u.analyte.variant_safety orelse return);
+        const vs = &(u.analyte.variant_safety orelse
+            std.debug.panic("variant_safety.updateVariantForUnion: union gid {d} has no variant_safety", .{union_gid}));
 
         // Check field index bounds
-        if (field_index >= vs.active_metas.len) return;
+        if (field_index >= vs.active_metas.len) {
+            std.debug.panic("variant_safety.updateVariantForUnion: field index {d} out of bounds ({d})", .{ field_index, vs.active_metas.len });
+        }
 
         try ensureVariantField(refinements, union_gid, field_index, field_type, ctx);
 
         // Re-fetch union and update variant_safety
         const u_ref = &refinements.at(union_gid).@"union";
-        const vs_ref = &(u_ref.analyte.variant_safety orelse return);
+        const vs_ref = &(u_ref.analyte.variant_safety orelse
+            std.debug.panic("variant_safety.updateVariantForUnion: union gid {d} lost variant_safety", .{union_gid}));
 
         // Clear all active variants and set only this one
         for (vs_ref.active_metas) |*meta| {
@@ -415,7 +437,9 @@ pub const VariantSafety = struct {
     /// invariants, so missing type metadata is a codegen bug.
     fn ensureVariantField(refinements: *Refinements, union_gid: Gid, field_index: usize, field_type: ?tag.Type, ctx: *Context) !void {
         const u = refinements.at(union_gid).@"union";
-        if (field_index >= u.fields.len) return;
+        if (field_index >= u.fields.len) {
+            std.debug.panic("variant_safety.ensureVariantField: field index {d} out of bounds ({d})", .{ field_index, u.fields.len });
+        }
         if (u.fields[field_index] != null) return;
 
         const ty = field_type orelse @panic("variant narrowing missing union field type");
@@ -436,7 +460,8 @@ pub const VariantSafety = struct {
 
         // operand can be null for interned values - skip variant checking for those
         const operand = params.operand orelse return;
-        const container_ref = results[operand].refinement orelse return;
+        const container_ref = results[operand].refinement orelse
+            std.debug.panic("variant_safety.struct_field_val: operand instruction {d} has no refinement", .{operand});
 
         // Only check variant access for unions
         if (refinements.at(container_ref).* == .@"union") {
@@ -445,7 +470,11 @@ pub const VariantSafety = struct {
     }
 
     fn checkVariantAccess(u: Refinements.Refinement.Union, field_index: usize, ctx: *Context) !void {
-        const vs = u.analyte.variant_safety orelse return;
+        const vs = u.analyte.variant_safety orelse
+            std.debug.panic("variant_safety.checkVariantAccess: union has no variant_safety", .{});
+        if (field_index >= vs.active_metas.len) {
+            std.debug.panic("variant_safety.checkVariantAccess: field index {d} out of bounds ({d})", .{ field_index, vs.active_metas.len });
+        }
 
         // Count active variants and collect their info
         var active_count: usize = 0;

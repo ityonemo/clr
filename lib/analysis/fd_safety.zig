@@ -12,7 +12,7 @@ const State = @import("../lib.zig").State;
 
 // strategy:
 // FdSafety effectively tracks a list of file descriptor create points.
-// Each analyte holds a reference to an index into this list.  Only 
+// Each analyte holds a reference to an index into this list.  Only
 // "scalar" refinements may have an FdSafety analyte.  If an fd is reinterpreted
 // as any other datatype it should trigger a failure.
 //
@@ -20,7 +20,7 @@ const State = @import("../lib.zig").State;
 // prevent double-close.
 // prevent use-after-close.
 //
-// leaks: 
+// leaks:
 // when a refinement with a file descriptor goes out of scope, we check to see if
 // it's closed.  If it's not closed and no other refinements in the table hold on
 // to the same reference, then we trigger a leak warning.
@@ -132,9 +132,15 @@ pub const FdSafety = struct {
             return true;
         }
 
-        // posix.dup/dup2 returns fd_t!DupError
-        if (gates.isPosixDup(fqn) or gates.isPosixDup2(fqn)) {
+        // posix.dup returns fd_t!DupError
+        if (gates.isPosixDup(fqn)) {
             try handleFdOpen(state, index, .dup);
+            return true;
+        }
+
+        // posix.dup2 returns void!DupError and replaces the destination fd.
+        if (gates.isPosixDup2(fqn)) {
+            try handleFdDup2(state, args);
             return true;
         }
 
@@ -172,13 +178,18 @@ pub const FdSafety = struct {
     /// Creates fd refinement (scalar) with open state.
     fn handleFdOpen(state: State, index: usize, fd_type: FdType) !void {
         // Result is errorunion -> scalar (fd_t is i32)
-        const eu_idx = state.results[index].refinement orelse return;
+        const eu_idx = state.results[index].refinement orelse
+            std.debug.panic("fd_safety.handleFdOpen: result instruction {d} has no refinement", .{index});
         const eu_ref = state.refinements.at(eu_idx);
-        if (eu_ref.* != .errorunion) return;
+        if (eu_ref.* != .errorunion) {
+            std.debug.panic("fd_safety.handleFdOpen: expected errorunion result, got {s}", .{@tagName(eu_ref.*)});
+        }
 
         const fd_idx = eu_ref.errorunion.to;
         const fd_ref = state.refinements.at(fd_idx);
-        if (fd_ref.* != .scalar) return;
+        if (fd_ref.* != .scalar) {
+            std.debug.panic("fd_safety.handleFdOpen: expected scalar fd payload, got {s}", .{@tagName(fd_ref.*)});
+        }
 
         fd_ref.scalar.analyte.fd_safety = try createTracked(.{
             .meta = state.ctx.meta,
@@ -186,12 +197,38 @@ pub const FdSafety = struct {
         });
     }
 
+    /// Handle posix.dup2 calls. dup2 returns void on success, so fd state belongs
+    /// on the second argument rather than the call result.
+    fn handleFdDup2(state: State, args: []const tag.Src) !void {
+        if (args.len < 2) return;
+
+        const dst_idx: Gid = switch (args[1]) {
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("fd_safety.handleFdDup2: destination fd instruction {d} has no refinement", .{inst}),
+            .interned, .fnptr => return,
+        };
+
+        const dst_ref = state.refinements.at(dst_idx);
+        if (dst_ref.* != .scalar) return;
+
+        if (dst_ref.scalar.analyte.fd_safety) |old_fd_safety| {
+            const old_fd = getTracked(old_fd_safety.ref);
+            if (old_fd.closed == null) {
+                old_fd.closed = .{ .meta = state.ctx.meta };
+            }
+        }
+
+        dst_ref.scalar.analyte.fd_safety = try createTracked(.{
+            .meta = state.ctx.meta,
+            .fd_type = .dup,
+        });
+    }
+
     /// Handle posix.pipe calls.
     /// pipe returns a struct with read_fd and write_fd, both need tracking.
     fn handlePipeOpen(state: State, index: usize) !void {
-        // For now, mark result as untracked - pipe returns struct with 2 fds
-        // TODO: Track individual pipe fds when we have proper struct field tracking
-        const result_idx = state.results[index].refinement orelse return;
+        const result_idx = state.results[index].refinement orelse
+            std.debug.panic("fd_safety.handlePipeOpen: result instruction {d} has no refinement", .{index});
         const result_ref = state.refinements.at(result_idx);
 
         // If it's an errorunion, follow to the payload
@@ -213,6 +250,8 @@ pub const FdSafety = struct {
                     });
                 }
             }
+        } else {
+            std.debug.panic("fd_safety.handlePipeOpen: expected pipe payload struct, got {s}", .{@tagName(payload_ref.*)});
         }
     }
 
@@ -226,7 +265,8 @@ pub const FdSafety = struct {
 
         // Get fd refinement
         const fd_idx: Gid = switch (args[0]) {
-            .inst => |inst| state.results[inst].refinement orelse return,
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("fd_safety.handleFdClose: fd instruction {d} has no refinement", .{inst}),
             .interned, .fnptr => return, // Can't track interned fds
         };
 
@@ -251,7 +291,8 @@ pub const FdSafety = struct {
         if (args.len < 1) return;
 
         const fd_idx: Gid = switch (args[0]) {
-            .inst => |inst| state.results[inst].refinement orelse return,
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("fd_safety.checkFdUse: fd instruction {d} has no refinement", .{inst}),
             .interned, .fnptr => return,
         };
 
@@ -276,7 +317,8 @@ pub const FdSafety = struct {
 
         // Get pointer GID based on ptr type
         const ptr_gid: ?Gid = switch (params.ptr) {
-            .inst => |ptr| results[ptr].refinement,
+            .inst => |ptr| results[ptr].refinement orelse
+                std.debug.panic("fd_safety.store: ptr instruction {d} has no refinement", .{ptr}),
             .interned => |interned| refinements.getGlobal(interned.ip_idx),
             .fnptr => null,
         };
@@ -404,7 +446,8 @@ pub const FdSafety = struct {
 
     /// Handle aggregate_init - copy fd_safety state from source elements to struct fields.
     pub fn aggregate_init(state: State, index: usize, params: tag.AggregateInit) !void {
-        const result_gid = state.results[index].refinement orelse return;
+        const result_gid = state.results[index].refinement orelse
+            std.debug.panic("fd_safety.aggregate_init: result instruction {d} has no refinement", .{index});
         const result_ref = state.refinements.at(result_gid);
 
         switch (result_ref.*) {
@@ -423,7 +466,8 @@ pub const FdSafety = struct {
     /// Copy fd_safety state from a source to a destination refinement.
     fn copyFdSafetyState(state: State, dst_gid: Gid, src: tag.Src) void {
         const src_gid: ?Gid = switch (src) {
-            .inst => |inst| state.results[inst].refinement,
+            .inst => |inst| state.results[inst].refinement orelse
+                std.debug.panic("fd_safety.copyFdSafetyState: source instruction {d} has no refinement", .{inst}),
             .interned => null, // Interned values don't have fd_safety
             .fnptr => null, // Function pointers don't have fd_safety
         };
@@ -496,47 +540,127 @@ pub const FdSafety = struct {
         }
     }
 
-    pub fn bit_and(state: State, index: usize, params: tag.BinOp(.bit_and)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn bit_or(state: State, index: usize, params: tag.BinOp(.bit_or)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn xor(state: State, index: usize, params: tag.BinOp(.xor)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn min(state: State, index: usize, params: tag.BinOp(.min)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn max(state: State, index: usize, params: tag.BinOp(.max)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn add(state: State, index: usize, params: tag.BinOp(.add)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn sub(state: State, index: usize, params: tag.BinOp(.sub)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn mul(state: State, index: usize, params: tag.BinOp(.mul)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn div(state: State, index: usize, params: tag.BinOp(.div)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn mod(state: State, index: usize, params: tag.BinOp(.mod)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn rem(state: State, index: usize, params: tag.BinOp(.rem)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn shl(state: State, index: usize, params: tag.BinOp(.shl)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn shr(state: State, index: usize, params: tag.BinOp(.shr)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn add_with_overflow(state: State, index: usize, params: tag.OverflowOp(.add_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn sub_with_overflow(state: State, index: usize, params: tag.OverflowOp(.sub_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn mul_with_overflow(state: State, index: usize, params: tag.OverflowOp(.mul_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
-    pub fn shl_with_overflow(state: State, index: usize, params: tag.OverflowOp(.shl_with_overflow)) !void { try checkBinMath(state, index, params.lhs, params.rhs); }
+    pub fn bit_and(state: State, index: usize, params: tag.BinOp(.bit_and)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn bit_or(state: State, index: usize, params: tag.BinOp(.bit_or)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn xor(state: State, index: usize, params: tag.BinOp(.xor)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn min(state: State, index: usize, params: tag.BinOp(.min)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn max(state: State, index: usize, params: tag.BinOp(.max)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn add(state: State, index: usize, params: tag.BinOp(.add)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn sub(state: State, index: usize, params: tag.BinOp(.sub)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn mul(state: State, index: usize, params: tag.BinOp(.mul)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn div(state: State, index: usize, params: tag.BinOp(.div)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn mod(state: State, index: usize, params: tag.BinOp(.mod)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn rem(state: State, index: usize, params: tag.BinOp(.rem)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn shl(state: State, index: usize, params: tag.BinOp(.shl)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn shr(state: State, index: usize, params: tag.BinOp(.shr)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn add_with_overflow(state: State, index: usize, params: tag.OverflowOp(.add_with_overflow)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn sub_with_overflow(state: State, index: usize, params: tag.OverflowOp(.sub_with_overflow)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn mul_with_overflow(state: State, index: usize, params: tag.OverflowOp(.mul_with_overflow)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
+    pub fn shl_with_overflow(state: State, index: usize, params: tag.OverflowOp(.shl_with_overflow)) !void {
+        try checkBinMath(state, index, params.lhs, params.rhs);
+    }
 
-    pub fn not(state: State, index: usize, params: tag.UnOp(.not)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn trunc(state: State, index: usize, params: tag.UnOp(.trunc)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn ctz(state: State, index: usize, params: tag.UnOp(.ctz)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn sqrt(state: State, index: usize, params: tag.UnOp(.sqrt)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn sin(state: State, index: usize, params: tag.UnOp(.sin)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn cos(state: State, index: usize, params: tag.UnOp(.cos)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn tan(state: State, index: usize, params: tag.UnOp(.tan)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn exp(state: State, index: usize, params: tag.UnOp(.exp)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn exp2(state: State, index: usize, params: tag.UnOp(.exp2)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn log(state: State, index: usize, params: tag.UnOp(.log)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn log2(state: State, index: usize, params: tag.UnOp(.log2)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn log10(state: State, index: usize, params: tag.UnOp(.log10)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn floor(state: State, index: usize, params: tag.UnOp(.floor)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn ceil(state: State, index: usize, params: tag.UnOp(.ceil)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn round(state: State, index: usize, params: tag.UnOp(.round)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn trunc_float(state: State, index: usize, params: tag.UnOp(.trunc_float)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn neg(state: State, index: usize, params: tag.UnOp(.neg)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn abs(state: State, index: usize, params: tag.UnOp(.abs)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn popcount(state: State, index: usize, params: tag.UnOp(.popcount)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn byte_swap(state: State, index: usize, params: tag.UnOp(.byte_swap)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn bit_reverse(state: State, index: usize, params: tag.UnOp(.bit_reverse)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn clz(state: State, index: usize, params: tag.UnOp(.clz)) !void { try checkUnaryMath(state, index, params.src); }
-    pub fn reduce(state: State, index: usize, params: tag.Reduce) !void { try checkUnaryMath(state, index, params.src); }
+    pub fn not(state: State, index: usize, params: tag.UnOp(.not)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn trunc(state: State, index: usize, params: tag.UnOp(.trunc)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn ctz(state: State, index: usize, params: tag.UnOp(.ctz)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn sqrt(state: State, index: usize, params: tag.UnOp(.sqrt)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn sin(state: State, index: usize, params: tag.UnOp(.sin)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn cos(state: State, index: usize, params: tag.UnOp(.cos)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn tan(state: State, index: usize, params: tag.UnOp(.tan)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn exp(state: State, index: usize, params: tag.UnOp(.exp)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn exp2(state: State, index: usize, params: tag.UnOp(.exp2)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn log(state: State, index: usize, params: tag.UnOp(.log)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn log2(state: State, index: usize, params: tag.UnOp(.log2)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn log10(state: State, index: usize, params: tag.UnOp(.log10)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn floor(state: State, index: usize, params: tag.UnOp(.floor)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn ceil(state: State, index: usize, params: tag.UnOp(.ceil)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn round(state: State, index: usize, params: tag.UnOp(.round)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn trunc_float(state: State, index: usize, params: tag.UnOp(.trunc_float)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn neg(state: State, index: usize, params: tag.UnOp(.neg)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn abs(state: State, index: usize, params: tag.UnOp(.abs)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn popcount(state: State, index: usize, params: tag.UnOp(.popcount)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn byte_swap(state: State, index: usize, params: tag.UnOp(.byte_swap)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn bit_reverse(state: State, index: usize, params: tag.UnOp(.bit_reverse)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn clz(state: State, index: usize, params: tag.UnOp(.clz)) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
+    pub fn reduce(state: State, index: usize, params: tag.Reduce) !void {
+        try checkUnaryMath(state, index, params.src);
+    }
 
     fn checkBinMath(state: State, index: usize, lhs: tag.Src, rhs: tag.Src) !void {
         try checkFdMathSrc(state, index, lhs);

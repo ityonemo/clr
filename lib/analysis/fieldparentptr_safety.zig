@@ -37,7 +37,8 @@ pub const FieldParentPtrSafety = struct {
         const refinements = state.refinements;
 
         // Get the pointer we just created
-        const ptr_idx = results[index].refinement orelse return;
+        const ptr_idx = results[index].refinement orelse
+            std.debug.panic("fieldparentptr_safety.struct_field_ptr: result instruction {d} has no refinement", .{index});
         const ptr = &refinements.at(ptr_idx).pointer;
 
         // Use the type_id from the tag params (set by codegen from the container type)
@@ -135,8 +136,10 @@ pub const FieldParentPtrSafety = struct {
 
         // Get the field pointer's refinement GID
         const ptr_idx: Gid = switch (params.field_ptr) {
-            .inst => |idx| results[idx].refinement orelse return,
-            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
+            .inst => |idx| results[idx].refinement orelse
+                std.debug.panic("fieldparentptr_safety.field_parent_ptr: field pointer instruction {d} has no refinement", .{idx}),
+            .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse
+                std.debug.panic("fieldparentptr_safety.field_parent_ptr: interned field pointer {d} has no global refinement", .{interned.ip_idx}),
             .fnptr => return, // function pointer, can't track
         };
         const ptr_ref = refinements.at(ptr_idx);
