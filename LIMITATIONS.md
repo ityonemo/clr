@@ -120,6 +120,28 @@ Consequences:
 Aliasing safety is separate from allocation memory safety and is not fully
 implemented yet.
 
+### Multiple-Source Pointers
+
+CLR does not yet model pointers whose target can legally come from multiple
+possible source GIDs as a first-class refinement. These pointers can arise after
+branch merges, indirect selection, or aggregate propagation where the pointer
+value is valid but the precise pointee identity is a set rather than a single
+GID.
+
+The intended model is not to reject all operations through such pointers. Some
+operations can safely fan out to every possible source, such as scalar writes
+that update equivalent state on each target, or narrow recursive structure
+updates where every candidate target supports the same field path. Other
+operations must remain illegal or require a stronger proof. In particular,
+destructive ownership/provenance operations such as `destroy`, `free`, or other
+delete-like actions should not be allowed through a multiple-source pointer
+unless the operation can prove exactly which allocation root is being consumed.
+
+Until this is represented explicitly, CLR can be either conservative or
+imprecise around merged pointer values: it may reject legal scalar/recursive
+updates, or it may require narrower special-case handling to avoid applying an
+unsafe destructive operation to an ambiguous source.
+
 ### Interprocedural Allocation Safety
 
 CLR has limited call-boundary propagation and several common allocation-return
