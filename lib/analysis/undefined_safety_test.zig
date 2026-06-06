@@ -533,6 +533,25 @@ test "unop succeeds on defined operand" {
     }
 }
 
+test "error_set_has_value marks result defined for boolean use" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+    const interned_scalar: tag.Src = .{ .interned = .{ .ip_idx = 1, .ty = .{ .scalar = .{} } } };
+
+    try Inst.apply(state, 0, .{ .error_set_has_value = .{ .src = interned_scalar } });
+    try expectInstResultDefined(&refinements, &results, 0);
+
+    try Inst.apply(state, 1, .{ .bool_or = .{
+        .lhs = .{ .inst = 0 },
+        .rhs = interned_scalar,
+    } });
+    try expectInstResultDefined(&refinements, &results, 1);
+}
+
 fn expectInstResultDefined(refinements: *Refinements, results: []Inst, index: usize) !void {
     const result_gid = results[index].refinement.?;
     const result_undef = refinements.at(result_gid).scalar.analyte.undefined_safety;

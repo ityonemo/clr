@@ -417,7 +417,11 @@ pub const UndefinedSafety = union(enum) {
     // Simple operations produce defined scalar results (non-binop/unop)
     pub const slice_len = markResultDefined;
     pub const is_non_err = markResultDefined;
+    pub const is_err = markResultDefined;
+    pub const is_err_ptr = markResultDefined;
+    pub const is_non_err_ptr = markResultDefined;
     pub const unwrap_errunion_err = markResultDefined;
+    pub const error_set_has_value = markResultDefined;
     pub const is_named_enum_value = markResultDefined;
 
     // Null checks produce defined boolean results
