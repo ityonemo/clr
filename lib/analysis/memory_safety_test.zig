@@ -1988,12 +1988,12 @@ test "boolean ops set result memory_safety" {
     try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[1].refinement.?).scalar.analyte.memory_safety.?));
 }
 
-test "scalar arithmetic and cast ops set result memory_safety" {
+test "scalar arithmetic cast and unary ops set result memory_safety" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 9;
+    var results = [_]Inst{.{}} ** 29;
     const state = testState(&ctx, &results, &refinements);
     const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
@@ -2006,26 +2006,71 @@ test "scalar arithmetic and cast ops set result memory_safety" {
     try Inst.apply(state, 6, .{ .clz = .{ .src = dummy_src } });
     try Inst.apply(state, 7, .{ .bit_or = .{ .lhs = dummy_src, .rhs = dummy_src } });
     try Inst.apply(state, 8, .{ .xor = .{ .lhs = dummy_src, .rhs = dummy_src } });
+    try Inst.apply(state, 9, .{ .sqrt = .{ .src = dummy_src } });
+    try Inst.apply(state, 10, .{ .sin = .{ .src = dummy_src } });
+    try Inst.apply(state, 11, .{ .cos = .{ .src = dummy_src } });
+    try Inst.apply(state, 12, .{ .tan = .{ .src = dummy_src } });
+    try Inst.apply(state, 13, .{ .exp = .{ .src = dummy_src } });
+    try Inst.apply(state, 14, .{ .exp2 = .{ .src = dummy_src } });
+    try Inst.apply(state, 15, .{ .log = .{ .src = dummy_src } });
+    try Inst.apply(state, 16, .{ .log2 = .{ .src = dummy_src } });
+    try Inst.apply(state, 17, .{ .log10 = .{ .src = dummy_src } });
+    try Inst.apply(state, 18, .{ .floor = .{ .src = dummy_src } });
+    try Inst.apply(state, 19, .{ .ceil = .{ .src = dummy_src } });
+    try Inst.apply(state, 20, .{ .round = .{ .src = dummy_src } });
+    try Inst.apply(state, 21, .{ .trunc_float = .{ .src = dummy_src } });
+    try Inst.apply(state, 22, .{ .neg = .{ .src = dummy_src } });
+    try Inst.apply(state, 23, .{ .abs = .{ .src = dummy_src } });
+    try Inst.apply(state, 24, .{ .popcount = .{ .src = dummy_src } });
+    try Inst.apply(state, 25, .{ .byte_swap = .{ .src = dummy_src } });
+    try Inst.apply(state, 26, .{ .bit_reverse = .{ .src = dummy_src } });
+    try Inst.apply(state, 27, .{ .fpext = .{ .src = dummy_src } });
+    try Inst.apply(state, 28, .{ .intcast_safe = .{ .src = dummy_src } });
 
-    for (0..9) |i| {
+    for (0..29) |i| {
         try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[i].refinement.?).scalar.analyte.memory_safety.?));
     }
 }
 
-test "select and reduce set result memory_safety" {
+test "select reduce and predicate queries set result memory_safety" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
 
-    var results = [_]Inst{.{}} ** 2;
+    var results = [_]Inst{.{}} ** 7;
     const state = testState(&ctx, &results, &refinements);
     const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
 
     try Inst.apply(state, 0, .{ .select = .{ .mask = dummy_src, .a = dummy_src, .b = dummy_src } });
     try Inst.apply(state, 1, .{ .reduce = .{ .src = .{ .inst = 0 } } });
+    try Inst.apply(state, 2, .{ .error_set_has_value = .{ .src = dummy_src } });
+    try Inst.apply(state, 3, .{ .is_err = .{ .src = dummy_src } });
+    try Inst.apply(state, 4, .{ .is_err_ptr = .{ .src = dummy_src } });
+    try Inst.apply(state, 5, .{ .is_non_err_ptr = .{ .src = dummy_src } });
+    try Inst.apply(state, 6, .{ .is_named_enum_value = .{ .src = dummy_src } });
 
-    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[0].refinement.?).scalar.analyte.memory_safety.?));
-    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[1].refinement.?).scalar.analyte.memory_safety.?));
+    for (0..7) |i| {
+        try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(results[i].refinement.?).scalar.analyte.memory_safety.?));
+    }
+}
+
+test "shift overflow op sets result memory_safety" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 1;
+    const state = testState(&ctx, &results, &refinements);
+    const dummy_src = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
+
+    try Inst.apply(state, 0, .{ .shl_with_overflow = .{ .lhs = dummy_src, .rhs = dummy_src } });
+
+    const result_gid = results[0].refinement.?;
+    const result = refinements.at(result_gid).@"struct";
+    try std.testing.expectEqual(.stack, std.meta.activeTag(result.analyte.memory_safety.?));
+    for (result.fields) |field_gid| {
+        try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(field_gid).scalar.analyte.memory_safety.?));
+    }
 }
 
 test "store interned pointer initializes destination pointer target memory_safety" {

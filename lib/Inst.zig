@@ -343,6 +343,7 @@ pub fn cond_br(
         .early_returns = &true_early_returns,
         .dispatch_target = state.dispatch_target,
         .copied_gids = state.copied_gids,
+        .restrict = state.restrict,
     };
     const false_state = State{
         .ctx = ctx,
@@ -356,6 +357,7 @@ pub fn cond_br(
         .early_returns = &false_early_returns,
         .dispatch_target = state.dispatch_target,
         .copied_gids = state.copied_gids,
+        .restrict = state.restrict,
     };
 
     // Save ctx.meta before branches execute (they modify it via dbg_stmt)

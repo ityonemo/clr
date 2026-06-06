@@ -31,7 +31,7 @@ This is an active rewrite of the original Elixir-based proof-of-concept in Zig. 
 
 Currently implemented:
 - Undefined value tracking (use before assignment, field-level tracking for structs)
-- Memory safety analysis (use-after-free, double-free, memory leaks)
+- Memory safety analysis (use-after-free, double-free, memory leaks, allocator mismatch, stack escapes)
 - Full `std.mem.Allocator` interface coverage:
   - `create`/`destroy` - single item allocation
   - `alloc`/`free` - slice allocation (including `alignedAlloc`, `allocSentinel`, etc.)
@@ -48,6 +48,7 @@ Currently implemented:
 - Pointer arithmetic safety (blocks ptr_add/ptr_sub on single-item pointers)
 - Null safety (unchecked optional unwrap detection)
 - Variant safety (accessing inactive union fields, ambiguous variant after branches)
+- FieldParentPtr safety (detecting invalid container recovery from field pointers)
 - Interprocedural analysis (tracking values across function calls via pointer arguments)
 - Function pointer tracking (indirect calls dispatch to possible targets)
 - Struct and union field tracking (pointer fields, nested types)
@@ -60,21 +61,24 @@ Currently implemented:
 - Loop analysis (for, while, for-else, while-else with fixed-point iteration)
 - Global variable tracking (undefined, variant, and memory safety)
 - Recursive datatypes (linked lists, trees, recursive unions)
+- Stdlib boundary reductions for common patterns such as `std.process.args`,
+  `std.mem.asBytes`, `std.HashMap`, and allocator/file APIs
 - File descriptor safety:
   - `posix.open`/`close`/`dup`/`dup2`/`socket`/`accept`/`epoll_create`/`pipe` tracking
   - Use-after-close detection (read/write/dup on closed fd)
   - Double-close detection
-  - Fd leak detection (unclosed fds at function exit)
-  - Return propagation (returned fds exempt from leak warnings)
+  - Fd leak detection at function exit and module finalization
+  - Descoped local-handle tracking so aliases that remain live suppress premature leak reports
+  - Return and aggregate propagation for covered descriptor patterns
   - Undefined fd argument detection (close/read/write with undefined fd)
 
 Planned (see LIMITATIONS.md for details):
-- Moving provenance
-- Recursive functions
 - async/await
 - Aliasing safety (detecting conflicting mutable references)
-- Allocator lifecycle safety (init/deinit for all allocator types, leak detection at deinit for GPA/MemoryPool, bulk-free semantics for Arena/FBA)
-- Full interception of allocator deinits (currently GPA.deinit is stubbed to avoid false positives from stdlib @ptrCast patterns)
+- Multiple-source pointer refinements for merged or indirect pointer provenance
+- Descriptor alias analysis beyond the currently covered fd propagation patterns
+- More complete interprocedural/global mutation summaries
+- Alignment-cast lowering recognition
 - Mutex safety (lock/unlock pairing, deadlock detection)
 - Custom coercion capability (user-defined refinement rules)
 
@@ -129,6 +133,9 @@ zig build test
 
 # Unit tests (runtime library)
 zig test lib/lib.zig
+
+# A focused integration test file
+bats test/integration/fd.bats
 
 # Integration tests (requires BATS)
 # Defaults to ReleaseFast; override with OPTIMIZE=ReleaseSafe or OPTIMIZE=Debug

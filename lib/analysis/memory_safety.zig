@@ -2708,6 +2708,36 @@ pub const MemorySafety = union(enum) {
         setResultStack(state, index);
     }
 
+    pub fn transfer_op(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn error_set_has_value(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn is_err(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn is_err_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn is_non_err_ptr(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn is_named_enum_value(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
     pub fn slice_len(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
@@ -2739,6 +2769,96 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn is_non_err(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn sqrt(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn sin(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn cos(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn tan(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn exp(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn exp2(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn log(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn log2(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn log10(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn floor(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn ceil(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn round(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn trunc_float(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn neg(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn abs(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn popcount(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn byte_swap(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setResultStack(state, index);
+    }
+
+    pub fn bit_reverse(state: State, index: usize, params: anytype) !void {
         _ = params;
         setResultStack(state, index);
     }
@@ -2944,6 +3064,11 @@ pub const MemorySafety = union(enum) {
     }
 
     pub fn mul_with_overflow(state: State, index: usize, params: anytype) !void {
+        _ = params;
+        setStructStack(state, index);
+    }
+
+    pub fn shl_with_overflow(state: State, index: usize, params: anytype) !void {
         _ = params;
         setStructStack(state, index);
     }
