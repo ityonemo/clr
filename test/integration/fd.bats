@@ -60,6 +60,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no false positive for readToEndAlloc on deferred-close file" {
+    run compile_and_run "$TEST_CASES/fd_safety/read_to_end_alloc_valid.zig"
+    [ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # Socket fd tests (posix.socket)
 # =============================================================================

@@ -105,6 +105,7 @@ pub const FdSafety = struct {
     /// Hash this analysis state for memoization.
     pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
         hasher.update(std.mem.asBytes(&self.ref));
+        hasher.update(&.{@as(u8, if (self.descoped) 1 else 0)});
         const fd = getTrackedOrNull(self.ref) orelse return;
         hasher.update(&.{@as(u8, if (fd.closed != null) 1 else 0)});
     }
@@ -375,21 +376,65 @@ pub const FdSafety = struct {
         defer returned_fds.deinit();
         collectReachableFds(refinements, return_gid, &returned_fds);
 
-        // Check for fd leaks (open fds not closed, not returned)
         for (results) |inst| {
             const idx = inst.refinement orelse continue;
+            if (idx == return_gid) continue;
+            if (isArg(inst)) continue;
+            markDescopedRecursive(refinements, idx);
+        }
 
-            // Skip arg instructions - fds passed in as arguments are not our
-            // responsibility to close, they belong to the caller
-            if (inst.inst_tag) |inst_tag| {
-                if (std.meta.activeTag(inst_tag) == .arg) continue;
-            }
+        var checked_fds = std.AutoHashMap(FdRef, void).init(ctx.allocator);
+        defer checked_fds.deinit();
 
-            try checkFdLeakRecursive(refinements, idx, ctx, &returned_fds);
+        for (results) |inst| {
+            const idx = inst.refinement orelse continue;
+            if (idx == return_gid) continue;
+            if (isArg(inst)) continue;
+
+            try checkFdLeakRecursive(refinements, idx, ctx, &returned_fds, &checked_fds);
         }
     }
 
-    fn checkFdLeakRecursive(refinements: *Refinements, gid: Gid, ctx: *Context, returned_fds: *std.AutoHashMap(FdRef, void)) !void {
+    fn isArg(inst: Inst) bool {
+        const inst_tag = inst.inst_tag orelse return false;
+        return std.meta.activeTag(inst_tag) == .arg;
+    }
+
+    fn markDescopedRecursive(refinements: *Refinements, gid: Gid) void {
+        if (gid >= refinements.list.items.len) return;
+
+        const ref = refinements.at(gid);
+        switch (ref.*) {
+            .scalar => |*s| {
+                if (s.analyte.fd_safety) |*fd_safety| {
+                    fd_safety.descoped = true;
+                }
+            },
+            .errorunion => markDescopedRecursive(refinements, ref.errorunion.to),
+            .optional => markDescopedRecursive(refinements, ref.optional.to),
+            .@"struct" => |s| {
+                for (s.fields) |field_gid| {
+                    markDescopedRecursive(refinements, field_gid);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        markDescopedRecursive(refinements, field_gid);
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+
+    fn checkFdLeakRecursive(
+        refinements: *Refinements,
+        gid: Gid,
+        ctx: *Context,
+        returned_fds: *std.AutoHashMap(FdRef, void),
+        checked_fds: *std.AutoHashMap(FdRef, void),
+    ) !void {
         const ref = refinements.at(gid);
         switch (ref.*) {
             .scalar => {
@@ -397,18 +442,41 @@ pub const FdSafety = struct {
                 const fd = getTracked(fd_safety.ref);
                 if (fd.closed != null) return;
                 if (returned_fds.contains(fd_safety.ref)) return;
+                if (checked_fds.contains(fd_safety.ref)) return;
+                try checked_fds.put(fd_safety.ref, {});
+                if (hasLiveFdRef(refinements, fd_safety.ref)) return;
 
                 return reportFdLeak(ctx, fd.opened);
             },
-            .errorunion => try checkFdLeakRecursive(refinements, ref.errorunion.to, ctx, returned_fds),
-            .optional => try checkFdLeakRecursive(refinements, ref.optional.to, ctx, returned_fds),
+            .errorunion => try checkFdLeakRecursive(refinements, ref.errorunion.to, ctx, returned_fds, checked_fds),
+            .optional => try checkFdLeakRecursive(refinements, ref.optional.to, ctx, returned_fds, checked_fds),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
-                    try checkFdLeakRecursive(refinements, field_gid, ctx, returned_fds);
+                    try checkFdLeakRecursive(refinements, field_gid, ctx, returned_fds, checked_fds);
+                }
+            },
+            .@"union" => |u| {
+                for (u.fields) |maybe_field_gid| {
+                    if (maybe_field_gid) |field_gid| {
+                        try checkFdLeakRecursive(refinements, field_gid, ctx, returned_fds, checked_fds);
+                    }
                 }
             },
             else => {},
         }
+    }
+
+    fn hasLiveFdRef(refinements: *Refinements, target: FdRef) bool {
+        for (refinements.list.items) |refinement| {
+            switch (refinement) {
+                .scalar => |s| {
+                    const fd_safety = s.analyte.fd_safety orelse continue;
+                    if (fd_safety.ref == target and !fd_safety.descoped) return true;
+                },
+                else => {},
+            }
+        }
+        return false;
     }
 
     /// Recursively collect FD identities from a refinement tree.

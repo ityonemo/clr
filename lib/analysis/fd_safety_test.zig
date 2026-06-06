@@ -205,6 +205,50 @@ test "mathematical operation on fd scalar reports error" {
     } }));
 }
 
+test "onFinish descopes local fd copy without leaking while arg remains live" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const fd_handle = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file });
+    const arg_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = fd_handle },
+    } });
+    const local_copy_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = fd_handle },
+    } });
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = arg_gid;
+    results[0].inst_tag = .{ .arg = .{ .value = arg_gid, .name_id = 0 } };
+    results[1].refinement = local_copy_gid;
+
+    try FdSafety.onFinish(&results, &ctx, &refinements, return_gid);
+
+    try std.testing.expect(!refinements.at(arg_gid).scalar.analyte.fd_safety.?.descoped);
+    try std.testing.expect(refinements.at(local_copy_gid).scalar.analyte.fd_safety.?.descoped);
+}
+
+test "onFinish reports local fd leak after all refinements descope" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const fd_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+    } });
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+
+    var results = [_]Inst{.{}} ** 1;
+    results[0].refinement = fd_gid;
+
+    try std.testing.expectError(error.FdLeak, FdSafety.onFinish(&results, &ctx, &refinements, return_gid));
+    try std.testing.expect(refinements.at(fd_gid).scalar.analyte.fd_safety.?.descoped);
+}
+
 test "finalizeModule reports open tracked fd" {
     var ctx, var refinements = initTest();
     defer FdSafety.deinitModule();
