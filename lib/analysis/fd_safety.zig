@@ -49,6 +49,8 @@ pub const Closed = struct {
 pub const TrackedFd = struct {
     opened: Open,
     closed: ?Closed = null,
+    // should be allowed to be specified as "false" in the future.
+    final_leak_check: bool = true,
 };
 
 const FdRef = usize;
@@ -58,6 +60,7 @@ var initialized = false;
 
 pub const FdSafety = struct {
     ref: FdRef,
+    descoped: bool = false,
 
     pub fn initModule(allocator: std.mem.Allocator) !void {
         list_allocator = allocator;
@@ -74,6 +77,15 @@ pub const FdSafety = struct {
         tracked.deinit(list_allocator);
         tracked = .empty;
         initialized = false;
+    }
+
+    pub fn finalizeModule(ctx: *Context) !void {
+        if (!initialized) return;
+        for (tracked.items) |fd| {
+            if (!fd.final_leak_check) continue;
+            if (fd.opened.fd_type == .stdio) continue;
+            if (fd.closed == null) return reportFdLeak(ctx, fd.opened);
+        }
     }
 
     pub fn createForTest(open: Open) !FdSafety {

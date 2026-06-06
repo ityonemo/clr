@@ -5,6 +5,7 @@ const null_safety_analysis = @import("analysis/null_safety.zig");
 const variant_safety_analysis = @import("analysis/variant_safety.zig");
 const fieldparentptr_safety_analysis = @import("analysis/fieldparentptr_safety.zig");
 const fd_safety_analysis = @import("analysis/fd_safety.zig");
+const Context = @import("Context.zig");
 
 const Analyte = @This();
 
@@ -39,6 +40,15 @@ pub fn initModules(allocator: std.mem.Allocator) !void {
 pub fn deinitModules() void {
     inline for (analyses) |Analysis| {
         Analysis.deinitModule();
+    }
+}
+
+/// Run report-capable module-level final checks before cleanup.
+pub fn finalizeModules(ctx: *Context) !void {
+    inline for (analyses) |Analysis| {
+        if (@hasDecl(Analysis, "finalizeModule")) {
+            try Analysis.finalizeModule(ctx);
+        }
     }
 }
 

@@ -204,3 +204,44 @@ test "mathematical operation on fd scalar reports error" {
         .rhs = .{ .inst = 1 },
     } }));
 }
+
+test "finalizeModule reports open tracked fd" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    _ = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file });
+
+    try std.testing.expectError(error.FdLeak, FdSafety.finalizeModule(&ctx));
+}
+
+test "finalizeModule accepts closed tracked fd" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const fd_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+    } });
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = fd_gid;
+
+    const state = testState(&ctx, &results, &refinements);
+    try Inst.call(state, 1, null, .{ .void = {} }, &.{.{ .inst = 0 }}, "std.posix.close");
+
+    try FdSafety.finalizeModule(&ctx);
+}
+
+test "finalizeModule ignores stdio tracked fd" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    _ = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .stdio });
+
+    try FdSafety.finalizeModule(&ctx);
+}

@@ -16,6 +16,7 @@ const std = @import("std");
 const Analyte = @import("Analyte.zig");
 pub const initAnalyses = Analyte.initModules;
 pub const deinitAnalyses = Analyte.deinitModules;
+pub const finalizeAnalyses = Analyte.finalizeModules;
 
 // Debug utilities
 /// Dump analysis state. Call as: clr.dump(state);

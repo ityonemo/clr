@@ -39,6 +39,14 @@ load test_helper
     [[ "$output" =~ "opened in" ]]
 }
 
+@test "detects fd leak left live until module finalization" {
+    run compile_and_run "$TEST_CASES/fd_safety/dup2_finalizer_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "fd leak" ]]
+    [[ "$output" =~ "dup2_finalizer_leak.duplicateToTarget" ]]
+    [[ "$output" =~ "opened in" ]]
+}
+
 @test "no false positive for correct file fd usage" {
     run compile_and_run "$TEST_CASES/fd_safety/valid_open_close.zig"
     [ "$status" -eq 0 ]

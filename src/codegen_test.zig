@@ -386,6 +386,11 @@ test "epilogue generates correct output with typed return slot" {
         \\        std.process.exit(1);
         \\    };
         \\    refinements.testValid(0);
+        \\    clr.finalizeAnalyses(&ctx) catch |err| {
+        \\        std.debug.print("Error: {}\\n", .{err});
+        \\        file_writer.interface.flush() catch {};
+        \\        std.process.exit(1);
+        \\    };
         \\}
         \\
     ;
