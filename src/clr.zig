@@ -100,7 +100,7 @@ pub const SourceLoc = struct {
 /// Child relationship info for global variables - mirrors GlobalDef.ChildInfo
 pub const ChildInfo = union(enum) {
     scalar: void,
-    @"null": void, // optional that starts out null
+    null: void, // optional that starts out null
     indirect: ?u32, // IP index for indirect targets, null if undefined
     struct_fields: []const ?u32, // IP indices for struct field globals
     union_field: struct {
@@ -144,6 +144,13 @@ pub fn registerGlobal(ip_idx: u32, type_str: []const u8, type_id: ?u32, children
 pub fn registerGlobalWithNav(ip_idx: u32, nav_idx: u32, type_str: []const u8, type_id: ?u32, children: ChildInfo) u32 {
     nav_to_ip.put(clr_allocator.allocator(), nav_idx, ip_idx) catch {};
     return registerGlobal(ip_idx, type_str, type_id, children);
+}
+
+/// Remember which InternPool pointer value codegen emitted for a nav global.
+/// updateNav later uses this to write accurate global metadata under the same
+/// ip_idx that generated load/store instructions reference.
+pub fn registerGlobalNavAlias(ip_idx: u32, nav_idx: u32) void {
+    nav_to_ip.put(clr_allocator.allocator(), nav_idx, ip_idx) catch {};
 }
 
 /// Register a struct field pointer and update the parent struct's struct_fields.
@@ -485,8 +492,7 @@ fn updateNav(_: c_anyopaque_t, pt_ptr: c_anyopaque_const_t, nav_index_raw: u32) 
         const inner_type = if (type_key == .opt_type) type_key.opt_type else nav_type;
         const inner_type_str = clr_codegen.typeToStringForGlobal(arena.allocator(), ip, inner_type);
         break :blk clr_allocator.allocPrint(clr_allocator.allocator(), ".{{ .null = .{{ .to = &{s} }} }}", .{inner_type_str}, null);
-    } else
-        clr_allocator.allocator().dupe(u8, type_str) catch return;
+    } else clr_allocator.allocator().dupe(u8, type_str) catch return;
 
     // Detect union type and extract active field info
     const children: ChildInfo = blk: {

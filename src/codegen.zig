@@ -1291,6 +1291,10 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
         if (pointee_type != nav_type) return null; // Field pointer, not struct pointer
     }
 
+    const ip_idx: u32 = @intFromEnum(interned_idx);
+    const nav_idx_raw: u32 = @intFromEnum(nav_idx);
+    clr.registerGlobalNavAlias(ip_idx, nav_idx_raw);
+
     // Get the initial value to check if it's undefined
     const init_val = switch (nav.status) {
         .fully_resolved => |fr| fr.val,
@@ -1435,8 +1439,6 @@ fn tryGlobalRef(info: *const FnInfo, interned_idx: InternPool.Index) ?[]const u8
 
     // Register this global using IP index (the interned pointer value)
     // Also register nav→ip mapping for struct field pointer lookups
-    const ip_idx: u32 = @intFromEnum(interned_idx);
-    const nav_idx_raw: u32 = @intFromEnum(nav_idx);
     _ = clr.registerGlobalWithNav(ip_idx, nav_idx_raw, type_str, type_id, children);
 
     // Return just the IP index number as a string

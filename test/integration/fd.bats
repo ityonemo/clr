@@ -47,6 +47,14 @@ load test_helper
     [[ "$output" =~ "opened in" ]]
 }
 
+@test "detects fd leak stored through interned global pointer" {
+    run compile_and_run "$TEST_CASES/fd_safety/global_fd_store_leak.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "fd leak" ]]
+    [[ "$output" =~ "global_fd_store_leak.main" ]]
+    [[ "$output" =~ "opened in" ]]
+}
+
 @test "no false positive for correct file fd usage" {
     run compile_and_run "$TEST_CASES/fd_safety/valid_open_close.zig"
     [ "$status" -eq 0 ]
