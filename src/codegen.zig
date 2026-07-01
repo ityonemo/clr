@@ -5078,7 +5078,7 @@ pub fn epilogue(entrypoint_index: u32, return_type: ?[]const u8) []u8 {
         \\        std.process.exit(1);
         \\    }};
         \\    refinements.testValid(0);
-        \\    clr.finalizeAnalyses(&ctx) catch |err| {{
+        \\    clr.finalizeAnalyses(&ctx, &refinements) catch |err| {{
         \\        std.debug.print("Error: {{}}\\n", .{{err}});
         \\        file_writer.interface.flush() catch {{}};
         \\        std.process.exit(1);

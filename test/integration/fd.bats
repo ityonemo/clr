@@ -77,6 +77,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no false double-close when defer runs on fallible and normal exits" {
+    run compile_and_run "$TEST_CASES/fd_safety/defer_close_after_error_union_valid.zig"
+    [ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # Socket fd tests (posix.socket)
 # =============================================================================

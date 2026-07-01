@@ -654,6 +654,32 @@ Added helper function `copyUndefinedStateFromScalarToStruct` to propagate undefi
 
 ---
 
+## Fix: Isolate file-descriptor closure state across branches
+
+**Date:** 2026-07-01
+
+**Symptom:** A single `defer file.close()` was reported as a double-close when
+both the error and success exits of a fallible operation lowered the defer.
+
+**Root Cause:** `FdSafety` stored only an `FdRef`; mutable closure state lived in
+the module-global tracked-FD list. Cloned branch refinements therefore shared
+the same closure bit, so analyzing one mutually exclusive exit closed the FD
+seen by the next branch.
+
+**The Fix:** Closure state now lives in `FdSafety`, which is copied with branch
+refinements. Closing an alias propagates by `FdRef` through the current
+refinement table, preserving alias behavior inside a branch without crossing
+branch boundaries. Final module leak checking now receives the final
+refinements instead of reading global closure state.
+
+**Unit Test:** `fd_safety_test.test.close in cloned branch does not close parent fd state`
+
+**Integration Test:** `test/cases/fd_safety/defer_close_after_error_union_valid.zig`
+
+**Vendor Test:** `vendor/validate/clr_wrapper.zig`
+
+---
+
 ## Fix: Clear source allocation tracking when bitcast creates new region
 
 **Date:** 2026-03-30

@@ -195,6 +195,28 @@ test "close through copied fd handle closes original safety state" {
     try std.testing.expect(original_fd.getForTest().closed != null);
 }
 
+test "close in cloned branch does not close parent fd state" {
+    var ctx, var refinements = initTest();
+    defer FdSafety.deinitModule();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const fd_gid = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
+    } });
+
+    var branch_refinements = try refinements.clone(ctx.allocator);
+    defer branch_refinements.deinit();
+
+    var branch_results = [_]Inst{.{}} ** 2;
+    branch_results[0].refinement = fd_gid;
+    const branch_state = testState(&ctx, &branch_results, &branch_refinements);
+    try Inst.call(branch_state, 1, null, .{ .void = {} }, &.{.{ .inst = 0 }}, "std.posix.close");
+
+    try std.testing.expect(branch_refinements.at(fd_gid).scalar.analyte.fd_safety.?.closed != null);
+    try std.testing.expect(refinements.at(fd_gid).scalar.analyte.fd_safety.?.closed == null);
+}
+
 test "mathematical operation on fd scalar reports error" {
     var ctx, var refinements = initTest();
     defer FdSafety.deinitModule();
@@ -267,9 +289,11 @@ test "finalizeModule reports open tracked fd" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    _ = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file });
+    _ = try refinements.appendEntity(.{ .scalar = .{
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
+    } });
 
-    try std.testing.expectError(error.FdLeak, FdSafety.finalizeModule(&ctx));
+    try std.testing.expectError(error.FdLeak, FdSafety.finalizeModule(&ctx, &refinements));
 }
 
 test "finalizeModule accepts closed tracked fd" {
@@ -288,7 +312,7 @@ test "finalizeModule accepts closed tracked fd" {
     const state = testState(&ctx, &results, &refinements);
     try Inst.call(state, 1, null, .{ .void = {} }, &.{.{ .inst = 0 }}, "std.posix.close");
 
-    try FdSafety.finalizeModule(&ctx);
+    try FdSafety.finalizeModule(&ctx, &refinements);
 }
 
 test "finalizeModule ignores stdio tracked fd" {
@@ -299,5 +323,5 @@ test "finalizeModule ignores stdio tracked fd" {
 
     _ = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .stdio });
 
-    try FdSafety.finalizeModule(&ctx);
+    try FdSafety.finalizeModule(&ctx, &refinements);
 }

@@ -44,10 +44,10 @@ pub fn deinitModules() void {
 }
 
 /// Run report-capable module-level final checks before cleanup.
-pub fn finalizeModules(ctx: *Context) !void {
+pub fn finalizeModules(ctx: *Context, refinements: *@import("Refinements.zig")) !void {
     inline for (analyses) |Analysis| {
         if (@hasDecl(Analysis, "finalizeModule")) {
-            try Analysis.finalizeModule(ctx);
+            try Analysis.finalizeModule(ctx, refinements);
         }
     }
 }

@@ -60,6 +60,7 @@ var initialized = false;
 pub const FdSafety = struct {
     ref: FdRef,
     descoped: bool = false,
+    closed: ?Closed = null,
 
     pub fn initModule(allocator: std.mem.Allocator) !void {
         list_allocator = allocator;
@@ -78,12 +79,12 @@ pub const FdSafety = struct {
         initialized = false;
     }
 
-    pub fn finalizeModule(ctx: *Context) !void {
+    pub fn finalizeModule(ctx: *Context, refinements: *Refinements) !void {
         if (!initialized) return;
-        for (tracked.items) |fd| {
+        for (tracked.items, 0..) |fd, ref| {
             if (!fd.final_leak_check) continue;
             if (fd.opened.fd_type == .stdio) continue;
-            if (fd.closed == null) return reportFdLeak(ctx, fd.opened);
+            if (hasOpenFdRef(refinements, ref)) return reportFdLeak(ctx, fd.opened);
         }
     }
 
@@ -92,7 +93,9 @@ pub const FdSafety = struct {
     }
 
     pub fn getForTest(self: FdSafety) TrackedFd {
-        return getTracked(self.ref).*;
+        var result = getTracked(self.ref).*;
+        result.closed = self.closed;
+        return result;
     }
 
     /// Trivial copy - no heap allocations to duplicate.
@@ -105,8 +108,7 @@ pub const FdSafety = struct {
     pub fn hash(self: @This(), hasher: *std.hash.Wyhash) void {
         hasher.update(std.mem.asBytes(&self.ref));
         hasher.update(&.{@as(u8, if (self.descoped) 1 else 0)});
-        const fd = getTrackedOrNull(self.ref) orelse return;
-        hasher.update(&.{@as(u8, if (fd.closed != null) 1 else 0)});
+        hasher.update(&.{@as(u8, if (self.closed != null) 1 else 0)});
     }
 
     /// Runtime call filter for fd operations.
@@ -224,9 +226,8 @@ pub const FdSafety = struct {
         if (dst_ref.* != .scalar) return;
 
         if (dst_ref.scalar.analyte.fd_safety) |old_fd_safety| {
-            const old_fd = getTracked(old_fd_safety.ref);
-            if (old_fd.closed == null) {
-                old_fd.closed = .{ .trace = state.ctx.captureTrace() };
+            if (old_fd_safety.closed == null) {
+                markClosed(state.refinements, old_fd_safety.ref, .{ .trace = state.ctx.captureTrace() });
             }
         }
 
@@ -286,15 +287,13 @@ pub const FdSafety = struct {
         if (fd_ref.* != .scalar) return;
 
         const fd_safety = fd_ref.scalar.analyte.fd_safety orelse return;
-        const fd_state = getTracked(fd_safety.ref);
-
         // Check for double-close
-        if (fd_state.closed) |prev_close| {
-            return reportDoubleClose(state.ctx, fd_state.opened, prev_close);
+        if (fd_safety.closed) |prev_close| {
+            return reportDoubleClose(state.ctx, getTracked(fd_safety.ref).opened, prev_close);
         }
 
         // Mark as closed
-        fd_state.closed = .{ .trace = state.ctx.captureTrace() };
+        markClosed(state.refinements, fd_safety.ref, .{ .trace = state.ctx.captureTrace() });
     }
 
     /// Check fd arguments for use-after-close.
@@ -312,11 +311,9 @@ pub const FdSafety = struct {
         if (fd_ref.* != .scalar) return;
 
         const fd_safety = fd_ref.scalar.analyte.fd_safety orelse return;
-        const fd_state = getTracked(fd_safety.ref);
-
         // Check for use-after-close
-        if (fd_state.closed) |close_site| {
-            return reportUseAfterClose(state.ctx, fd_state.opened, close_site);
+        if (fd_safety.closed) |close_site| {
+            return reportUseAfterClose(state.ctx, getTracked(fd_safety.ref).opened, close_site);
         }
     }
 
@@ -439,7 +436,7 @@ pub const FdSafety = struct {
             .scalar => {
                 const fd_safety = ref.scalar.analyte.fd_safety orelse return;
                 const fd = getTracked(fd_safety.ref);
-                if (fd.closed != null) return;
+                if (fd_safety.closed != null) return;
                 if (returned_fds.contains(fd_safety.ref)) return;
                 if (checked_fds.contains(fd_safety.ref)) return;
                 try checked_fds.put(fd_safety.ref, {});
@@ -807,6 +804,25 @@ fn getTrackedOrNull(ref: FdRef) ?*TrackedFd {
     if (!initialized) return null;
     if (ref >= tracked.items.len) return null;
     return &tracked.items[ref];
+}
+
+fn markClosed(refinements: *Refinements, target_ref: FdRef, closed: Closed) void {
+    for (refinements.list.items) |*refinement| {
+        if (refinement.* != .scalar) continue;
+        const safety = refinement.scalar.analyte.fd_safety orelse continue;
+        if (safety.ref == target_ref) {
+            refinement.scalar.analyte.fd_safety.?.closed = closed;
+        }
+    }
+}
+
+fn hasOpenFdRef(refinements: *Refinements, target_ref: FdRef) bool {
+    for (refinements.list.items) |refinement| {
+        if (refinement != .scalar) continue;
+        const safety = refinement.scalar.analyte.fd_safety orelse continue;
+        if (safety.ref == target_ref and safety.closed == null) return true;
+    }
+    return false;
 }
 
 const debug = @import("builtin").mode == .Debug;
