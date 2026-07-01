@@ -25,6 +25,68 @@ The goal is to bring Rust-level memory safety guarantees to Zig through static a
 
 CLR depends on a forked version of the Zig compiler (included as a submodule in `zig/`) that adds support for routing AIR to external plugins. When invoked with `-ofmt=air -fair-out=<plugin.so>`, the compiler loads the specified shared library and passes generated AIR to it for processing.
 
+## Safety-Oriented Architecture
+
+CLR is intended to push programs toward lifecycle patterns that are explicit and
+locally verifiable, not merely to recognize every technically valid Zig program.
+When two representations are possible, CLR prefers the one that makes resource
+state visible in the type and control-flow structure.
+
+For example, avoid conditionally closing a non-optional file descriptor:
+
+```zig
+const file = try std.fs.cwd().openFile(path, .{});
+if (should_close) {
+    file.close(); // Bad: file is ambiguously open after this branch.
+}
+```
+
+Prefer representing conditional ownership with an optional:
+
+```zig
+var file: ?std.fs.File = null;
+if (should_open) {
+    file = try std.fs.cwd().openFile(path, .{});
+}
+
+if (file) |open_file| {
+    open_file.close();
+}
+```
+
+Conditionally closing a non-optional descriptor leaves its lifecycle ambiguous
+after the branch. CLR's intended policy is to reject that pattern rather than
+carry a permanent "maybe closed" state.
+
+The same principle applies to allocated pointers. Do not free through a derived
+pointer:
+
+```zig
+const allocation = try allocator.alloc(u8, size);
+const payload = allocation[header_size..];
+allocator.free(payload); // Bad: payload is not the allocation base.
+```
+
+Keep the allocation-base pointer available for deallocation, and use derived
+pointers only for access:
+
+```zig
+const allocation = try allocator.alloc(u8, size);
+defer allocator.free(allocation);
+
+const payload = allocation[header_size..];
+use(payload);
+```
+
+Freeing a field pointer, subslice, or pointer produced by arithmetic is rejected
+unless a documented internal rule reestablishes allocation-base provenance.
+
+These policies are strict by default because they produce code with simpler,
+more reviewable resource lifecycles. A future unsafe annotation mechanism will
+allow selected GIDs or operations to opt out of individual analyses. That will
+support code which deliberately accepts weaker checking in exchange for
+performance, without weakening the default model for the rest of the program.
+
 ## Status
 
 This is an active rewrite of the original Elixir-based proof-of-concept in Zig. The Zig implementation loads as a compiler plugin and analyzes AIR directly.

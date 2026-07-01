@@ -82,6 +82,16 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "optional fd supports conditional open and close" {
+    run compile_and_run "$TEST_CASES/fd_safety/optional_conditional_open_close_valid.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "optional fd supports close followed by clearing optional" {
+    run compile_and_run "$TEST_CASES/fd_safety/optional_close_and_clear_valid.zig"
+    [ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # Socket fd tests (posix.socket)
 # =============================================================================
