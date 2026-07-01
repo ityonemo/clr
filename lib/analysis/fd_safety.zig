@@ -4,7 +4,6 @@ const Refinements = @import("../Refinements.zig");
 const Analyte = @import("../Analyte.zig");
 const Gid = Refinements.Gid;
 const core = @import("../core.zig");
-const Meta = core.Meta;
 const tag = @import("../tag.zig");
 const gates = @import("gates.zig");
 const Context = @import("../Context.zig");
@@ -38,12 +37,12 @@ pub const FdType = enum {
 };
 
 pub const Open = struct {
-    meta: Meta, // Where fd was opened
+    trace: Context.Trace,
     fd_type: FdType, // Type of fd (file, socket, pipe, etc.)
 };
 
 pub const Closed = struct {
-    meta: Meta,
+    trace: Context.Trace,
 };
 
 pub const TrackedFd = struct {
@@ -205,7 +204,7 @@ pub const FdSafety = struct {
         }
 
         fd_ref.scalar.analyte.fd_safety = try createTracked(.{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .fd_type = fd_type,
         });
     }
@@ -227,12 +226,12 @@ pub const FdSafety = struct {
         if (dst_ref.scalar.analyte.fd_safety) |old_fd_safety| {
             const old_fd = getTracked(old_fd_safety.ref);
             if (old_fd.closed == null) {
-                old_fd.closed = .{ .meta = state.ctx.meta };
+                old_fd.closed = .{ .trace = state.ctx.captureTrace() };
             }
         }
 
         dst_ref.scalar.analyte.fd_safety = try createTracked(.{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .fd_type = .dup,
         });
     }
@@ -258,7 +257,7 @@ pub const FdSafety = struct {
                 const field_ref = state.refinements.at(field_gid);
                 if (field_ref.* == .scalar) {
                     field_ref.scalar.analyte.fd_safety = try createTracked(.{
-                        .meta = state.ctx.meta,
+                        .trace = state.ctx.captureTrace(),
                         .fd_type = .pipe,
                     });
                 }
@@ -295,7 +294,7 @@ pub const FdSafety = struct {
         }
 
         // Mark as closed
-        fd_state.closed = .{ .meta = state.ctx.meta };
+        fd_state.closed = .{ .trace = state.ctx.captureTrace() };
     }
 
     /// Check fd arguments for use-after-close.
@@ -768,27 +767,27 @@ pub const FdSafety = struct {
     // =========================================================================
 
     fn reportDoubleClose(ctx: *Context, fd_state: Open, prev_close: Closed) anyerror {
-        try ctx.meta.print(ctx.writer, "double close in ", .{});
-        try prev_close.meta.print(ctx.writer, "previously closed in ", .{});
-        try fd_state.meta.print(ctx.writer, "originally opened in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "double close in ", .{});
+        try Context.printTrace(prev_close.trace, ctx.writer, "previously closed in ", .{});
+        try Context.printTrace(fd_state.trace, ctx.writer, "originally opened in ", .{});
         return error.DoubleClose;
     }
 
     fn reportUseAfterClose(ctx: *Context, fd_state: Open, close_site: Closed) anyerror {
-        try ctx.meta.print(ctx.writer, "use after close in ", .{});
-        try close_site.meta.print(ctx.writer, "closed in ", .{});
-        try fd_state.meta.print(ctx.writer, "opened in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "use after close in ", .{});
+        try Context.printTrace(close_site.trace, ctx.writer, "closed in ", .{});
+        try Context.printTrace(fd_state.trace, ctx.writer, "opened in ", .{});
         return error.UseAfterClose;
     }
 
     fn reportFdLeak(ctx: *Context, fd_state: Open) anyerror {
-        try ctx.meta.print(ctx.writer, "fd leak in ", .{});
-        try fd_state.meta.print(ctx.writer, "opened in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "fd leak in ", .{});
+        try Context.printTrace(fd_state.trace, ctx.writer, "opened in ", .{});
         return error.FdLeak;
     }
 
     fn reportFdMath(ctx: *Context) anyerror {
-        try ctx.meta.print(ctx.writer, "fd used in mathematical operation in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "fd used in mathematical operation in ", .{});
         return error.FdMath;
     }
 };

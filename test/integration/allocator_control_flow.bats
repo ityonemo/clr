@@ -72,7 +72,7 @@ load test_helper
 }
 
 @test "no false positive when if branch frees and returns" {
-    run compile_and_run "$TEST_CASES/allocator_safety/if/free_and_return.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/if/if_free_and_return.zig"
     [ "$status" -eq 0 ]
 }
 
@@ -107,6 +107,6 @@ load test_helper
 }
 
 @test "no false positive when switch case frees and returns" {
-    run compile_and_run "$TEST_CASES/allocator_safety/switch/free_and_return.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/switch/switch_free_and_return.zig"
     [ "$status" -eq 0 ]
 }

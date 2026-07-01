@@ -189,7 +189,7 @@ the basic allocator case basename when generated analyzers are run in parallel.
 - `test/integration/allocator_slice.bats`
 
 **Test Cases:**
-- `test/cases/allocator_safety/basic/pass_to_callee_noleak.zig`
+- `test/cases/allocator_safety/basic/basic_pass_to_callee_noleak.zig`
 - `test/cases/allocator_safety/basic/free_from_callee_noleak.zig`
 - `test/cases/allocator_safety/slice/pass_slice_to_callee_noleak.zig`
 - `test/cases/allocator_safety/slice/free_returned_slice.zig`
@@ -230,7 +230,7 @@ field-origin metadata when the immediate memory root is unavailable.
 
 **Test Cases:**
 - `test/cases/fieldparentptr_safety/valid_union_field.zig`
-- `test/cases/fieldparentptr_safety/globals/valid_union_field.zig`
+- `test/cases/fieldparentptr_safety/globals/globals_valid_union_field.zig`
 - `test/cases/allocator_safety/field_ptr/free_via_fieldparentptr_union.zig`
 - `test/cases/allocator_safety/field_ptr/free_via_fieldparentptr_tagged_union.zig`
 
@@ -272,7 +272,7 @@ placeholders, so recursive union pointer fields satisfy memory-safety validation
 - `undefined_safety/unions/untagged_whole_undefined.zig`
 - `undefined_safety/globals/use_undefined_union.zig`
 - `allocator_safety/recursive/expr_tree_correct.zig`
-- `stack_pointer_safety/union/no_escape.zig`
+- `stack_pointer_safety/union/union_no_escape.zig`
 
 ---
 

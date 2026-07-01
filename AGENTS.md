@@ -50,11 +50,13 @@ pre-existing.
 
 ## Debugging Generated Analyzers
 
-`./run_one.sh` generates a root-level `.air.zig` file. After generation, run it
-directly for faster iteration:
+`./run_one.sh` generates a root-level `.air.zig` file whose name contains the
+case's full repository-relative path with `__` separators. This keeps concurrent
+cases and cases that previously shared a basename from overwriting one another.
+After generation, run it directly for faster iteration:
 
 ```sh
-zig run --dep clr -Mroot=name.air.zig -Mclr=lib/lib.zig
+zig run --dep clr -Mroot=test__cases__path__to__case.air.zig -Mclr=lib/lib.zig
 ```
 
 It is acceptable to temporarily instrument generated `.air.zig` files while

@@ -3,9 +3,11 @@ const tag = @import("tag.zig");
 const Refinements = @import("Refinements.zig");
 const Inst = @import("Inst.zig");
 const core = @import("core.zig");
+const TraceType = @import("Trace.zig").Trace;
 
 allocator: std.mem.Allocator,
-stacktrace: std.ArrayListUnmanaged([]const u8),
+stacktrace: Trace,
+trace_arena: std.heap.ArenaAllocator,
 meta: core.Meta,
 base_line: u32 = 0,
 writer: *std.Io.Writer = undefined,
@@ -80,6 +82,8 @@ pub const LoopFrame = struct {
 
 const Context = @This();
 
+pub const Trace = TraceType;
+
 /// Default getName for tests - returns "unknown"
 fn testGetName(_: u32) []const u8 {
     return "unknown";
@@ -93,7 +97,8 @@ fn testGetFieldId(_: u32, _: u32) ?u32 {
 pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
     return .{
         .allocator = allocator,
-        .stacktrace = .empty,
+        .stacktrace = .{},
+        .trace_arena = std.heap.ArenaAllocator.init(allocator),
         .meta = .{
             .function = "",
             .file = "",
@@ -109,7 +114,7 @@ pub fn init(allocator: std.mem.Allocator, writer: *std.Io.Writer) Context {
 }
 
 pub fn deinit(self: *Context) void {
-    self.stacktrace.deinit(self.allocator);
+    self.trace_arena.deinit();
     self.error_name_arena.deinit();
     for (self.loop_stack.items) |*frame| {
         frame.deinit(self.allocator);
@@ -220,48 +225,102 @@ pub fn delete(self: *Context) void {
 }
 
 pub fn push_fn(self: *Context, func_name: []const u8) !void {
-    self.meta.function = func_name;
-    try self.stacktrace.append(self.allocator, func_name);
+    self.meta = .{
+        .function = func_name,
+        .file = self.meta.file,
+        .line = 0,
+        .column = null,
+    };
+    try self.prependTrace(self.meta);
 }
 
 pub fn pop_fn(self: *Context) void {
-    if (self.stacktrace.items.len == 0) @panic("you busted the stacktrace");
-    _ = self.stacktrace.pop();
-    // Restore meta.function to the caller's function name
-    if (self.stacktrace.items.len > 0) {
-        self.meta.function = self.stacktrace.items[self.stacktrace.items.len - 1];
+    const current = self.stacktrace.popFirst() orelse @panic("you busted the stacktrace");
+    _ = current;
+    if (self.stacktrace.at(0)) |caller| {
+        self.meta = caller.data;
     } else {
-        self.meta.function = "";
+        self.meta = .{
+            .function = "",
+            .file = "",
+            .line = 0,
+            .column = null,
+        };
     }
 }
 
+pub fn setLocation(self: *Context, line: u32, column: u32) !void {
+    self.meta.line = line;
+    self.meta.column = column;
+
+    const current = self.stacktrace.at(0) orelse {
+        try self.prependTrace(self.meta);
+        return;
+    };
+    const parent = current.node.next;
+    const replacement = try self.trace_arena.allocator().create(Trace.Item);
+    replacement.* = .{ .data = self.meta };
+    replacement.node.next = parent;
+    self.stacktrace.wrapped.first = &replacement.node;
+}
+
+pub fn captureTrace(self: *const Context) Trace {
+    return self.stacktrace;
+}
+
+pub fn traceFromMeta(self: *Context, meta: core.Meta) error{OutOfMemory}!Trace {
+    const frame = try self.trace_arena.allocator().create(Trace.Item);
+    frame.* = .{ .data = meta };
+    var trace: Trace = .{};
+    trace.prepend(frame);
+    return trace;
+}
+
+pub fn traceLeaf(trace: Trace) ?core.Meta {
+    return if (trace.at(0)) |frame| frame.data else null;
+}
+
+pub fn printTrace(trace: Trace, writer: anytype, comptime prefix: []const u8, prefix_args: anytype) !void {
+    const leaf = trace.at(0) orelse return;
+    try leaf.data.print(writer, prefix, prefix_args);
+
+    var caller = leaf.next();
+    while (caller) |frame| : (caller = frame.next()) {
+        try frame.data.print(writer, "called from ", .{});
+    }
+}
+
+pub fn currentFunction(self: *const Context) []const u8 {
+    return (self.stacktrace.at(0) orelse @panic("currentFunction called outside a function")).data.function;
+}
+
+pub fn traceDepth(self: *const Context) usize {
+    return self.stacktrace.len();
+}
+
+pub fn restoreTrace(self: *Context, trace: Trace) void {
+    self.stacktrace = trace;
+    if (trace.at(0)) |frame| {
+        self.meta = frame.data;
+    }
+}
+
+pub fn restoreExecutionPoint(self: *Context, meta: core.Meta, trace: Trace) void {
+    self.meta = meta;
+    self.stacktrace = trace;
+}
+
+fn prependTrace(self: *Context, meta: core.Meta) !void {
+    const frame = try self.trace_arena.allocator().create(Trace.Item);
+    frame.* = .{ .data = meta };
+    self.stacktrace.prepend(frame);
+}
+
 pub fn dumpStackTrace(self: *Context) void {
-    var buf: [1024]u8 = undefined;
-
-    // Get relative path, being careful to free allocations
-    const cwd_path = std.fs.cwd().realpathAlloc(self.allocator, ".") catch null;
-    defer if (cwd_path) |p| self.allocator.free(p);
-
-    const rel_path = if (cwd_path) |cwd|
-        std.fs.path.relative(self.allocator, cwd, self.meta.file) catch self.meta.file
-    else
-        self.meta.file;
-    defer if (cwd_path != null and rel_path.ptr != self.meta.file.ptr) self.allocator.free(rel_path);
-
     self.writer.writeAll("Stack trace:\n") catch {};
-    // Print frames in reverse order (most recent first)
-    var i = self.stacktrace.items.len;
-    while (i > 0) {
-        i -= 1;
-        const frame = self.stacktrace.items[i];
-        if (i == self.stacktrace.items.len - 1) {
-            // Most recent frame - include file/line info
-            const msg = std.fmt.bufPrint(&buf, "  {s} ({s}:{d}:{d})\n", .{ frame, rel_path, self.meta.line, self.meta.column orelse 0 }) catch continue;
-            self.writer.writeAll(msg) catch {};
-        } else {
-            const msg = std.fmt.bufPrint(&buf, "  {s}\n", .{frame}) catch continue;
-            self.writer.writeAll(msg) catch {};
-        }
+    var frame = self.stacktrace.at(0);
+    while (frame) |item| : (frame = item.next()) {
+        item.data.print(self.writer, "  ", .{}) catch {};
     }
 }
 
@@ -274,12 +333,12 @@ test "context stacktrace tracks calls" {
     try ctx.push_fn("first");
     try ctx.push_fn("second");
 
-    try std.testing.expectEqual(@as(usize, 2), ctx.stacktrace.items.len);
-    try std.testing.expectEqualStrings("first", ctx.stacktrace.items[0]);
-    try std.testing.expectEqualStrings("second", ctx.stacktrace.items[1]);
+    try std.testing.expectEqual(@as(usize, 2), ctx.stacktrace.len());
+    try std.testing.expectEqualStrings("second", ctx.stacktrace.at(0).?.data.function);
+    try std.testing.expectEqualStrings("first", ctx.stacktrace.at(1).?.data.function);
 
     ctx.pop_fn();
-    try std.testing.expectEqual(@as(usize, 1), ctx.stacktrace.items.len);
+    try std.testing.expectEqual(@as(usize, 1), ctx.stacktrace.len());
 }
 
 test "pop_fn restores meta.function to caller" {
@@ -303,6 +362,75 @@ test "pop_fn restores meta.function to caller" {
     // Pop caller - meta.function should be empty
     ctx.pop_fn();
     try std.testing.expectEqualStrings("", ctx.meta.function);
+}
+
+test "stacktrace preserves full caller metadata across push and pop" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    ctx.meta.file = "caller.zig";
+    try ctx.push_fn("caller");
+    try ctx.setLocation(12, 7);
+
+    ctx.meta.file = "callee.zig";
+    try ctx.push_fn("callee");
+    try ctx.setLocation(30, 9);
+
+    try std.testing.expectEqualStrings("callee", ctx.stacktrace.at(0).?.data.function);
+    try std.testing.expectEqualStrings("callee.zig", ctx.stacktrace.at(0).?.data.file);
+    try std.testing.expectEqual(@as(u32, 30), ctx.stacktrace.at(0).?.data.line);
+    try std.testing.expectEqualStrings("caller", ctx.stacktrace.at(1).?.data.function);
+    try std.testing.expectEqualStrings("caller.zig", ctx.stacktrace.at(1).?.data.file);
+    try std.testing.expectEqual(@as(u32, 12), ctx.stacktrace.at(1).?.data.line);
+
+    ctx.pop_fn();
+    try std.testing.expectEqualStrings("caller", ctx.meta.function);
+    try std.testing.expectEqualStrings("caller.zig", ctx.meta.file);
+    try std.testing.expectEqual(@as(u32, 12), ctx.meta.line);
+    try std.testing.expectEqual(@as(u32, 7), ctx.meta.column.?);
+}
+
+test "stacktrace location replacement leaves captured trace immutable" {
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(std.testing.allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    ctx.meta.file = "main.zig";
+    try ctx.push_fn("main");
+    try ctx.setLocation(4, 2);
+    const captured = ctx.captureTrace();
+
+    try ctx.setLocation(8, 6);
+
+    try std.testing.expectEqual(@as(u32, 4), captured.at(0).?.data.line);
+    try std.testing.expectEqual(@as(u32, 2), captured.at(0).?.data.column.?);
+    try std.testing.expectEqual(@as(u32, 8), ctx.stacktrace.at(0).?.data.line);
+    try std.testing.expectEqual(@as(u32, 6), ctx.stacktrace.at(0).?.data.column.?);
+}
+
+test "printTrace renders leaf followed by callers" {
+    var output: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&output);
+    var ctx = Context.init(std.testing.allocator, &writer);
+    defer ctx.deinit();
+
+    ctx.meta.file = "caller.zig";
+    try ctx.push_fn("caller");
+    try ctx.setLocation(10, 4);
+    ctx.meta.file = "callee.zig";
+    try ctx.push_fn("callee");
+    try ctx.setLocation(20, 8);
+
+    try Context.printTrace(ctx.captureTrace(), &writer, "event in ", .{});
+
+    try std.testing.expectEqualStrings(
+        "event in callee (callee.zig:20:8)\n" ++
+            "called from caller (caller.zig:10:4)\n",
+        writer.buffered(),
+    );
 }
 
 // Test helper: getName that maps specific IDs to names

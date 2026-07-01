@@ -14,9 +14,11 @@ if [ -z "$1" ]; then
     exit 1
 fi
 
-INPUT="$1"
-BASENAME="$(basename "${INPUT%.zig}")"
-OUTPUT="${SCRIPT_DIR}/${BASENAME}.air.zig"
+INPUT="$(realpath "$1")"
+RELATIVE_INPUT="${INPUT#"$SCRIPT_DIR"/}"
+CASE_NAME="${RELATIVE_INPUT%.zig}"
+CASE_NAME="${CASE_NAME//\//__}"
+OUTPUT="${SCRIPT_DIR}/${CASE_NAME}.air.zig"
 
 "$ZIG_COMPILER" build-exe \
     -fair-out="$LIBCLR" \

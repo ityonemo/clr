@@ -70,6 +70,8 @@ pub const FnInterpreter = *const fn (*Context, *Refinements, Gid, []const Gid) a
 
 test {
     @import("std").testing.refAllDecls(@This());
+    _ = @import("SinglyLinkedList.zig");
+    _ = @import("Trace.zig");
     // Analysis module unit tests
     _ = @import("analysis/null_safety_test.zig");
     _ = @import("analysis/undefined_safety_test.zig");

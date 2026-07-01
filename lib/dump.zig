@@ -31,9 +31,14 @@ pub fn dump(state: State) void {
 
     // Stacktrace
     writer.writeAll("  stacktrace: [") catch {};
-    for (ctx.stacktrace.items, 0..) |frame, i| {
-        if (i > 0) writer.writeAll(", ") catch {};
-        writer.writeAll(frame) catch {};
+    var frame = ctx.stacktrace.at(0);
+    var index: usize = 0;
+    while (frame) |item| : ({
+        frame = item.next();
+        index += 1;
+    }) {
+        if (index > 0) writer.writeAll(", ") catch {};
+        writer.writeAll(item.data.function) catch {};
     }
     writer.writeAll("]\n") catch {};
 

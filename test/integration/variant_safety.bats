@@ -100,19 +100,19 @@ load test_helper
 # =============================================================================
 
 @test "detects inactive variant access on global union" {
-    run compile_and_run "$TEST_CASES/variant_safety/globals/inactive_access.zig"
+    run compile_and_run "$TEST_CASES/variant_safety/globals/globals_inactive_access.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "access of inactive union variant" ]]
     [[ "$output" =~ "inactive_access.get_int" ]]
 }
 
 @test "no error when accessing active variant of global union" {
-    run compile_and_run "$TEST_CASES/variant_safety/globals/active_access.zig"
+    run compile_and_run "$TEST_CASES/variant_safety/globals/globals_active_access.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "no error when global union variant is checked before access" {
-    run compile_and_run "$TEST_CASES/variant_safety/globals/checked_access.zig"
+    run compile_and_run "$TEST_CASES/variant_safety/globals/globals_checked_access.zig"
     [ "$status" -eq 0 ]
 }
 

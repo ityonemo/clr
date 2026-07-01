@@ -7,33 +7,33 @@ load test_helper
 # =============================================================================
 
 @test "no false positive for correct slice usage" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/correct_usage.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_correct_usage.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects use-after-free for slice" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/use_after_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_use_after_free.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use after free in use_after_free.main" ]]
-    [[ "$output" =~ "use_after_free.zig:9:" ]]
-    [[ "$output" =~ "'slice' freed in use_after_free.main" ]]
-    [[ "$output" =~ "use_after_free.zig:7:" ]]
+    [[ "$output" =~ "use after free in slice_use_after_free.main" ]]
+    [[ "$output" =~ "slice_use_after_free.zig:9:" ]]
+    [[ "$output" =~ "'slice' freed in slice_use_after_free.main" ]]
+    [[ "$output" =~ "slice_use_after_free.zig:7:" ]]
 }
 
 @test "detects double-free for slice" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/double_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_double_free.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "double free in double_free.main" ]]
-    [[ "$output" =~ "double_free.zig:8:" ]]
-    [[ "$output" =~ "'slice' previously freed in double_free.main" ]]
-    [[ "$output" =~ "double_free.zig:7:" ]]
+    [[ "$output" =~ "double free in slice_double_free.main" ]]
+    [[ "$output" =~ "slice_double_free.zig:8:" ]]
+    [[ "$output" =~ "'slice' previously freed in slice_double_free.main" ]]
+    [[ "$output" =~ "slice_double_free.zig:7:" ]]
 }
 
 @test "detects memory leak for slice" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/leak.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_leak.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "memory leak in leak.main" ]]
-    [[ "$output" =~ "leak.zig:8:" ]]
+    [[ "$output" =~ "memory leak in slice_leak.main" ]]
+    [[ "$output" =~ "slice_leak.zig:8:" ]]
 }
 
 @test "no false positive when callee frees slice from caller" {
@@ -42,25 +42,25 @@ load test_helper
 }
 
 @test "detects leak when callee doesn't free slice from caller" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/pass_to_callee_leak.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_pass_to_callee_leak.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "memory leak in pass_to_callee_leak.main" ]]
-    [[ "$output" =~ "pass_to_callee_leak.zig:13:" ]]
-    [[ "$output" =~ "allocated in pass_to_callee_leak.main" ]]
+    [[ "$output" =~ "memory leak in slice_pass_to_callee_leak.main" ]]
+    [[ "$output" =~ "slice_pass_to_callee_leak.zig:13:" ]]
+    [[ "$output" =~ "allocated in slice_pass_to_callee_leak.main" ]]
 }
 
 @test "detects double-free across caller/callee for slice" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/pass_to_callee_double_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_pass_to_callee_double_free.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "double free in pass_to_callee_double_free.main" ]]
-    [[ "$output" =~ "pass_to_callee_double_free.zig" ]]
+    [[ "$output" =~ "double free in slice_pass_to_callee_double_free.main" ]]
+    [[ "$output" =~ "slice_pass_to_callee_double_free.zig" ]]
 }
 
 @test "detects use-after-free across caller/callee for slice" {
-    run compile_and_run "$TEST_CASES/allocator_safety/slice/pass_to_callee_use_after_free.zig"
+    run compile_and_run "$TEST_CASES/allocator_safety/slice/slice_pass_to_callee_use_after_free.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "use after free in pass_to_callee_use_after_free.main" ]]
-    [[ "$output" =~ "pass_to_callee_use_after_free.zig" ]]
+    [[ "$output" =~ "use after free in slice_pass_to_callee_use_after_free.main" ]]
+    [[ "$output" =~ "slice_pass_to_callee_use_after_free.zig" ]]
 }
 
 @test "no false positive for freeing slice returned from function" {

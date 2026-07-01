@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const core = @import("core.zig");
 const Meta = core.Meta;
+const Trace = @import("Trace.zig").Trace;
 const tag = @import("tag.zig");
 
 /// Entity Index - index into the Refinements entity table.
@@ -146,7 +147,7 @@ pub const Refinement = union(enum) {
         analyte: Analyte = .{},
         type_id: Tid,
         arena_gid: ?Gid = null, // if from arena, the arena's GID
-        deinit: ?Meta = null,
+        deinit: ?Trace = null,
     };
 
     scalar: Scalar,

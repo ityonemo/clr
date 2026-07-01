@@ -45,19 +45,19 @@ load test_helper
 # Global field pointers are interned at compile time (no struct_field_ptr generated),
 # but we now track them via initWithGlobals with field_info.
 @test "no error when fieldParentPtr on global struct field" {
-    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/valid_struct_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/globals_valid_struct_field.zig"
     [ "$status" -eq 0 ]
 }
 
 @test "detects fieldParentPtr on global standalone variable" {
-    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/invalid_standalone.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/globals_invalid_standalone.zig"
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fieldParentPtr on non-field pointer" ]]
     [[ "$output" =~ "invalid_standalone.get_parent" ]]
 }
 
 @test "no error when fieldParentPtr on global union field" {
-    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/valid_union_field.zig"
+    run compile_and_run "$TEST_CASES/fieldparentptr_safety/globals/globals_valid_union_field.zig"
     [ "$status" -eq 0 ]
 }
 

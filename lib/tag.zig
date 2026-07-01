@@ -493,8 +493,7 @@ pub const DbgStmt = struct {
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         _ = try Inst.clobberInst(state.refinements, state.results, index, .void);
-        state.ctx.meta.line = state.ctx.base_line + self.line + 1;
-        state.ctx.meta.column = self.column;
+        try state.ctx.setLocation(state.ctx.base_line + self.line + 1, self.column);
     }
 };
 
@@ -2756,7 +2755,8 @@ pub fn splatInitEntrypointReturnSlot(refinements: *Refinements, gid: Gid, ctx: ?
     // Then dispatch to entrypoint-specific handlers (e.g., memory_safety sets .stack)
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_entrypoint_return_slot")) {
-            Analysis.init_entrypoint_return_slot(refinements, gid);
+            Analysis.init_entrypoint_return_slot(refinements, gid, ctx orelse
+                @panic("entrypoint return-slot initialization requires Context"));
         }
     }
 }
@@ -2772,7 +2772,8 @@ pub fn splatInitCallReturnSlot(refinements: *Refinements, gid: Gid, ctx: ?*Conte
     // Then dispatch to call-return-slot-specific handlers (e.g., memory_safety sets .stack)
     inline for (Analyte.analyses) |Analysis| {
         if (@hasDecl(Analysis, "init_call_return_slot")) {
-            Analysis.init_call_return_slot(refinements, gid);
+            Analysis.init_call_return_slot(refinements, gid, ctx orelse
+                @panic("call return-slot initialization requires Context"));
         }
     }
 }
@@ -3714,7 +3715,7 @@ test "unwrap_errunion_payload extracts payload from error union" {
     // Create an error union with a scalar payload
     const payload_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{
-            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } },
             .undefined_safety = .{ .defined = {} },
         },
     } });
@@ -3769,7 +3770,7 @@ test "struct_field_val valueCopies field" {
 
     const field_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{
-            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } },
             .undefined_safety = .{ .defined = {} },
         },
     } });
@@ -3862,7 +3863,7 @@ test "wrap_optional valueCopies inst payload" {
 
     const payload_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{
-            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } },
             .undefined_safety = .{ .defined = {} },
         },
     } });
@@ -3896,7 +3897,7 @@ test "wrap_errunion_payload valueCopies inst payload" {
 
     const payload_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{
-            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } },
             .undefined_safety = .{ .defined = {} },
         },
     } });
@@ -4281,7 +4282,7 @@ test "br valueCopies inst source into block result" {
 
     const src_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{
-            .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } },
+            .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } },
             .undefined_safety = .{ .defined = {} },
         },
     } });

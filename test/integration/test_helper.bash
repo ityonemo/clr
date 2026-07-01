@@ -24,6 +24,11 @@ teardown() {
     rm -rf "$TEST_TEMP"
 }
 
+flunk() {
+    printf 'flunk! %s\n' "$BATS_TEST_NAME"
+    return 1
+}
+
 # Compile a test case with AIR output
 # Usage: compile_air <input.zig> <output.air>
 compile_air() {

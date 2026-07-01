@@ -15,12 +15,12 @@ const State = @import("../lib.zig").State;
 // =========================================================================
 
 pub const Free = struct {
-    meta: Meta,
+    trace: Context.Trace,
     name_at_free: ?[]const u8 = null, // Full path name (arena-allocated at store time)
 };
 
 pub const Stack = struct {
-    meta: Meta,
+    trace: Context.Trace,
     root_gid: ?Gid, // null = root, else parent container gid
     name: Name = .{ .other = {} },
 
@@ -32,7 +32,7 @@ pub const Stack = struct {
 };
 
 pub const Allocated = struct {
-    meta: Meta,
+    trace: Context.Trace,
     root_gid: ?Gid, // null = root, else parent container gid
     freed: ?Free = null, // null = still allocated, has value = freed
 
@@ -104,7 +104,7 @@ pub const MemorySafety = union(enum) {
         // Inst contains .pointer = Indirected, set memory_safety on pointer and pointee
         const ptr_idx = state.results[index].refinement.?;
         const stack_ms: MemorySafety = .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } };
         // Paint the pointer itself
@@ -186,7 +186,7 @@ pub const MemorySafety = union(enum) {
         const dest_ref = refinements.at(dest_gid);
         if (dest_ref.* == .pointer and src_refinement.* == .pointer) {
             try checkPointerSlotClobber(state, dest_gid, src_refinement_idx);
-            dest_ref.pointer.analyte.memory_safety = src_refinement.pointer.analyte.memory_safety orelse .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
+            dest_ref.pointer.analyte.memory_safety = src_refinement.pointer.analyte.memory_safety orelse .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } };
         }
         if (dest_ref.* == .@"struct" and src_refinement.* == .@"struct") {
             const dest_struct = dest_ref.@"struct";
@@ -223,7 +223,7 @@ pub const MemorySafety = union(enum) {
         if (tgt_ptr.analyte.memory_safety) |*ms| {
             if (ms.* == .stack) {
                 ms.stack.name = .{ .parameter = param_name_id };
-                ms.stack.meta = param_meta;
+                ms.stack.trace = try ctx.traceFromMeta(param_meta);
             }
         }
 
@@ -233,7 +233,7 @@ pub const MemorySafety = union(enum) {
         if (getAnalytePtr(pointee).memory_safety) |*ms| {
             if (ms.* == .stack) {
                 ms.stack.name = .{ .parameter = param_name_id };
-                ms.stack.meta = param_meta;
+                ms.stack.trace = try ctx.traceFromMeta(param_meta);
             }
         }
     }
@@ -322,7 +322,7 @@ pub const MemorySafety = union(enum) {
         const base_idx: Gid = switch (params.base) {
             .inst => |inst| state.results[inst].refinement orelse {
                 // No base refinement - set .stack on result and any nested refinements
-                paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
                 return;
             },
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
@@ -338,7 +338,7 @@ pub const MemorySafety = union(enum) {
         };
         const base_ref = refinements.at(base_idx);
         if (base_ref.* != .pointer) {
-            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
             return;
         }
 
@@ -359,9 +359,9 @@ pub const MemorySafety = union(enum) {
         // Create memory_safety for the pointer with root_gid pointing to container
         const container_gid = container.getGid();
         ptr.analyte.memory_safety = switch (container_ms) {
-            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = container_gid } },
+            .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = container_gid } },
             .allocated => |a| .{ .allocated = .{
-                .meta = a.meta,
+                .trace = a.trace,
                 .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
                 .freed = a.freed,
@@ -369,7 +369,7 @@ pub const MemorySafety = union(enum) {
             } },
             .interned => |g| .{ .interned = g },
             .error_stub => {
-                paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
                 return;
             },
             .placeholder => std.debug.panic("placeholder in struct_field_ptr - container not initialized", .{}),
@@ -380,7 +380,7 @@ pub const MemorySafety = union(enum) {
         // (e.g., accessing an inactive union field for the first time).
         // Match the container's memory_safety type.
         switch (container_ms) {
-            .stack => paintSpatialMemory(refinements, ptr.to, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } }),
+            .stack => paintSpatialMemory(refinements, ptr.to, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } }),
             .interned => |g| paintSpatialMemory(refinements, ptr.to, .{ .interned = g }),
             .allocated => {
                 // For allocated containers, fields are part of the allocation
@@ -399,21 +399,21 @@ pub const MemorySafety = union(enum) {
         if (base_ref.* != .pointer) return;
 
         const base_ms = base_ref.pointer.analyte.memory_safety orelse MemorySafety{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } };
         const root_gid = base_ref.getGid();
         const field_ms: MemorySafety = switch (base_ms) {
-            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = root_gid } },
+            .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = root_gid } },
             .allocated => |a| .{ .allocated = .{
-                .meta = a.meta,
+                .trace = a.trace,
                 .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = root_gid,
             } },
             .interned => |g| .{ .interned = g },
-            .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = root_gid } },
+            .error_stub => .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = root_gid } },
             .placeholder => std.debug.panic("placeholder in struct_field_ptr - reinterpreted base pointer not initialized", .{}),
         };
 
@@ -437,7 +437,7 @@ pub const MemorySafety = union(enum) {
                 const slice_ref = refinements.at(slice_gid);
                 if (slice_ref.* == .pointer) {
                     ptr.analyte.memory_safety = slice_ref.pointer.analyte.memory_safety orelse .{ .stack = .{
-                        .meta = state.ctx.meta,
+                        .trace = state.ctx.captureTrace(),
                         .root_gid = null,
                     } };
                     return;
@@ -449,7 +449,7 @@ pub const MemorySafety = union(enum) {
         const region_idx = ptr.to;
         const region = refinements.at(region_idx);
         if (region.getMultiplicity() != .region and ptr.raw_bytes == null) {
-            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
             return;
         }
 
@@ -463,20 +463,20 @@ pub const MemorySafety = union(enum) {
         // Create memory_safety for the pointer with root_gid pointing to the region
         const region_gid = region.getGid();
         ptr.analyte.memory_safety = switch (region_ms) {
-            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = region_gid } },
+            .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = region_gid } },
             .allocated => |a| .{ .allocated = .{
-                .meta = a.meta,
+                .trace = a.trace,
                 .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = region_gid,
             } },
             .interned => |g| .{ .interned = g },
-            .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
+            .error_stub => .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = region_gid } },
             // Region has placeholder - the pointee is uninitialized, but the pointer VALUE
             // itself lives on the stack. The pointee's placeholder state is already tracked
             // on the region; accessing the pointee will be caught by other safety checks.
-            .placeholder => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = region_gid } },
+            .placeholder => .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = region_gid } },
         };
     }
 
@@ -495,7 +495,7 @@ pub const MemorySafety = union(enum) {
         // Get the source pointer (pointer to slice)
         const src_idx: Gid = switch (params.src) {
             .inst => |inst| state.results[inst].refinement orelse {
-                paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
                 return;
             },
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
@@ -509,14 +509,14 @@ pub const MemorySafety = union(enum) {
         };
         const src_ref = refinements.at(src_idx);
         if (src_ref.* != .pointer) {
-            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
             return;
         }
 
         // The source pointer (e.g., from struct_field_ptr) has the memory_safety we need.
         // This tells us where the slice field lives (stack of which function, etc.).
         const src_ms = src_ref.pointer.analyte.memory_safety orelse {
-            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
             return;
         };
 
@@ -524,16 +524,16 @@ pub const MemorySafety = union(enum) {
         // Inherit memory_safety from the source pointer with root_gid pointing to the source.
         const src_gid = src_ref.getGid();
         ptr.analyte.memory_safety = switch (src_ms) {
-            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src_gid } },
+            .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = src_gid } },
             .allocated => |a| .{ .allocated = .{
-                .meta = a.meta,
+                .trace = a.trace,
                 .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
                 .freed = a.freed,
                 .root_gid = src_gid,
             } },
             .interned => |g| .{ .interned = g },
-            .error_stub => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = src_gid } },
+            .error_stub => .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = src_gid } },
             .placeholder => std.debug.panic("placeholder in slice_field_ptr - source not initialized", .{}),
         };
         // Initialize the pointee to .placeholder (it's an unassigned pointer target)
@@ -572,7 +572,7 @@ pub const MemorySafety = union(enum) {
         }
 
         result_ref.pointer.analyte.memory_safety = .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = ptr_ref.pointer.to,
         } };
     }
@@ -587,10 +587,10 @@ pub const MemorySafety = union(enum) {
         // original parent below, the orphaned struct/field entities need memory_safety
         // set to pass testValid.
         if (state.results[index].refinement) |ref_idx| {
-            paintSpatialMemory(refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
             const ref = refinements.at(ref_idx);
             if (ref.* == .pointer) {
-                paintSpatialMemory(refinements, ref.pointer.to, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                paintSpatialMemory(refinements, ref.pointer.to, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
                 initPointerTargetsPlaceholder(refinements, ref.pointer.to);
             }
         }
@@ -643,9 +643,9 @@ pub const MemorySafety = union(enum) {
         const parent_ms = parent_analyte.memory_safety orelse
             std.debug.panic("memory_safety.field_parent_ptr: parent gid {d} has no memory_safety", .{parent_eidx});
         result_ptr.analyte.memory_safety = switch (parent_ms) {
-            .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = null } },
+            .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = null } },
             .allocated => |a| .{ .allocated = .{
-                .meta = a.meta,
+                .trace = a.trace,
                 .allocator_gid = a.allocator_gid,
                 .type_id = a.type_id,
                 .freed = a.freed,
@@ -854,8 +854,10 @@ pub const MemorySafety = union(enum) {
                 if (getMemorySafety(pointee)) |ms| {
                     if (ms == .stack) {
                         const sp = ms.stack;
-                        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
-                        if (std.mem.eql(u8, sp.meta.function, func_name)) {
+                        const func_name = ctx.currentFunction();
+                        const origin = Context.traceLeaf(sp.trace) orelse
+                            @panic("stack memory_safety has an empty trace");
+                        if (std.mem.eql(u8, origin.function, func_name)) {
                             return reportStackEscape(ms, ctx);
                         }
                     }
@@ -915,7 +917,7 @@ pub const MemorySafety = union(enum) {
         if (ptr_refinement.* != .pointer) return;
 
         const pointee_idx = ptr_refinement.pointer.to;
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        const func_name = ctx.currentFunction();
 
         // Check for stack pointers escaping via struct/union fields
         try checkStackEscapeRecursive(refinements, pointee_idx, ctx, func_name);
@@ -938,7 +940,9 @@ pub const MemorySafety = union(enum) {
                 if (getAnalytePtr(pointee).memory_safety) |ms| {
                     if (ms == .stack) {
                         const sp = ms.stack;
-                        if (std.mem.eql(u8, sp.meta.function, func_name)) {
+                        const origin = Context.traceLeaf(sp.trace) orelse
+                            @panic("stack memory_safety has an empty trace");
+                        if (std.mem.eql(u8, origin.function, func_name)) {
                             return reportStackEscape(ms, ctx);
                         }
                     }
@@ -990,7 +994,7 @@ pub const MemorySafety = union(enum) {
         if (new_ptr_ref.* != .pointer) return;
         const new_region_gid = new_ptr_ref.pointer.to;
 
-        const stack_ms: MemorySafety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } };
+        const stack_ms: MemorySafety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } };
 
         // Paint the optional and pointer as stack values (return value)
         paintSpatialMemory(refinements, result_gid, stack_ms);
@@ -1013,7 +1017,7 @@ pub const MemorySafety = union(enum) {
                     // and mark old region as freed.
                     paintSpatialMemory(refinements, new_region_gid, .{
                         .allocated = .{
-                            .meta = ctx.meta,
+                            .trace = ctx.captureTrace(),
                             .allocator_gid = alloc_info.allocator_gid,
                             .type_id = alloc_info.type_id,
                             .freed = null,
@@ -1023,7 +1027,7 @@ pub const MemorySafety = union(enum) {
 
                     // Mark old slice's region as freed
                     const free_meta: Free = .{
-                        .meta = ctx.meta,
+                        .trace = ctx.captureTrace(),
                         .name_at_free = null, // Name tracking not available in setup
                     };
                     setFreedRecursive(refinements, old_region_gid, free_meta);
@@ -1141,7 +1145,7 @@ pub const MemorySafety = union(enum) {
     /// With global refinements, args share entities directly with caller.
     /// Stack pointer escapes through args are detected by checking arg pointees.
     pub fn onFinish(results: []Inst, ctx: *Context, refinements: *Refinements, return_gid: Gid) !void {
-        const func_name = ctx.stacktrace.items[ctx.stacktrace.items.len - 1];
+        const func_name = ctx.currentFunction();
 
         // Check for stack pointer escapes via pointer arguments
         // If a pointer arg's pointee contains a stack pointer from this function,
@@ -1207,7 +1211,7 @@ pub const MemorySafety = union(enum) {
 
         // Check for memory leaks via splatOrphaned.
         // In main (stack depth 1), also check allocations stored in globals.
-        const in_main = ctx.stacktrace.items.len == 1;
+        const in_main = ctx.traceDepth() == 1;
 
         // Build OrphanContext for function_end leak detection
         const orphan_ctx: core.OrphanContext = .{
@@ -1558,7 +1562,18 @@ pub const MemorySafety = union(enum) {
     fn sameAllocationMetadata(lhs: Allocated, rhs: Allocated) bool {
         return lhs.allocator_gid == rhs.allocator_gid and
             lhs.type_id == rhs.type_id and
-            std.meta.eql(lhs.meta, rhs.meta);
+            traceEql(lhs.trace, rhs.trace);
+    }
+
+    fn traceEql(lhs: Context.Trace, rhs: Context.Trace) bool {
+        var lhs_frame = lhs.at(0);
+        var rhs_frame = rhs.at(0);
+        while (lhs_frame != null and rhs_frame != null) {
+            if (!std.meta.eql(lhs_frame.?.data, rhs_frame.?.data)) return false;
+            lhs_frame = lhs_frame.?.next();
+            rhs_frame = rhs_frame.?.next();
+        }
+        return lhs_frame == null and rhs_frame == null;
     }
 
     fn hasEquivalentAllocation(refinements: *Refinements, gid: Gid, allocation: Allocated) bool {
@@ -1677,7 +1692,7 @@ pub const MemorySafety = union(enum) {
 
     /// Base allocation info for setAllocatedRecursive (without root_gid, which is computed).
     const AllocatedBase = struct {
-        meta: Meta,
+        trace: Context.Trace,
         allocator_gid: Gid, // GID of allocator for identity comparison
         type_id: u32, // Type ID for error messages
         root_gid: ?Gid, // Initial root_gid for the root node
@@ -1745,14 +1760,14 @@ pub const MemorySafety = union(enum) {
         if (result_ref.* == .pointer) {
             if (pointee.* == .pointer) {
                 result_ref.pointer.analyte.memory_safety = pointee.pointer.analyte.memory_safety orelse .{ .stack = .{
-                    .meta = ctx.meta,
+                    .trace = ctx.captureTrace(),
                     .root_gid = null,
                 } };
             } else if (params.ptr == .interned) {
                 paintSpatialMemory(refinements, result_idx, .{ .interned = ctx.meta });
             } else {
                 result_ref.pointer.analyte.memory_safety = .{ .stack = .{
-                    .meta = ctx.meta,
+                    .trace = ctx.captureTrace(),
                     .root_gid = null,
                 } };
             }
@@ -1880,7 +1895,7 @@ pub const MemorySafety = union(enum) {
         const base_ref: Gid = switch (params.base) {
             .inst => |idx| results[idx].refinement orelse {
                 // No base refinement - set result to stack
-                paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+                paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } });
                 return;
             },
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse {
@@ -1898,13 +1913,13 @@ pub const MemorySafety = union(enum) {
 
         // For slices: base is pointer → region
         if (base_refinement != .pointer) {
-            paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } });
             return;
         }
         const region_idx = base_refinement.pointer.to;
         const region_ref = refinements.at(region_idx);
         if (region_ref.getMultiplicity() != .region and base_refinement.pointer.raw_bytes == null) {
-            paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, result_ref_idx, .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } });
             return;
         }
 
@@ -1919,7 +1934,7 @@ pub const MemorySafety = union(enum) {
             .allocated => |a| {
                 result_ref.pointer.analyte.memory_safety = .{
                     .allocated = .{
-                        .meta = a.meta,
+                        .trace = a.trace,
                         .allocator_gid = a.allocator_gid,
                         .type_id = a.type_id,
                         .freed = a.freed,
@@ -1932,7 +1947,7 @@ pub const MemorySafety = union(enum) {
             },
             .stack => |s| {
                 result_ref.pointer.analyte.memory_safety = .{ .stack = .{
-                    .meta = s.meta,
+                    .trace = s.trace,
                     .root_gid = region_idx,
                 } };
             },
@@ -1941,7 +1956,7 @@ pub const MemorySafety = union(enum) {
             },
             .error_stub => {
                 result_ref.pointer.analyte.memory_safety = .{ .stack = .{
-                    .meta = ctx.meta,
+                    .trace = ctx.captureTrace(),
                     .root_gid = region_idx,
                 } };
             },
@@ -1984,22 +1999,22 @@ pub const MemorySafety = union(enum) {
 
     fn reportStackEscape(ms: MemorySafety, ctx: *Context) anyerror {
         const sp = ms.stack;
-        try ctx.meta.print(ctx.writer, "stack pointer escape in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "stack pointer escape in ", .{});
         switch (sp.name) {
             .variable => |name_id| {
                 const name = ctx.getName(name_id);
-                try sp.meta.print(ctx.writer, "pointer was for local variable '{s}' in ", .{name});
+                try Context.printTrace(sp.trace, ctx.writer, "pointer was for local variable '{s}' in ", .{name});
             },
             .parameter => |name_id| {
                 const name = ctx.getName(name_id);
                 if (name.len > 0) {
-                    try sp.meta.print(ctx.writer, "pointer was for parameter '{s}' created in ", .{name});
+                    try Context.printTrace(sp.trace, ctx.writer, "pointer was for parameter '{s}' created in ", .{name});
                 } else {
-                    try sp.meta.print(ctx.writer, "pointer was for parameter created in ", .{});
+                    try Context.printTrace(sp.trace, ctx.writer, "pointer was for parameter created in ", .{});
                 }
             },
             .other => {
-                try sp.meta.print(ctx.writer, "pointer was for stack memory created in ", .{});
+                try Context.printTrace(sp.trace, ctx.writer, "pointer was for stack memory created in ", .{});
             },
         }
         return error.StackPointerEscape;
@@ -2016,89 +2031,89 @@ pub const MemorySafety = union(enum) {
     }
 
     fn reportDoubleFree(ctx: *Context, allocation: Allocated, previous_free: Free) anyerror {
-        try ctx.meta.print(ctx.writer, "double free in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "double free in ", .{});
         // Use name_at_free for "previously freed" line
         var buf1: [256]u8 = undefined;
         const free_prefix = formatNamePrefix(previous_free.name_at_free, &buf1);
         if (free_prefix.len > 0) {
-            try previous_free.meta.print(ctx.writer, "{s}previously freed in ", .{free_prefix});
+            try Context.printTrace(previous_free.trace, ctx.writer, "{s}previously freed in ", .{free_prefix});
         } else {
-            try previous_free.meta.print(ctx.writer, "previously freed in ", .{});
+            try Context.printTrace(previous_free.trace, ctx.writer, "previously freed in ", .{});
         }
         // Use name_at_alloc for "originally allocated" line
         var buf2: [256]u8 = undefined;
         const alloc_prefix = formatNamePrefix(allocation.name_at_alloc, &buf2);
         if (alloc_prefix.len > 0) {
-            try allocation.meta.print(ctx.writer, "{s}originally allocated in ", .{alloc_prefix});
+            try Context.printTrace(allocation.trace, ctx.writer, "{s}originally allocated in ", .{alloc_prefix});
         } else {
-            try allocation.meta.print(ctx.writer, "originally allocated in ", .{});
+            try Context.printTrace(allocation.trace, ctx.writer, "originally allocated in ", .{});
         }
         return error.DoubleFree;
     }
 
     fn reportUseAfterFree(ctx: *Context, allocation: Allocated, free_site: Free) anyerror {
-        try ctx.meta.print(ctx.writer, "use after free in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "use after free in ", .{});
         // Use name_at_free for "freed" line
         var buf1: [256]u8 = undefined;
         const free_prefix = formatNamePrefix(free_site.name_at_free, &buf1);
         if (free_prefix.len > 0) {
-            try free_site.meta.print(ctx.writer, "{s}freed in ", .{free_prefix});
+            try Context.printTrace(free_site.trace, ctx.writer, "{s}freed in ", .{free_prefix});
         } else {
-            try free_site.meta.print(ctx.writer, "freed in ", .{});
+            try Context.printTrace(free_site.trace, ctx.writer, "freed in ", .{});
         }
         // Use name_at_alloc for "allocated" line
         var buf2: [256]u8 = undefined;
         const alloc_prefix = formatNamePrefix(allocation.name_at_alloc, &buf2);
         if (alloc_prefix.len > 0) {
-            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{alloc_prefix});
+            try Context.printTrace(allocation.trace, ctx.writer, "{s}allocated in ", .{alloc_prefix});
         } else {
-            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+            try Context.printTrace(allocation.trace, ctx.writer, "allocated in ", .{});
         }
         return error.UseAfterFree;
     }
 
-    fn reportUseAfterArenaDeinit(ctx: *Context, allocation: Allocated, deinit_meta: Meta) anyerror {
-        try ctx.meta.print(ctx.writer, "use after free in ", .{});
-        try deinit_meta.print(ctx.writer, "arena deinited in ", .{});
+    fn reportUseAfterArenaDeinit(ctx: *Context, allocation: Allocated, deinit_trace: Context.Trace) anyerror {
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "use after free in ", .{});
+        try Context.printTrace(deinit_trace, ctx.writer, "arena deinited in ", .{});
         // Use name_at_alloc for "allocated" line
         var buf: [256]u8 = undefined;
         const alloc_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
         if (alloc_prefix.len > 0) {
-            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{alloc_prefix});
+            try Context.printTrace(allocation.trace, ctx.writer, "{s}allocated in ", .{alloc_prefix});
         } else {
-            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+            try Context.printTrace(allocation.trace, ctx.writer, "allocated in ", .{});
         }
         return error.UseAfterFree;
     }
 
     fn reportMemoryLeak(ctx: *Context, allocation: Allocated) anyerror {
-        try ctx.meta.print(ctx.writer, "memory leak in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "memory leak in ", .{});
         var buf: [256]u8 = undefined;
         const name_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
         if (name_prefix.len > 0) {
-            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{name_prefix});
+            try Context.printTrace(allocation.trace, ctx.writer, "{s}allocated in ", .{name_prefix});
         } else {
-            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+            try Context.printTrace(allocation.trace, ctx.writer, "allocated in ", .{});
         }
         return error.MemoryLeak;
     }
 
     fn reportArenaLeak(ctx: *Context, allocation: Allocated) anyerror {
-        try ctx.meta.print(ctx.writer, "arena leak in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "arena leak in ", .{});
         var buf: [256]u8 = undefined;
         const name_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
         if (name_prefix.len > 0) {
-            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{name_prefix});
+            try Context.printTrace(allocation.trace, ctx.writer, "{s}allocated in ", .{name_prefix});
         } else {
-            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+            try Context.printTrace(allocation.trace, ctx.writer, "allocated in ", .{});
         }
         return error.ArenaLeak;
     }
 
     fn reportMismatchedAllocator(ctx: *Context, allocation: Allocated, destroy_type_id: u32) anyerror {
-        try ctx.meta.print(ctx.writer, "allocator mismatch in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "allocator mismatch in ", .{});
         const alloc_type_name = ctx.getName(allocation.type_id);
-        try allocation.meta.print(ctx.writer, "allocated with {s} in ", .{alloc_type_name});
+        try Context.printTrace(allocation.trace, ctx.writer, "allocated with {s} in ", .{alloc_type_name});
         var buf: [256]u8 = undefined;
         const destroy_type_name = ctx.getName(destroy_type_id);
         const msg = std.fmt.bufPrint(&buf, "freed with {s}\n", .{destroy_type_name}) catch return error.FormatError;
@@ -2125,10 +2140,10 @@ pub const MemorySafety = union(enum) {
     /// alloc_is_slice: true if allocation was made with alloc (slice)
     /// free_is_slice: true if free was attempted with free (expects slice)
     fn reportMethodMismatch(ctx: *Context, allocation: Allocated, alloc_is_slice: bool, free_is_slice: bool) anyerror {
-        try ctx.meta.print(ctx.writer, "allocation method mismatch in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "allocation method mismatch in ", .{});
         const alloc_method = if (alloc_is_slice) "alloc" else "create";
         const free_method = if (free_is_slice) "free" else "destroy";
-        try allocation.meta.print(ctx.writer, "allocated with ", .{});
+        try Context.printTrace(allocation.trace, ctx.writer, "allocated with ", .{});
         try ctx.writer.writeAll(alloc_method);
         try ctx.writer.writeAll(", freed with ");
         try ctx.writer.writeAll(free_method);
@@ -2137,37 +2152,37 @@ pub const MemorySafety = union(enum) {
     }
 
     fn reportFreeStackMemory(ctx: *Context, sp: Stack) anyerror {
-        try ctx.meta.print(ctx.writer, "free of stack memory in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "free of stack memory in ", .{});
         switch (sp.name) {
             .variable => |name_id| {
                 const name = ctx.getName(name_id);
-                try sp.meta.print(ctx.writer, "pointer is to local variable '{s}' in ", .{name});
+                try Context.printTrace(sp.trace, ctx.writer, "pointer is to local variable '{s}' in ", .{name});
             },
             .parameter => |name_id| {
                 const name = ctx.getName(name_id);
-                try sp.meta.print(ctx.writer, "pointer is to parameter '{s}' in ", .{name});
+                try Context.printTrace(sp.trace, ctx.writer, "pointer is to parameter '{s}' in ", .{name});
             },
             .other => {
-                try sp.meta.print(ctx.writer, "pointer is to stack memory in ", .{});
+                try Context.printTrace(sp.trace, ctx.writer, "pointer is to stack memory in ", .{});
             },
         }
         return error.FreeStackMemory;
     }
 
     fn reportFreeFieldPointer(ctx: *Context, allocation: Allocated) anyerror {
-        try ctx.meta.print(ctx.writer, "free of field pointer in ", .{});
-        try allocation.meta.print(ctx.writer, "pointer is to field of allocation from ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "free of field pointer in ", .{});
+        try Context.printTrace(allocation.trace, ctx.writer, "pointer is to field of allocation from ", .{});
         return error.FreeFieldPointer;
     }
 
     fn reportFreeFieldPointerStack(ctx: *Context, sp: Stack) anyerror {
-        try ctx.meta.print(ctx.writer, "free of field pointer in ", .{});
-        try sp.meta.print(ctx.writer, "pointer is to field of stack allocation from ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "free of field pointer in ", .{});
+        try Context.printTrace(sp.trace, ctx.writer, "pointer is to field of stack allocation from ", .{});
         return error.FreeFieldPointer;
     }
 
     fn reportFreeGlobalMemory(ctx: *Context) anyerror {
-        try ctx.meta.print(ctx.writer, "free of global/comptime memory in ", .{});
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "free of global/comptime memory in ", .{});
         return error.FreeGlobalMemory;
     }
 
@@ -2411,16 +2426,16 @@ pub const MemorySafety = union(enum) {
             },
             .function_end => {
                 // Use same format as old reportMemoryLeak for compatibility
-                try ctx.meta.print(ctx.writer, "{s} in ", .{leak_type});
+                try Context.printTrace(ctx.captureTrace(), ctx.writer, "{s} in ", .{leak_type});
             },
         }
 
         var buf: [256]u8 = undefined;
         const name_prefix = formatNamePrefix(allocation.name_at_alloc, &buf);
         if (name_prefix.len > 0) {
-            try allocation.meta.print(ctx.writer, "{s}allocated in ", .{name_prefix});
+            try Context.printTrace(allocation.trace, ctx.writer, "{s}allocated in ", .{name_prefix});
         } else {
-            try allocation.meta.print(ctx.writer, "allocated in ", .{});
+            try Context.printTrace(allocation.trace, ctx.writer, "allocated in ", .{});
         }
 
         return if (is_arena) error.ArenaLeak else error.MemoryLeak;
@@ -2457,14 +2472,14 @@ pub const MemorySafety = union(enum) {
     /// Initialize memory_safety for the entrypoint's return slot.
     /// The entrypoint (main function) has no tag handler, so we need to explicitly
     /// set stack memory_safety on the return slot created by the generated code.
-    pub fn initReturnSlotStack(refinements: *Refinements, gid: Gid) void {
+    pub fn initReturnSlotStack(refinements: *Refinements, gid: Gid, ctx: *Context) void {
         const stack_ms: MemorySafety = .{ .stack = .{
-            .meta = .{
+            .trace = ctx.traceFromMeta(.{
                 .function = "",
                 .file = "<entrypoint>",
                 .line = 0,
                 .column = 0,
-            },
+            }) catch @panic("out of memory creating return-slot trace"),
             .root_gid = null,
         } };
         paintSpatialMemory(refinements, gid, stack_ms);
@@ -2474,16 +2489,16 @@ pub const MemorySafety = union(enum) {
 
     /// Handler for splatInitEntrypointReturnSlot dispatch.
     /// Called by tag.splatInitEntrypointReturnSlot to initialize the entrypoint's return slot.
-    pub fn init_entrypoint_return_slot(refinements: *Refinements, gid: Gid) void {
-        initReturnSlotStack(refinements, gid);
+    pub fn init_entrypoint_return_slot(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+        initReturnSlotStack(refinements, gid, ctx);
     }
 
     /// Handler for splatInitCallReturnSlot dispatch.
     /// Called by tag.splatInitCallReturnSlot to initialize a call's return slot.
     /// The return slot may become orphaned if the callee returns a different GID,
     /// but it still needs valid memory_safety for testValid.
-    pub fn init_call_return_slot(refinements: *Refinements, gid: Gid) void {
-        initReturnSlotStack(refinements, gid);
+    pub fn init_call_return_slot(refinements: *Refinements, gid: Gid, ctx: *Context) void {
+        initReturnSlotStack(refinements, gid, ctx);
     }
 
     /// Initialize memory_safety on a refinement created from a `.undefined` type wrapper.
@@ -2552,7 +2567,7 @@ pub const MemorySafety = union(enum) {
     fn setResultStack(state: State, index: usize) void {
         const ref_idx = state.results[index].refinement orelse return;
         state.refinements.at(ref_idx).scalar.analyte.memory_safety = .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } };
     }
@@ -2561,7 +2576,7 @@ pub const MemorySafety = union(enum) {
     fn setStructStack(state: State, index: usize) void {
         const ref_idx = state.results[index].refinement orelse return;
         const stack_ms: MemorySafety = .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } };
         paintSpatialMemory(state.refinements, ref_idx, stack_ms);
@@ -2880,9 +2895,9 @@ pub const MemorySafety = union(enum) {
             if (src_ref.* == .pointer) {
                 if (src_ref.pointer.analyte.memory_safety) |src_ms| {
                     ptr.analyte.memory_safety = switch (src_ms) {
-                        .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src } },
+                        .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = src } },
                         .allocated => |a| .{ .allocated = .{
-                            .meta = a.meta,
+                            .trace = a.trace,
                             .allocator_gid = a.allocator_gid,
                             .type_id = a.type_id,
                             .freed = a.freed,
@@ -2914,9 +2929,9 @@ pub const MemorySafety = union(enum) {
             if (src_ref.* == .pointer) {
                 if (src_ref.pointer.analyte.memory_safety) |src_ms| {
                     ptr.analyte.memory_safety = switch (src_ms) {
-                        .stack => |s| .{ .stack = .{ .meta = s.meta, .root_gid = src } },
+                        .stack => |s| .{ .stack = .{ .trace = s.trace, .root_gid = src } },
                         .allocated => |a| .{ .allocated = .{
-                            .meta = a.meta,
+                            .trace = a.trace,
                             .allocator_gid = a.allocator_gid,
                             .type_id = a.type_id,
                             .freed = a.freed,
@@ -2953,7 +2968,7 @@ pub const MemorySafety = union(enum) {
 
         // Initialize memory_safety on the result (ArenaAllocator struct)
         if (state.results[index].refinement) |gid| {
-            paintSpatialMemory(refinements, gid, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, gid, .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } });
         }
     }
 
@@ -3019,7 +3034,7 @@ pub const MemorySafety = union(enum) {
             if (ref.* == .allocator) {
                 if (ref.allocator.arena_gid) |arena_struct_gid| {
                     if (arena_struct_gid == target_arena_gid) {
-                        ref.allocator.deinit = ctx.meta;
+                        ref.allocator.deinit = ctx.captureTrace();
                     }
                 }
             }
@@ -3040,15 +3055,15 @@ pub const MemorySafety = union(enum) {
         return null;
     }
 
-    fn reportDoubleDeinit(ctx: *Context, first_deinit: Meta) anyerror {
-        try ctx.meta.print(ctx.writer, "double arena deinit in ", .{});
-        try first_deinit.print(ctx.writer, "previously deinited in ", .{});
+    fn reportDoubleDeinit(ctx: *Context, first_deinit: Context.Trace) anyerror {
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "double arena deinit in ", .{});
+        try Context.printTrace(first_deinit, ctx.writer, "previously deinited in ", .{});
         return error.DoubleDeinit;
     }
 
-    fn reportAllocAfterDeinit(ctx: *Context, deinit_meta: Meta) anyerror {
-        try ctx.meta.print(ctx.writer, "allocation from deinited allocator in ", .{});
-        try deinit_meta.print(ctx.writer, "allocator deinited in ", .{});
+    fn reportAllocAfterDeinit(ctx: *Context, deinit_trace: Context.Trace) anyerror {
+        try Context.printTrace(ctx.captureTrace(), ctx.writer, "allocation from deinited allocator in ", .{});
+        try Context.printTrace(deinit_trace, ctx.writer, "allocator deinited in ", .{});
         return error.AllocAfterDeinit;
     }
 
@@ -3090,7 +3105,7 @@ pub const MemorySafety = union(enum) {
         // paintSpatialMemory stops at pointer indirection, so the region keeps
         // whatever spatial memory it already has.
         paintSpatialMemory(refinements, ptr_idx, .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } });
     }
@@ -3114,7 +3129,7 @@ pub const MemorySafety = union(enum) {
 
         switch (result_ref.*) {
             .@"struct" => |s| {
-                result_ref.@"struct".analyte.memory_safety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+                result_ref.@"struct".analyte.memory_safety = .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } };
                 // For structs: copy memory_safety from each source element to corresponding field
                 for (s.fields, 0..) |field_gid, i| {
                     if (i >= params.elements.len) {
@@ -3125,7 +3140,7 @@ pub const MemorySafety = union(enum) {
                         if (field_ref.* == .pointer) {
                             paintSpatialMemory(state.refinements, field_gid, .{ .interned = state.ctx.meta });
                         } else {
-                            paintSpatialMemory(state.refinements, field_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                            paintSpatialMemory(state.refinements, field_gid, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
                         }
                     } else {
                         const src = params.elements[i];
@@ -3135,7 +3150,7 @@ pub const MemorySafety = union(enum) {
             },
             else => {
                 // Fallback: initialize to stack (computed value)
-                paintSpatialMemory(state.refinements, result_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+                paintSpatialMemory(state.refinements, result_gid, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
             },
         }
     }
@@ -3265,7 +3280,7 @@ pub const MemorySafety = union(enum) {
         const ref_idx = state.results[index].refinement orelse return;
         const ref = state.refinements.at(ref_idx);
         if (ref.* != .errorunion) return;
-        ref.errorunion.analyte.memory_safety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+        ref.errorunion.analyte.memory_safety = .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } };
         markPayloadErrorStub(state.refinements, ref.errorunion.to);
     }
 
@@ -3295,7 +3310,7 @@ pub const MemorySafety = union(enum) {
             else => getAnalytePtrConst(payload_ref).memory_safety,
         } orelse return;
         if (payload_ms == .error_stub) {
-            try state.ctx.meta.print(state.ctx.writer, "error union unwrap of error path in ", .{});
+            try Context.printTrace(state.ctx.captureTrace(), state.ctx.writer, "error union unwrap of error path in ", .{});
             return error.ErrorUnionUnwrap;
         }
     }
@@ -3349,7 +3364,7 @@ pub const MemorySafety = union(enum) {
                 const src_ref = state.refinements.at(src_gid);
                 if (src_ref.* == .pointer) {
                     result_ref.pointer.analyte.memory_safety = src_ref.pointer.analyte.memory_safety orelse .{ .stack = .{
-                        .meta = state.ctx.meta,
+                        .trace = state.ctx.captureTrace(),
                         .root_gid = null,
                     } };
                     initPointerTargetsPlaceholder(state.refinements, ref_idx);
@@ -3357,7 +3372,7 @@ pub const MemorySafety = union(enum) {
                 }
             }
         }
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
         // Initialize pointer targets to placeholder if not already set
         // (handles fallback case where typeToRefinement created fresh structure)
         initPointerTargetsPlaceholder(state.refinements, ref_idx);
@@ -3611,7 +3626,7 @@ pub const MemorySafety = union(enum) {
     pub fn block(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
         initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
@@ -3621,7 +3636,7 @@ pub const MemorySafety = union(enum) {
         const ref_idx = state.results[index].refinement orelse return;
         const ref = state.refinements.at(ref_idx);
         ref.allocator.analyte.memory_safety = .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } };
     }
@@ -3632,7 +3647,7 @@ pub const MemorySafety = union(enum) {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
         // Only init if memory_safety is null (not already set by container)
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
         initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
@@ -3640,7 +3655,7 @@ pub const MemorySafety = union(enum) {
     pub fn union_init(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
         initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
@@ -3657,7 +3672,7 @@ pub const MemorySafety = union(enum) {
             const src_ref = state.refinements.at(source_gid);
             if (src_ref.* == .pointer) {
                 const pointer_ms: MemorySafety = src_ref.pointer.analyte.memory_safety orelse .{ .stack = .{
-                    .meta = state.ctx.meta,
+                    .trace = state.ctx.captureTrace(),
                     .root_gid = null,
                 } };
                 switch (result_ref.*) {
@@ -3668,7 +3683,7 @@ pub const MemorySafety = union(enum) {
                     },
                     .optional => |opt| {
                         result_ref.optional.analyte.memory_safety = .{ .stack = .{
-                            .meta = state.ctx.meta,
+                            .trace = state.ctx.captureTrace(),
                             .root_gid = null,
                         } };
                         const payload_ref = state.refinements.at(opt.to);
@@ -3682,7 +3697,7 @@ pub const MemorySafety = union(enum) {
                 }
             }
         }
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
         initPointerTargetsPlaceholder(state.refinements, ref_idx);
     }
 
@@ -3697,7 +3712,7 @@ pub const MemorySafety = union(enum) {
         };
         const union_gid = state.refinements.at(ptr_gid).pointer.to;
         const field_gid = state.refinements.at(union_gid).@"union".fields[field_index] orelse return;
-        paintSpatialMemory(state.refinements, field_gid, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, field_gid, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
         initPointerTargetsPlaceholder(state.refinements, field_gid);
     }
 
@@ -3728,7 +3743,7 @@ pub const MemorySafety = union(enum) {
         _ = payload_ms; // Payload's memory_safety is preserved, not overwritten
         const paint: MemorySafety = switch (params.src) {
             .interned, .fnptr => .{ .interned = comptime_interned_meta },
-            .inst => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } },
+            .inst => .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } },
         };
 
         result_ref.errorunion.analyte.memory_safety = paint;
@@ -3761,7 +3776,7 @@ pub const MemorySafety = union(enum) {
         _ = payload_ms; // Payload's memory_safety is preserved, not overwritten
         const paint: MemorySafety = switch (params.src) {
             .interned, .fnptr => .{ .interned = comptime_interned_meta },
-            .inst => .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } },
+            .inst => .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } },
         };
 
         result_ref.optional.analyte.memory_safety = paint;
@@ -3794,7 +3809,7 @@ pub const MemorySafety = union(enum) {
         if (ms != .allocated) return;
         var allocation = ms.allocated;
         if (allocation.freed == null) {
-            allocation.freed = .{ .meta = state.ctx.meta };
+            allocation.freed = .{ .trace = state.ctx.captureTrace() };
         }
         analyte.memory_safety = .{ .allocated = allocation };
     }
@@ -3813,7 +3828,7 @@ pub const MemorySafety = union(enum) {
 
         const raw_pointer_ms = metadata_ptr_ref.pointer.analyte.memory_safety orelse
             std.debug.panic("hashmap_header: metadata pointer has no memory_safety", .{});
-        const fallback_ms: MemorySafety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+        const fallback_ms: MemorySafety = .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } };
         const pointer_ms = switch (raw_pointer_ms) {
             .placeholder, .error_stub => fallback_ms,
             else => raw_pointer_ms,
@@ -3868,7 +3883,7 @@ pub const MemorySafety = union(enum) {
         const ptr_ref_idx = state.results[index].refinement orelse return;
         const ptr_ref = state.refinements.at(ptr_ref_idx);
         if (ptr_ref.* != .pointer) return;
-        const stack_ms: MemorySafety = .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } };
+        const stack_ms: MemorySafety = .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } };
         // Set stack memory_safety on the pointer itself
         ptr_ref.pointer.analyte.memory_safety = stack_ms;
         // Set stack memory_safety on the pointee (the return value entity)
@@ -3880,7 +3895,7 @@ pub const MemorySafety = union(enum) {
     pub fn errunion_payload_ptr_set(state: State, index: usize, params: anytype) !void {
         _ = params;
         const ref_idx = state.results[index].refinement orelse return;
-        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .meta = state.ctx.meta, .root_gid = null } });
+        paintSpatialMemory(state.refinements, ref_idx, .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } });
     }
 
     /// Initialize memory_safety on global variables.
@@ -4181,7 +4196,7 @@ pub const MemorySafety = union(enum) {
             .stack => |stack| {
                 refinements.at(payload_gid).pointer.analyte.memory_safety = .{
                     .stack = .{
-                        .meta = stack.meta,
+                        .trace = stack.trace,
                         .name = stack.name,
                         .root_gid = stack.root_gid,
                     },
@@ -4190,7 +4205,7 @@ pub const MemorySafety = union(enum) {
             .allocated => |alloc_ms| {
                 refinements.at(payload_gid).pointer.analyte.memory_safety = .{
                     .allocated = .{
-                        .meta = alloc_ms.meta,
+                        .trace = alloc_ms.trace,
                         .allocator_gid = alloc_ms.allocator_gid,
                         .type_id = alloc_ms.type_id,
                         .root_gid = buf_gid, // Derived from buffer
@@ -4299,13 +4314,13 @@ pub const MemorySafety = union(enum) {
         // The errorunion and pointer are fresh computed values on the stack.
         // paintSpatialMemory traverses errorunion.to (the pointer) but stops at pointer.to.
         paintSpatialMemory(state.refinements, eu_idx, .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } });
 
         // Set allocation state recursively on the pointee (the actual heap data)
         paintSpatialMemory(state.refinements, pointee_ref, .{ .allocated = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .allocator_gid = alloc_id.gid,
             .type_id = alloc_id.type_id,
             .root_gid = null,
@@ -4366,7 +4381,7 @@ pub const MemorySafety = union(enum) {
                     .placeholder => return error.InvalidReallocInput,
                 }
             }
-            return reportFreeFieldPointerStack(ctx, .{ .meta = ctx.meta, .root_gid = null });
+            return reportFreeFieldPointerStack(ctx, .{ .trace = ctx.captureTrace(), .root_gid = null });
         }
 
         // Get the pointee entity via ptr.to
@@ -4462,7 +4477,7 @@ pub const MemorySafety = union(enum) {
             else => null,
         };
         const free_meta: Free = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .name_at_free = if (ptr_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
         };
         setFreedRecursive(refinements, pointee_idx, free_meta);
@@ -4539,7 +4554,7 @@ pub const MemorySafety = union(enum) {
         const agid = allocator_gid orelse return;
 
         const alloc_base: AllocatedBase = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .allocator_gid = agid,
             .type_id = type_id,
             .root_gid = null,
@@ -4548,14 +4563,14 @@ pub const MemorySafety = union(enum) {
         // The errorunion and pointer (inside errorunion) are fresh computed values on the stack.
         // paintSpatialMemory traverses errorunion.to but not pointer.to, so region stays unaffected.
         paintSpatialMemory(state.refinements, eu_idx, .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } });
 
         // Set memory_safety on the region-multiplicity pointee.
         getAnalytePtr(region_refinement).memory_safety = .{
             .allocated = .{
-                .meta = alloc_base.meta,
+                .trace = alloc_base.trace,
                 .allocator_gid = alloc_base.allocator_gid,
                 .type_id = type_id,
                 .root_gid = null,
@@ -4564,7 +4579,7 @@ pub const MemorySafety = union(enum) {
 
         // Set allocation state recursively on the element
         paintSpatialMemory(state.refinements, element_ref, .{ .allocated = .{
-            .meta = alloc_base.meta,
+            .trace = alloc_base.trace,
             .allocator_gid = alloc_base.allocator_gid,
             .type_id = alloc_base.type_id,
             .root_gid = null,
@@ -4707,7 +4722,7 @@ pub const MemorySafety = union(enum) {
             else => null,
         };
         const free_meta: Free = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .name_at_free = if (slice_inst) |inst| ctx.buildPathName(results, refinements, inst) else null,
         };
         setFreedRecursive(refinements, pointee_idx, free_meta);
@@ -4722,14 +4737,14 @@ pub const MemorySafety = union(enum) {
         const new_ptr_idx: Gid = switch (result_ref.*) {
             .errorunion => |eu| blk: {
                 refinements.at(result_idx).errorunion.analyte.memory_safety = .{ .stack = .{
-                    .meta = state.ctx.meta,
+                    .trace = state.ctx.captureTrace(),
                     .root_gid = null,
                 } };
                 break :blk eu.to;
             },
             .optional => |opt| blk: {
                 refinements.at(result_idx).optional.analyte.memory_safety = .{ .stack = .{
-                    .meta = state.ctx.meta,
+                    .trace = state.ctx.captureTrace(),
                     .root_gid = null,
                 } };
                 break :blk opt.to;
@@ -4745,14 +4760,14 @@ pub const MemorySafety = union(enum) {
         const new_element_ref = new_region_idx;
 
         getAnalytePtr(new_region_ref).memory_safety = .{ .allocated = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .allocator_gid = allocator_gid,
             .type_id = type_id,
             .root_gid = null,
         } };
 
         paintSpatialMemory(refinements, new_element_ref, .{ .allocated = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .allocator_gid = allocator_gid,
             .type_id = type_id,
             .root_gid = null,
@@ -4791,7 +4806,7 @@ pub const MemorySafety = union(enum) {
 
         // The return value (optional + payload) lives on the stack
         const stack_ms: MemorySafety = .{ .stack = .{
-            .meta = state.ctx.meta,
+            .trace = state.ctx.captureTrace(),
             .root_gid = null,
         } };
 
@@ -4831,7 +4846,7 @@ pub const MemorySafety = union(enum) {
         // Initialize memory_safety on the result (ArenaAllocator struct)
         // Inst.call already created the refinement, we just re-initialize it
         if (state.results[index].refinement) |gid| {
-            paintSpatialMemory(refinements, gid, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+            paintSpatialMemory(refinements, gid, .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } });
             // Initialize nested pointer targets to .placeholder
             initPointerTargetsPlaceholder(refinements, gid);
         }
@@ -4904,7 +4919,7 @@ pub const MemorySafety = union(enum) {
             if (ref.* == .allocator) {
                 if (ref.allocator.arena_gid) |arena_struct_gid| {
                     if (arena_struct_gid == target_arena_gid) {
-                        ref.allocator.deinit = ctx.meta;
+                        ref.allocator.deinit = ctx.captureTrace();
                     }
                 }
             }
@@ -4925,7 +4940,7 @@ pub const MemorySafety = union(enum) {
         if (alloc_ref.* != .allocator) return;
 
         // Initialize memory_safety on the allocator (return value lives on stack)
-        paintSpatialMemory(refinements, alloc_idx, .{ .stack = .{ .meta = ctx.meta, .root_gid = null } });
+        paintSpatialMemory(refinements, alloc_idx, .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } });
 
         // Check if this is ArenaAllocator.allocator() - need to link to arena
         if (!gates.isArenaAllocator(fqn)) return;

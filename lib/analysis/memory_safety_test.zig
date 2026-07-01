@@ -14,7 +14,7 @@ var test_discarding = std.Io.Writer.Discarding.init(&test_buf);
 fn initTest() struct { Context, Refinements } {
     const allocator = std.testing.allocator;
     var ctx = Context.init(allocator, &test_discarding.writer);
-    ctx.meta.function = "test_func";
+    ctx.push_fn("test_func") catch @panic("out of memory initializing test trace");
     return .{ ctx, Refinements.init(allocator) };
 }
 
@@ -52,6 +52,8 @@ test "alloc sets stack metadata on pointee" {
     const ptr_gid = results[0].refinement.?;
     const ms = refinements.at(ptr_gid).pointer.analyte.memory_safety.?;
     try std.testing.expect(ms == .stack);
+    try std.testing.expectEqual(@as(usize, 1), ms.stack.trace.len());
+    try std.testing.expectEqualStrings("test_func", Context.traceLeaf(ms.stack.trace).?.function);
 }
 
 test "undefined region type initializes placeholder memory_safety recursively" {
@@ -133,7 +135,7 @@ test "hashmap_header inherits memory safety from metadata pointer" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    const allocation: MemorySafety = .{ .allocated = .{ .meta = ctx.meta, .root_gid = null, .allocator_gid = 1, .type_id = 0 } };
+    const allocation: MemorySafety = .{ .allocated = .{ .trace = ctx.captureTrace(), .root_gid = null, .allocator_gid = 1, .type_id = 0 } };
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = allocation },
     } });
@@ -144,10 +146,10 @@ test "hashmap_header inherits memory safety from metadata pointer" {
     } });
     const metadata_gid = try refinements.appendEntity(.{ .optional = .{
         .to = metadata_payload_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const size_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const fields = try std.testing.allocator.alloc(Gid, 2);
     fields[0] = metadata_gid;
@@ -155,7 +157,7 @@ test "hashmap_header inherits memory safety from metadata pointer" {
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
         .type_id = 100,
         .fields = fields,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -220,7 +222,7 @@ test "array_elem_val from region value copies element memory safety" {
     const state = testState(&ctx, &results, &refinements);
 
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const region_gid = makeRegion(&refinements, elem_gid);
     results[0].refinement = region_gid;
@@ -245,7 +247,7 @@ test "struct_field_ptr through reinterpreted region inherits base pointer memory
     const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = region_gid } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = region_gid } } },
     } });
     results[0].refinement = ptr_gid;
 
@@ -279,7 +281,7 @@ test "struct_field_ptr through reinterpreted region initializes pointer field ta
     const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = region_gid } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = region_gid } } },
     } });
     results[0].refinement = ptr_gid;
 
@@ -312,11 +314,11 @@ test "bitcast initializes missing children under initialized pointer target" {
     const target_gid = try refinements.appendEntity(.{ .@"struct" = .{
         .fields = try refinements.list.allocator.dupe(Gid, &.{field_gid}),
         .type_id = 123,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = target_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     results[0].refinement = ptr_gid;
 
@@ -369,7 +371,7 @@ test "call intercepts mem.Allocator.destroy and marks allocation freed" {
     // Create pointee (scalar) with allocation metadata - destroy checks pointee's memory_safety
     const scalar_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -422,12 +424,12 @@ test "call intercepts HashMap keys accessor with metadata-backed pointer view" {
 
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const metadata_region_gid = try refinements.appendEntity(.{ .scalar = .{
         .multiplicity = .region,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -436,7 +438,7 @@ test "call intercepts HashMap keys accessor with metadata-backed pointer view" {
     const metadata_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = metadata_region_gid,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = metadata_region_gid,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -557,7 +559,7 @@ test "call intercepts process args iterator next" {
     } });
     const iterator_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = iterator_slot_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -597,12 +599,12 @@ test "call intercepts HashMap deallocate and frees metadata allocation" {
 
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const metadata_region_gid = try refinements.appendEntity(.{ .scalar = .{
         .multiplicity = .region,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -611,7 +613,7 @@ test "call intercepts HashMap deallocate and frees metadata allocation" {
     const metadata_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = metadata_region_gid,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = metadata_region_gid,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -682,7 +684,7 @@ test "destroy of interned pointer value to allocated pointee frees allocation" {
     } });
     const scalar_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -721,12 +723,12 @@ test "ret_load of struct with slice pointer field leaves no invalid orphaned mem
     const caller_meta = core.Meta{ .function = "caller", .file = "caller.zig", .line = 1, .column = 1 };
 
     const arg_elem_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = caller_meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = try ctx.traceFromMeta(caller_meta), .root_gid = null } } },
     } });
     const arg_region_gid = makeRegion(&refinements, arg_elem_gid);
     const arg_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = arg_region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = caller_meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = try ctx.traceFromMeta(caller_meta), .root_gid = null } } },
     } });
 
     const struct_ty: tag.Type = .{ .@"struct" = &.{
@@ -783,7 +785,7 @@ test "allocation returned through block break is not reported as callee leak" {
 
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const return_ref = try tag.typeToRefinement(.{ .pointer = .{ .to = &.{ .scalar = .{} } } }, &refinements);
     const return_gid = try refinements.appendEntity(return_ref);
@@ -821,11 +823,11 @@ test "local pointer slot containing argument allocation is not reported as calle
 
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const allocated_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -833,7 +835,7 @@ test "local pointer slot containing argument allocation is not reported as calle
     } });
     const arg_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = allocated_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const return_gid = try refinements.appendEntity(.{ .void = {} });
 
@@ -865,11 +867,11 @@ test "ret_safe ignores invalid root gid while collecting argument reachability" 
     defer refinements.deinit();
 
     const pointee_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = pointee_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = core.INVALID_GID } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = core.INVALID_GID } } },
     } });
     const return_gid = try refinements.appendEntity(.{ .void = {} });
 
@@ -894,11 +896,11 @@ test "reachable allocations are tracked by allocation root gid, not allocator gi
 
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const scalar_a = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -906,7 +908,7 @@ test "reachable allocations are tracked by allocation root gid, not allocator gi
     } });
     const scalar_b = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -954,7 +956,7 @@ test "slice from ptr_add is treated as derived pointer on free" {
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -963,7 +965,7 @@ test "slice from ptr_add is treated as derived pointer on free" {
     const region_gid = makeRegion(&refinements, elem_gid);
     const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 5;
@@ -991,7 +993,7 @@ test "slice from zero ptr_add preserves base pointer provenance on free" {
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1000,7 +1002,7 @@ test "slice from zero ptr_add preserves base pointer provenance on free" {
     const region_gid = makeRegion(&refinements, elem_gid);
     const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 5;
@@ -1028,7 +1030,7 @@ test "ptr_sub from derived pointer remains derived on free" {
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1037,7 +1039,7 @@ test "ptr_sub from derived pointer remains derived on free" {
     const region_gid = makeRegion(&refinements, elem_gid);
     const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 6;
@@ -1066,7 +1068,7 @@ test "ptr_sub derived provenance survives pointer slot store load before free" {
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1075,7 +1077,7 @@ test "ptr_sub derived provenance survives pointer slot store load before free" {
     const region_gid = makeRegion(&refinements, elem_gid);
     const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 12;
@@ -1116,7 +1118,7 @@ test "bitcast preserves derived pointer provenance on free" {
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1125,7 +1127,7 @@ test "bitcast preserves derived pointer provenance on free" {
     const region_gid = makeRegion(&refinements, elem_gid);
     const base_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 6;
@@ -1152,7 +1154,7 @@ test "bitcast to optional pointer initializes copied pointer target memory safet
 
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = 0,
             .type_id = 100,
@@ -1161,7 +1163,7 @@ test "bitcast to optional pointer initializes copied pointer target memory safet
     const region_gid = makeRegion(&refinements, elem_gid);
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -1197,7 +1199,7 @@ test "branch orphan ignores allocation reachable through merge-created parent va
     const base_len: Gid = @intCast(parent.list.items.len);
     const elem_gid = try parent.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1232,7 +1234,7 @@ test "branch orphan matches imported allocation with different parent gid" {
 
     const branch_elem_gid = try branch.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1245,7 +1247,7 @@ test "branch orphan matches imported allocation with different parent gid" {
     _ = try parent.appendEntity(.{ .void = {} });
     const parent_elem_gid = try parent.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1276,7 +1278,7 @@ test "branch orphan matches allocation reachable through copied argument" {
 
     const arg_elem_gid = try branch.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1284,19 +1286,19 @@ test "branch orphan matches allocation reachable through copied argument" {
     } });
     const arg_ptr_gid = try branch.appendEntity(.{ .pointer = .{
         .to = arg_elem_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const arg_struct_gid = try branch.appendEntity(.{ .@"struct" = .{
         .fields = try ctx.allocator.dupe(Gid, &.{arg_ptr_gid}),
         .type_id = 200,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     _ = arg_struct_gid;
     const base_len: Gid = @intCast(branch.list.items.len);
 
     const orphan_elem_gid = try branch.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1304,7 +1306,7 @@ test "branch orphan matches allocation reachable through copied argument" {
     } });
     const orphan_ptr_gid = try branch.appendEntity(.{ .pointer = .{
         .to = orphan_elem_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var copied = std.AutoHashMap(Gid, void).init(ctx.allocator);
@@ -1328,7 +1330,7 @@ test "early return ignores allocation reachable through copied argument" {
     const alloc_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 100 } });
     const arg_elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1336,18 +1338,18 @@ test "early return ignores allocation reachable through copied argument" {
     } });
     const arg_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = arg_elem_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const arg_struct_gid = try refinements.appendEntity(.{ .@"struct" = .{
         .fields = try ctx.allocator.dupe(Gid, &.{arg_ptr_gid}),
         .type_id = 200,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const base_gid: Gid = @intCast(refinements.list.items.len);
 
     const local_elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1355,7 +1357,7 @@ test "early return ignores allocation reachable through copied argument" {
     } });
     const local_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = local_elem_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 3;
@@ -1387,7 +1389,7 @@ test "divergent allocated pointer branch result does not orphan alternate alloca
     const placeholder_region = makeRegion(&parent, placeholder_elem);
     const parent_ptr = try parent.appendEntity(.{ .pointer = .{
         .to = placeholder_region,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const base_len: Gid = @intCast(parent.list.items.len);
 
@@ -1418,7 +1420,7 @@ test "divergent allocated pointer branch result does not orphan alternate alloca
 fn appendAllocatedSlice(ctx: *Context, refinements: *Refinements, alloc_gid: Gid, type_id: u32) !Gid {
     const elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = type_id,
@@ -1455,7 +1457,7 @@ test "load detects use after free" {
     // Create pointee with allocation metadata (simulates created allocation)
     const scalar_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
@@ -1492,11 +1494,11 @@ test "memcpy detects use after free on dest" {
             .analyte = .{
                 .memory_safety = .{
                     .allocated = .{
-                        .meta = ctx.meta,
+                        .trace = ctx.captureTrace(),
                         .root_gid = null,
                         .allocator_gid = alloc_gid,
                         .type_id = 100,
-                        .freed = .{ .meta = ctx.meta }, // Already freed
+                        .freed = .{ .trace = ctx.captureTrace() }, // Already freed
                     },
                 },
             },
@@ -1539,11 +1541,11 @@ test "memcpy detects use after free on src" {
             .analyte = .{
                 .memory_safety = .{
                     .allocated = .{
-                        .meta = ctx.meta,
+                        .trace = ctx.captureTrace(),
                         .root_gid = null,
                         .allocator_gid = alloc_gid,
                         .type_id = 100,
-                        .freed = .{ .meta = ctx.meta }, // Already freed
+                        .freed = .{ .trace = ctx.captureTrace() }, // Already freed
                     },
                 },
             },
@@ -1573,11 +1575,11 @@ test "memmove detects use after free on dest" {
     const region_gid = try refinements.appendEntity(.{ .scalar = .{
         .multiplicity = .region,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
-            .freed = .{ .meta = ctx.meta },
+            .freed = .{ .trace = ctx.captureTrace() },
         } } },
     } });
     const dest_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
@@ -1608,11 +1610,11 @@ test "memset detects use after free on dest" {
     const region_gid = try refinements.appendEntity(.{ .scalar = .{
         .multiplicity = .region,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
-            .freed = .{ .meta = ctx.meta },
+            .freed = .{ .trace = ctx.captureTrace() },
         } } },
     } });
     const dest_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
@@ -1641,11 +1643,11 @@ test "memset_safe detects use after free on dest" {
     const region_gid = try refinements.appendEntity(.{ .scalar = .{
         .multiplicity = .region,
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = alloc_gid,
             .type_id = 100,
-            .freed = .{ .meta = ctx.meta },
+            .freed = .{ .trace = ctx.captureTrace() },
         } } },
     } });
     const dest_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = region_gid } });
@@ -1759,7 +1761,7 @@ test "ret_safe does not report stack escape when pointer points to allocated mem
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
         .analyte = .{ .memory_safety = .{ .stack = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
         } } },
     } });
@@ -1774,7 +1776,7 @@ test "ret_safe does not report stack escape when pointer points to allocated mem
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = struct_gid;
 
-    ctx.stacktrace.append(allocator, "test_func") catch unreachable;
+    ctx.push_fn("test_func") catch unreachable;
     const state = testState(&ctx, &results, &refinements);
 
     // ret_safe should NOT report a stack escape - the pointee is .allocated, not .stack
@@ -1884,11 +1886,11 @@ test "splatMerge propagates optional wrapper memory_safety from branches" {
     defer branch2_refinements.deinit();
 
     branch1_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
-        .meta = ctx.meta,
+        .trace = ctx.captureTrace(),
         .root_gid = null,
     } };
     branch2_refinements.at(opt_gid).optional.analyte.memory_safety = .{ .stack = .{
-        .meta = ctx.meta,
+        .trace = ctx.captureTrace(),
         .root_gid = null,
     } };
 
@@ -1950,7 +1952,7 @@ test "memcpy propagates region element memory_safety" {
     const dest_region_gid = makeRegion(&refinements, dest_elem_gid);
     const dest_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = dest_region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     const src_elem_gid = try refinements.appendEntity(.{ .scalar = .{
@@ -1959,7 +1961,7 @@ test "memcpy propagates region element memory_safety" {
     const src_region_gid = makeRegion(&refinements, src_elem_gid);
     const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = src_region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 3;
@@ -2082,11 +2084,11 @@ test "store interned pointer initializes destination pointer target memory_safet
     const region_gid = makeRegion(&refinements, elem_gid);
     const pointer_slot_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const slot_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = pointer_slot_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -2115,7 +2117,7 @@ test "store interned struct initializes destination fields memory_safety" {
     } });
     const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = struct_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -2138,24 +2140,24 @@ test "store pointer into pointer slot does not paint old target as allocated" {
 
     const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const old_elem_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const old_region_gid = makeRegion(&refinements, old_elem_gid);
     const slot_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = old_region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const slot_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = slot_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     const new_elem_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = allocator_gid,
             .type_id = 100,
@@ -2164,7 +2166,7 @@ test "store pointer into pointer slot does not paint old target as allocated" {
     const new_region_gid = makeRegion(&refinements, new_elem_gid);
     const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = new_region_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 3;
@@ -2186,11 +2188,11 @@ test "store pointer into pointer slot reports clobbered live allocation" {
 
     const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
         .type_id = 100,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const old_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = allocator_gid,
             .type_id = 100,
@@ -2198,15 +2200,15 @@ test "store pointer into pointer slot reports clobbered live allocation" {
     } });
     const slot_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = old_scalar_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const slot_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = slot_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
     const new_scalar_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .memory_safety = .{ .allocated = .{
-            .meta = ctx.meta,
+            .trace = ctx.captureTrace(),
             .root_gid = null,
             .allocator_gid = allocator_gid,
             .type_id = 100,
@@ -2214,7 +2216,7 @@ test "store pointer into pointer slot reports clobbered live allocation" {
     } });
     const src_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
         .to = new_scalar_gid,
-        .analyte = .{ .memory_safety = .{ .stack = .{ .meta = ctx.meta, .root_gid = null } } },
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
     } });
 
     var results = [_]Inst{.{}} ** 3;

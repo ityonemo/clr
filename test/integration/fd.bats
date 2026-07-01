@@ -9,10 +9,12 @@ load test_helper
 @test "detects double-close on file fd" {
     run compile_and_run "$TEST_CASES/fd_safety/double_close.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "double close" ]]
-    [[ "$output" =~ "double_close.main" ]]
-    [[ "$output" =~ "previously closed" ]]
-    [[ "$output" =~ "originally opened" ]]
+    [[ "$output" =~ "double close in double_close.main" ]]
+    [[ "$output" =~ "double_close.zig:6:19" ]]
+    [[ "$output" =~ "previously closed in double_close.main" ]]
+    [[ "$output" =~ "double_close.zig:5:19" ]]
+    [[ "$output" =~ "originally opened in double_close.main" ]]
+    [[ "$output" =~ "double_close.zig:4:33" ]]
 }
 
 @test "detects use-after-close with read" {
@@ -22,6 +24,9 @@ load test_helper
     [[ "$output" =~ "use_after_close.main" ]]
     [[ "$output" =~ "closed in" ]]
     [[ "$output" =~ "opened in" ]]
+    [[ "$output" =~ "use_after_close.zig:7:22" ]]
+    [[ "$output" =~ "use_after_close.zig:5:19" ]]
+    [[ "$output" =~ "use_after_close.zig:4:33" ]]
 }
 
 @test "detects use-after-close with write" {
@@ -29,6 +34,9 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use after close" ]]
     [[ "$output" =~ "write_after_close.main" ]]
+    [[ "$output" =~ "write_after_close.zig:7:23" ]]
+    [[ "$output" =~ "write_after_close.zig:5:19" ]]
+    [[ "$output" =~ "write_after_close.zig:4:33" ]]
 }
 
 @test "detects file fd leak" {
@@ -37,22 +45,26 @@ load test_helper
     [[ "$output" =~ "fd leak" ]]
     [[ "$output" =~ "fd_leak.main" ]]
     [[ "$output" =~ "opened in" ]]
+    [[ "$output" =~ "fd_leak.zig:5:4" ]]
+    [[ "$output" =~ "fd_leak.zig:4:33" ]]
 }
 
 @test "detects fd leak left live until module finalization" {
     run compile_and_run "$TEST_CASES/fd_safety/dup2_finalizer_leak.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "fd leak" ]]
-    [[ "$output" =~ "dup2_finalizer_leak.duplicateToTarget" ]]
-    [[ "$output" =~ "opened in" ]]
+    [[ "$output" =~ "opened in dup2_finalizer_leak.duplicateToTarget" ]]
+    [[ "$output" =~ "dup2_finalizer_leak.zig:4:22" ]]
+    [[ "$output" =~ "called from dup2_finalizer_leak.main" ]]
+    [[ "$output" =~ "dup2_finalizer_leak.zig:11:25" ]]
+    [[ "$output" =~ "error.FdLeak" ]]
 }
 
 @test "detects fd leak stored through interned global pointer" {
     run compile_and_run "$TEST_CASES/fd_safety/global_fd_store_leak.zig"
     [ "$status" -ne 0 ]
-    [[ "$output" =~ "fd leak" ]]
     [[ "$output" =~ "global_fd_store_leak.main" ]]
     [[ "$output" =~ "opened in" ]]
+    [[ "$output" =~ "global_fd_store_leak.zig:6:34" ]]
 }
 
 @test "no false positive for correct file fd usage" {
@@ -74,6 +86,9 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double close" ]]
     [[ "$output" =~ "socket_double_close.main" ]]
+    [[ "$output" =~ "socket_double_close.zig:6:19" ]]
+    [[ "$output" =~ "socket_double_close.zig:5:19" ]]
+    [[ "$output" =~ "socket_double_close.zig:4:35" ]]
 }
 
 @test "detects socket fd leak" {
@@ -81,6 +96,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fd leak" ]]
     [[ "$output" =~ "socket_leak.main" ]]
+    [[ "$output" =~ "socket_leak.zig:5:4" ]]
+    [[ "$output" =~ "socket_leak.zig:4:35" ]]
 }
 
 @test "no false positive for correct socket usage" {
@@ -97,6 +114,9 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double close" ]]
     [[ "$output" =~ "dup_double_close.main" ]]
+    [[ "$output" =~ "dup_double_close.zig:8:19" ]]
+    [[ "$output" =~ "dup_double_close.zig:7:19" ]]
+    [[ "$output" =~ "dup_double_close.zig:5:33" ]]
 }
 
 @test "detects dup'd fd leak" {
@@ -104,6 +124,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fd leak" ]]
     [[ "$output" =~ "dup_leak.main" ]]
+    [[ "$output" =~ "dup_leak.zig:7:4" ]]
+    [[ "$output" =~ "dup_leak.zig:5:33" ]]
 }
 
 @test "no false positive for correct dup usage (both fds closed)" {
@@ -120,6 +142,9 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double close" ]]
     [[ "$output" =~ "epoll_double_close.main" ]]
+    [[ "$output" =~ "epoll_double_close.zig:6:19" ]]
+    [[ "$output" =~ "epoll_double_close.zig:5:19" ]]
+    [[ "$output" =~ "epoll_double_close.zig:4:42" ]]
 }
 
 @test "detects epoll fd leak" {
@@ -127,6 +152,8 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fd leak" ]]
     [[ "$output" =~ "epoll_leak.main" ]]
+    [[ "$output" =~ "epoll_leak.zig:5:4" ]]
+    [[ "$output" =~ "epoll_leak.zig:4:42" ]]
 }
 
 @test "no false positive for correct epoll usage" {
@@ -148,6 +175,11 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "fd leak" ]]
     [[ "$output" =~ "return_leak.main" ]]
+    [[ "$output" =~ "return_leak.zig:9:4" ]]
+    [[ "$output" =~ "opened in return_leak.openFile" ]]
+    [[ "$output" =~ "return_leak.zig:4:29" ]]
+    [[ "$output" =~ "called from return_leak.main" ]]
+    [[ "$output" =~ "return_leak.zig:8:27" ]]
 }
 
 # =============================================================================
@@ -159,6 +191,9 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double close" ]]
     [[ "$output" =~ "openat_double_close.main" ]]
+    [[ "$output" =~ "openat_double_close.zig:7:19" ]]
+    [[ "$output" =~ "openat_double_close.zig:6:19" ]]
+    [[ "$output" =~ "openat_double_close.zig:5:35" ]]
 }
 
 @test "no false positive for correct openat usage" {
@@ -175,6 +210,9 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "double close" ]]
     [[ "$output" =~ "dup2_double_close.main" ]]
+    [[ "$output" =~ "dup2_double_close.zig:10:19" ]]
+    [[ "$output" =~ "dup2_double_close.zig:9:19" ]]
+    [[ "$output" =~ "dup2_double_close.zig:7:22" ]]
 }
 
 # =============================================================================
@@ -186,4 +224,7 @@ load test_helper
     [ "$status" -ne 0 ]
     [[ "$output" =~ "use after close" ]]
     [[ "$output" =~ "socket_use_after_close.main" ]]
+    [[ "$output" =~ "socket_use_after_close.zig:7:22" ]]
+    [[ "$output" =~ "socket_use_after_close.zig:5:19" ]]
+    [[ "$output" =~ "socket_use_after_close.zig:4:35" ]]
 }

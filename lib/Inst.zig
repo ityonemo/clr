@@ -363,13 +363,14 @@ pub fn cond_br(
     // Save ctx.meta before branches execute (they modify it via dbg_stmt)
     // The merge should use the meta at the cond_br, not inside a branch
     const saved_meta = ctx.meta;
+    const saved_trace = ctx.captureTrace();
 
     // Execute both branches (they modify their cloned state)
     try true_fn(true_state);
     try false_fn(false_state);
 
     // Restore ctx.meta for the merge - errors should point to the cond_br location
-    ctx.meta = saved_meta;
+    ctx.restoreExecutionPoint(saved_meta, saved_trace);
 
     // Record base_len BEFORE creating void - branches may have created entities at same indices
     const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
@@ -534,13 +535,14 @@ pub fn remap_br(
 
     // Save ctx.meta before branches execute
     const saved_meta = ctx.meta;
+    const saved_trace = ctx.captureTrace();
 
     // Execute both branches (no RemapBranch tag injection - setup is already done)
     try true_fn(true_state);
     try false_fn(false_state);
 
     // Restore ctx.meta for the merge
-    ctx.meta = saved_meta;
+    ctx.restoreExecutionPoint(saved_meta, saved_trace);
 
     // Create parent refinement for call_idx so merge has a target to merge into
     {
@@ -652,6 +654,7 @@ pub fn switch_br(
     // Save ctx.meta before branches execute (they modify it via dbg_stmt)
     // The merge should use the meta at the switch_br, not inside a branch
     const saved_meta = ctx.meta;
+    const saved_trace = ctx.captureTrace();
 
     // Execute all branches
     inline for (0..num_cases) |i| {
@@ -659,7 +662,7 @@ pub fn switch_br(
     }
 
     // Restore ctx.meta for the merge - errors should point to the switch_br location
-    ctx.meta = saved_meta;
+    ctx.restoreExecutionPoint(saved_meta, saved_trace);
 
     // Record base_len BEFORE creating void - branches may have created entities at same indices
     const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
@@ -782,6 +785,7 @@ pub fn loop_switch_br(
 
     // Save ctx.meta before execution
     const saved_meta = ctx.meta;
+    const saved_trace = ctx.captureTrace();
 
     // Start with entry case (case 0) and cloned state
     const entry_refinements = try allocator.create(Refinements);
@@ -886,7 +890,7 @@ pub fn loop_switch_br(
     }
 
     // Restore ctx.meta for the merge
-    ctx.meta = saved_meta;
+    ctx.restoreExecutionPoint(saved_meta, saved_trace);
 
     // Record base_len BEFORE creating void
     const branch_base_len: Gid = @intCast(state.refinements.list.items.len);
@@ -1400,7 +1404,7 @@ test "ret_safe writes return value to return slot" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
-    try ctx.stacktrace.append(allocator, "test_func"); // ret_safe needs a function name on stacktrace
+    try ctx.push_fn("test_func"); // ret_safe needs a function name on stacktrace
 
     // Global refinements table - return slot pre-allocated with typed slot
     var refinements = Refinements.init(allocator);
@@ -1425,6 +1429,8 @@ test "ret_safe writes return value to return slot" {
 
     // Allocate and store a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    const ptr_gid = results[0].refinement.?;
+    refinements.at(refinements.at(ptr_gid).pointer.to).scalar.analyte.memory_safety = .{ .interned = ctx.meta };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Return the value from instruction 0
@@ -1441,7 +1447,7 @@ test "ret_safe with void src sets return to void" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
-    try ctx.stacktrace.append(allocator, "test_func");
+    try ctx.push_fn("test_func");
 
     // Global refinements table - return slot pre-allocated with void type
     var refinements = Refinements.init(allocator);
@@ -1473,7 +1479,7 @@ test "ret_safe at entrypoint succeeds" {
     var discarding = std.Io.Writer.Discarding.init(&buf);
     var ctx = Context.init(allocator, &discarding.writer);
     defer ctx.deinit();
-    try ctx.stacktrace.append(allocator, "test_func");
+    try ctx.push_fn("test_func");
 
     var refinements = Refinements.init(allocator);
     defer refinements.deinit();
@@ -1495,6 +1501,8 @@ test "ret_safe at entrypoint succeeds" {
 
     // Allocate a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    const ptr_gid = results[0].refinement.?;
+    refinements.at(refinements.at(ptr_gid).pointer.to).scalar.analyte.memory_safety = .{ .interned = ctx.meta };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Return - should just succeed without error

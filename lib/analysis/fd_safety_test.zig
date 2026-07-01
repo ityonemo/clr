@@ -15,7 +15,9 @@ fn initTest() struct { Context, Refinements } {
     const allocator = std.testing.allocator;
     FdSafety.initModule(allocator) catch unreachable;
     var ctx = Context.init(allocator, &test_discarding.writer);
-    ctx.meta.function = "test_func";
+    ctx.meta.file = "test.zig";
+    ctx.push_fn("test_func") catch unreachable;
+    ctx.setLocation(1, 1) catch unreachable;
     return .{ ctx, Refinements.init(allocator) };
 }
 
@@ -37,7 +39,7 @@ test "ret_safe does not modify fd_safety state (connectivity tracking handles le
 
     // Create a scalar with fd_safety.open state
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 }, .fd_type = .file }) },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -64,6 +66,10 @@ test "call intercepts posix.open and sets fd_safety.open state" {
 
     const state = testState(&ctx, &results, &refinements);
 
+    ctx.meta.file = "std/fs/Dir.zig";
+    try ctx.push_fn("fs.Dir.openFileZ");
+    try ctx.setLocation(904, 32);
+
     // Call posix.open - Inst.call creates the return structure
     const scalar_type: tag.Type = .{ .scalar = .{} };
     const return_type: tag.Type = .{ .errorunion = .{ .to = &scalar_type } };
@@ -73,7 +79,13 @@ test "call intercepts posix.open and sets fd_safety.open state" {
     const eu_gid = results[0].refinement.?;
     const scalar_gid = refinements.at(eu_gid).errorunion.to;
     const fd_safety = refinements.at(scalar_gid).scalar.analyte.fd_safety.?;
-    try std.testing.expect(fd_safety.getForTest().opened.fd_type == .file);
+    const opened = fd_safety.getForTest().opened;
+    try std.testing.expect(opened.fd_type == .file);
+    try std.testing.expectEqualStrings("fs.Dir.openFileZ", opened.trace.at(0).?.data.function);
+    try std.testing.expectEqualStrings("std/fs/Dir.zig", opened.trace.at(0).?.data.file);
+    try std.testing.expectEqual(@as(u32, 904), opened.trace.at(0).?.data.line);
+    try std.testing.expectEqualStrings("test_func", opened.trace.at(1).?.data.function);
+    try std.testing.expectEqualStrings("test.zig", opened.trace.at(1).?.data.file);
 }
 
 test "call intercepts posix.close and marks fd as closed" {
@@ -84,7 +96,7 @@ test "call intercepts posix.close and marks fd as closed" {
 
     // Create fd with open state
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -131,7 +143,7 @@ test "aggregate_init incorporates fd_safety state from source elements" {
 
     // Create source scalars - one with fd_safety set
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = .{ .function = "test", .file = "test.zig", .line = 1, .column = 1 }, .fd_type = .file }) },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
     } });
     const other_gid = try refinements.appendEntity(.{ .scalar = .{} });
 
@@ -164,7 +176,7 @@ test "close through copied fd handle closes original safety state" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    const fd_handle = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file });
+    const fd_handle = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file });
     const original_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .fd_safety = fd_handle },
     } });
@@ -190,7 +202,7 @@ test "mathematical operation on fd scalar reports error" {
     defer refinements.deinit();
 
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
     } });
     const rhs_gid = try refinements.appendEntity(.{ .scalar = .{} });
 
@@ -211,7 +223,7 @@ test "onFinish descopes local fd copy without leaking while arg remains live" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    const fd_handle = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file });
+    const fd_handle = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file });
     const arg_gid = try refinements.appendEntity(.{ .scalar = .{
         .analyte = .{ .fd_safety = fd_handle },
     } });
@@ -238,7 +250,7 @@ test "onFinish reports local fd leak after all refinements descope" {
     defer refinements.deinit();
 
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
     } });
     const return_gid = try refinements.appendEntity(.{ .void = {} });
 
@@ -255,7 +267,7 @@ test "finalizeModule reports open tracked fd" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    _ = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file });
+    _ = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file });
 
     try std.testing.expectError(error.FdLeak, FdSafety.finalizeModule(&ctx));
 }
@@ -267,7 +279,7 @@ test "finalizeModule accepts closed tracked fd" {
     defer refinements.deinit();
 
     const fd_gid = try refinements.appendEntity(.{ .scalar = .{
-        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .file }) },
+        .analyte = .{ .fd_safety = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .file }) },
     } });
 
     var results = [_]Inst{.{}} ** 2;
@@ -285,7 +297,7 @@ test "finalizeModule ignores stdio tracked fd" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    _ = try FdSafety.createForTest(.{ .meta = ctx.meta, .fd_type = .stdio });
+    _ = try FdSafety.createForTest(.{ .trace = ctx.captureTrace(), .fd_type = .stdio });
 
     try FdSafety.finalizeModule(&ctx);
 }
