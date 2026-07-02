@@ -540,6 +540,60 @@ test "call intercepts public HashMap put" {
     try std.testing.expect(intercepted);
 }
 
+test "allocation stored in caller-owned privileged HashMap is not reported as callee leak" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
+    } });
+    const hashmap_gid = try refinements.appendEntity(try tag.typeToRefinement(
+        .{ .hashmap = .{ .type_id = 200 } },
+        &refinements,
+    ));
+    tag.splatInitCallReturnSlot(&refinements, hashmap_gid, &ctx);
+    refinements.at(hashmap_gid).hashmap.allocator_gid = allocator_gid;
+    const return_gid = try refinements.appendEntity(.{ .void = {} });
+    const base_gid: Gid = @intCast(refinements.list.items.len);
+
+    var results = [_]Inst{.{}} ** 5;
+    results[0].refinement = allocator_gid;
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = base_gid,
+        .early_returns = &early_returns,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 1, .{ .arg = .{ .value = hashmap_gid, .name_id = 1 } });
+    try Inst.call(
+        state,
+        2,
+        null,
+        .{ .errorunion = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } },
+        &.{.{ .inst = 0 }},
+        "mem.Allocator.dupe",
+    );
+    try Inst.apply(state, 3, .{ .@"try" = .{ .src = .{ .inst = 2 } } });
+    try Inst.call(
+        state,
+        4,
+        null,
+        .{ .errorunion = .{ .to = &.{ .void = {} } } },
+        &.{ .{ .inst = 1 }, .{ .inst = 3 }, .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } },
+        "hash_map.HashMap([]const u8,u32,hash_map.StringContext,80).put",
+    );
+
+    try Inst.onFinish(state);
+}
+
 test "call intercepts process args iterator init" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

@@ -1379,6 +1379,9 @@ pub const MemorySafety = union(enum) {
                 }
                 break :blk false;
             },
+            .hashmap => |h| isReachableFromInner(refinements, target_gid, h.metadata_gid, depth + 1) or
+                isReachableFromInner(refinements, target_gid, h.keys_gid, depth + 1) or
+                isReachableFromInner(refinements, target_gid, h.values_gid, depth + 1),
             else => false,
         };
     }
@@ -1418,6 +1421,11 @@ pub const MemorySafety = union(enum) {
                         collectReachableGids(refinements, field_gid, reachable);
                     }
                 }
+            },
+            .hashmap => |h| {
+                collectReachableGids(refinements, h.metadata_gid, reachable);
+                collectReachableGids(refinements, h.keys_gid, reachable);
+                collectReachableGids(refinements, h.values_gid, reachable);
             },
             else => {},
         }
@@ -1495,6 +1503,11 @@ pub const MemorySafety = union(enum) {
                         collectReachableAllocationsInner(refinements, field_gid, allocs, depth + 1);
                     }
                 }
+            },
+            .hashmap => |h| {
+                collectReachableAllocationsInner(refinements, h.metadata_gid, allocs, depth + 1);
+                collectReachableAllocationsInner(refinements, h.keys_gid, allocs, depth + 1);
+                collectReachableAllocationsInner(refinements, h.values_gid, allocs, depth + 1);
             },
             else => {},
         }
