@@ -1837,7 +1837,7 @@ pub const UndefinedSafety = union(enum) {
             return false;
         }
 
-        if (gates.isHashMapInit(fqn) or gates.isHashMapGetPtr(fqn) or gates.isHashMapGet(fqn)) {
+        if (gates.isHashMapInit(fqn) or gates.isHashMapGetPtr(fqn) or gates.isHashMapGet(fqn) or gates.isHashMapContains(fqn)) {
             handleDefinedScalarResult(state, index);
             return false;
         }

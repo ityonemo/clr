@@ -2278,3 +2278,62 @@ test "aggregate_init sets struct container memory_safety" {
     const struct_gid = results[0].refinement.?;
     try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(struct_gid).@"struct".analyte.memory_safety.?));
 }
+
+test "aggregate_init with privileged hashmap leaves no uninitialized orphan storage" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const hashmap_type: tag.Type = .{ .hashmap = .{ .type_id = 200 } };
+    const hashmap_gid = try refinements.appendEntity(try tag.typeToRefinement(hashmap_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, hashmap_gid, &ctx);
+
+    var results = [_]Inst{.{}} ** 2;
+    results[0].refinement = hashmap_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try Inst.apply(state, 1, .{ .aggregate_init = .{
+        .ty = .{ .@"struct" = &.{ .type_id = 201, .fields = &.{hashmap_type} } },
+        .elements = &.{.{ .inst = 0 }},
+    } });
+
+    for (refinements.list.items, 0..) |refinement, idx| {
+        @import("memory_safety.zig").testValid(refinement, idx);
+    }
+}
+
+test "aggregate_init initializes allocator pointer and interned scalar fields" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_type: tag.Type = .{ .allocator = .{ .type_id = 100 } };
+    const buffer_type: tag.Type = .{ .pointer = .{
+        .to = &.{ .pointer = .{
+            .to = &.{ .scalar = .{} },
+            .multiplicity = .region,
+        } },
+    } };
+    const allocator_gid = try refinements.appendEntity(try tag.typeToRefinement(allocator_type, &refinements));
+    const buffer_gid = try refinements.appendEntity(try tag.typeToRefinement(buffer_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, allocator_gid, &ctx);
+    tag.splatInitCallReturnSlot(&refinements, buffer_gid, &ctx);
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = allocator_gid;
+    results[1].refinement = buffer_gid;
+    const state = testState(&ctx, &results, &refinements);
+    const zero = tag.Src{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } };
+
+    try Inst.apply(state, 2, .{ .aggregate_init = .{
+        .ty = .{ .@"struct" = &.{
+            .type_id = 101,
+            .fields = &.{ allocator_type, buffer_type, .{ .scalar = .{} }, .{ .scalar = .{} }, .{ .scalar = .{} } },
+        } },
+        .elements = &.{ .{ .inst = 0 }, .{ .inst = 1 }, zero, zero, zero },
+    } });
+
+    for (refinements.list.items, 0..) |refinement, idx| {
+        @import("memory_safety.zig").testValid(refinement, idx);
+    }
+}

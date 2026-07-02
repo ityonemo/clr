@@ -3222,6 +3222,7 @@ pub const MemorySafety = union(enum) {
                     .trace = ctx.captureTrace(),
                     .root_gid = null,
                 } });
+                initPointerTargetsPlaceholder(refinements, p.to);
             },
             .optional => |*o| {
                 o.analyte.memory_safety = switch (src_ref.*) {
@@ -3288,6 +3289,11 @@ pub const MemorySafety = union(enum) {
                     .hashmap => |src_h| src_h.analyte.memory_safety,
                     else => null,
                 };
+                if (src_ref.* == .hashmap) {
+                    copyMemorySafetyStateRecursive(refinements, h.metadata_gid, src_ref.hashmap.metadata_gid, ctx);
+                    copyMemorySafetyStateRecursive(refinements, h.keys_gid, src_ref.hashmap.keys_gid, ctx);
+                    copyMemorySafetyStateRecursive(refinements, h.values_gid, src_ref.hashmap.values_gid, ctx);
+                }
             },
             .fnptr => |*f| {
                 f.analyte.memory_safety = switch (src_ref.*) {
@@ -4329,6 +4335,11 @@ pub const MemorySafety = union(enum) {
 
         if (gates.isHashMapGet(fqn)) {
             handleHashMapGet(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapContains(fqn)) {
+            setResultStack(state, index);
             return true;
         }
 

@@ -165,6 +165,12 @@ pub fn isHashMapGet(fqn: []const u8) bool {
         std.mem.endsWith(u8, fqn, ".get");
 }
 
+pub fn isHashMapContains(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
+        std.mem.endsWith(u8, fqn, ".contains");
+}
+
 pub fn isHashMapManagedDeinit(fqn: []const u8) bool {
     return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
         std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
@@ -175,6 +181,9 @@ test "managed HashMap put matches storage mutator gate" {
     const fqn = "hash_map.HashMap(u32,example.Value,hash_map.AutoContext(u32),80).put";
     try std.testing.expect(isHashMapManagedPut(fqn));
     try std.testing.expect(isHashMapStorageMutator(fqn));
+    try std.testing.expect(isHashMapContains(
+        "hash_map.HashMap([]const u8,example.Value,hash_map.StringContext,80).contains",
+    ));
 }
 
 /// Match std.hash_map.HashMapUnmanaged.deallocate.
