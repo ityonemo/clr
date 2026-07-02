@@ -1827,12 +1827,12 @@ pub const UndefinedSafety = union(enum) {
             return false;
         }
 
-        if (gates.isHashMapValueIterator(fqn)) {
+        if (gates.isHashMapValueIterator(fqn) or gates.isHashMapIterator(fqn)) {
             handleDefinedScalarResult(state, index);
             return true;
         }
 
-        if (gates.isHashMapFieldIteratorNext(fqn)) {
+        if (gates.isHashMapFieldIteratorNext(fqn) or gates.isHashMapIteratorNext(fqn)) {
             handleDefinedScalarResult(state, index);
             return false;
         }

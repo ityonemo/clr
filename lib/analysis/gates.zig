@@ -102,6 +102,20 @@ pub fn isHashMapValueIterator(fqn: []const u8) bool {
     return is_hashmap and std.mem.endsWith(u8, fqn, ".valueIterator");
 }
 
+pub fn isHashMapIterator(fqn: []const u8) bool {
+    const is_hashmap = std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null;
+    return is_hashmap and std.mem.endsWith(u8, fqn, ".iterator");
+}
+
+pub fn isHashMapIteratorNext(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and
+        std.mem.indexOf(u8, fqn, ".Iterator.next") != null;
+}
+
 pub fn isHashMapFieldIteratorNext(fqn: []const u8) bool {
     return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
         std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and

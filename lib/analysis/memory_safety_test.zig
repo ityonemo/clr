@@ -540,6 +540,75 @@ test "call intercepts public HashMap put" {
     try std.testing.expect(intercepted);
 }
 
+test "privileged HashMap iterator preserves map and entry slot identity" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
+    } });
+    const map_gid = try refinements.appendEntity(try tag.typeToRefinement(
+        .{ .hashmap = .{ .type_id = 200 } },
+        &refinements,
+    ));
+    tag.splatInitCallReturnSlot(&refinements, map_gid, &ctx);
+    refinements.at(map_gid).hashmap.allocator_gid = allocator_gid;
+    const metadata_gid = refinements.at(map_gid).hashmap.metadata_gid;
+    const keys_gid = refinements.at(map_gid).hashmap.keys_gid;
+    const values_gid = refinements.at(map_gid).hashmap.values_gid;
+    refinements.at(map_gid).hashmap.analyte.memory_safety = .{ .allocated = .{
+        .trace = ctx.captureTrace(),
+        .root_gid = metadata_gid,
+        .allocator_gid = allocator_gid,
+        .type_id = 100,
+    } };
+
+    const iterator_type: tag.Type = .{ .@"struct" = &.{
+        .type_id = 201,
+        .fields = &.{ .{ .pointer = .{ .to = &.{ .hashmap = .{ .type_id = 200 } } } }, .{ .scalar = .{} } },
+    } };
+    const iterator_gid = try refinements.appendEntity(try tag.typeToRefinement(iterator_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, iterator_gid, &ctx);
+    const entry_type: tag.Type = .{ .optional = .{ .to = &.{ .@"struct" = &.{
+        .type_id = 202,
+        .fields = &.{
+            .{ .pointer = .{ .to = &.{ .scalar = .{} } } },
+            .{ .pointer = .{ .to = &.{ .scalar = .{} } } },
+        },
+    } } } };
+    const entry_gid = try refinements.appendEntity(try tag.typeToRefinement(entry_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, entry_gid, &ctx);
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = map_gid;
+    results[1].refinement = iterator_gid;
+    results[2].refinement = entry_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    try std.testing.expect(try MemorySafety.call(
+        state,
+        1,
+        iterator_type,
+        &.{.{ .inst = 0 }},
+        "hash_map.HashMap(u32,u32,hash_map.AutoContext(u32),80).iterator",
+    ));
+    const iterator = refinements.at(iterator_gid).@"struct";
+    try std.testing.expectEqual(map_gid, refinements.at(iterator.fields[0]).pointer.to);
+
+    try std.testing.expect(try MemorySafety.call(
+        state,
+        2,
+        entry_type,
+        &.{.{ .inst = 1 }},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).Iterator.next",
+    ));
+    const entry = refinements.at(refinements.at(entry_gid).optional.to).@"struct";
+    try std.testing.expectEqual(keys_gid, refinements.at(entry.fields[0]).pointer.to);
+    try std.testing.expectEqual(values_gid, refinements.at(entry.fields[1]).pointer.to);
+}
+
 test "allocation stored in caller-owned privileged HashMap is not reported as callee leak" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

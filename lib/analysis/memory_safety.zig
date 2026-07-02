@@ -3881,6 +3881,47 @@ pub const MemorySafety = union(enum) {
         try paintHashMapPointerView(state, result_ref.@"struct".fields[2], args[0]);
     }
 
+    fn handleHashMapIterator(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) @panic("hashmap iterator missing self");
+        const map_gid = getHashMapGid(state, args[0]) orelse @panic("hashmap iterator self is not privileged hashmap");
+        const result_gid = requireResult(state, index, "hashmap iterator");
+        const result = state.refinements.at(result_gid);
+        if (result.* != .@"struct" or result.@"struct".fields.len != 2) {
+            @panic("hashmap iterator: expected two-field iterator struct");
+        }
+        paintPrivilegedHashMapView(state, result.@"struct".fields[0], map_gid, map_gid);
+        paintSpatialMemory(state.refinements, result.@"struct".fields[1], .{ .stack = .{
+            .trace = state.ctx.captureTrace(),
+            .root_gid = null,
+        } });
+    }
+
+    fn handleHashMapIteratorNext(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) @panic("hashmap Iterator.next missing self");
+        const self_gid = srcGid(state, args[0]) orelse @panic("hashmap Iterator.next self has no refinement");
+        const self_ref = state.refinements.at(self_gid);
+        const iterator_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+        const iterator = state.refinements.at(iterator_gid);
+        if (iterator.* != .@"struct" or iterator.@"struct".fields.len != 2) {
+            @panic("hashmap Iterator.next self is not iterator struct");
+        }
+        const map_pointer = state.refinements.at(iterator.@"struct".fields[0]);
+        if (map_pointer.* != .pointer) @panic("hashmap Iterator.next map field is not pointer");
+        const map_gid = map_pointer.pointer.to;
+        const map = state.refinements.at(map_gid);
+        if (map.* != .hashmap) @panic("hashmap Iterator.next map field does not target privileged hashmap");
+
+        const result_gid = requireResult(state, index, "hashmap Iterator.next");
+        const result = state.refinements.at(result_gid);
+        if (result.* != .optional) @panic("hashmap Iterator.next result is not optional");
+        const entry = state.refinements.at(result.optional.to);
+        if (entry.* != .@"struct" or entry.@"struct".fields.len != 2) {
+            @panic("hashmap Iterator.next payload is not a two-field entry struct");
+        }
+        paintPrivilegedHashMapView(state, entry.@"struct".fields[0], map_gid, map.hashmap.keys_gid);
+        paintPrivilegedHashMapView(state, entry.@"struct".fields[1], map_gid, map.hashmap.values_gid);
+    }
+
     fn paintPrivilegedHashMapView(state: State, result_gid: Gid, map_gid: Gid, target_gid: Gid) void {
         const result = state.refinements.at(result_gid);
         if (result.* != .pointer) @panic("privileged hashmap view result is not pointer");
@@ -4380,6 +4421,16 @@ pub const MemorySafety = union(enum) {
 
         if (gates.isHashMapValueIterator(fqn)) {
             try handleHashMapValueIterator(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapIterator(fqn)) {
+            handleHashMapIterator(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapIteratorNext(fqn)) {
+            handleHashMapIteratorNext(state, index, args);
             return true;
         }
 

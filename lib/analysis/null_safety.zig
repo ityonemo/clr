@@ -683,6 +683,12 @@ pub const NullSafety = union(enum) {
             return false;
         }
 
+        if (gates.isHashMapIteratorNext(fqn)) {
+            const result_gid = state.results[index].refinement orelse return false;
+            initOptionalsUnknown(state.refinements, result_gid);
+            return false;
+        }
+
         if (gates.isHashMapStorageMutator(fqn)) {
             if (gates.isHashMapManagedPut(fqn) and args.len > 0) {
                 markHashMapManagedStorageNonNull(state, args[0]);
