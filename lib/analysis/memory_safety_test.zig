@@ -175,7 +175,7 @@ test "hashmap_header inherits memory safety from metadata pointer" {
     try std.testing.expectEqual(.allocated, std.meta.activeTag(refinements.at(pointee_gid).@"struct".analyte.memory_safety.?));
 }
 
-test "hashmap_header treats placeholder metadata as synthetic valid header" {
+test "hashmap_header rejects placeholder metadata provenance" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();
     defer refinements.deinit();
@@ -202,15 +202,11 @@ test "hashmap_header treats placeholder metadata as synthetic valid header" {
     results[0].refinement = struct_gid;
     const state = testState(&ctx, &results, &refinements);
 
-    try Inst.apply(state, 1, .{ .hashmap_header = .{
+    const result = Inst.apply(state, 1, .{ .hashmap_header = .{
         .self = .{ .inst = 0 },
         .ty = .{ .pointer = .{ .to = &.{ .@"struct" = &.{ .type_id = 101, .fields = &.{.{ .scalar = .{} }} } } } },
     } });
-
-    const result_gid = results[1].refinement.?;
-    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(result_gid).pointer.analyte.memory_safety.?));
-    const pointee_gid = refinements.at(result_gid).pointer.to;
-    try std.testing.expectEqual(.stack, std.meta.activeTag(refinements.at(pointee_gid).@"struct".analyte.memory_safety.?));
+    try std.testing.expectError(error.HashMapStorageProvenanceMissing, result);
 }
 
 test "array_elem_val from region value copies element memory safety" {
@@ -472,6 +468,33 @@ test "call intercepts HashMap keys accessor with metadata-backed pointer view" {
     try std.testing.expect(result_ref.pointer.analyte.memory_safety != null);
     const pointee_ms = refinements.at(result_ref.pointer.to).scalar.analyte.memory_safety.?;
     try std.testing.expect(pointee_ms != .placeholder);
+
+    const iterator_len_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const iterator_metadata_region_gid = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
+    const iterator_metadata_gid = try refinements.appendEntity(.{ .pointer = .{ .to = iterator_metadata_region_gid } });
+    const iterator_values_region_gid = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
+    const iterator_values_gid = try refinements.appendEntity(.{ .pointer = .{ .to = iterator_values_region_gid } });
+    const iterator_fields = try std.testing.allocator.alloc(Gid, 3);
+    iterator_fields[0] = iterator_len_gid;
+    iterator_fields[1] = iterator_metadata_gid;
+    iterator_fields[2] = iterator_values_gid;
+    const iterator_gid = try refinements.appendEntity(.{ .@"struct" = .{
+        .type_id = 300,
+        .fields = iterator_fields,
+    } });
+    results[1].refinement = iterator_gid;
+
+    const iterator_intercepted = try MemorySafety.call(
+        state,
+        1,
+        .{ .@"struct" = &.{ .type_id = 300, .fields = &.{} } },
+        &.{.{ .inst = 0 }},
+        "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).valueIterator",
+    );
+
+    try std.testing.expect(iterator_intercepted);
+    try std.testing.expect(refinements.at(iterator_metadata_gid).pointer.analyte.memory_safety.? != .placeholder);
+    try std.testing.expect(refinements.at(iterator_values_gid).pointer.analyte.memory_safety.? != .placeholder);
 }
 
 test "call intercepts HashMap capacity-assume mutator" {
@@ -625,6 +648,10 @@ test "call intercepts HashMap deallocate and frees metadata allocation" {
     fields[0] = metadata_gid;
     fields[1] = size_gid;
     const self_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 200, .fields = fields } });
+    const alias_gid = try refinements.appendEntity(.{ .scalar = .{
+        .multiplicity = .region,
+        .analyte = .{ .memory_safety = refinements.at(metadata_region_gid).scalar.analyte.memory_safety },
+    } });
 
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = self_gid;
@@ -643,6 +670,9 @@ test "call intercepts HashMap deallocate and frees metadata allocation" {
     const ms = refinements.at(metadata_region_gid).scalar.analyte.memory_safety.?;
     try std.testing.expect(ms == .allocated);
     try std.testing.expect(ms.allocated.freed != null);
+    const alias_ms = refinements.at(alias_gid).scalar.analyte.memory_safety.?;
+    try std.testing.expect(alias_ms == .allocated);
+    try std.testing.expect(alias_ms.allocated.freed != null);
 }
 
 test "destroy of interned pointer reports global memory free" {

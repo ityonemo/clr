@@ -3785,13 +3785,25 @@ pub const MemorySafety = union(enum) {
     pub fn hashmap_header(state: State, index: usize, params: tag.HashMapHeader) !void {
         const result_gid = state.results[index].refinement orelse
             std.debug.panic("hashmap_header: result instruction {d} has no refinement", .{index});
-        paintHashMapPointerView(state, result_gid, params.self);
+        try paintHashMapPointerView(state, result_gid, params.self);
     }
 
-    fn handleHashMapPointerAccessor(state: State, index: usize, args: []const tag.Src) void {
+    fn handleHashMapPointerAccessor(state: State, index: usize, args: []const tag.Src) !void {
         if (args.len < 1) return;
         const result_gid = state.results[index].refinement orelse return;
-        paintHashMapPointerView(state, result_gid, args[0]);
+        try paintHashMapPointerView(state, result_gid, args[0]);
+    }
+
+    fn handleHashMapValueIterator(state: State, index: usize, args: []const tag.Src) !void {
+        if (args.len < 1) return;
+        const result_gid = state.results[index].refinement orelse return;
+        const result_ref = state.refinements.at(result_gid);
+        if (result_ref.* != .@"struct" or result_ref.@"struct".fields.len != 3) {
+            std.debug.panic("hashmap valueIterator: expected three-field iterator struct", .{});
+        }
+
+        try paintHashMapPointerView(state, result_ref.@"struct".fields[1], args[0]);
+        try paintHashMapPointerView(state, result_ref.@"struct".fields[2], args[0]);
     }
 
     fn handleHashMapDeallocate(state: State, args: []const tag.Src) void {
@@ -3811,10 +3823,24 @@ pub const MemorySafety = union(enum) {
         if (allocation.freed == null) {
             allocation.freed = .{ .trace = state.ctx.captureTrace() };
         }
-        analyte.memory_safety = .{ .allocated = allocation };
+        setFreedForEquivalentAllocations(state.refinements, allocation);
     }
 
-    fn paintHashMapPointerView(state: State, result_gid: Gid, self: tag.Src) void {
+    fn setFreedForEquivalentAllocations(refinements: *Refinements, allocation: Allocated) void {
+        for (refinements.list.items) |*ref| {
+            switch (ref.*) {
+                .void, .noreturn, .unimplemented => continue,
+                else => {},
+            }
+            const analyte = getAnalytePtr(ref);
+            const candidate = analyte.memory_safety orelse continue;
+            if (candidate != .allocated) continue;
+            if (!sameAllocationMetadata(candidate.allocated, allocation)) continue;
+            analyte.memory_safety = .{ .allocated = allocation };
+        }
+    }
+
+    fn paintHashMapPointerView(state: State, result_gid: Gid, self: tag.Src) !void {
         const result_ref = state.refinements.at(result_gid);
         if (result_ref.* != .pointer) {
             std.debug.panic("hashmap_header: expected pointer result, got {s}", .{@tagName(result_ref.*)});
@@ -3828,20 +3854,56 @@ pub const MemorySafety = union(enum) {
 
         const raw_pointer_ms = metadata_ptr_ref.pointer.analyte.memory_safety orelse
             std.debug.panic("hashmap_header: metadata pointer has no memory_safety", .{});
-        const fallback_ms: MemorySafety = .{ .stack = .{ .trace = state.ctx.captureTrace(), .root_gid = null } };
         const pointer_ms = switch (raw_pointer_ms) {
-            .placeholder, .error_stub => fallback_ms,
+            .placeholder, .error_stub => return error.HashMapStorageProvenanceMissing,
             else => raw_pointer_ms,
         };
         result_ref.pointer.analyte.memory_safety = pointer_ms;
 
         const raw_pointee_ms = getMemorySafety(state.refinements.at(metadata_ptr_ref.pointer.to)) orelse pointer_ms;
         const pointee_ms = switch (raw_pointee_ms) {
-            .placeholder, .error_stub => pointer_ms,
+            .placeholder, .error_stub => return error.HashMapStorageProvenanceMissing,
             else => raw_pointee_ms,
         };
         paintSpatialMemory(state.refinements, result_ref.pointer.to, pointee_ms);
         initPointerTargetsPlaceholder(state.refinements, result_ref.pointer.to);
+    }
+
+    fn handleHashMapManagedPut(state: State, args: []const tag.Src) void {
+        if (args.len < 1) return;
+        const self_gid = switch (args[0]) {
+            .inst => |inst| state.results[inst].refinement orelse return,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
+            .fnptr => return,
+        };
+        const self_ref = state.refinements.at(self_gid);
+        const managed_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+        const managed = state.refinements.at(managed_gid);
+        if (managed.* != .@"struct" or managed.@"struct".fields.len < 2) return;
+
+        const unmanaged_gid = managed.@"struct".fields[0];
+        const allocator_gid = managed.@"struct".fields[1];
+        if (state.refinements.at(allocator_gid).* != .allocator) return;
+
+        const unmanaged = state.refinements.at(unmanaged_gid);
+        if (unmanaged.* != .@"struct" or unmanaged.@"struct".fields.len == 0) return;
+        const metadata = state.refinements.at(unmanaged.@"struct".fields[0]);
+        if (metadata.* != .optional) return;
+        const metadata_ptr = state.refinements.at(metadata.optional.to);
+        if (metadata_ptr.* != .pointer) return;
+
+        const region_gid = metadata_ptr.pointer.to;
+        const existing = getAnalytePtr(state.refinements.at(region_gid)).memory_safety;
+        if (existing != null and existing.? == .allocated) return;
+
+        const allocation: MemorySafety = .{ .allocated = .{
+            .trace = state.ctx.captureTrace(),
+            .root_gid = region_gid,
+            .allocator_gid = allocator_gid,
+            .type_id = state.refinements.at(allocator_gid).allocator.type_id,
+        } };
+        metadata_ptr.pointer.analyte.memory_safety = allocation;
+        paintSpatialMemory(state.refinements, region_gid, allocation);
     }
 
     fn getHashMapMetadataPointerGid(state: State, src: tag.Src) Gid {
@@ -3866,7 +3928,14 @@ pub const MemorySafety = union(enum) {
             @panic("hashmap_header: self struct has no metadata field");
         }
 
-        const metadata_gid = struct_ref.@"struct".fields[0];
+        var metadata_gid = struct_ref.@"struct".fields[0];
+        const first_ref = state.refinements.at(metadata_gid);
+        if (first_ref.* == .@"struct") {
+            if (first_ref.@"struct".fields.len == 0) {
+                @panic("hashmap_header: managed map has empty unmanaged field");
+            }
+            metadata_gid = first_ref.@"struct".fields[0];
+        }
         const metadata_ref = state.refinements.at(metadata_gid);
         if (metadata_ref.* != .optional) {
             std.debug.panic("hashmap_header: expected metadata optional, got {s}", .{@tagName(metadata_ref.*)});
@@ -4030,6 +4099,7 @@ pub const MemorySafety = union(enum) {
         }
 
         if (gates.isHashMapStorageMutator(fqn)) {
+            if (gates.isHashMapManagedPut(fqn)) handleHashMapManagedPut(state, args);
             return true;
         }
 
@@ -4039,7 +4109,12 @@ pub const MemorySafety = union(enum) {
         }
 
         if (gates.isHashMapKeysOrValues(fqn)) {
-            handleHashMapPointerAccessor(state, index, args);
+            try handleHashMapPointerAccessor(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapValueIterator(fqn)) {
+            try handleHashMapValueIterator(state, index, args);
             return true;
         }
 

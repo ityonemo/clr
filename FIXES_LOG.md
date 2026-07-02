@@ -4,6 +4,30 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Treat HashMap valueIterator as a stdlib boundary
+
+**Date:** 2026-07-02
+
+**Symptom:**
+`HashMap.valueIterator` produced `error.InconsistentBranches` because the
+stdlib's empty-map branch intentionally returns an iterator containing
+`undefined` pointer fields.
+
+**The Fix:**
+Added a narrow managed/unmanaged HashMap override that skips the
+`valueIterator` implementation, marks the returned iterator defined, and
+derives both iterator pointer views from the map's tracked storage. HashMap
+deallocation now updates every refinement carrying equivalent allocation
+metadata so iterator views do not retain stale unfreed state.
+
+**Unit Tests:**
+- HashMap iterator memory-safety provenance and deallocation propagation
+- HashMap iterator undefined-safety initialization
+
+**Integration Test:** `test/cases/std/hashmap_value_iterator.zig`
+
+---
+
 ## Fix: Preserve allocator identity in returned aggregate fields
 
 **Date:** 2026-07-01

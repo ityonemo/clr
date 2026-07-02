@@ -231,6 +231,24 @@ pub const NullSafety = union(enum) {
         return struct_ref.@"struct".fields[0];
     }
 
+    fn markHashMapManagedStorageNonNull(state: State, src: tag.Src) void {
+        const self_gid = switch (src) {
+            .inst => |inst| state.results[inst].refinement orelse return,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
+            .fnptr => return,
+        };
+        const self_ref = state.refinements.at(self_gid);
+        const managed_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+        const managed = state.refinements.at(managed_gid);
+        if (managed.* != .@"struct" or managed.@"struct".fields.len == 0) return;
+
+        const unmanaged = state.refinements.at(managed.@"struct".fields[0]);
+        if (unmanaged.* != .@"struct" or unmanaged.@"struct".fields.len == 0) return;
+        const metadata = state.refinements.at(unmanaged.@"struct".fields[0]);
+        if (metadata.* != .optional) return;
+        metadata.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
+    }
+
     /// remap_setup handler - narrows null_safety for remap result.
     /// Called by Inst.remap_br via splatRemapSetup BEFORE executing each branch.
     /// - Success branch (is_success=true): remap result is .non_null
@@ -362,11 +380,56 @@ pub const NullSafety = union(enum) {
             .interned => |interned| {
                 applyInternedNullSafety(refinements, pointee_idx, interned.ty, ctx.meta);
             },
-            .inst, .fnptr => {
-                if (pointee.* != .optional) return;
-                // Runtime value or function pointer - mark as non_null
-                pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
+            .inst => |src_inst| {
+                const src_gid = results[src_inst].refinement orelse return;
+                if (pointee.* == .optional) {
+                    pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
+                } else {
+                    copyNullSafetyRecursive(refinements, pointee_idx, src_gid);
+                }
             },
+            .fnptr => {
+                if (pointee.* == .optional) {
+                    pointee.optional.analyte.null_safety = .{ .non_null = ctx.meta };
+                }
+            },
+        }
+    }
+
+    fn copyNullSafetyRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+        const dst = refinements.at(dst_gid);
+        const src = refinements.at(src_gid);
+        switch (dst.*) {
+            .optional => |dst_optional| {
+                if (src.* != .optional) return;
+                dst.optional.analyte.null_safety = src.optional.analyte.null_safety;
+                copyNullSafetyRecursive(refinements, dst_optional.to, src.optional.to);
+            },
+            .pointer => |dst_pointer| {
+                if (src.* == .pointer) {
+                    copyNullSafetyRecursive(refinements, dst_pointer.to, src.pointer.to);
+                }
+            },
+            .errorunion => |dst_errorunion| {
+                if (src.* == .errorunion) {
+                    copyNullSafetyRecursive(refinements, dst_errorunion.to, src.errorunion.to);
+                }
+            },
+            .@"struct" => |dst_struct| {
+                if (src.* != .@"struct") return;
+                for (dst_struct.fields, src.@"struct".fields) |dst_field, src_field| {
+                    copyNullSafetyRecursive(refinements, dst_field, src_field);
+                }
+            },
+            .@"union" => |dst_union| {
+                if (src.* != .@"union") return;
+                for (dst_union.fields, src.@"union".fields) |dst_field, src_field| {
+                    if (dst_field != null and src_field != null) {
+                        copyNullSafetyRecursive(refinements, dst_field.?, src_field.?);
+                    }
+                }
+            },
+            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -599,7 +662,6 @@ pub const NullSafety = union(enum) {
         fqn: []const u8,
     ) anyerror!bool {
         _ = return_type;
-        _ = args;
 
         if (gates.isHashMapGetIndex(fqn)) {
             const result_gid = state.results[index].refinement orelse return true;
@@ -608,6 +670,9 @@ pub const NullSafety = union(enum) {
         }
 
         if (gates.isHashMapStorageMutator(fqn)) {
+            if (gates.isHashMapManagedPut(fqn) and args.len > 0) {
+                markHashMapManagedStorageNonNull(state, args[0]);
+            }
             return true;
         }
 

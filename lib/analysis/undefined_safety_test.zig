@@ -121,6 +121,44 @@ test "call intercepts HashMap Metadata predicate and marks result defined" {
     try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(result_gid).scalar.analyte.undefined_safety.?));
 }
 
+test "call intercepts HashMap valueIterator and marks result defined" {
+    const UndefinedSafetyAnalysis = @import("undefined_safety.zig").UndefinedSafety;
+
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const len_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const metadata_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } }),
+    } });
+    const values_gid = try refinements.appendEntity(.{ .pointer = .{
+        .to = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } }),
+    } });
+    const fields = try std.testing.allocator.alloc(Gid, 3);
+    fields[0] = len_gid;
+    fields[1] = metadata_gid;
+    fields[2] = values_gid;
+    const result_gid = try refinements.appendEntity(.{ .@"struct" = .{ .type_id = 1, .fields = fields } });
+
+    var results = [_]Inst{.{}};
+    results[0].refinement = result_gid;
+    const state = testState(&ctx, &results, &refinements);
+
+    const intercepted = try UndefinedSafetyAnalysis.call(
+        state,
+        0,
+        .{ .@"struct" = &.{ .type_id = 1, .fields = &.{} } },
+        &.{},
+        "hash_map.HashMap(u32,u32,hash_map.AutoContext(u32),80).valueIterator",
+    );
+
+    try std.testing.expect(intercepted);
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(len_gid).scalar.analyte.undefined_safety.?));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(metadata_gid).pointer.analyte.undefined_safety.?));
+    try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(values_gid).pointer.analyte.undefined_safety.?));
+}
+
 test "store with undefined type wrapper keeps state undefined" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

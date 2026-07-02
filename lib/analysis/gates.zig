@@ -93,6 +93,15 @@ pub fn isHashMapKeysOrValues(fqn: []const u8) bool {
         (std.mem.endsWith(u8, fqn, ".keys") or std.mem.endsWith(u8, fqn, ".values"));
 }
 
+/// Match managed or unmanaged HashMap valueIterator.
+pub fn isHashMapValueIterator(fqn: []const u8) bool {
+    const is_hashmap = std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null;
+    return is_hashmap and std.mem.endsWith(u8, fqn, ".valueIterator");
+}
+
 /// Match std.hash_map.HashMapUnmanaged.Metadata predicate helpers.
 pub fn isHashMapMetadataPredicate(fqn: []const u8) bool {
     if (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") == null and
@@ -123,6 +132,12 @@ pub fn isHashMapStorageMutator(fqn: []const u8) bool {
     if (is_managed and std.mem.endsWith(u8, fqn, ".put")) return true;
     return std.mem.endsWith(u8, fqn, ".putAssumeCapacityNoClobberContext") or
         std.mem.endsWith(u8, fqn, ".getOrPutAssumeCapacityAdapted");
+}
+
+pub fn isHashMapManagedPut(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
+        std.mem.endsWith(u8, fqn, ".put");
 }
 
 /// Match std.hash_map.HashMapUnmanaged.deallocate.

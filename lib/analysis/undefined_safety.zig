@@ -1779,6 +1779,11 @@ pub const UndefinedSafety = union(enum) {
             return true;
         }
 
+        if (gates.isHashMapValueIterator(fqn)) {
+            handleDefinedScalarResult(state, index);
+            return true;
+        }
+
         // POSIX fd functions - check for undefined fd arguments
         if (gates.isPosixClose(fqn)) {
             // close(fd) - arg[0] is fd
