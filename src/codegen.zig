@@ -1741,6 +1741,9 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             if (isAllocatorType(ip, ty)) {
                 break :blk formatAllocatorType(arena, @intFromEnum(ty));
             }
+            if (isHashMapType(ip, ty)) {
+                break :blk formatHashMapType(arena, @intFromEnum(ty));
+            }
             if (visited.contains(ty) and !isLeafAggregate(ip, ty)) {
                 break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
             }
@@ -2012,6 +2015,9 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             // Check for well-known struct type: std.mem.Allocator
             if (isAllocatorType(ip, ty)) {
                 break :blk formatAllocatorType(arena, @intFromEnum(ty));
+            }
+            if (isHashMapType(ip, ty)) {
+                break :blk formatHashMapType(arena, @intFromEnum(ty));
             }
             if (visited.contains(ty) and !isLeafAggregate(ip, ty)) {
                 break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
@@ -3267,6 +3273,23 @@ fn getCallReturnType(info: *const FnInfo, datum: Data) []const u8 {
 /// Testable without InternPool.
 pub fn formatAllocatorType(arena: std.mem.Allocator, type_id: u32) []const u8 {
     return clr_allocator.allocPrint(arena, ".{{ .allocator = .{{ .type_id = {d} }} }}", .{type_id}, null);
+}
+
+pub fn formatHashMapType(arena: std.mem.Allocator, type_id: u32) []const u8 {
+    return clr_allocator.allocPrint(arena, ".{{ .hashmap = .{{ .type_id = {d} }} }}", .{type_id}, null);
+}
+
+pub fn isHashMapType(ip: *const InternPool, type_idx: InternPool.Index) bool {
+    if (type_idx == .none) return false;
+    if (@intFromEnum(type_idx) <= @intFromEnum(InternPool.Index.empty_tuple)) return false;
+    return switch (ip.indexToKey(type_idx)) {
+        .struct_type => blk: {
+            const name = ip.loadStructType(type_idx).name.toSlice(ip);
+            break :blk std.mem.indexOf(u8, name, "hash_map.HashMap(") != null or
+                std.mem.indexOf(u8, name, "std.hash_map.HashMap(") != null;
+        },
+        else => false,
+    };
 }
 
 /// Check if a type (by InternPool index) is std.mem.Allocator.

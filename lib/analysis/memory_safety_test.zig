@@ -1471,6 +1471,7 @@ fn expectMemorySafetySet(ref: *const Refinements.Refinement) !void {
         .@"union" => |u| u.analyte,
         .fnptr => |f| f.analyte,
         .allocator => |a| a.analyte,
+        .hashmap => |h| h.analyte,
         .void, .noreturn, .unimplemented => return,
     };
     try std.testing.expect(analyte.memory_safety != null);

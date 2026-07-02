@@ -33,6 +33,11 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("variant_safety should only exist on unions, got allocator", .{});
             }
         },
+        .hashmap => |h| {
+            if (h.analyte.variant_safety != null) {
+                std.debug.panic("variant_safety should only exist on unions, got hashmap", .{});
+            }
+        },
         inline .pointer, .optional, .errorunion, .@"struct", .recursive, .fnptr => |data, t| {
             if (data.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got {s}", .{@tagName(t)});
@@ -125,7 +130,7 @@ pub const VariantSafety = struct {
                 for (s.fields) |field_gid| initRecursive(refinements, field_gid);
             },
             .recursive => {},
-            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .void, .noreturn, .unimplemented => {},
         }
     }
 

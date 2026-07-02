@@ -861,6 +861,9 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         .allocator => |a| {
             if (a.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on allocator (idx={d})", .{idx});
         },
+        .hashmap => |h| {
+            if (h.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on hashmap (idx={d})", .{idx});
+        },
         // NO ANALYTE - trivial types
         .void, .noreturn, .unimplemented => {},
     }

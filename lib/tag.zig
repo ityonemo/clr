@@ -123,6 +123,17 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
             // Allocator refinement - type_id uniquely identifies allocator type
             break :blk .{ .allocator = .{ .type_id = alloc_type.type_id } };
         },
+        .hashmap => |hashmap_type| blk: {
+            const metadata_gid = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
+            const keys_gid = try refinements.appendEntity(.{ .unimplemented = {} });
+            const values_gid = try refinements.appendEntity(.{ .unimplemented = {} });
+            break :blk .{ .hashmap = .{
+                .type_id = hashmap_type.type_id,
+                .metadata_gid = metadata_gid,
+                .keys_gid = keys_gid,
+                .values_gid = values_gid,
+            } };
+        },
         .@"struct" => |struct_type| blk: {
             const allocator = refinements.list.allocator;
             const fields = allocator.alloc(Gid, struct_type.fields.len) catch @panic("out of memory");
@@ -166,6 +177,7 @@ fn typeMultiplicity(ty: Type) core.Multiplicity {
         .null => |payload| payload.multiplicity,
         .undefined => |payload| payload.multiplicity,
         .allocator => |payload| payload.multiplicity,
+        .hashmap => |payload| payload.multiplicity,
         .fnptr => |payload| payload.multiplicity,
         .recursive => .single,
         .@"struct" => |payload| payload.multiplicity,
@@ -1248,6 +1260,11 @@ fn updateFieldReferences(refinements: *Refinements, dest_gid: Gid, src_gid: Gid)
                 Refinement.clobber_structured_idx(dest_gid, refinements, src_ref.*, refinements) catch @panic("out of memory");
             }
         },
+        .hashmap => {
+            if (src_ref.* == .hashmap) {
+                Refinement.clobber_structured_idx(dest_gid, refinements, src_ref.*, refinements) catch @panic("out of memory");
+            }
+        },
         // Scalars and fnptrs don't have .to references.
         .scalar, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
     }
@@ -1269,7 +1286,7 @@ fn retargetRefinementEdges(refinements: *Refinements, old_gid: Gid, new_gid: Gid
                     if (maybe_field_gid.* == old_gid) maybe_field_gid.* = new_gid;
                 }
             },
-            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
 }
@@ -1313,13 +1330,16 @@ pub const Store = struct {
         // to find the destination. If we modify it first, they would copy from
         // source to source instead of source to destination.
         //
-        // Special case for allocator: call splat after, as we modify ptr_ref.pointer.to
-        // differently there (direct reference instead of structural update).
-        const is_allocator = if (src_gid) |gid| state.refinements.at(gid).* == .allocator else false;
+        // Privileged identity refinements are stored by retargeting the slot to
+        // the canonical entity after analyses observe the original destination.
+        const is_identity = if (src_gid) |gid| switch (state.refinements.at(gid).*) {
+            .allocator, .hashmap => true,
+            else => false,
+        } else false;
         if (src_gid == null) {
             try prepareInternedUnionStore(state, pointee_gid, self.src);
         }
-        if (!is_allocator) {
+        if (!is_identity) {
             try splat(.store, state, index, self);
         }
 
@@ -1328,13 +1348,10 @@ pub const Store = struct {
         if (src_gid) |src_ref| {
             const src = state.refinements.at(src_ref);
 
-            // ALLOCATOR IDENTITY: When storing an allocator, make the pointer
-            // point directly to the source allocator refinement. This preserves
-            // allocator identity through store/load cycles. The Zig Allocator type
-            // is a struct, but we track it as .allocator refinement for analysis.
+            // IDENTITY: privileged refinements are canonical runtime objects.
             // IMPORTANT: Call splat BEFORE identity update so undefined_safety.store
             // marks the ORIGINAL pointee (struct field) as defined, not the source.
-            if (src.* == .allocator) {
+            if (src.* == .allocator or src.* == .hashmap) {
                 try splat(.store, state, index, self);
                 retargetRefinementEdges(state.refinements, pointee_gid, src_ref);
                 return;
@@ -1875,6 +1892,22 @@ pub const AggregateInit = struct {
         try preserveTrackedInternedAggregateFields(state, new_gid, self);
         // Dispatch to analysis modules to incorporate source element state
         try splat(.aggregate_init, state, index, self);
+        incorporateRuntimeFieldReferences(state, new_gid, self);
+    }
+
+    fn incorporateRuntimeFieldReferences(state: State, aggregate_gid: Gid, self: @This()) void {
+        const aggregate_ref = state.refinements.at(aggregate_gid);
+        if (aggregate_ref.* != .@"struct") return;
+
+        for (aggregate_ref.@"struct".fields, 0..) |field_gid, i| {
+            if (i >= self.elements.len) break;
+            const src_gid = switch (self.elements[i]) {
+                .inst => |inst| state.results[inst].refinement orelse continue,
+                .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse continue,
+                .fnptr => continue,
+            };
+            updateFieldReferences(state.refinements, field_gid, src_gid);
+        }
     }
 
     fn preserveTrackedInternedAggregateFields(state: State, aggregate_gid: Gid, self: @This()) !void {
@@ -3482,6 +3515,36 @@ fn mergeRefinementRecursive(
                 try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, field_idx, branches, field_gids, merged, copied_from_branch, base_len);
             }
         },
+        .hashmap => |h| {
+            const storage_gids = [_]Gid{ h.metadata_gid, h.keys_gid, h.values_gid };
+            const field_gids = try allocator.alloc(?Gid, branches.len);
+            defer allocator.free(field_gids);
+
+            for (storage_gids, 0..) |storage_gid, storage_i| {
+                for (branches, branch_gids, 0..) |branch_opt, branch_gid_opt, i| {
+                    const branch = branch_opt orelse {
+                        field_gids[i] = null;
+                        continue;
+                    };
+                    const branch_gid = branch_gid_opt orelse {
+                        field_gids[i] = null;
+                        continue;
+                    };
+                    const branch_ref = branch.refinements.at(branch_gid).*;
+                    if (branch_ref != .hashmap) {
+                        field_gids[i] = null;
+                        continue;
+                    }
+                    field_gids[i] = switch (storage_i) {
+                        0 => branch_ref.hashmap.metadata_gid,
+                        1 => branch_ref.hashmap.keys_gid,
+                        2 => branch_ref.hashmap.values_gid,
+                        else => unreachable,
+                    };
+                }
+                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, storage_gid, branches, field_gids, merged, copied_from_branch, base_len);
+            }
+        },
         .@"union" => |u| {
             // Need separate array for union fields since we recurse multiple times
             const field_gids = try allocator.alloc(?Gid, branches.len);
@@ -3835,6 +3898,53 @@ test "aggregate_init preserves tracked interned allocator identity" {
     const struct_gid = results[0].refinement.?;
     const field_gid = refinements.at(struct_gid).@"struct".fields[0];
     try std.testing.expectEqual(@as(u32, 517906155), refinements.at(field_gid).allocator.type_id);
+}
+
+test "aggregate_init pointer field shares source target" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 2;
+    const state = testState(&ctx, &results, &refinements);
+    const pointer_ty: Type = .{ .pointer = .{ .to = &.{ .scalar = .{} } } };
+
+    try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
+    try Inst.apply(state, 1, .{ .aggregate_init = .{
+        .ty = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{pointer_ty} } },
+        .elements = &.{.{ .inst = 0 }},
+    } });
+
+    const source_pointer_gid = results[0].refinement.?;
+    const aggregate_gid = results[1].refinement.?;
+    const field_gid = refinements.at(aggregate_gid).@"struct".fields[0];
+    try std.testing.expectEqual(
+        refinements.at(source_pointer_gid).pointer.to,
+        refinements.at(field_gid).pointer.to,
+    );
+}
+
+test "privileged hashmap value copies preserve canonical identity and storage slots" {
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    const map_gid = try refinements.appendEntity(try typeToRefinement(
+        .{ .hashmap = .{ .type_id = 1234 } },
+        &refinements,
+    ));
+    const map = refinements.at(map_gid).hashmap;
+
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(map.metadata_gid).*));
+    try std.testing.expectEqual(.region, refinements.at(map.metadata_gid).scalar.multiplicity);
+    try std.testing.expectEqual(.unimplemented, std.meta.activeTag(refinements.at(map.keys_gid).*));
+    try std.testing.expectEqual(.unimplemented, std.meta.activeTag(refinements.at(map.values_gid).*));
+    try std.testing.expectEqual(map_gid, try refinements.valueCopy(map_gid));
 }
 
 test "store struct preserves allocator field identity" {

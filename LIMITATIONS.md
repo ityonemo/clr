@@ -23,10 +23,20 @@ the future.
 
 ### Stdlib HashMap Invariants
 
-`HashMapUnmanaged.header`, `getIndex`, and some capacity-assumed insertion
-helpers depend on HashMap invariants that ordinary AIR does not expose directly.
-CLR models those paths through narrow stdlib overrides instead of weakening
-general optional unwrap, pointer arithmetic, packed metadata, or leak checking.
+Managed `std.HashMap` values are represented by a privileged refinement with
+canonical metadata, key, and value storage GIDs. The supported opaque boundary
+currently covers `init`, `put`, `get`, `getPtr`, `valueIterator`,
+`FieldIterator.next`, and `deinit`; selected unmanaged metadata helpers remain
+narrow overrides. This avoids depending on HashMap's private struct layout and
+does not weaken general optional unwrap, pointer arithmetic, packed metadata,
+or leak checking.
+
+The current model has one representative key slot and one representative value
+slot per map, not per-entry storage. It covers scalar maps and the tested case
+where a stored aggregate owns one pointer allocation. A map containing multiple
+entries with independently managed pointer values may require multiple-source
+provenance or per-entry identities and is not yet claimed as fully modeled.
+Unlisted HashMap methods are unsupported until given focused boundary tests.
 
 This is a stdlib-specific override. User code should eventually express similar
 facts through a declarative refinement/tag mechanism rather than hidden

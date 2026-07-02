@@ -47,6 +47,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "pointer derived from by-value aggregate parameter does not leak allocation" {
+    run compile_and_run "$TEST_CASES/allocator_safety/struct_pointer_field/pointer_from_value_parameter_no_leak.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive when callee frees struct pointer field" {
     run compile_and_run "$TEST_CASES/allocator_safety/struct_pointer_field/struct_pointer_field_pass_to_callee_noleak.zig"
     [ "$status" -eq 0 ]

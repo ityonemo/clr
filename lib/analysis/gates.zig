@@ -102,6 +102,13 @@ pub fn isHashMapValueIterator(fqn: []const u8) bool {
     return is_hashmap and std.mem.endsWith(u8, fqn, ".valueIterator");
 }
 
+pub fn isHashMapFieldIteratorNext(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMapUnmanaged(") != null) and
+        std.mem.indexOf(u8, fqn, ".FieldIterator(") != null and
+        std.mem.endsWith(u8, fqn, ".next");
+}
+
 /// Match std.hash_map.HashMapUnmanaged.Metadata predicate helpers.
 pub fn isHashMapMetadataPredicate(fqn: []const u8) bool {
     if (std.mem.indexOf(u8, fqn, "hash_map.HashMapUnmanaged(") == null and
@@ -138,6 +145,36 @@ pub fn isHashMapManagedPut(fqn: []const u8) bool {
     return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
         std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
         std.mem.endsWith(u8, fqn, ".put");
+}
+
+pub fn isHashMapInit(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
+        std.mem.endsWith(u8, fqn, ".init");
+}
+
+pub fn isHashMapGetPtr(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
+        std.mem.endsWith(u8, fqn, ".getPtr");
+}
+
+pub fn isHashMapGet(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
+        std.mem.endsWith(u8, fqn, ".get");
+}
+
+pub fn isHashMapManagedDeinit(fqn: []const u8) bool {
+    return (std.mem.indexOf(u8, fqn, "hash_map.HashMap(") != null or
+        std.mem.indexOf(u8, fqn, "std.hash_map.HashMap(") != null) and
+        std.mem.endsWith(u8, fqn, ".deinit");
+}
+
+test "managed HashMap put matches storage mutator gate" {
+    const fqn = "hash_map.HashMap(u32,example.Value,hash_map.AutoContext(u32),80).put";
+    try std.testing.expect(isHashMapManagedPut(fqn));
+    try std.testing.expect(isHashMapStorageMutator(fqn));
 }
 
 /// Match std.hash_map.HashMapUnmanaged.deallocate.

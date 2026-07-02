@@ -4,6 +4,35 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Preserve HashMap value storage identity
+
+**Date:** 2026-07-02
+
+**Symptom:**
+Values stored in `std.HashMap` and later recovered through `getPtr` or
+`valueIterator` lost nested pointer provenance. Painting transient accessor
+views as HashMap backing storage could misclassify a value-owned pointer as a
+field pointer into the map allocation.
+
+**Root Cause:**
+Each stdlib accessor produced a disconnected refinement view. CLR had no
+persistent edge from a managed HashMap to its metadata, key, and value storage.
+
+**The Fix:**
+Added a privileged `.hashmap` type/refinement with fixed canonical storage GIDs
+and identity-preserving copy/store semantics. Codegen recognizes managed
+`std.HashMap` types, and focused boundaries model `init`, `put`, `get`,
+`getPtr`, value iteration, and `deinit` without entering private stdlib layout.
+Aggregate initialization also now shares pointer targets rather than duplicating
+allocation roots.
+
+**Integration Tests:**
+- `test/cases/std/hashmap_owned_pointer_slice.zig`
+- `test/cases/std/hashmap_value_iterator.zig`
+- `test/cases/allocator_safety/struct_pointer_field/pointer_from_value_parameter_no_leak.zig`
+
+---
+
 ## Fix: Treat HashMap valueIterator as a stdlib boundary
 
 **Date:** 2026-07-02

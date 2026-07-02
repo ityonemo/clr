@@ -126,10 +126,11 @@ reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
 returned-pointer destroy handling, labeled-switch branch-result import work,
 FD safety refactoring, std.mem.asBytes raw-byte pointer handling, HashMap
 stdlib overrides, repeated scalar-only struct expansion, and returned allocator
-field identity is `376/376`
+field identity, aggregate pointer target identity, and privileged HashMap
+storage is `379/379`
 passing. The last full measured baseline was from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
-./run_integration.sh` on 2026-07-01.
+./run_integration.sh` on 2026-07-02.
 
 Keep `LIMITATIONS.md` accurate as the public inventory of supported behavior and
 known gaps. The main engineering risks to keep in mind are:
@@ -150,8 +151,10 @@ known gaps. The main engineering risks to keep in mind are:
 - Stdlib reductions. Packed struct init, packed-struct scalar cross-call safety,
   `std.mem.indexOfSentinel` SIMD `select`/`splat` handling, memcpy/memset
   destination definition, string literal equality, branch clobber, copied
-  struct-argument allocation reachability, basic ArrayList usage, basic HashMap
-  usage, and `std.mem.asBytes(&scalar)` byte views are covered.
+  struct-argument allocation reachability, basic ArrayList usage, privileged
+  HashMap scalar/value-iterator/single-owned-value usage, and
+  `std.mem.asBytes(&scalar)` byte views are covered. HashMap currently has one
+  representative key/value storage slot rather than per-entry provenance.
 - Global union initialization. Basic active-variant import from generated global
   refinement structure is covered, but this remains sensitive to new InternPool
   shapes. Document any newly discovered shape in `LIMITATIONS.md` and cover it
@@ -197,4 +200,5 @@ Good next targets:
 1. Recommended next focused sprint: choose the next architectural gap now that
    full integration is green. FD aliasing remains a good later target, but it no
    longer blocks the current suite.
-2. Keep HashMap stdlib overrides narrow; broaden them only with focused tests.
+2. Keep the privileged HashMap boundary narrow; add methods or per-entry
+   provenance only with focused tests.

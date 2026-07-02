@@ -888,6 +888,11 @@ pub const MemorySafety = union(enum) {
                     }
                 }
             },
+            .hashmap => |h| {
+                try checkReturnedStackEscape(refinements, h.metadata_gid, ctx);
+                try checkReturnedStackEscape(refinements, h.keys_gid, ctx);
+                try checkReturnedStackEscape(refinements, h.values_gid, ctx);
+            },
             .recursive => |r| try checkReturnedStackEscape(refinements, r.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
         }
@@ -961,6 +966,11 @@ pub const MemorySafety = union(enum) {
                         try checkStackEscapeRecursive(refinements, field_idx, ctx, func_name);
                     }
                 }
+            },
+            .hashmap => |h| {
+                try checkStackEscapeRecursive(refinements, h.metadata_gid, ctx, func_name);
+                try checkStackEscapeRecursive(refinements, h.keys_gid, ctx, func_name);
+                try checkStackEscapeRecursive(refinements, h.values_gid, ctx, func_name);
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
@@ -1110,6 +1120,7 @@ pub const MemorySafety = union(enum) {
                 markPayloadErrorStub(refinements, p.to);
             },
             .scalar => |*s| s.analyte.memory_safety = .{ .error_stub = {} },
+            .hashmap => |*h| h.analyte.memory_safety = .{ .error_stub = {} },
             .@"struct" => |*st| {
                 st.analyte.memory_safety = .{ .error_stub = {} };
                 for (st.fields) |field_gid| {
@@ -1613,6 +1624,9 @@ pub const MemorySafety = union(enum) {
                 }
                 break :blk false;
             },
+            .hashmap => |h| hasEquivalentAllocationInner(refinements, h.metadata_gid, allocation, depth + 1) or
+                hasEquivalentAllocationInner(refinements, h.keys_gid, allocation, depth + 1) or
+                hasEquivalentAllocationInner(refinements, h.values_gid, allocation, depth + 1),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
         };
     }
@@ -1628,6 +1642,7 @@ pub const MemorySafety = union(enum) {
             .recursive => |*rec| &rec.analyte,
             .@"union" => |*un| &un.analyte,
             .allocator => |*a| &a.analyte,
+            .hashmap => |*h| &h.analyte,
             .fnptr => |*f| &f.analyte,
             .void, .noreturn, .unimplemented => @panic("no analyte on this type"),
         };
@@ -1645,6 +1660,7 @@ pub const MemorySafety = union(enum) {
             .recursive => |rec| rec.analyte.memory_safety == null,
             .@"union" => |u| u.analyte.memory_safety == null,
             .allocator => |a| a.analyte.memory_safety == null,
+            .hashmap => |h| h.analyte.memory_safety == null,
             .fnptr => |f| f.analyte.memory_safety == null,
             .void, .noreturn, .unimplemented => true, // No analyte, so no memory_safety
         };
@@ -1660,6 +1676,7 @@ pub const MemorySafety = union(enum) {
             .recursive => |rec| rec.analyte.memory_safety,
             .@"union" => |u| u.analyte.memory_safety,
             .allocator => |a| a.analyte.memory_safety,
+            .hashmap => |h| h.analyte.memory_safety,
             .fnptr => |f| f.analyte.memory_safety,
             .void, .noreturn, .unimplemented => null,
         };
@@ -1681,6 +1698,7 @@ pub const MemorySafety = union(enum) {
             .@"union" => |*u| &u.analyte,
             .recursive => |*r| &r.analyte,
             .allocator => |*a| &a.analyte,
+            .hashmap => |*h| &h.analyte,
             .fnptr => |*f| &f.analyte,
             .void, .noreturn, .unimplemented => @panic("refinement type does not have analyte"),
         };
@@ -1818,6 +1836,7 @@ pub const MemorySafety = union(enum) {
             .errorunion => |e| e.analyte.memory_safety,
             .recursive => |r| r.analyte.memory_safety,
             .allocator => |a| a.analyte.memory_safety,
+            .hashmap => |h| h.analyte.memory_safety,
             .fnptr => |f| f.analyte.memory_safety,
             else => null,
         };
@@ -2540,6 +2559,7 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .allocator => |*a| a.analyte.memory_safety = placeholder,
+            .hashmap => |*h| h.analyte.memory_safety = placeholder,
             .fnptr => |*f| f.analyte.memory_safety = placeholder,
             .recursive => |r| {
                 ref.recursive.analyte.memory_safety = placeholder;
@@ -3171,12 +3191,12 @@ pub const MemorySafety = union(enum) {
         }
 
         // Copy analyte state recursively from source to destination
-        copyMemorySafetyStateRecursive(state.refinements, dst_gid, src_gid.?);
+        copyMemorySafetyStateRecursive(state.refinements, dst_gid, src_gid.?, state.ctx);
     }
 
     /// Recursively copy memory_safety state from source GID to destination GID.
     /// If source doesn't have memory_safety, destination is left as null (no tracking).
-    fn copyMemorySafetyStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid) void {
+    fn copyMemorySafetyStateRecursive(refinements: *Refinements, dst_gid: Gid, src_gid: Gid, ctx: *Context) void {
         const src_ref = refinements.at(src_gid);
         const dst_ref = refinements.at(dst_gid);
 
@@ -3193,11 +3213,15 @@ pub const MemorySafety = union(enum) {
                     .pointer => |sp| sp.analyte.memory_safety,
                     else => null, // Type mismatch - leave untracked
                 };
-                // Also copy pointee state
-                if (src_ref.* == .pointer) {
-                    copyMemorySafetyStateRecursive(refinements, p.to, src_ref.pointer.to);
-                }
-                // If type mismatch, pointee keeps its default null memory_safety
+                // Aggregate initialization copies the pointer value, not the
+                // pointee. tag.AggregateInit reconnects this pointer to the
+                // source target after analysis dispatch. Initialize the
+                // soon-to-be-orphaned type skeleton so testValid can still
+                // inspect every entity in the table.
+                paintSpatialMemory(refinements, p.to, .{ .stack = .{
+                    .trace = ctx.captureTrace(),
+                    .root_gid = null,
+                } });
             },
             .optional => |*o| {
                 o.analyte.memory_safety = switch (src_ref.*) {
@@ -3205,7 +3229,7 @@ pub const MemorySafety = union(enum) {
                     else => null,
                 };
                 if (src_ref.* == .optional) {
-                    copyMemorySafetyStateRecursive(refinements, o.to, src_ref.optional.to);
+                    copyMemorySafetyStateRecursive(refinements, o.to, src_ref.optional.to, ctx);
                 }
             },
             .errorunion => |*e| {
@@ -3214,7 +3238,7 @@ pub const MemorySafety = union(enum) {
                     else => null,
                 };
                 if (src_ref.* == .errorunion) {
-                    copyMemorySafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
+                    copyMemorySafetyStateRecursive(refinements, e.to, src_ref.errorunion.to, ctx);
                 }
             },
             .@"struct" => |*s| {
@@ -3226,7 +3250,7 @@ pub const MemorySafety = union(enum) {
                     const src_s = src_ref.@"struct";
                     for (s.fields, 0..) |field_gid, i| {
                         if (i < src_s.fields.len) {
-                            copyMemorySafetyStateRecursive(refinements, field_gid, src_s.fields[i]);
+                            copyMemorySafetyStateRecursive(refinements, field_gid, src_s.fields[i], ctx);
                         }
                         // Extra fields keep default null memory_safety
                     }
@@ -3244,7 +3268,7 @@ pub const MemorySafety = union(enum) {
                         const field_gid = maybe_field orelse continue;
                         if (i < src_u.fields.len) {
                             if (src_u.fields[i]) |src_field| {
-                                copyMemorySafetyStateRecursive(refinements, field_gid, src_field);
+                                copyMemorySafetyStateRecursive(refinements, field_gid, src_field, ctx);
                             }
                             // Else source field null - dest keeps default null memory_safety
                         }
@@ -3256,6 +3280,12 @@ pub const MemorySafety = union(enum) {
             .allocator => |*a| {
                 a.analyte.memory_safety = switch (src_ref.*) {
                     .allocator => |sa| sa.analyte.memory_safety,
+                    else => null,
+                };
+            },
+            .hashmap => |*h| {
+                h.analyte.memory_safety = switch (src_ref.*) {
+                    .hashmap => |src_h| src_h.analyte.memory_safety,
                     else => null,
                 };
             },
@@ -3347,6 +3377,9 @@ pub const MemorySafety = union(enum) {
                 }
                 break :blk false;
             },
+            .hashmap => |h| containsReachableAllocation(refinements, h.metadata_gid, depth + 1) or
+                containsReachableAllocation(refinements, h.keys_gid, depth + 1) or
+                containsReachableAllocation(refinements, h.values_gid, depth + 1),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
         };
     }
@@ -3423,6 +3456,10 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .allocator => |*a| a.analyte.memory_safety = ms,
+            .hashmap => |*h| {
+                h.analyte.memory_safety = ms;
+                paintSpatialMemory(refinements, h.metadata_gid, ms);
+            },
             .fnptr => |*f| f.analyte.memory_safety = ms,
             .recursive => |r| {
                 ref.recursive.analyte.memory_safety = ms;
@@ -3468,6 +3505,9 @@ pub const MemorySafety = union(enum) {
             .allocator => |*a| {
                 if (a.analyte.memory_safety == null) a.analyte.memory_safety = ms;
             },
+            .hashmap => |*h| {
+                if (h.analyte.memory_safety == null) h.analyte.memory_safety = ms;
+            },
             .fnptr => |*f| {
                 if (f.analyte.memory_safety == null) f.analyte.memory_safety = ms;
             },
@@ -3491,7 +3531,7 @@ pub const MemorySafety = union(enum) {
     pub fn initPointerTargetsPlaceholder(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
-            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .void, .noreturn, .unimplemented => {},
             .pointer => |p| {
                 // Only set target to placeholder if it doesn't already have memory_safety set
                 // This prevents overwriting caller-owned entities that were aliased via store
@@ -3598,6 +3638,11 @@ pub const MemorySafety = union(enum) {
                     if (src_ref.allocator.analyte.memory_safety) |ms| {
                         dest_ref.allocator.analyte.memory_safety = ms;
                     }
+                }
+            },
+            .hashmap => {
+                if (src_ref.* == .hashmap) {
+                    dest_ref.hashmap.analyte.memory_safety = src_ref.hashmap.analyte.memory_safety;
                 }
             },
             .fnptr => {
@@ -3732,6 +3777,7 @@ pub const MemorySafety = union(enum) {
             .@"struct" => |s| s.analyte.memory_safety,
             .@"union" => |u| u.analyte.memory_safety,
             .allocator => |a| a.analyte.memory_safety,
+            .hashmap => |h| h.analyte.memory_safety,
             .fnptr => |f| f.analyte.memory_safety,
             .recursive => |r| r.analyte.memory_safety,
             .void, .noreturn, .unimplemented => null,
@@ -3765,6 +3811,7 @@ pub const MemorySafety = union(enum) {
             .@"struct" => |s| s.analyte.memory_safety,
             .@"union" => |u| u.analyte.memory_safety,
             .allocator => |a| a.analyte.memory_safety,
+            .hashmap => |h| h.analyte.memory_safety,
             .fnptr => |f| f.analyte.memory_safety,
             .recursive => |r| r.analyte.memory_safety,
             .void, .noreturn, .unimplemented => null,
@@ -3802,8 +3849,56 @@ pub const MemorySafety = union(enum) {
             std.debug.panic("hashmap valueIterator: expected three-field iterator struct", .{});
         }
 
+        if (getHashMapGid(state, args[0])) |map_gid| {
+            const map_ref = state.refinements.at(map_gid);
+            if (map_ref.* == .hashmap) {
+                paintPrivilegedHashMapView(state, result_ref.@"struct".fields[1], map_gid, map_ref.hashmap.metadata_gid);
+                paintPrivilegedHashMapView(state, result_ref.@"struct".fields[2], map_gid, map_ref.hashmap.values_gid);
+                return;
+            }
+        }
+
         try paintHashMapPointerView(state, result_ref.@"struct".fields[1], args[0]);
         try paintHashMapPointerView(state, result_ref.@"struct".fields[2], args[0]);
+    }
+
+    fn paintPrivilegedHashMapView(state: State, result_gid: Gid, map_gid: Gid, target_gid: Gid) void {
+        const result = state.refinements.at(result_gid);
+        if (result.* != .pointer) @panic("privileged hashmap view result is not pointer");
+        const map_ms = state.refinements.at(map_gid).hashmap.analyte.memory_safety orelse
+            @panic("privileged hashmap view has no storage provenance");
+        result.pointer.to = target_gid;
+        result.pointer.analyte.memory_safety = switch (map_ms) {
+            .allocated => |a| .{ .allocated = .{
+                .trace = a.trace,
+                .root_gid = state.refinements.at(map_gid).hashmap.metadata_gid,
+                .allocator_gid = a.allocator_gid,
+                .type_id = a.type_id,
+                .freed = a.freed,
+            } },
+            else => map_ms,
+        };
+    }
+
+    fn handleHashMapFieldIteratorNext(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) @panic("hashmap FieldIterator.next missing self");
+        const self_gid = srcGid(state, args[0]) orelse @panic("hashmap FieldIterator.next self has no refinement");
+        const self_ref = state.refinements.at(self_gid);
+        const iterator_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+        const iterator = state.refinements.at(iterator_gid);
+        if (iterator.* != .@"struct" or iterator.@"struct".fields.len != 3) {
+            @panic("hashmap FieldIterator.next self is not iterator struct");
+        }
+        const values_pointer = state.refinements.at(iterator.@"struct".fields[2]);
+        if (values_pointer.* != .pointer) @panic("hashmap FieldIterator.next values field is not pointer");
+
+        const result_gid = requireResult(state, index, "hashmap FieldIterator.next");
+        const result = state.refinements.at(result_gid);
+        if (result.* != .optional) @panic("hashmap FieldIterator.next result is not optional");
+        const result_pointer = state.refinements.at(result.optional.to);
+        if (result_pointer.* != .pointer) @panic("hashmap FieldIterator.next payload is not pointer");
+        result_pointer.pointer.to = values_pointer.pointer.to;
+        result_pointer.pointer.analyte.memory_safety = values_pointer.pointer.analyte.memory_safety;
     }
 
     fn handleHashMapDeallocate(state: State, args: []const tag.Src) void {
@@ -3869,22 +3964,49 @@ pub const MemorySafety = union(enum) {
         initPointerTargetsPlaceholder(state.refinements, result_ref.pointer.to);
     }
 
-    fn handleHashMapManagedPut(state: State, args: []const tag.Src) void {
+    fn handleHashMapManagedPut(state: State, args: []const tag.Src) !void {
         if (args.len < 1) return;
-        const self_gid = switch (args[0]) {
-            .inst => |inst| state.results[inst].refinement orelse return,
-            .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return,
-            .fnptr => return,
-        };
-        const self_ref = state.refinements.at(self_gid);
-        const managed_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+        const managed_gid = getHashMapGid(state, args[0]) orelse return;
         const managed = state.refinements.at(managed_gid);
-        if (managed.* != .@"struct" or managed.@"struct".fields.len < 2) return;
+        if (managed.* == .hashmap) {
+            if (args.len < 3) @panic("hashmap put missing key or value");
 
+            const map = state.refinements.at(managed_gid).hashmap;
+            if (srcGid(state, args[1])) |key_gid| {
+                installHashMapSlot(state.refinements, map.keys_gid, key_gid);
+            } else if (args[1] == .interned) {
+                try installHashMapInternedSlot(state, map.keys_gid, args[1].interned);
+            }
+            if (srcGid(state, args[2])) |value_gid| {
+                installHashMapSlot(state.refinements, map.values_gid, value_gid);
+            } else if (args[2] == .interned) {
+                try installHashMapInternedSlot(state, map.values_gid, args[2].interned);
+            } else {
+                return;
+            }
+            state.refinements.at(map.keys_gid).setMultiplicity(.region);
+            state.refinements.at(map.values_gid).setMultiplicity(.region);
+            const allocator_gid = map.allocator_gid orelse
+                @panic("hashmap put before allocator initialization");
+            const metadata_gid = map.metadata_gid;
+            if (state.refinements.at(metadata_gid).* != .scalar) {
+                @panic("hashmap metadata slot is not scalar");
+            }
+            const allocation: MemorySafety = .{ .allocated = .{
+                .trace = state.ctx.captureTrace(),
+                .root_gid = metadata_gid,
+                .allocator_gid = allocator_gid,
+                .type_id = state.refinements.at(allocator_gid).allocator.type_id,
+            } };
+            state.refinements.at(metadata_gid).scalar.analyte.memory_safety = allocation;
+            state.refinements.at(managed_gid).hashmap.analyte.memory_safety = allocation;
+            return;
+        }
+
+        if (managed.* != .@"struct" or managed.@"struct".fields.len < 2) return;
         const unmanaged_gid = managed.@"struct".fields[0];
         const allocator_gid = managed.@"struct".fields[1];
         if (state.refinements.at(allocator_gid).* != .allocator) return;
-
         const unmanaged = state.refinements.at(unmanaged_gid);
         if (unmanaged.* != .@"struct" or unmanaged.@"struct".fields.len == 0) return;
         const metadata = state.refinements.at(unmanaged.@"struct".fields[0]);
@@ -3904,6 +4026,103 @@ pub const MemorySafety = union(enum) {
         } };
         metadata_ptr.pointer.analyte.memory_safety = allocation;
         paintSpatialMemory(state.refinements, region_gid, allocation);
+    }
+
+    fn installHashMapInternedSlot(state: State, slot_gid: Gid, interned: core.Interned) !void {
+        const refinement = try tag.typeToRefinement(interned.ty, state.refinements);
+        state.refinements.at(slot_gid).* = refinement;
+        switch (state.refinements.at(slot_gid).*) {
+            .void, .noreturn, .unimplemented => {},
+            inline else => |*data| data.gid = slot_gid,
+        }
+        tag.splatInitInterned(state.refinements, slot_gid);
+    }
+
+    fn installHashMapSlot(refinements: *Refinements, slot_gid: Gid, source_gid: Gid) void {
+        const copied_gid = refinements.valueCopy(source_gid) catch @panic("out of memory");
+        const copied = refinements.at(copied_gid).*;
+        refinements.at(slot_gid).* = copied;
+        switch (refinements.at(slot_gid).*) {
+            .void, .noreturn, .unimplemented => {},
+            inline else => |*data| data.gid = slot_gid,
+        }
+        refinements.at(copied_gid).* = .{ .unimplemented = {} };
+    }
+
+    fn handleHashMapInit(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) @panic("hashmap init missing allocator");
+        const result_gid = requireResult(state, index, "hashmap init");
+        const result = state.refinements.at(result_gid);
+        if (result.* != .hashmap) @panic("hashmap init result is not privileged hashmap");
+        const raw_allocator_gid = srcGid(state, args[0]) orelse @panic("hashmap init allocator has no refinement");
+        const raw_allocator = state.refinements.at(raw_allocator_gid);
+        const allocator_gid = if (raw_allocator.* == .pointer) raw_allocator.pointer.to else raw_allocator_gid;
+        if (state.refinements.at(allocator_gid).* != .allocator) @panic("hashmap init argument is not allocator");
+        result.hashmap.allocator_gid = allocator_gid;
+    }
+
+    fn handleHashMapGetPtr(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) @panic("hashmap getPtr missing self");
+        const map_gid = getHashMapGid(state, args[0]) orelse @panic("hashmap getPtr self is not privileged hashmap");
+        const map = state.refinements.at(map_gid).hashmap;
+        const result_gid = requireResult(state, index, "hashmap getPtr");
+        const result = state.refinements.at(result_gid);
+        if (result.* != .optional) @panic("hashmap getPtr result is not optional");
+        const pointer = state.refinements.at(result.optional.to);
+        if (pointer.* != .pointer) @panic("hashmap getPtr payload is not pointer");
+        pointer.pointer.to = map.values_gid;
+
+        const metadata_ms = state.refinements.at(map_gid).hashmap.analyte.memory_safety orelse
+            @panic("hashmap getPtr before storage initialization");
+        pointer.pointer.analyte.memory_safety = switch (metadata_ms) {
+            .allocated => |a| .{ .allocated = .{
+                .trace = a.trace,
+                .root_gid = map.metadata_gid,
+                .allocator_gid = a.allocator_gid,
+                .type_id = a.type_id,
+                .freed = a.freed,
+            } },
+            else => metadata_ms,
+        };
+    }
+
+    fn handleHashMapGet(state: State, index: usize, args: []const tag.Src) void {
+        if (args.len < 1) @panic("hashmap get missing self");
+        const map_gid = getHashMapGid(state, args[0]) orelse @panic("hashmap get self is not privileged hashmap");
+        const map = state.refinements.at(map_gid);
+        if (map.* != .hashmap) @panic("hashmap get self is not privileged hashmap");
+        const result_gid = requireResult(state, index, "hashmap get");
+        const result = state.refinements.at(result_gid);
+        if (result.* != .optional) @panic("hashmap get result is not optional");
+        result.optional.to = state.refinements.valueCopy(map.hashmap.values_gid) catch @panic("out of memory");
+    }
+
+    fn handleHashMapManagedDeinit(state: State, args: []const tag.Src) void {
+        if (args.len < 1) return;
+        const map_gid = getHashMapGid(state, args[0]) orelse return;
+        const map = state.refinements.at(map_gid);
+        if (map.* != .hashmap) return;
+        const ms = map.hashmap.analyte.memory_safety orelse return;
+        if (ms != .allocated) return;
+        var allocation = ms.allocated;
+        if (allocation.freed == null) allocation.freed = .{ .trace = state.ctx.captureTrace() };
+        setFreedForEquivalentAllocations(state.refinements, allocation);
+    }
+
+    fn srcGid(state: State, src: tag.Src) ?Gid {
+        return switch (src) {
+            .inst => |inst| state.results[inst].refinement,
+            .interned => |interned| state.refinements.getGlobal(interned.ip_idx),
+            .fnptr => null,
+        };
+    }
+
+    fn getHashMapGid(state: State, src: tag.Src) ?Gid {
+        const gid = srcGid(state, src) orelse return null;
+        const ref = state.refinements.at(gid);
+        if (ref.* == .hashmap) return gid;
+        if (ref.* == .pointer and state.refinements.at(ref.pointer.to).* == .hashmap) return ref.pointer.to;
+        return gid;
     }
 
     fn getHashMapMetadataPointerGid(state: State, src: tag.Src) Gid {
@@ -4098,8 +4317,30 @@ pub const MemorySafety = union(enum) {
             return true;
         }
 
+        if (gates.isHashMapInit(fqn)) {
+            handleHashMapInit(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapGetPtr(fqn)) {
+            handleHashMapGetPtr(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapGet(fqn)) {
+            handleHashMapGet(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapManagedDeinit(fqn)) {
+            handleHashMapManagedDeinit(state, args);
+            return true;
+        }
+
         if (gates.isHashMapStorageMutator(fqn)) {
-            if (gates.isHashMapManagedPut(fqn)) handleHashMapManagedPut(state, args);
+            if (gates.isHashMapManagedPut(fqn)) {
+                try handleHashMapManagedPut(state, args);
+            }
             return true;
         }
 
@@ -4115,6 +4356,11 @@ pub const MemorySafety = union(enum) {
 
         if (gates.isHashMapValueIterator(fqn)) {
             try handleHashMapValueIterator(state, index, args);
+            return true;
+        }
+
+        if (gates.isHashMapFieldIteratorNext(fqn)) {
+            handleHashMapFieldIteratorNext(state, index, args);
             return true;
         }
 
@@ -4201,7 +4447,7 @@ pub const MemorySafety = union(enum) {
                     paintProcessArgsReturnedMemory(refinements, r.to, ms);
                 }
             },
-            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -4365,6 +4611,11 @@ pub const MemorySafety = union(enum) {
                 }
             },
             .optional => |o| try checkUseAfterFreeRecursive(refinements, o.to, ctx),
+            .hashmap => |h| {
+                try checkUseAfterFreeRecursive(refinements, h.metadata_gid, ctx);
+                try checkUseAfterFreeRecursive(refinements, h.keys_gid, ctx);
+                try checkUseAfterFreeRecursive(refinements, h.values_gid, ctx);
+            },
             .errorunion => |e| try checkUseAfterFreeRecursive(refinements, e.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
         }
@@ -5070,6 +5321,9 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         },
         .allocator => |a| {
             if (a.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on allocator (idx={d})", .{idx});
+        },
+        .hashmap => |h| {
+            if (h.analyte.memory_safety == null) std.debug.panic("memory_safety must be set on hashmap (idx={d})", .{idx});
         },
         // Container types - no undefined_safety on themselves, just check memory_safety exists
         inline .optional, .errorunion, .recursive, .@"struct", .@"union" => |data, t| {

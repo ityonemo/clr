@@ -143,6 +143,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no false positive for HashMap value owning pointer slice" {
+    run compile_and_run "$TEST_CASES/std/hashmap_owned_pointer_slice.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive for HashMap value iterator" {
     run compile_and_run "$TEST_CASES/std/hashmap_value_iterator.zig"
     [ "$status" -eq 0 ]

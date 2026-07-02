@@ -188,6 +188,10 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .allocator => ref.allocator.analyte.undefined_safety = undef_state,
+            .hashmap => |h| {
+                ref.hashmap.analyte.undefined_safety = undef_state;
+                initRecursive(refinements, h.metadata_gid, undef_state);
+            },
             .fnptr => ref.fnptr.analyte.undefined_safety = undef_state,
             .recursive => {}, // Don't follow recursive references
             .void, .unimplemented, .noreturn => {},
@@ -659,6 +663,7 @@ pub const UndefinedSafety = union(enum) {
             .scalar => |s| s.analyte.undefined_safety,
             .pointer => |p| p.analyte.undefined_safety,
             .allocator => |a| a.analyte.undefined_safety,
+            .hashmap => |h| h.analyte.undefined_safety,
             .fnptr => |f| f.analyte.undefined_safety,
             // Container types don't have undefined state on themselves
             .optional, .errorunion, .@"struct", .@"union", .recursive, .void, .noreturn, .unimplemented => null,
@@ -669,6 +674,7 @@ pub const UndefinedSafety = union(enum) {
             .scalar => |*s| s.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .pointer => |*p| p.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .allocator => |*a| a.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
+            .hashmap => |*h| h.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .fnptr => |*f| f.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             // For container types in destination, recurse
             .optional => |o| copyUndefinedStateRecursive(state.refinements, o.to, src_gid.?),
@@ -756,6 +762,10 @@ pub const UndefinedSafety = union(enum) {
                 .allocator => |sa| sa.analyte.undefined_safety orelse .{ .defined = {} },
                 else => .{ .defined = {} },
             },
+            .hashmap => |*h| h.analyte.undefined_safety = switch (src_ref.*) {
+                .hashmap => |src_h| src_h.analyte.undefined_safety orelse .{ .defined = {} },
+                else => .{ .defined = {} },
+            },
             .fnptr => |*f| f.analyte.undefined_safety = switch (src_ref.*) {
                 .fnptr => |sf| sf.analyte.undefined_safety orelse .{ .defined = {} },
                 else => .{ .defined = {} },
@@ -816,6 +826,11 @@ pub const UndefinedSafety = union(enum) {
                 // Only set to defined if not already set
                 if (a.analyte.undefined_safety == null) {
                     a.analyte.undefined_safety = .{ .defined = {} };
+                }
+            },
+            .hashmap => |*h| {
+                if (h.analyte.undefined_safety == null) {
+                    h.analyte.undefined_safety = .{ .defined = {} };
                 }
             },
             .void, .unimplemented, .noreturn => {},
@@ -1060,6 +1075,7 @@ pub const UndefinedSafety = union(enum) {
                 }
             },
             .allocator => |*a| a.analyte.undefined_safety = undef_state,
+            .hashmap => |*h| h.analyte.undefined_safety = undef_state,
             .void, .unimplemented, .noreturn => {},
             .recursive => {
                 // Don't follow recursive references - they're placeholders
@@ -1075,7 +1091,7 @@ pub const UndefinedSafety = union(enum) {
     fn initPointerTargetsUndefined(refinements: *Refinements, gid: Gid, meta: Meta) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
-            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
+            .scalar, .allocator, .hashmap, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
             .pointer => |p| {
                 // Set target to undefined and recurse
                 setSafetyState(refinements, p.to, .{ .undefined = .{ .meta = meta } });
@@ -1181,6 +1197,12 @@ pub const UndefinedSafety = union(enum) {
                 // Allocator value - mark as defined
                 switch (refinements.at(idx).*) {
                     .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
+                    else => setSafetyState(refinements, idx, .{ .defined = {} }),
+                }
+            },
+            .hashmap => {
+                switch (refinements.at(idx).*) {
+                    .hashmap => |*h| h.analyte.undefined_safety = .{ .defined = {} },
                     else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
             },
@@ -1310,6 +1332,7 @@ pub const UndefinedSafety = union(enum) {
                             }
                         },
                         .allocator => |*a| a.analyte.undefined_safety = .{ .defined = {} },
+                        .hashmap => |*h| h.analyte.undefined_safety = .{ .defined = {} },
                         .fnptr => |*f| f.analyte.undefined_safety = .{ .defined = {} },
                         .void, .unimplemented, .noreturn => {},
                         .recursive => |r| {
@@ -1491,6 +1514,14 @@ pub const UndefinedSafety = union(enum) {
             .allocator => |a| {
                 // Allocator - check for undefined
                 const undef = a.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
+                    .defined => {},
+                }
+            },
+            .hashmap => |h| {
+                const undef = h.analyte.undefined_safety orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(ctx),
                     .inconsistent => return undef.reportInconsistentBranches(ctx),
@@ -1697,6 +1728,7 @@ pub const UndefinedSafety = union(enum) {
             .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
+            .hashmap => |*h| h.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .fnptr => |*f| f.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             // Containers don't track undefined on themselves
             .optional, .errorunion, .@"struct", .@"union", .recursive => {},
@@ -1779,9 +1811,35 @@ pub const UndefinedSafety = union(enum) {
             return true;
         }
 
+        if (gates.isHashMapManagedPut(fqn) and args.len > 0) {
+            const self_gid = switch (args[0]) {
+                .inst => |inst| state.results[inst].refinement orelse return false,
+                .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return false,
+                .fnptr => return false,
+            };
+            const self_ref = state.refinements.at(self_gid);
+            const map_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+            const map = state.refinements.at(map_gid);
+            if (map.* == .hashmap) {
+                const metadata = state.refinements.at(map.hashmap.metadata_gid);
+                if (metadata.* == .scalar) metadata.scalar.analyte.undefined_safety = .{ .defined = {} };
+            }
+            return false;
+        }
+
         if (gates.isHashMapValueIterator(fqn)) {
             handleDefinedScalarResult(state, index);
             return true;
+        }
+
+        if (gates.isHashMapFieldIteratorNext(fqn)) {
+            handleDefinedScalarResult(state, index);
+            return false;
+        }
+
+        if (gates.isHashMapInit(fqn) or gates.isHashMapGetPtr(fqn) or gates.isHashMapGet(fqn)) {
+            handleDefinedScalarResult(state, index);
+            return false;
         }
 
         // POSIX fd functions - check for undefined fd arguments
@@ -1874,6 +1932,14 @@ pub const UndefinedSafety = union(enum) {
             },
             .pointer => |p| {
                 const undef = p.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            .hashmap => |h| {
+                const undef = h.analyte.undefined_safety orelse return;
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(state.ctx),
                     .inconsistent => return undef.reportInconsistentBranches(state.ctx),
@@ -2083,6 +2149,11 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         .allocator => |a| {
             if (a.analyte.undefined_safety == null) {
                 std.debug.panic("undefined state must be set on allocators", .{});
+            }
+        },
+        .hashmap => |h| {
+            if (h.analyte.undefined_safety == null) {
+                std.debug.panic("undefined state must be set on hashmaps", .{});
             }
         },
         inline .optional, .errorunion, .@"struct", .@"union", .recursive => |data, t| {

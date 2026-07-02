@@ -1213,3 +1213,13 @@ test "formatAllocatorType generates correct type string" {
     const result3 = codegen.formatAllocatorType(arena.allocator(), 4294967295);
     try std.testing.expectEqualStrings(".{ .allocator = .{ .type_id = 4294967295 } }", result3);
 }
+
+test "formatHashMapType generates privileged type string" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    try std.testing.expectEqualStrings(
+        ".{ .hashmap = .{ .type_id = 12345 } }",
+        codegen.formatHashMapType(arena.allocator(), 12345),
+    );
+}

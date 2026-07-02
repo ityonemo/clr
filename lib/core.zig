@@ -81,6 +81,11 @@ pub const AllocatorType = struct {
     multiplicity: Multiplicity = .single,
 };
 
+pub const HashMapType = struct {
+    type_id: Name,
+    multiplicity: Multiplicity = .single,
+};
+
 /// Struct type descriptor with type_id for field name lookup.
 pub const StructType = struct {
     type_id: u32, // InternPool index for getFieldId lookup
@@ -108,6 +113,7 @@ pub const Type = union(enum) {
     @"struct": *const StructType, // struct with type_id and field types
     @"union": *const UnionType, // union with type_id and variant types
     allocator: AllocatorType, // pseudo-allocator, should always be pointed to, the allocator
+    hashmap: HashMapType, // privileged stdlib HashMap with canonical storage identities
     // pointer represents the pointer to metadata + pointer to vtable.
     fnptr: TypePayload, // function pointer (choices stored in Src.fnptr)
     recursive: Name, // self-referential type placeholder (Name unused, set to 0)

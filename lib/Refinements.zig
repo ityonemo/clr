@@ -150,6 +150,17 @@ pub const Refinement = union(enum) {
         deinit: ?Trace = null,
     };
 
+    pub const HashMapRef = struct {
+        gid: Gid = INVALID_GID,
+        multiplicity: Multiplicity = .single,
+        analyte: Analyte = .{},
+        type_id: Tid,
+        metadata_gid: Gid,
+        keys_gid: Gid,
+        values_gid: Gid,
+        allocator_gid: ?Gid = null,
+    };
+
     scalar: Scalar,
     pointer: Pointer,
     optional: Indirected,
@@ -159,6 +170,7 @@ pub const Refinement = union(enum) {
     @"union": Union,
     fnptr: FunctionPtr,
     allocator: AllocatorRef, // tracks allocator identity for mismatch detection
+    hashmap: HashMapRef,
     noreturn: void, // specific return value for error paths.
     unimplemented: void, // this is the result of an operation that is unimplemented but does carry a value.
     void: void, // any instructions that don't store anything.
@@ -174,6 +186,10 @@ pub const Refinement = union(enum) {
             .allocator => {
                 if (src != .allocator) std.debug.panic("clobber mismatch: src is .{s} and dst is .allocator", .{@tagName(src)});
                 dst.allocator = src.allocator;
+            },
+            .hashmap => {
+                if (src != .hashmap) std.debug.panic("clobber mismatch: src is .{s} and dst is .hashmap", .{@tagName(src)});
+                dst.hashmap = src.hashmap;
             },
             .fnptr => {
                 if (src != .fnptr) std.debug.panic("clobber mismatch: src is .{s} and dst is .fnptr", .{@tagName(src)});
@@ -227,6 +243,10 @@ pub const Refinement = union(enum) {
             .allocator => {
                 if (src != .allocator) std.debug.panic("clobber mismatch: src is .{s} and dst is .allocator", .{@tagName(src)});
                 dst.allocator = src.allocator;
+            },
+            .hashmap => {
+                if (src != .hashmap) std.debug.panic("clobber mismatch: src is .{s} and dst is .hashmap", .{@tagName(src)});
+                dst.hashmap = src.hashmap;
             },
             .fnptr => {
                 if (src != .fnptr) std.debug.panic("clobber mismatch: src is .{s} and dst is .fnptr", .{@tagName(src)});
@@ -324,6 +344,17 @@ pub const Refinement = union(enum) {
         return switch (src) {
             .scalar => try dst_list.appendEntity(src),
             .allocator => try dst_list.appendEntity(src),
+            .hashmap => |h| blk: {
+                const metadata_gid = try copyValuePreservingPointerTargets(h.metadata_gid, src_list, dst_list);
+                const keys_gid = try copyValuePreservingPointerTargets(h.keys_gid, src_list, dst_list);
+                const values_gid = try copyValuePreservingPointerTargets(h.values_gid, src_list, dst_list);
+                var copied = h;
+                copied.analyte = try h.analyte.copy(dst_list.list.allocator);
+                copied.metadata_gid = metadata_gid;
+                copied.keys_gid = keys_gid;
+                copied.values_gid = values_gid;
+                break :blk try dst_list.appendEntity(.{ .hashmap = copied });
+            },
             .fnptr => |f| blk: {
                 // Deep copy choices array
                 const allocator = dst_list.list.allocator;
@@ -366,6 +397,11 @@ pub const Refinement = union(enum) {
         const new_value: Refinement = switch (src) {
             .scalar => src,
             .allocator => src,
+            .hashmap => |h| blk: {
+                var copied = h;
+                copied.analyte = try h.analyte.copy(allocator);
+                break :blk .{ .hashmap = copied };
+            },
             .fnptr => |f| blk: {
                 const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, f.choices.len);
                 @memcpy(new_choices, f.choices);
@@ -452,6 +488,17 @@ pub const Refinement = union(enum) {
         const copied_gid = switch (src) {
             .scalar => try dst_list.appendEntity(src),
             .allocator => try dst_list.appendEntity(src),
+            .hashmap => |h| blk: {
+                const metadata_gid = try copyValuePreservingPointerTargetsMapped(h.metadata_gid, src_list, dst_list, copied_targets);
+                const keys_gid = try copyValuePreservingPointerTargetsMapped(h.keys_gid, src_list, dst_list, copied_targets);
+                const values_gid = try copyValuePreservingPointerTargetsMapped(h.values_gid, src_list, dst_list, copied_targets);
+                var copied = h;
+                copied.analyte = try h.analyte.copy(allocator);
+                copied.metadata_gid = metadata_gid;
+                copied.keys_gid = keys_gid;
+                copied.values_gid = values_gid;
+                break :blk try dst_list.appendEntity(.{ .hashmap = copied });
+            },
             .fnptr => |f| blk: {
                 const new_choices = try allocator.alloc(@import("lib.zig").FnInterpreter, f.choices.len);
                 @memcpy(new_choices, f.choices);
@@ -540,6 +587,9 @@ pub const Refinement = union(enum) {
                 }
                 break :blk true;
             },
+            .hashmap => |h| pointerTargetsExistInDestination(h.metadata_gid, src_list, dst_list) and
+                pointerTargetsExistInDestination(h.keys_gid, src_list, dst_list) and
+                pointerTargetsExistInDestination(h.values_gid, src_list, dst_list),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => true,
         };
     }
@@ -601,6 +651,14 @@ pub const Refinement = union(enum) {
         switch (src) {
             // fnptr has no nested GIDs - choices are IP indices, not GIDs
             .scalar, .allocator, .fnptr, .unimplemented, .void, .noreturn => {},
+            .hashmap => |h| {
+                for ([_]Gid{ h.metadata_gid, h.keys_gid, h.values_gid }) |child_gid| {
+                    if (!collected.contains(child_gid)) {
+                        try collected.put(child_gid, {});
+                        try collectReachableGids(src_list.at(child_gid).*, src_list, collected);
+                    }
+                }
+            },
             inline .pointer, .optional, .errorunion, .recursive => |data| {
                 const inner_gid = data.to;
                 if (!collected.contains(inner_gid)) {
@@ -863,7 +921,7 @@ pub fn deinit(self: *Refinements) void {
                 allocator.free(@constCast(data.choices));
                 data.analyte.deinit(allocator);
             },
-            inline .scalar, .pointer, .optional, .recursive, .allocator => |data| {
+            inline .scalar, .pointer, .optional, .recursive, .allocator, .hashmap => |data| {
                 data.analyte.deinit(allocator);
             },
             .errorunion => |data| {
@@ -954,6 +1012,11 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                     .choices = new_choices,
                 } });
             },
+            .hashmap => |data| {
+                var copied = data;
+                copied.analyte = try data.analyte.copy(allocator);
+                try new.list.append(.{ .hashmap = copied });
+            },
             // Deep copy analyte for types that have one - memory_safety state must be independent
             inline .scalar, .pointer, .optional, .errorunion, .recursive, .allocator => |data, ref_tag| {
                 const new_analyte = try data.analyte.copy(allocator);
@@ -988,7 +1051,7 @@ pub fn freeValue(self: *Refinements, value: *Refinement) void {
             allocator.free(@constCast(data.choices));
             data.analyte.deinit(allocator);
         },
-        inline .scalar, .pointer, .optional, .recursive, .allocator => |data| {
+        inline .scalar, .pointer, .optional, .recursive, .allocator, .hashmap => |data| {
             data.analyte.deinit(allocator);
         },
         .errorunion => |data| {
@@ -1031,7 +1094,7 @@ pub fn valueCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
         // If we encounter issues with this approach (e.g., branch merging creates conflicting
         // copies), we may need to switch to tracking identity explicitly rather than
         // preventing copies entirely.
-        .allocator => src_gid,
+        .allocator, .hashmap => src_gid,
 
         // Function pointers: deep copy choices array
         .fnptr => |f| blk: {
@@ -1193,6 +1256,12 @@ fn hashRefinement(ref: Refinement) u64 {
         .@"struct" => |s| hashAnalyte(s.analyte, &hasher),
         .@"union" => |u| hashAnalyte(u.analyte, &hasher),
         .allocator => |a| hashAnalyte(a.analyte, &hasher),
+        .hashmap => |h| {
+            hashAnalyte(h.analyte, &hasher);
+            hasher.update(std.mem.asBytes(&h.metadata_gid));
+            hasher.update(std.mem.asBytes(&h.keys_gid));
+            hasher.update(std.mem.asBytes(&h.values_gid));
+        },
         .fnptr => |f| {
             hashAnalyte(f.analyte, &hasher);
             // Also hash the choices array

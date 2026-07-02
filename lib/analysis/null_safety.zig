@@ -429,7 +429,7 @@ pub const NullSafety = union(enum) {
                     }
                 }
             },
-            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -478,7 +478,7 @@ pub const NullSafety = union(enum) {
                 },
                 else => {},
             },
-            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -566,7 +566,7 @@ pub const NullSafety = union(enum) {
                     }
                 }
             },
-            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+            .scalar, .allocator, .hashmap, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
         }
     }
 
@@ -669,6 +669,20 @@ pub const NullSafety = union(enum) {
             return true;
         }
 
+        if (gates.isHashMapGetPtr(fqn)) {
+            const result_gid = state.results[index].refinement orelse return false;
+            const result = state.refinements.at(result_gid);
+            if (result.* == .optional) result.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
+            return false;
+        }
+
+        if (gates.isHashMapFieldIteratorNext(fqn)) {
+            const result_gid = state.results[index].refinement orelse return false;
+            const result = state.refinements.at(result_gid);
+            if (result.* == .optional) result.optional.analyte.null_safety = .{ .non_null = state.ctx.meta };
+            return false;
+        }
+
         if (gates.isHashMapStorageMutator(fqn)) {
             if (gates.isHashMapManagedPut(fqn) and args.len > 0) {
                 markHashMapManagedStorageNonNull(state, args[0]);
@@ -691,7 +705,7 @@ pub const NullSafety = union(enum) {
     fn initOptionalsUnknown(refinements: *Refinements, gid: Gid) void {
         const ref = refinements.at(gid);
         switch (ref.*) {
-            .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
+            .scalar, .allocator, .hashmap, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
             .optional => |o| {
                 ref.optional.analyte.null_safety = .{ .unknown = {} };
                 initOptionalsUnknown(refinements, o.to);
@@ -735,6 +749,11 @@ pub fn testValid(refinement: Refinements.Refinement) void {
         .allocator => |a| {
             if (a.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got allocator", .{});
+            }
+        },
+        .hashmap => |h| {
+            if (h.analyte.null_safety != null) {
+                std.debug.panic("null_safety should only exist on optionals, got hashmap", .{});
             }
         },
         inline .pointer, .errorunion, .@"struct", .@"union", .recursive, .fnptr => |data, t| {

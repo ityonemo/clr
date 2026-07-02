@@ -125,6 +125,8 @@ Currently implemented:
 - Recursive datatypes (linked lists, trees, recursive unions)
 - Stdlib boundary reductions for common patterns such as `std.process.args`,
   `std.mem.asBytes`, `std.HashMap`, and allocator/file APIs
+- Privileged `std.HashMap` refinements with canonical metadata/key/value storage
+  identity across `put`, `get`, `getPtr`, and value iteration
 - File descriptor safety:
   - `posix.open`/`close`/`dup`/`dup2`/`socket`/`accept`/`epoll_create`/`pipe` tracking
   - Use-after-close detection (read/write/dup on closed fd)
