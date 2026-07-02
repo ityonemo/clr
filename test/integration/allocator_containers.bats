@@ -42,6 +42,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "returned struct preserves allocator field identity" {
+    run compile_and_run "$TEST_CASES/allocator_safety/struct_pointer_field/returned_allocator_field_identity.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive when callee frees struct pointer field" {
     run compile_and_run "$TEST_CASES/allocator_safety/struct_pointer_field/struct_pointer_field_pass_to_callee_noleak.zig"
     [ "$status" -eq 0 ]

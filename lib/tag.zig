@@ -1253,6 +1253,27 @@ fn updateFieldReferences(refinements: *Refinements, dest_gid: Gid, src_gid: Gid)
     }
 }
 
+fn retargetRefinementEdges(refinements: *Refinements, old_gid: Gid, new_gid: Gid) void {
+    for (refinements.list.items) |*ref| {
+        switch (ref.*) {
+            inline .pointer, .optional, .errorunion => |*indirected| {
+                if (indirected.to == old_gid) indirected.to = new_gid;
+            },
+            .@"struct" => |aggregate| {
+                for (@constCast(aggregate.fields)) |*field_gid| {
+                    if (field_gid.* == old_gid) field_gid.* = new_gid;
+                }
+            },
+            .@"union" => |aggregate| {
+                for (@constCast(aggregate.fields)) |*maybe_field_gid| {
+                    if (maybe_field_gid.* == old_gid) maybe_field_gid.* = new_gid;
+                }
+            },
+            .scalar, .allocator, .fnptr, .recursive, .void, .noreturn, .unimplemented => {},
+        }
+    }
+}
+
 pub const Store = struct {
     /// Pointer being stored through - can be local inst, global (interned), or constant.
     ptr: Src,
@@ -1315,7 +1336,7 @@ pub const Store = struct {
             // marks the ORIGINAL pointee (struct field) as defined, not the source.
             if (src.* == .allocator) {
                 try splat(.store, state, index, self);
-                ptr_ref.pointer.to = src_ref;
+                retargetRefinementEdges(state.refinements, pointee_gid, src_ref);
                 return;
             }
 
@@ -3845,6 +3866,37 @@ test "store struct preserves allocator field identity" {
     const loaded_struct_gid = results[3].refinement.?;
     const loaded_field_gid = refinements.at(loaded_struct_gid).@"struct".fields[0];
     try std.testing.expectEqual(@as(u32, 517906155), refinements.at(loaded_field_gid).allocator.type_id);
+}
+
+test "store allocator through struct field pointer updates parent field identity" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+
+    var results = [_]Inst{.{}} ** 4;
+    const state = testState(&ctx, &results, &refinements);
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{ .type_id = 517906155 } });
+    results[0].refinement = allocator_gid;
+
+    const struct_ty: Type = .{ .@"struct" = &.{ .type_id = 100, .fields = &.{.{ .allocator = .{ .type_id = 2705 } }} } };
+    try Inst.apply(state, 1, .{ .alloc = .{ .ty = struct_ty } });
+    try Inst.apply(state, 2, .{ .struct_field_ptr = .{
+        .base = .{ .inst = 1 },
+        .field_index = 0,
+        .ty = .{ .pointer = .{ .to = &.{ .allocator = .{ .type_id = 2705 } } } },
+        .type_id = 100,
+    } });
+    try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 2 }, .src = .{ .inst = 0 } } });
+
+    const struct_gid = refinements.at(results[1].refinement.?).pointer.to;
+    try std.testing.expectEqual(allocator_gid, refinements.at(struct_gid).@"struct".fields[0]);
 }
 
 test "wrap_optional valueCopies inst payload" {

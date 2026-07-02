@@ -4,6 +4,30 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Preserve allocator identity in returned aggregate fields
+
+**Date:** 2026-07-01
+
+**Symptom:** A fallible function returned a struct containing both an allocator
+and memory allocated by it. Freeing through the returned allocator field
+reported `allocated with PageAllocator, freed with unknown`.
+
+**Root Cause:** Storing an allocator through `struct_field_ptr` redirected only
+the temporary field pointer to the canonical allocator GID. The parent
+aggregate still referenced its statically-created allocator placeholder, so
+`ret_load` copied the placeholder across the call boundary.
+
+**The Fix:** Allocator stores now retarget refinement edges from the destination
+allocator slot to the canonical source allocator GID. Parent aggregates and
+aliases therefore retain allocator identity without introducing another
+allocator-reference representation.
+
+**Unit Test:** `tag.test.store allocator through struct field pointer updates parent field identity`
+
+**Integration Test:** `test/cases/allocator_safety/struct_pointer_field/returned_allocator_field_identity.zig`
+
+---
+
 ## Fix: Expand repeated scalar-only struct types
 
 **Date:** 2026-07-01

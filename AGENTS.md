@@ -125,7 +125,8 @@ reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
 returned-pointer destroy handling, labeled-switch branch-result import work,
 FD safety refactoring, std.mem.asBytes raw-byte pointer handling, HashMap
-stdlib overrides, and repeated scalar-only struct expansion is `375/375`
+stdlib overrides, repeated scalar-only struct expansion, and returned allocator
+field identity is `376/376`
 passing. The last full measured baseline was from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
 ./run_integration.sh` on 2026-07-01.
