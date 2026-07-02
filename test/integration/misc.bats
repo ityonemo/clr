@@ -151,6 +151,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "no analyzer panic for std.fs.File.stat" {
+    run compile_and_run "$TEST_CASES/std/file_stat.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive for memcpy marking destination as defined" {
     # After @memcpy, the destination region should have the same defined state as the source.
     run compile_and_run "$TEST_CASES/undefined_safety/memcpy_marks_dest_defined.zig"

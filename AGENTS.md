@@ -124,10 +124,11 @@ The integration baseline after allocator provenance, call-return, test
 reorganization, memory-safety initialization, branch clobber, copied-argument
 reachability, global-free, FBA mismatch, returned-allocation leak-suppression,
 returned-pointer destroy handling, labeled-switch branch-result import work,
-FD safety refactoring, std.mem.asBytes raw-byte pointer handling, and HashMap
-stdlib overrides is `367/367` passing. The last full measured baseline was from
+FD safety refactoring, std.mem.asBytes raw-byte pointer handling, HashMap
+stdlib overrides, and repeated scalar-only struct expansion is `375/375`
+passing. The last full measured baseline was from
 `env ZIG_GLOBAL_CACHE_DIR=/tmp/clr-zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/clr-zig-local
-./run_integration.sh` on 2026-06-04.
+./run_integration.sh` on 2026-07-01.
 
 Keep `LIMITATIONS.md` accurate as the public inventory of supported behavior and
 known gaps. The main engineering risks to keep in mind are:

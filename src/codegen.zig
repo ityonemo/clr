@@ -1,6 +1,7 @@
 const clr_allocator = @import("allocator.zig");
 const clr = @import("clr.zig");
 const debug = @import("debug.zig");
+const InternPoolIndexSet = @import("InternPoolIndexSet.zig");
 const compiler = @import("compiler");
 const Air = compiler.Air;
 const InternPool = compiler.InternPool;
@@ -1614,8 +1615,24 @@ fn isWellKnownIndex(idx: InternPool.Index) bool {
     };
 }
 
-/// Set of visited type indices for cycle detection in recursive types.
-const VisitedTypes = std.AutoArrayHashMapUnmanaged(InternPool.Index, void);
+/// Types already expanded in this description, used to bound recursive and
+/// repeatedly nested aggregate output.
+const VisitedTypes = InternPoolIndexSet;
+
+fn isLeafAggregate(ip: *const InternPool, ty: InternPool.Index) bool {
+    const key = ip.indexToKey(ty);
+    const field_types = switch (key) {
+        .struct_type => ip.loadStructType(ty).field_types.get(ip),
+        else => return false,
+    };
+    for (field_types) |field_type| {
+        switch (ip.indexToKey(field_type)) {
+            .simple_type, .int_type, .enum_type, .error_set_type, .inferred_error_set_type, .vector_type, .opaque_type => {},
+            else => return false,
+        }
+    }
+    return true;
+}
 
 /// Convert an InternPool type to a Type union string.
 /// Recursively handles nested types like pointers and optionals.
@@ -1724,10 +1741,10 @@ fn typeToStringLookupNoNames(arena: std.mem.Allocator, ip: *const InternPool, ty
             if (isAllocatorType(ip, ty)) {
                 break :blk formatAllocatorType(arena, @intFromEnum(ty));
             }
-            if (visited.contains(ty)) {
+            if (visited.contains(ty) and !isLeafAggregate(ip, ty)) {
                 break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
             }
-            visited.put(arena, ty, {}) catch @panic("out of memory");
+            if (!visited.contains(ty)) visited.put(arena, ty, {}) catch @panic("out of memory");
             break :blk structTypeToStringSimple(arena, ip, ty, visited);
         },
         .union_type => blk: {
@@ -1996,10 +2013,10 @@ fn typeToStringLookup(name_map: *std.AutoHashMapUnmanaged(u32, []const u8), fiel
             if (isAllocatorType(ip, ty)) {
                 break :blk formatAllocatorType(arena, @intFromEnum(ty));
             }
-            if (visited.contains(ty)) {
+            if (visited.contains(ty) and !isLeafAggregate(ip, ty)) {
                 break :blk clr_allocator.allocPrint(arena, ".{{ .recursive = {d} }}", .{@intFromEnum(ty)}, null);
             }
-            visited.put(arena, ty, {}) catch @panic("out of memory");
+            if (!visited.contains(ty)) visited.put(arena, ty, {}) catch @panic("out of memory");
             break :blk structTypeToString(name_map, field_map, arena, ip, ty, visited);
         },
         .union_type => blk: {
@@ -5183,4 +5200,5 @@ const CallTarget = @import("clr.zig").CallTarget;
 
 test {
     @import("std").testing.refAllDecls(@import("codegen_test.zig"));
+    @import("std").testing.refAllDecls(@import("InternPoolIndexSet_test.zig"));
 }

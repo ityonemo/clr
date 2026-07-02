@@ -89,6 +89,16 @@ transformations that lose the tracked scalar FD refinement can also lose
 close/use/leak state, and raw syscalls or custom wrappers are only checked when
 they lower through a recognized override.
 
+Conditional closure of a non-optional descriptor is intentionally not a
+supported lifecycle pattern. Branch-local FD state can represent mutually
+exclusive exits such as a deferred close on success and error paths, but merging
+an open descriptor from one continuing branch with a closed descriptor from
+another leaves ambiguous post-branch state. Represent conditional descriptor
+ownership with an optional, close the unwrapped value, and clear or leave the
+optional according to the surrounding lifecycle. CLR's intended policy is to
+reject the ambiguous non-optional pattern rather than silently treat it as open
+or closed.
+
 ### Stack Escape And Returned Aggregate Provenance
 
 Returning pointers inside structs, unions, or globals is still conservative in
@@ -251,15 +261,28 @@ Open questions:
 Some AIR instruction tags are handled only enough to avoid crashing and may
 produce `.unimplemented` refinements:
 
-- `dbg_inline_block`
 - `intcast`
 - `ret_addr`
 - `stack_trace_frames`
 
-The debug and stack-trace tags are unlikely to affect ordinary safety cases.
+The return-address and stack-trace tags are unlikely to affect ordinary safety
+cases.
 `intcast` is more significant: it currently does not inherit undefined or other
 value safety state from its operand, so safety state can be lost across integer
 casts until that handler is completed.
+
+### Interned Operands In Pointer Transforms
+
+Several pointer-shape operations currently require an instruction-backed source.
+`ptr_add`, `ptr_sub`, `array_to_slice`, and element-pointer construction can
+panic when codegen supplies an interned source instead. Undefined-safety
+optional-payload handling also rejects a general interned optional source.
+
+Known stdlib boundaries and string/slice literals have narrower handling where
+needed by current coverage, but that does not make arbitrary interned globals or
+comptime pointer values valid inputs to these operations. Codegen should either
+resolve tracked globals before emitting the operation or preserve enough type
+and provenance information for runtime handling.
 
 ### Codegen Type Extraction Gaps
 
@@ -270,6 +293,16 @@ AIR and the InternPool. When type extraction fails, CLR should prefer a loud
 Known examples include allocator `create` payload type extraction and slice
 element type reconstruction. These are correctness boundaries in the AIR-to-CLR
 translation layer rather than intentional safety allowances.
+
+Generated type descriptions inline aggregate structure. Repeated scalar-only
+struct types are expanded independently, including stdlib timestamp structures
+used by `std.fs.File.stat`. More complex repeated aggregates still use
+`.recursive` placeholders to bound generated output. The placeholder was
+designed for active recursive back-edges, but codegen also uses it for completed
+complex sibling types because the runtime type model has no reusable type
+definition reference. Operations that require such a sibling's full field shape
+may therefore fail analysis. General support requires a runtime type-reference
+representation rather than unrestricted structural expansion.
 
 ### Indirect Function Calls
 

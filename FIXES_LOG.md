@@ -4,6 +4,30 @@ This document records bugs found and fixed during vendor wrapper testing, includ
 
 ---
 
+## Fix: Expand repeated scalar-only struct types
+
+**Date:** 2026-07-01
+
+**Symptom:** `std.fs.File.stat` generated a `.recursive` refinement for the
+later `linux.Statx` timestamp fields, causing `struct_field_val` to reject the
+field shape.
+
+**Root Cause:** Codegen treated every previously encountered aggregate type as
+an active recursive back-edge. Expanding every repeated aggregate instead
+caused large stdlib type graphs to grow excessively.
+
+**The Fix:** Vendored a vtable-free `InternPool.Index` hash set for plugin
+codegen and independently expand repeated scalar-only structs. Complex repeated
+aggregates retain bounded placeholder behavior until CLR has reusable runtime
+type references.
+
+**Unit Test:** `InternPoolIndexSet_test.test.InternPoolIndexSet supports growth, membership, and removal`
+
+**Integration Tests:** `test/cases/misc/repeated_sibling_struct_types.zig`,
+`test/cases/std/file_stat.zig`
+
+---
+
 ## Fix: std.mem.asBytes scalar views and std.HashMap basic usage
 
 **Date:** 2026-06-04
