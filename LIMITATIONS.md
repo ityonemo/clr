@@ -25,11 +25,13 @@ the future.
 
 Managed `std.HashMap` values are represented by a privileged refinement with
 canonical metadata, key, and value storage GIDs. The supported opaque boundary
-currently covers `init`, `put`, `get`, `getPtr`, `valueIterator`,
-`FieldIterator.next`, and `deinit`; selected unmanaged metadata helpers remain
-narrow overrides. This avoids depending on HashMap's private struct layout and
-does not weaken general optional unwrap, pointer arithmetic, packed metadata,
-or leak checking.
+currently covers `init`, `put`, `get`, `getPtr`, `contains`, `iterator`,
+`Iterator.next`, `valueIterator`, `FieldIterator.next`, `keys`/`values`,
+`getIndex`, `deinit`, and `deallocate`; selected unmanaged metadata helpers
+(fill/remove mutators, `isUsed`/`isFree`/`isTombstone` predicates, and the
+assume-capacity storage mutators) remain narrow overrides. This avoids depending
+on HashMap's private struct layout and does not weaken general optional unwrap,
+pointer arithmetic, packed metadata, or leak checking.
 
 The current model has one representative key slot and one representative value
 slot per map, not per-entry storage. It covers scalar maps and the tested case
@@ -115,6 +117,11 @@ Returning pointers inside structs, unions, or globals is still conservative in
 some cases. Basic fieldParentPtr recovery for structs, unions, and global
 struct/union fields is covered, but returned pointers through aggregate values
 and merged pointers can still lose enough provenance to produce false positives.
+
+Early error returns are handled: when a function takes an error path before its
+success payload is constructed, the interned error union's structural payload is
+marked an inactive error stub, so branch merging does not misreport the
+not-yet-allocated success payload (for example a slice field) as a leak.
 
 This area overlaps with stack lifetime tracking: CLR detects some escaping stack
 pointers, but it does not yet have a complete tombstone model for stack memory
