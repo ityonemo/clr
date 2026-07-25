@@ -545,6 +545,13 @@ fn isZeroRef(info: *const FnInfo, ref: Ref) bool {
 /// Payload for ret_safe - just the src, caller_refinements and return_gid come from State.
 fn payloadRetSafe(info: *const FnInfo, datum: Data) []const u8 {
     const src_str = srcString(info, datum.un_op);
+    const is_error = if (datum.un_op.toInterned()) |interned_idx| blk: {
+        const key = info.ip.indexToKey(interned_idx);
+        break :blk key == .error_union and key.error_union.val == .err_name;
+    } else false;
+    if (is_error) {
+        return clr_allocator.allocPrint(info.arena, ".{{ .src = {s}, .is_error = true }}", .{src_str}, null);
+    }
     return clr_allocator.allocPrint(info.arena, ".{{ .src = {s} }}", .{src_str}, null);
 }
 

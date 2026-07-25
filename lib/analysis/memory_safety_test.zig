@@ -967,6 +967,127 @@ test "allocation returned through block break is not reported as callee leak" {
     try Inst.onFinish(state);
 }
 
+test "early error return does not overwrite successful struct pointer payload with interned state" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
+    } });
+    const item_type: tag.Type = .{ .@"struct" = &.{
+        .type_id = 101,
+        .fields = &.{.{ .scalar = .{} }},
+    } };
+    const slice_type: tag.Type = .{ .pointer = .{
+        .to = &.{ .pointer = .{
+            .to = &item_type,
+            .multiplicity = .region,
+        } },
+    } };
+    const payload_type: tag.Type = .{ .@"struct" = &.{
+        .type_id = 102,
+        .fields = &.{ .{ .allocator = .{ .type_id = 100 } }, slice_type, .{ .scalar = .{} } },
+    } };
+    const return_type: tag.Type = .{ .errorunion = .{ .to = &payload_type } };
+    const return_gid = try refinements.appendEntity(try tag.typeToRefinement(return_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, return_gid, &ctx);
+
+    const success_gid = try refinements.appendEntity(try tag.typeToRefinement(return_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, success_gid, &ctx);
+    const success_payload_gid = refinements.at(success_gid).errorunion.to;
+    const success_payload = refinements.at(success_payload_gid).@"struct";
+    const success_slice_gid = success_payload.fields[1];
+    const success_slice = &refinements.at(success_slice_gid).pointer;
+    success_slice.analyte.memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } };
+    refinements.at(success_slice.to).pointer.analyte.memory_safety = .{ .allocated = .{
+        .trace = ctx.captureTrace(),
+        .root_gid = null,
+        .allocator_gid = allocator_gid,
+        .type_id = 100,
+    } };
+
+    var results = [_]Inst{.{}} ** 3;
+    results[0].refinement = success_gid;
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = success_gid,
+        .early_returns = &early_returns,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 1, .{ .ret_safe = .{
+        .src = .{ .interned = .{ .ip_idx = 999, .ty = return_type } },
+        .is_error = true,
+    } });
+    try Inst.apply(state, 2, .{ .ret_safe = .{ .src = .{ .inst = 0 } } });
+    try Inst.mergeEarlyReturns(state);
+
+    const merged_payload = refinements.at(refinements.at(return_gid).errorunion.to).@"struct";
+    const merged_slice = refinements.at(merged_payload.fields[1]).pointer;
+    try std.testing.expectEqual(.stack, std.meta.activeTag(merged_slice.analyte.memory_safety.?));
+    try std.testing.expectEqual(.allocated, std.meta.activeTag(
+        refinements.at(merged_slice.to).pointer.analyte.memory_safety.?,
+    ));
+}
+
+test "error return preserves allocated return slot and marks payload inactive" {
+    var ctx, var refinements = initTest();
+    defer ctx.deinit();
+    defer refinements.deinit();
+
+    const allocator_gid = try refinements.appendEntity(.{ .allocator = .{
+        .type_id = 100,
+        .analyte = .{ .memory_safety = .{ .stack = .{ .trace = ctx.captureTrace(), .root_gid = null } } },
+    } });
+    const payload_type: tag.Type = .{ .@"struct" = &.{
+        .type_id = 101,
+        .fields = &.{.{ .pointer = .{ .to = &.{ .scalar = .{} } } }},
+    } };
+    const return_type: tag.Type = .{ .errorunion = .{ .to = &payload_type } };
+    const return_gid = try refinements.appendEntity(try tag.typeToRefinement(return_type, &refinements));
+    tag.splatInitCallReturnSlot(&refinements, return_gid, &ctx);
+    refinements.at(return_gid).errorunion.analyte.memory_safety = .{ .allocated = .{
+        .trace = ctx.captureTrace(),
+        .root_gid = return_gid,
+        .allocator_gid = allocator_gid,
+        .type_id = 100,
+    } };
+
+    var results = [_]Inst{.{}};
+    var early_returns = std.ArrayListUnmanaged(State){};
+    defer Inst.freeEarlyReturns(&early_returns, ctx.allocator);
+    const state = State{
+        .ctx = &ctx,
+        .results = &results,
+        .refinements = &refinements,
+        .return_gid = return_gid,
+        .base_gid = @intCast(refinements.list.items.len),
+        .early_returns = &early_returns,
+        .restrict = .memory_safety,
+    };
+
+    try Inst.apply(state, 0, .{ .ret_safe = .{
+        .src = .{ .interned = .{ .ip_idx = 999, .ty = return_type } },
+        .is_error = true,
+    } });
+
+    const returned = early_returns.items[0].refinements;
+    try std.testing.expectEqual(.allocated, std.meta.activeTag(
+        returned.at(return_gid).errorunion.analyte.memory_safety.?,
+    ));
+    const payload_gid = returned.at(return_gid).errorunion.to;
+    try std.testing.expectEqual(.error_stub, std.meta.activeTag(
+        returned.at(payload_gid).@"struct".analyte.memory_safety.?,
+    ));
+}
+
 test "local pointer slot containing argument allocation is not reported as callee leak" {
     var ctx, var refinements = initTest();
     defer ctx.deinit();

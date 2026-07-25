@@ -1018,6 +1018,9 @@ pub const UnwrapErrunionPayloadPtr = struct {
 pub const RetSafe = struct {
     /// Value being returned. Use .interned with .void for void returns.
     src: Src,
+    /// True when an interned error union contains the error variant, so its
+    /// structural payload is inactive rather than an interned value.
+    is_error: bool = false,
 
     pub fn apply(self: @This(), state: State, index: usize) !void {
         const allocator = state.ctx.allocator;
@@ -1049,6 +1052,9 @@ pub const RetSafe = struct {
                 try Refinement.copyToSlot(return_gid, state.refinements.at(src_gid).*, state.refinements, cloned);
             },
             .interned => |interned| {
+                if (self.is_error) {
+                    splatInitErrorReturn(cloned, return_gid);
+                } else
                 // Try to look up as tracked global first
                 if (cloned.getGlobal(interned.ip_idx)) |global_gid| {
                     // Return an interned variable by overwriting the cloned return slot
@@ -2707,6 +2713,14 @@ pub fn splatFinish(results: []Inst, ctx: *Context, refinements: *Refinements, re
 pub fn splatInitInterned(refinements: *Refinements, gid: Gid) void {
     // Interned values are always defined - use the unified init (no ctx needed)
     splatInit(refinements, gid, null, .defined);
+}
+
+fn splatInitErrorReturn(refinements: *Refinements, gid: Gid) void {
+    inline for (Analyte.analyses) |Analysis| {
+        if (@hasDecl(Analysis, "init_error_return")) {
+            Analysis.init_error_return(refinements, gid);
+        }
+    }
 }
 
 /// Called after receiving a return value from a function call.
