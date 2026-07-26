@@ -78,6 +78,11 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "early error return preserves allocated slice in struct success payload" {
+    run compile_and_run "$TEST_CASES/allocator_safety/error_paths/early_error_struct_slice_free.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no false positive for error path clearing allocation metadata" {
     # When an allocation fails (error path), phantom allocation metadata must be
     # cleared while maintaining valid refinement state (memory_safety set to .unset).

@@ -1152,6 +1152,12 @@ pub const MemorySafety = union(enum) {
         }
     }
 
+    pub fn init_error_return(refinements: *Refinements, gid: Gid) void {
+        const ref = refinements.at(gid);
+        if (ref.* != .errorunion) @panic("error return slot is not an error union");
+        markPayloadErrorStub(refinements, ref.errorunion.to);
+    }
+
     /// Called on function close to check for memory leaks and stack pointer escapes.
     /// With global refinements, args share entities directly with caller.
     /// Stack pointer escapes through args are detected by checking arg pointees.
@@ -2253,6 +2259,7 @@ pub const MemorySafety = union(enum) {
             fn first(orig: Gid, branches_: []const ?State, branch_gids_: []const ?Gid) ?MemorySafety {
                 _ = orig;
                 var fallback: ?MemorySafety = null;
+                var error_fallback: ?MemorySafety = null;
                 for (branches_, branch_gids_) |branch_opt, branch_gid_opt| {
                     const branch = branch_opt orelse continue;
                     const branch_gid = branch_gid_opt orelse continue;
@@ -2263,9 +2270,13 @@ pub const MemorySafety = union(enum) {
                     };
                     const ms = branch_analyte.memory_safety orelse continue;
                     if (ms == .allocated) return ms;
+                    if (merge_tag == .early_return and ms == .error_stub) {
+                        if (error_fallback == null) error_fallback = ms;
+                        continue;
+                    }
                     if (fallback == null) fallback = ms;
                 }
-                return fallback;
+                return fallback orelse error_fallback;
             }
         };
 

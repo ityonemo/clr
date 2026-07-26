@@ -282,7 +282,7 @@ When a false positive is identified, follow this cycle **exactly**. Do NOT skip 
 - `lib/Inst.zig` - Inst struct and results list management only
 - `lib/dump.zig` - Debug formatting (uses accessor functions from analysis modules)
 
-Analyte manipulation (`.analyte.undefined_safety`, `.analyte.memory_safety`, `.analyte.null_safety`, `.analyte.variant_safety`, `.analyte.fieldparentptr_safety`) is the EXCLUSIVE responsibility of analysis modules in `lib/analysis/`.
+Analyte manipulation (`.analyte.undefined_safety`, `.analyte.memory_safety`, `.analyte.null_safety`, `.analyte.variant_safety`, `.analyte.fieldparentptr_safety`, `.analyte.fd_safety`) is the EXCLUSIVE responsibility of analysis modules in `lib/analysis/`.
 
 Tag handlers should only:
 1. Set up refinement STRUCTURE (pointer, scalar, struct, etc.) via `appendEntity`
@@ -415,10 +415,14 @@ test "instLine for my_new_tag" {
     var arena = clr_allocator.newArena();
     defer arena.deinit();
 
-    const datum: Data = .{ /* appropriate data for this tag */ };
-    const result = codegen._instLine(arena.allocator(), dummy_ip, .my_new_tag, datum, 0, &.{}, &.{}, &.{}, &.{}, null);
+    // FnInfo bundles the arena, ip, tags, and other per-function context.
+    var info: FnInfo = .{ /* ...set up arena, ip, etc... */ };
 
-    try std.testing.expectEqualStrings("    try Inst.apply(0, .{ .my_new_tag = .{ /* expected payload */ } }, results, ctx, &refinements);\n", result);
+    const datum: Data = .{ /* appropriate data for this tag */ };
+    // Signature: _instLine(info: *const FnInfo, tag, datum, inst_index, arg_counter)
+    const result = codegen._instLine(&info, .my_new_tag, datum, 0, null);
+
+    try std.testing.expectEqualStrings("    try Inst.apply(state, 0, .{ .my_new_tag = .{ /* expected payload */ } });\n", result);
 }
 ```
 
@@ -463,9 +467,11 @@ Tags are defined inline in `lib/tag.zig`. Add a new struct type and include it i
 pub const MyNewTag = struct {
     field: u32,  // fields matching the payload
 
-    pub fn apply(self: @This(), results: []Inst, index: usize, ctx: *Context, refinements: *Refinements) !void {
-        // Tag-specific logic (if any) before analysis dispatch
-        try splat(.my_new_tag, results, index, ctx, refinements, self);
+    // `state: State` bundles results, refinements, and ctx.
+    pub fn apply(self: @This(), state: State, index: usize) !void {
+        // Set up refinement STRUCTURE here (via state.refinements), then
+        // dispatch to analysis modules:
+        try splat(.my_new_tag, state, index, self);
     }
 };
 
@@ -481,7 +487,11 @@ If the tag affects an analysis (e.g., undefined tracking), add a handler:
 
 ```zig
 // In lib/analysis/undefined_safety.zig (or other analysis module)
-pub fn my_new_tag(results: []Inst, index: usize, ctx: *Context, refinements: *Refinements, payload: anytype) !void {
+// First arg is `state: State`; the last arg is the concrete tag struct
+// (e.g. `tag.MyNewTag`), not a generic `anytype`.
+pub fn my_new_tag(state: State, index: usize, params: tag.MyNewTag) !void {
+    const results = state.results;
+    const refinements = state.refinements;
     // Analysis logic - update results, report errors, etc.
 }
 ```
@@ -623,16 +633,9 @@ We won't prevent failures due to union tag field being set to an invalid value. 
 
 ### Setting a pointer to undefined
 
-Need to investigate what happens when a pointer itself is set to undefined (e.g., `var ptr: *u8 = undefined;`). Currently we set `pointer.analyte.undefined = undef_state`, but this needs testing and verification.
+Need to investigate what happens when a pointer itself is set to undefined (e.g., `var ptr: *u8 = undefined;`). Currently we set the pointer's own `analyte.undefined_safety` state while `pointer.to` still points at its (potentially undefined) pointee, but this needs testing and verification.
 
-We may need to make `pointer.to` an optional value - an undefined pointer doesn't point to anything valid.
-
-### Simple tags need BinOp/UnOp refinement
-
-The `Simple` type currently just produces a scalar without tracking operands. For proper data flow analysis, we'll need to:
-- Split into `BinOp` (binary operations like `bit_and`, `cmp_*`, `sub`) and `UnOp` (unary operations like `ctz`)
-- Pass operand parameters to track where values flow from
-- Currently affects: `bit_and`, `cmp_eq`, `cmp_gt`, `cmp_lte`, `ctz`, `sub`
+Note: `pointer.to` is a required `Gid`, not optional. An undefined pointer still has a `.to` target entity; the undefined-ness is tracked on the pointer's `undefined_safety` analyte rather than by nulling `.to`.
 
 ### Runtime union tag comparisons not tracked
 
@@ -647,17 +650,16 @@ if (my_union == some_tag) {  // NOT recognized - some_tag is runtime value
 
 This is an intentional limitation - tracking runtime tag values would require complex value flow analysis.
 
-### `dbg_inline_block` not implemented
-
-The `dbg_inline_block` instruction is used for inlined function calls. This needs investigation to understand how it affects data flow tracking - inlined code may need special handling to maintain correct interprocedural analysis.
-
 ### Other return instructions not implemented
 
-Only `ret_safe` is implemented. The following return variants are marked as `Unimplemented` and need proper handling:
+`ret_safe`, `ret_ptr`, and `ret_load` are implemented. `ret_ptr` creates a
+pointer to a local entity used to build up the return value, and `ret_load`
+copies that built-up value to the return slot (used for large return values
+that don't fit in registers).
 
-- **`ret_addr`**: Returns the return address (used for stack traces). Probably safe to leave as unimplemented since it's metadata, not data flow.
-- **`ret_load`**: Returns by loading from a pointer (used for large return values that don't fit in registers). **TODO**: This affects data flow and needs implementation.
-- **`ret_ptr`**: Returns the pointer where the return value should be stored (caller provides storage). **TODO**: This affects data flow and needs implementation.
+- **`ret_addr`**: Returns the return address (used for stack traces). Still
+  produces `.unimplemented`. Probably safe to leave as unimplemented since it's
+  metadata, not data flow.
 
 ### `std.crypto.random` causes false positives
 
