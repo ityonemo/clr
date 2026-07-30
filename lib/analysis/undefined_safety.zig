@@ -92,7 +92,7 @@ pub const UndefinedSafety = union(enum) {
             .scalar => |s| if (s.analyte.undefined_safety) |u| u == .undefined else false,
             .pointer => |p| {
                 const ptr_undef = if (p.analyte.undefined_safety) |u| u == .undefined else false;
-                return ptr_undef and fullyUndefined(refinements, p.to);
+                return ptr_undef and fullyUndefined(refinements, p.info.to);
             },
             .fnptr => |f| if (f.analyte.undefined_safety) |u| u == .undefined else false,
             .allocator => |a| if (a.analyte.undefined_safety) |u| u == .undefined else false,
@@ -144,7 +144,7 @@ pub const UndefinedSafety = union(enum) {
         // The pointee starts as undefined (must be set by store before use)
         // Note: packed struct fields also start undefined, but the RMW pattern
         // is handled by packed_field tracking in struct_field_ptr/load/store
-        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        const pointee_idx = refinements.at(ptr_idx).pointer.info.to;
         setSafetyState(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
         // Initialize any nested pointer targets to undefined (they're unassigned)
         initPointerTargetsUndefined(refinements, pointee_idx, state.ctx.meta);
@@ -171,7 +171,12 @@ pub const UndefinedSafety = union(enum) {
             .scalar => ref.scalar.analyte.undefined_safety = undef_state,
             .pointer => |p| {
                 ref.pointer.analyte.undefined_safety = undef_state;
-                initRecursive(refinements, p.to, undef_state);
+                initRecursive(refinements, p.info.to, undef_state);
+            },
+            .pointer_union => |p| {
+                for (p.members) |member| {
+                    initRecursive(refinements, member.to, undef_state);
+                }
             },
             .optional => |o| initRecursive(refinements, o.to, undef_state),
             .errorunion => |e| initRecursive(refinements, e.to, undef_state),
@@ -204,8 +209,11 @@ pub const UndefinedSafety = union(enum) {
         const refinements = state.refinements;
         // The pointer itself is defined (it exists and points to a valid field)
         const ptr_idx = results[index].refinement.?;
-        const ptr = &refinements.at(ptr_idx).pointer;
-        ptr.analyte.undefined_safety = .{ .defined = {} };
+        switch (refinements.at(ptr_idx).*) {
+            .pointer => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            .pointer_union => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            else => @panic("undefined_safety.struct_field_ptr: result is not a pointer"),
+        }
         // The pointee's undefined state is set by the tag handler via splatInit
     }
 
@@ -236,8 +244,11 @@ pub const UndefinedSafety = union(enum) {
         const refinements = state.refinements;
         // The slice pointer itself is defined (we're creating a valid slice)
         const ptr_idx = results[index].refinement.?;
-        const ptr = &refinements.at(ptr_idx).pointer;
-        ptr.analyte.undefined_safety = .{ .defined = {} };
+        switch (refinements.at(ptr_idx).*) {
+            .pointer => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            .pointer_union => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            else => @panic("undefined_safety.slice: expected pointer result"),
+        }
         // The region's undefined state is already set from the source pointer
     }
 
@@ -257,8 +268,11 @@ pub const UndefinedSafety = union(enum) {
         const refinements = state.refinements;
         // The pointer itself is defined (it exists and points to a valid element)
         const ptr_idx = requireResult(state, index, "undefined_safety.ptr_add");
-        const ptr = &refinements.at(ptr_idx).pointer;
-        ptr.analyte.undefined_safety = .{ .defined = {} };
+        switch (refinements.at(ptr_idx).*) {
+            .pointer => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            .pointer_union => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            else => @panic("undefined_safety.ptr_add: expected pointer result"),
+        }
         // The region's undefined state is already set from the source pointer
     }
 
@@ -266,8 +280,11 @@ pub const UndefinedSafety = union(enum) {
         _ = params;
         const refinements = state.refinements;
         const ptr_idx = requireResult(state, index, "undefined_safety.ptr_sub");
-        const ptr = &refinements.at(ptr_idx).pointer;
-        ptr.analyte.undefined_safety = .{ .defined = {} };
+        switch (refinements.at(ptr_idx).*) {
+            .pointer => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            .pointer_union => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            else => @panic("undefined_safety.ptr_sub: expected pointer result"),
+        }
     }
 
     pub fn field_parent_ptr(state: State, index: usize, params: tag.FieldParentPtr) !void {
@@ -298,8 +315,11 @@ pub const UndefinedSafety = union(enum) {
         const refinements = state.refinements;
         // The pointer itself is defined (it exists and points to a valid region)
         const ptr_idx = results[index].refinement.?;
-        const ptr = &refinements.at(ptr_idx).pointer;
-        ptr.analyte.undefined_safety = .{ .defined = {} };
+        switch (refinements.at(ptr_idx).*) {
+            .pointer => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            .pointer_union => |*ptr| ptr.analyte.undefined_safety = .{ .defined = {} },
+            else => @panic("undefined_safety.slice_ptr: expected pointer result"),
+        }
         // The region's undefined state is already set (from alloc)
     }
 
@@ -312,7 +332,7 @@ pub const UndefinedSafety = union(enum) {
             .fnptr => return null,
         };
         return switch (refinements.at(ptr_gid).*) {
-            .pointer => |p| p.to,
+            .pointer => |p| p.info.to,
             else => null,
         };
     }
@@ -325,7 +345,7 @@ pub const UndefinedSafety = union(enum) {
         const ptr_idx = results[index].refinement.?;
         refinements.at(ptr_idx).pointer.analyte.undefined_safety = .{ .defined = {} };
         // The pointee starts as undefined (must be set before ret_load)
-        const pointee_idx = refinements.at(ptr_idx).pointer.to;
+        const pointee_idx = refinements.at(ptr_idx).pointer.info.to;
         setSafetyState(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
@@ -349,7 +369,7 @@ pub const UndefinedSafety = union(enum) {
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse return,
             .fnptr => return, // comptime constant - no undefined tracking
         };
-        const container_idx = refinements.at(ptr_ref).pointer.to;
+        const container_idx = refinements.at(ptr_ref).pointer.info.to;
         const u = &refinements.at(container_idx).@"union";
 
         // The newly activated field is undefined (tag set but value not stored yet)
@@ -549,7 +569,7 @@ pub const UndefinedSafety = union(enum) {
         try checkSrcUndefined(state, params.value);
 
         // After memset, destination region elements are defined (they're set to value)
-        const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
+        const dest_elem_gid = (try getRegionElementGid(state, params.dest)) orelse return;
         setSafetyState(state.refinements, dest_elem_gid, .{ .defined = {} });
     }
     pub const memset = memsetHandler;
@@ -561,8 +581,8 @@ pub const UndefinedSafety = union(enum) {
         try checkSrcUndefined(state, params.src);
 
         // Propagate defined state from source region element to dest region element
-        const src_elem_gid = getRegionElementGid(state, params.src) orelse return;
-        const dest_elem_gid = getRegionElementGid(state, params.dest) orelse return;
+        const src_elem_gid = (try getRegionElementGid(state, params.src)) orelse return;
+        const dest_elem_gid = (try getRegionElementGid(state, params.dest)) orelse return;
 
         // Copy undefined state from source to destination
         copyUndefinedStateRecursive(state.refinements, dest_elem_gid, src_elem_gid);
@@ -572,7 +592,7 @@ pub const UndefinedSafety = union(enum) {
 
     /// Helper to get the region element GID from a Src that points to a region.
     /// Returns null if the Src doesn't resolve to a pointer->region chain.
-    fn getRegionElementGid(state: State, src: tag.Src) ?Gid {
+    fn getRegionElementGid(state: State, src: tag.Src) !?Gid {
         const ptr_gid: Gid = switch (src) {
             .inst => |inst| state.results[inst].refinement orelse return null,
             .interned => |interned| state.refinements.getGlobal(interned.ip_idx) orelse return null,
@@ -580,14 +600,19 @@ pub const UndefinedSafety = union(enum) {
         };
 
         const ptr_ref = state.refinements.at(ptr_gid);
-        const region_gid = switch (ptr_ref.*) {
-            .pointer => |p| p.to,
+        const infos: []const Refinements.Refinement.PointerInfo = switch (ptr_ref.*) {
+            .pointer => |p| &.{p.info},
+            .pointer_union => |p| p.members,
             else => return null,
         };
 
-        const region_ref = state.refinements.at(region_gid);
-        if (region_ref.getMultiplicity() != .region and ptr_ref.pointer.raw_bytes == null) return null;
-        return region_gid;
+        if (infos.len == 0) @panic("undefined_safety.getRegionElementGid: empty pointer union");
+        for (infos) |info| {
+            const region_ref = state.refinements.at(info.to);
+            if (region_ref.getMultiplicity() != .region and info.raw_bytes == null) return null;
+            try checkUndefinedRecursive(state, info.to);
+        }
+        return infos[0].to;
     }
 
     /// Check if a Src operand is undefined and error if so
@@ -611,6 +636,15 @@ pub const UndefinedSafety = union(enum) {
             .pointer => |p| {
                 const undef = p.analyte.undefined_safety orelse
                     std.debug.panic("undefined_safety.checkSrcUndefined: pointer gid {d} has no undefined_safety", .{gid});
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
+            .pointer_union => |p| {
+                const undef = p.analyte.undefined_safety orelse
+                    std.debug.panic("undefined_safety.checkSrcUndefined: pointer union gid {d} has no undefined_safety", .{gid});
                 switch (undef) {
                     .undefined => return undef.reportUseBeforeAssign(state.ctx),
                     .inconsistent => return undef.reportInconsistentBranches(state.ctx),
@@ -662,6 +696,7 @@ pub const UndefinedSafety = union(enum) {
         const src_undef: ?UndefinedSafety = switch (src_ref.*) {
             .scalar => |s| s.analyte.undefined_safety,
             .pointer => |p| p.analyte.undefined_safety,
+            .pointer_union => null,
             .allocator => |a| a.analyte.undefined_safety,
             .hashmap => |h| h.analyte.undefined_safety,
             .fnptr => |f| f.analyte.undefined_safety,
@@ -673,6 +708,7 @@ pub const UndefinedSafety = union(enum) {
         switch (dst_ref.*) {
             .scalar => |*s| s.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .pointer => |*p| p.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
+            .pointer_union => |*p| p.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .allocator => |*a| a.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .hashmap => |*h| h.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
             .fnptr => |*f| f.analyte.undefined_safety = src_undef orelse .{ .defined = {} },
@@ -722,9 +758,10 @@ pub const UndefinedSafety = union(enum) {
                 };
                 // Also copy pointee state
                 if (src_ref.* == .pointer) {
-                    copyUndefinedStateRecursive(refinements, p.to, src_ref.pointer.to);
+                    copyUndefinedStateRecursive(refinements, p.info.to, src_ref.pointer.info.to);
                 }
             },
+            .pointer_union => |*p| p.analyte.undefined_safety = .{ .defined = {} },
             .optional => |o| {
                 if (src_ref.* == .optional) {
                     copyUndefinedStateRecursive(refinements, o.to, src_ref.optional.to);
@@ -804,7 +841,10 @@ pub const UndefinedSafety = union(enum) {
                 if (p.analyte.undefined_safety == null) {
                     p.analyte.undefined_safety = .{ .defined = {} };
                 }
-                setDefinedRecursive(refinements, p.to);
+                setDefinedRecursive(refinements, p.info.to);
+            },
+            .pointer_union => |p| {
+                for (p.members) |member| setDefinedRecursive(refinements, member.to);
             },
             .optional => |o| setDefinedRecursive(refinements, o.to),
             .errorunion => |e| setDefinedRecursive(refinements, e.to),
@@ -862,7 +902,7 @@ pub const UndefinedSafety = union(enum) {
                         undef.undefined.name_when_set = name;
                     }
                 }
-                setNameOnUndefined(refinements, p.to, name);
+                setNameOnUndefined(refinements, p.info.to, name);
             },
             .optional => |o| setNameOnUndefined(refinements, o.to, name),
             .errorunion => |e| setNameOnUndefined(refinements, e.to, name),
@@ -893,7 +933,7 @@ pub const UndefinedSafety = union(enum) {
                         undef.undefined.name_when_set = name;
                     }
                 }
-                forceNameOnUndefined(refinements, p.to, name);
+                forceNameOnUndefined(refinements, p.info.to, name);
             },
             .optional => |o| forceNameOnUndefined(refinements, o.to, name),
             .errorunion => |e| forceNameOnUndefined(refinements, e.to, name),
@@ -913,7 +953,7 @@ pub const UndefinedSafety = union(enum) {
         const inst = params.ptr orelse return;
         const ptr_idx = state.results[inst].refinement orelse return;
         // Follow pointer to get pointee - panic on unexpected types
-        const pointee_idx = state.refinements.at(ptr_idx).pointer.to;
+        const pointee_idx = state.refinements.at(ptr_idx).pointer.info.to;
         // Build the full path name and set on undefined states
         const name = state.ctx.buildPathName(state.results, state.refinements, inst);
         setNameOnUndefined(state.refinements, pointee_idx, name);
@@ -939,7 +979,7 @@ pub const UndefinedSafety = union(enum) {
 
         if (params.is_pointer) {
             // Pointer argument: follow pointer to set name on pointee
-            const pointee_idx = state.refinements.at(gid).pointer.to;
+            const pointee_idx = state.refinements.at(gid).pointer.info.to;
             const name = state.ctx.buildPathName(state.results, state.refinements, inst);
             setNameOnUndefined(state.refinements, pointee_idx, name);
         } else {
@@ -1051,6 +1091,7 @@ pub const UndefinedSafety = union(enum) {
                 // Set state on pointer value, but NOT on pointee (separate memory)
                 p.analyte.undefined_safety = undef_state;
             },
+            .pointer_union => |*p| p.analyte.undefined_safety = undef_state,
             .optional => |o| {
                 // Don't set analyte.undefined on optional - only the payload carries undefined state
                 setSafetyState(refinements, o.to, undef_state);
@@ -1094,8 +1135,11 @@ pub const UndefinedSafety = union(enum) {
             .scalar, .allocator, .hashmap, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},
             .pointer => |p| {
                 // Set target to undefined and recurse
-                setSafetyState(refinements, p.to, .{ .undefined = .{ .meta = meta } });
-                initPointerTargetsUndefined(refinements, p.to, meta);
+                setSafetyState(refinements, p.info.to, .{ .undefined = .{ .meta = meta } });
+                initPointerTargetsUndefined(refinements, p.info.to, meta);
+            },
+            .pointer_union => |p| {
+                for (p.members) |member| initPointerTargetsUndefined(refinements, member.to, meta);
             },
             .optional => |o| initPointerTargetsUndefined(refinements, o.to, meta),
             .errorunion => |e| initPointerTargetsUndefined(refinements, e.to, meta),
@@ -1151,7 +1195,7 @@ pub const UndefinedSafety = union(enum) {
                 switch (refinements.at(idx).*) {
                     .pointer => |*p| {
                         p.analyte.undefined_safety = .{ .defined = {} };
-                        applyInternedType(refinements, p.to, inner.to.*, ctx);
+                        applyInternedType(refinements, p.info.to, inner.to.*, ctx);
                     },
                     else => setSafetyState(refinements, idx, .{ .defined = {} }),
                 }
@@ -1236,11 +1280,29 @@ pub const UndefinedSafety = union(enum) {
             .interned => |interned| refinements.getGlobal(interned.ip_idx) orelse @panic("store: global not found"),
             .fnptr => @panic("store: storing through constant pointer not supported"),
         };
-        const ptr_ref = refinements.at(ptr_gid).pointer;
+        const ptr_refinement = refinements.at(ptr_gid);
+
+        // Scalar writes through a multipointer update every possible target. The
+        // tag layer has already rejected pointer/aggregate retargeting here.
+        if (ptr_refinement.* == .pointer_union) {
+            const is_undef = switch (params.src) {
+                .interned => |interned| interned.ty == .undefined,
+                else => false,
+            };
+            const state_to_set: UndefinedSafety = if (is_undef)
+                .{ .undefined = .{ .meta = state.ctx.meta } }
+            else
+                .{ .defined = {} };
+            for (ptr_refinement.pointer_union.members) |member| {
+                setSafetyState(refinements, member.to, state_to_set);
+            }
+            return;
+        }
+        const ptr_ref = ptr_refinement.pointer;
 
         // Check if this is a packed struct field store (RMW pattern)
         // If so, mark only that specific field as defined in the container struct
-        if (ptr_ref.packed_field) |pf| {
+        if (ptr_ref.info.packed_field) |pf| {
             const container = refinements.at(pf.container_gid);
             if (container.* == .@"struct") {
                 const field_gid = container.@"struct".fields[pf.field_index];
@@ -1252,7 +1314,7 @@ pub const UndefinedSafety = union(enum) {
         }
 
         // Follow pointer to get pointee - panic on unexpected types
-        const pointee_idx = ptr_ref.to;
+        const pointee_idx = ptr_ref.info.to;
 
         // Check if source is an undefined type (interned with .undefined wrapper)
         const is_undef = switch (params.src) {
@@ -1289,11 +1351,13 @@ pub const UndefinedSafety = union(enum) {
                     switch (refinements.at(pointee_idx).*) {
                         .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
                         .pointer => |*p| p.analyte.undefined_safety = .{ .defined = {} },
+                        .pointer_union => |*p| p.analyte.undefined_safety = .{ .defined = {} },
                         .optional => |o| {
                             // Mark the payload as defined
                             switch (refinements.at(o.to).*) {
                                 .scalar => |*s| s.analyte.undefined_safety = .{ .defined = {} },
                                 .pointer => |*p| p.analyte.undefined_safety = .{ .defined = {} },
+                                .pointer_union => |*p| p.analyte.undefined_safety = .{ .defined = {} },
                                 else => {},
                             }
                         },
@@ -1351,7 +1415,7 @@ pub const UndefinedSafety = union(enum) {
                                 // If global is also a pointer, update .to to share the target
                                 if (refinements.at(global_gid).* == .pointer) {
                                     const global_ptr = refinements.at(global_gid).pointer;
-                                    p.to = global_ptr.to;
+                                    p.info.to = global_ptr.info.to;
                                     p.analyte.undefined_safety = .{ .defined = {} };
                                 } else {
                                     p.analyte.undefined_safety = .{ .defined = {} };
@@ -1401,8 +1465,22 @@ pub const UndefinedSafety = union(enum) {
             .fnptr => null,
         };
         if (ptr_gid) |gid| {
+            if (refinements.at(gid).* == .pointer_union) {
+                const undef = refinements.at(gid).pointer_union.analyte.undefined_safety orelse
+                    std.debug.panic("undefined_safety.load: pointer union has no undefined_safety", .{});
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
+                    .defined => {},
+                }
+                for (refinements.at(gid).pointer_union.members) |member| {
+                    try checkUndefinedRecursive(state, member.to);
+                }
+                setSafetyState(refinements, results[index].refinement.?, .{ .defined = {} });
+                return;
+            }
             if (refinements.at(gid).* == .pointer) {
-                if (refinements.at(gid).pointer.packed_field) |pf| {
+                if (refinements.at(gid).pointer.info.packed_field) |pf| {
                     // Reading from a packed struct field - check if that specific field is defined
                     const container = refinements.at(pf.container_gid);
                     if (container.* == .@"struct") {
@@ -1463,6 +1541,15 @@ pub const UndefinedSafety = union(enum) {
                         const idx = results[index].refinement.?;
                         setSafetyState(refinements, idx, .{ .defined = {} });
                     },
+                }
+            },
+            .pointer_union => |p| {
+                const undef = p.analyte.undefined_safety orelse
+                    std.debug.panic("load: pointer union has no undefined_safety", .{});
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(ctx),
+                    .defined => {},
                 }
             },
             .optional => |o| {
@@ -1727,6 +1814,7 @@ pub const UndefinedSafety = union(enum) {
         switch (ref.*) {
             .scalar => |*s| s.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .pointer => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
+            .pointer_union => |*p| p.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .allocator => |*a| a.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .hashmap => |*h| h.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
             .fnptr => |*f| f.analyte.undefined_safety = .{ .undefined = .{ .meta = meta } },
@@ -1818,7 +1906,7 @@ pub const UndefinedSafety = union(enum) {
                 .fnptr => return false,
             };
             const self_ref = state.refinements.at(self_gid);
-            const map_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+            const map_gid = if (self_ref.* == .pointer) self_ref.pointer.info.to else self_gid;
             const map = state.refinements.at(map_gid);
             if (map.* == .hashmap) {
                 const metadata = state.refinements.at(map.hashmap.metadata_gid);
@@ -1938,6 +2026,14 @@ pub const UndefinedSafety = union(enum) {
                     .defined => {},
                 }
             },
+            .pointer_union => |p| {
+                const undef = p.analyte.undefined_safety orelse return;
+                switch (undef) {
+                    .undefined => return undef.reportUseBeforeAssign(state.ctx),
+                    .inconsistent => return undef.reportInconsistentBranches(state.ctx),
+                    .defined => {},
+                }
+            },
             .hashmap => |h| {
                 const undef = h.analyte.undefined_safety orelse return;
                 switch (undef) {
@@ -2013,8 +2109,8 @@ pub const UndefinedSafety = union(enum) {
 
         // Slice: pointer -> region-multiplicity element
         if (ref.* == .pointer) {
-            const region_ref = refinements.at(ref.pointer.to);
-            if (region_ref.getMultiplicity() == .region or ref.pointer.raw_bytes != null) {
+            const region_ref = refinements.at(ref.pointer.info.to);
+            if (region_ref.getMultiplicity() == .region or ref.pointer.info.raw_bytes != null) {
                 setDefinedRecursive(refinements, gid);
             }
         }
@@ -2053,7 +2149,7 @@ pub const UndefinedSafety = union(enum) {
         ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
 
         // The pointee starts as undefined (must be set by store before use)
-        const pointee_idx = ptr_ref.pointer.to;
+        const pointee_idx = ptr_ref.pointer.info.to;
         setSafetyState(refinements, pointee_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
 
@@ -2075,9 +2171,9 @@ pub const UndefinedSafety = union(enum) {
         ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
 
         // The pointee is a region-multiplicity element.
-        const region_idx = ptr_ref.pointer.to;
+        const region_idx = ptr_ref.pointer.info.to;
         const region_ref = refinements.at(region_idx);
-        if (region_ref.getMultiplicity() != .region and ptr_ref.pointer.raw_bytes == null) return;
+        if (region_ref.getMultiplicity() != .region and ptr_ref.pointer.info.raw_bytes == null) return;
 
         setSafetyState(refinements, region_idx, .{ .undefined = .{ .meta = state.ctx.meta } });
     }
@@ -2101,9 +2197,9 @@ pub const UndefinedSafety = union(enum) {
         ptr_ref.pointer.analyte.undefined_safety = .{ .defined = {} };
 
         // The pointee is a region-multiplicity element.
-        const region_idx = ptr_ref.pointer.to;
+        const region_idx = ptr_ref.pointer.info.to;
         const region_ref = refinements.at(region_idx);
-        if (region_ref.getMultiplicity() != .region and ptr_ref.pointer.raw_bytes == null) return;
+        if (region_ref.getMultiplicity() != .region and ptr_ref.pointer.info.raw_bytes == null) return;
 
         setSafetyState(refinements, region_idx, .{ .defined = {} });
     }
@@ -2140,6 +2236,9 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
             if (p.analyte.undefined_safety == null) {
                 std.debug.panic("undefined state must be set on pointers (refinement idx {})", .{idx});
             }
+        },
+        .pointer_union => |p| {
+            if (p.analyte.undefined_safety == null) std.debug.panic("undefined state must be set on pointer unions (refinement idx {})", .{idx});
         },
         .fnptr => |f| {
             if (f.analyte.undefined_safety == null) {

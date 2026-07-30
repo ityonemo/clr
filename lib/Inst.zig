@@ -59,7 +59,7 @@ fn srcSliceToGidSlice(state: State, args: []const tag.Src) ![]const Gid {
                     if (interned.ty == .allocator) {
                         const ref = state.refinements.at(global_gid);
                         if (ref.* == .pointer) {
-                            break :blk ref.pointer.to;
+                            break :blk ref.pointer.info.to;
                         }
                     }
                     break :blk global_gid;
@@ -207,9 +207,11 @@ fn rewriteMemAsBytesResult(state: State, index: usize, args: []const tag.Src) !v
     const old_analyte = if (old_result == .pointer) old_result.pointer.analyte else Analyte{};
 
     state.refinements.at(result_gid).* = .{ .pointer = .{
-        .to = src_ptr_ref.pointer.to,
         .analyte = old_analyte,
-        .raw_bytes = .readonly,
+        .info = .{
+            .to = src_ptr_ref.pointer.info.to,
+            .raw_bytes = .readonly,
+        },
     } };
 }
 
@@ -262,7 +264,7 @@ pub fn storeFnptr(state: State, index: usize, ptr: tag.Src, func: tag.FnInterpre
     }
 
     // The pointer should point to an fnptr
-    const pointee_gid = ptr_ref.pointer.to;
+    const pointee_gid = ptr_ref.pointer.info.to;
     const pointee_ref = state.refinements.at(pointee_gid);
 
     // Verify it's an fnptr and set choices to include this function
@@ -1289,7 +1291,7 @@ test "loop_switch imports branch-only pointer result target instead of preservin
     const ptr_gid = results[1].refinement.?;
     const ptr_ref = refinements.at(ptr_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(ptr_ref.*));
-    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(ptr_ref.pointer.to).*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(ptr_ref.pointer.info.to).*));
 }
 
 test "alloc creates pointer to typed pointee" {
@@ -1316,7 +1318,7 @@ test "alloc creates pointer to typed pointee" {
     // alloc creates pointer; pointee type is determined by .ty parameter
     try std.testing.expect(results[1].refinement != null);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(results[1].get(&refinements).*));
-    const pointee_idx = results[1].get(&refinements).pointer.to;
+    const pointee_idx = results[1].get(&refinements).pointer.info.to;
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(pointee_idx).*));
     // uninitialized instruction has no refinement yet
     try std.testing.expectEqual(null, results[2].refinement);
@@ -1430,7 +1432,7 @@ test "ret_safe writes return value to return slot" {
     // Allocate and store a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
     const ptr_gid = results[0].refinement.?;
-    refinements.at(refinements.at(ptr_gid).pointer.to).scalar.analyte.memory_safety = .{ .interned = ctx.meta };
+    refinements.at(refinements.at(ptr_gid).pointer.info.to).scalar.analyte.memory_safety = .{ .interned = ctx.meta };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Return the value from instruction 0
@@ -1502,7 +1504,7 @@ test "ret_safe at entrypoint succeeds" {
     // Allocate a value
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
     const ptr_gid = results[0].refinement.?;
-    refinements.at(refinements.at(ptr_gid).pointer.to).scalar.analyte.memory_safety = .{ .interned = ctx.meta };
+    refinements.at(refinements.at(ptr_gid).pointer.info.to).scalar.analyte.memory_safety = .{ .interned = ctx.meta };
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Return - should just succeed without error
@@ -1528,7 +1530,7 @@ test "allocator remap builds optional around copied old slice" {
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{ .multiplicity = .region } } } });
 
     const old_slice_gid = results[0].refinement.?;
-    const old_region_gid = refinements.at(old_slice_gid).pointer.to;
+    const old_region_gid = refinements.at(old_slice_gid).pointer.info.to;
 
     const return_type: tag.Type = .{ .optional = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } };
     const args = [_]tag.Src{
@@ -1547,7 +1549,7 @@ test "allocator remap builds optional around copied old slice" {
 
     const payload_ref = refinements.at(payload_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(payload_ref.*));
-    try std.testing.expectEqual(old_region_gid, payload_ref.pointer.to);
+    try std.testing.expectEqual(old_region_gid, payload_ref.pointer.info.to);
 }
 
 test "mem.asBytes call rewrite creates valid raw-byte pointer view" {
@@ -1569,7 +1571,7 @@ test "mem.asBytes call rewrite creates valid raw-byte pointer view" {
     try Inst.apply(state, 0, .{ .alloc = .{ .ty = .{ .scalar = .{} } } });
 
     const src_ptr_gid = results[0].refinement.?;
-    const src_pointee_gid = refinements.at(src_ptr_gid).pointer.to;
+    const src_pointee_gid = refinements.at(src_ptr_gid).pointer.info.to;
     const return_type: tag.Type = .{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } };
     const args = [_]tag.Src{.{ .inst = 0 }};
 
@@ -1578,8 +1580,8 @@ test "mem.asBytes call rewrite creates valid raw-byte pointer view" {
     const result_gid = results[1].refinement.?;
     const result_ref = refinements.at(result_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(result_ref.*));
-    try std.testing.expectEqual(src_pointee_gid, result_ref.pointer.to);
-    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.raw_bytes.?);
+    try std.testing.expectEqual(src_pointee_gid, result_ref.pointer.info.to);
+    try std.testing.expectEqual(Refinements.Refinement.RawBytes.readonly, result_ref.pointer.info.raw_bytes.?);
     try std.testing.expect(result_ref.pointer.analyte.undefined_safety != null);
     try std.testing.expect(result_ref.pointer.analyte.memory_safety != null);
     refinements.testValid(state.base_gid);

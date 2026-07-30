@@ -120,8 +120,8 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
         }) catch "scalar(?)",
         .pointer => |p| blk: {
             var inner_buf: [1024]u8 = undefined;
-            const pointee = refinements.at(p.to);
-            const pointee_desc = formatRefinementDeep(&inner_buf, p.to, pointee.*, refinements, depth + 1);
+            const pointee = refinements.at(p.info.to);
+            const pointee_desc = formatRefinementDeep(&inner_buf, p.info.to, pointee.*, refinements, depth + 1);
             const result = std.fmt.bufPrint(buf, "({d}) pointer(undef={s}, mem={s}) → {s}", .{
                 gid,
                 p.analyte.formatUndefined(),
@@ -130,6 +130,7 @@ fn formatRefinementDeep(buf: []u8, gid: Gid, ref: Refinement, refinements: *Refi
             }) catch "pointer(?)";
             break :blk result;
         },
+        .pointer_union => |p| std.fmt.bufPrint(buf, "({d}) pointer_union(members={d})", .{ gid, p.members.len }) catch "pointer_union(?)",
         .optional => |o| blk: {
             var inner_buf: [1024]u8 = undefined;
             const payload = refinements.at(o.to);

@@ -38,7 +38,15 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("variant_safety should only exist on unions, got hashmap", .{});
             }
         },
-        inline .pointer, .optional, .errorunion, .@"struct", .recursive, .fnptr => |data, t| {
+        .pointer => |pointer| {
+            if (pointer.analyte.variant_safety != null) {
+                std.debug.panic("variant_safety should only exist on unions, got pointer", .{});
+            }
+        },
+        .pointer_union => |pointer_union| {
+            if (pointer_union.analyte.variant_safety != null) std.debug.panic("variant_safety should only exist on unions, got pointer union", .{});
+        },
+        inline .optional, .errorunion, .@"struct", .recursive, .fnptr => |data, t| {
             if (data.analyte.variant_safety != null) {
                 std.debug.panic("variant_safety should only exist on unions, got {s}", .{@tagName(t)});
             }
@@ -123,7 +131,10 @@ pub const VariantSafety = struct {
                     if (field_opt) |field_gid| initRecursive(refinements, field_gid);
                 }
             },
-            .pointer => |p| initRecursive(refinements, p.to),
+            .pointer => |p| initRecursive(refinements, p.info.to),
+            .pointer_union => |p| {
+                for (p.members) |member| initRecursive(refinements, member.to);
+            },
             .optional => |o| initRecursive(refinements, o.to),
             .errorunion => |e| initRecursive(refinements, e.to),
             .@"struct" => |s| {
@@ -156,7 +167,7 @@ pub const VariantSafety = struct {
             .interned => |interned| refinements.getGlobal(interned.ip_idx).?,
             .fnptr => return, // function pointer - no variant tracking
         };
-        const container_idx = refinements.at(ptr_ref).pointer.to;
+        const container_idx = refinements.at(ptr_ref).pointer.info.to;
         const u = &refinements.at(container_idx).@"union";
         const field_idx = params.field_index.?;
 
@@ -206,7 +217,7 @@ pub const VariantSafety = struct {
         const ptr_ref = state.refinements.at(ptr_gid);
         if (ptr_ref.* != .pointer) return;
 
-        const pointee_gid = ptr_ref.pointer.to;
+        const pointee_gid = ptr_ref.pointer.info.to;
         const pointee = state.refinements.at(pointee_gid);
         if (pointee.* != .@"union") return;
 
@@ -244,8 +255,17 @@ pub const VariantSafety = struct {
             .fnptr => return, // function pointer - no variant checking
         };
 
-        // Follow pointer to container - must be a pointer
-        const container_idx = refinements.at(base_ref).pointer.to;
+        if (refinements.at(base_ref).* == .pointer_union) {
+            for (refinements.at(base_ref).pointer_union.members) |member| {
+                if (refinements.at(member.to).* == .@"union") {
+                    try checkVariantAccess(refinements.at(member.to).@"union", params.field_index, ctx);
+                }
+            }
+            return;
+        }
+
+        // Follow pointer to container - must be a pointer.
+        const container_idx = refinements.at(base_ref).pointer.info.to;
 
         // Only check variant access for unions
         if (refinements.at(container_idx).* == .@"union") {
@@ -334,7 +354,7 @@ pub const VariantSafety = struct {
             .fnptr => return,
         };
 
-        const source_pointee_gid = refinements.at(src_ptr_gid).pointer.to;
+        const source_pointee_gid = refinements.at(src_ptr_gid).pointer.info.to;
         const source_union_ref = refinements.at(source_pointee_gid);
         if (source_union_ref.* != .@"union") return;
 
@@ -398,7 +418,7 @@ pub const VariantSafety = struct {
         };
         const ptr_ref = ptr_gid orelse
             std.debug.panic("variant_safety.switch_br: load source has no refinement", .{});
-        const pointee_gid = refinements.at(ptr_ref).pointer.to;
+        const pointee_gid = refinements.at(ptr_ref).pointer.info.to;
 
         // Only update if pointee is a union (it should be)
         if (refinements.at(pointee_gid).* != .@"union") return;

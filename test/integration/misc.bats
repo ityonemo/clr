@@ -158,6 +158,16 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "HashMap is deletion-agnostic for mixed stack and heap pointers" {
+    run compile_and_run "$TEST_CASES/std/hashmap_pointerunion_no_delete.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "HashMap iterator cleanup frees every uniform pointer entry" {
+    run compile_and_run "$TEST_CASES/std/hashmap_pointerunion_delete.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no analyzer panic for std.process.args" {
     # std.process.args initializes an ArgIterator from OS-provided argv state.
     # CLR should treat that as a stdlib boundary rather than requiring an

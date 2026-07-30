@@ -107,7 +107,7 @@ test "store of interned union value sets active variant" {
     } });
 
     const ptr_gid = results[0].refinement.?;
-    const union_gid = refinements.at(ptr_gid).pointer.to;
+    const union_gid = refinements.at(ptr_gid).pointer.info.to;
     const u = refinements.at(union_gid).@"union";
     const vs = u.analyte.variant_safety.?;
     try std.testing.expect(vs.active_metas[0] == null);
@@ -129,7 +129,7 @@ test "set_union_tag sets active variant" {
     fields[0] = field0_gid;
     fields[1] = field1_gid;
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 0 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = union_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = union_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -165,7 +165,7 @@ test "struct_field_ptr allows access to active variant" {
         .type_id = 0,
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
     } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = union_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = union_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -195,7 +195,7 @@ test "struct_field_ptr errors on inactive variant" {
         .type_id = 0,
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
     } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = union_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = union_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -263,7 +263,7 @@ test "struct_field_ptr errors on ambiguous variant after merge" {
         .type_id = 0,
         .analyte = .{ .variant_safety = .{ .active_metas = active_metas } },
     } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = union_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = union_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);

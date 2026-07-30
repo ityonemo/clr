@@ -76,6 +76,54 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "allows load through stack-or-heap multipointer" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_load_ok.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "rejects destroy through stack-or-heap multipointer" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_destroy_rejected.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "free of stack memory" ]]
+}
+
+@test "allows destroy of outer allocation with divergent nested pointer" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_nested_divergence_destroy_ok.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "preserves candidates through nested multipointer load" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_nested_load_ok.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "rejects multipointer read with freed candidate" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_read_freed_rejected.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use after free" ]]
+}
+
+@test "rejects multipointer read with undefined candidate" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_read_undefined_rejected.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "use of undefined value" ]]
+}
+
+@test "allows aggregate field read through multipointer" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_aggregate_read_ok.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "preserves candidates through multipointer ptr_add read" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_ptr_add_read_ok.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "preserves candidates through multipointer memcpy read" {
+    run compile_and_run "$TEST_CASES/allocator_safety/if/multipointer_memcpy_read_ok.zig"
+    [ "$status" -eq 0 ]
+}
+
 # =============================================================================
 # Switch memory safety tests
 # =============================================================================

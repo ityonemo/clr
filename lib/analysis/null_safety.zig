@@ -184,7 +184,7 @@ pub const NullSafety = union(enum) {
             const ptr_ref = state.refinements.at(ptr_gid);
             if (ptr_ref.* != .pointer) continue;
 
-            const dest_ref = state.refinements.at(ptr_ref.pointer.to);
+            const dest_ref = state.refinements.at(ptr_ref.pointer.info.to);
             if (dest_ref.* != .@"struct") continue;
             if (field_index >= dest_ref.@"struct".fields.len) {
                 std.debug.panic("struct store copy field index {d} out of bounds", .{field_index});
@@ -217,7 +217,7 @@ pub const NullSafety = union(enum) {
         };
         const self_ref = state.refinements.at(self_gid);
         const struct_gid = switch (self_ref.*) {
-            .pointer => |p| p.to,
+            .pointer => |p| p.info.to,
             .@"struct" => self_gid,
             else => |t| std.debug.panic("hashmap_header: expected self struct or pointer to struct, got {s}", .{@tagName(t)}),
         };
@@ -238,7 +238,7 @@ pub const NullSafety = union(enum) {
             .fnptr => return,
         };
         const self_ref = state.refinements.at(self_gid);
-        const managed_gid = if (self_ref.* == .pointer) self_ref.pointer.to else self_gid;
+        const managed_gid = if (self_ref.* == .pointer) self_ref.pointer.info.to else self_gid;
         const managed = state.refinements.at(managed_gid);
         if (managed.* != .@"struct" or managed.@"struct".fields.len == 0) return;
 
@@ -373,7 +373,7 @@ pub const NullSafety = union(enum) {
         const ptr_ref = refinements.at(ptr_idx);
         if (ptr_ref.* != .pointer) return;
 
-        const pointee_idx = ptr_ref.pointer.to;
+        const pointee_idx = ptr_ref.pointer.info.to;
         const pointee = refinements.at(pointee_idx);
 
         switch (params.src) {
@@ -407,9 +407,10 @@ pub const NullSafety = union(enum) {
             },
             .pointer => |dst_pointer| {
                 if (src.* == .pointer) {
-                    copyNullSafetyRecursive(refinements, dst_pointer.to, src.pointer.to);
+                    copyNullSafetyRecursive(refinements, dst_pointer.info.to, src.pointer.info.to);
                 }
             },
+            .pointer_union => {},
             .errorunion => |dst_errorunion| {
                 if (src.* == .errorunion) {
                     copyNullSafetyRecursive(refinements, dst_errorunion.to, src.errorunion.to);
@@ -452,9 +453,10 @@ pub const NullSafety = union(enum) {
                 else => {},
             },
             .pointer => |p| switch (src_ty) {
-                .pointer => |child_ty| applyInternedNullSafety(refinements, p.to, child_ty.to.*, meta),
+                .pointer => |child_ty| applyInternedNullSafety(refinements, p.info.to, child_ty.to.*, meta),
                 else => {},
             },
+            .pointer_union => {},
             .errorunion => |e| switch (src_ty) {
                 .errorunion => |child_ty| applyInternedNullSafety(refinements, e.to, child_ty.to.*, meta),
                 else => {},
@@ -535,9 +537,10 @@ pub const NullSafety = union(enum) {
             .pointer => |p| {
                 // Pointers don't have null_safety, but recurse to pointee
                 if (src_ref.* == .pointer) {
-                    copyNullSafetyStateRecursive(refinements, p.to, src_ref.pointer.to);
+                    copyNullSafetyStateRecursive(refinements, p.info.to, src_ref.pointer.info.to);
                 }
             },
+            .pointer_union => {},
             .errorunion => |e| {
                 if (src_ref.* == .errorunion) {
                     copyNullSafetyStateRecursive(refinements, e.to, src_ref.errorunion.to);
@@ -703,7 +706,7 @@ pub const NullSafety = union(enum) {
     pub fn alloc(state: State, index: usize, params: tag.Alloc) !void {
         _ = params;
         const ptr_gid = state.results[index].refinement.?;
-        const pointee_gid = state.refinements.at(ptr_gid).pointer.to;
+        const pointee_gid = state.refinements.at(ptr_gid).pointer.info.to;
         initOptionalsUnknown(state.refinements, pointee_gid);
     }
 
@@ -716,7 +719,10 @@ pub const NullSafety = union(enum) {
                 ref.optional.analyte.null_safety = .{ .unknown = {} };
                 initOptionalsUnknown(refinements, o.to);
             },
-            .pointer => |p| initOptionalsUnknown(refinements, p.to),
+            .pointer => |p| initOptionalsUnknown(refinements, p.info.to),
+            .pointer_union => |p| {
+                for (p.members) |member| initOptionalsUnknown(refinements, member.to);
+            },
             .errorunion => |e| initOptionalsUnknown(refinements, e.to),
             .@"struct" => |s| {
                 for (s.fields) |field_gid| {
@@ -762,7 +768,15 @@ pub fn testValid(refinement: Refinements.Refinement) void {
                 std.debug.panic("null_safety should only exist on optionals, got hashmap", .{});
             }
         },
-        inline .pointer, .errorunion, .@"struct", .@"union", .recursive, .fnptr => |data, t| {
+        .pointer => |pointer| {
+            if (pointer.analyte.null_safety != null) {
+                std.debug.panic("null_safety should only exist on optionals, got pointer", .{});
+            }
+        },
+        .pointer_union => |pointer_union| {
+            if (pointer_union.analyte.null_safety != null) std.debug.panic("null_safety should only exist on optionals, got pointer union", .{});
+        },
+        inline .errorunion, .@"struct", .@"union", .recursive, .fnptr => |data, t| {
             if (data.analyte.null_safety != null) {
                 std.debug.panic("null_safety should only exist on optionals, got {s}", .{@tagName(t)});
             }

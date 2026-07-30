@@ -163,7 +163,7 @@ test "cond_br narrows prior struct store copy of checked field" {
 
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = .{ .to = &.{ .scalar = .{} } } }} } } } });
     try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
-    const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.to;
+    const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.info.to;
     const copied_field_gid = refinements.at(copied_struct_gid).@"struct".fields[0];
 
     try Inst.apply(state, 3, .{ .struct_field_val = .{
@@ -201,7 +201,7 @@ test "cond_br propagates already known struct field state to prior copy" {
 
     try Inst.apply(state, 1, .{ .alloc = .{ .ty = .{ .@"struct" = &.{ .type_id = 1, .fields = &.{.{ .optional = .{ .to = &.{ .scalar = .{} } } }} } } } });
     try Inst.apply(state, 2, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .inst = 0 } } });
-    const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.to;
+    const copied_struct_gid = refinements.at(results[1].refinement.?).pointer.info.to;
     const copied_field_gid = refinements.at(copied_struct_gid).@"struct".fields[0];
     refinements.at(copied_field_gid).optional.analyte.null_safety = .{ .unknown = {} };
 
@@ -222,7 +222,7 @@ test "hashmap_header marks metadata non_null" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    const metadata_payload_gid = try refinements.appendEntity(.{ .pointer = .{ .to = try refinements.appendEntity(.{ .scalar = .{} }) } });
+    const metadata_payload_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = try refinements.appendEntity(.{ .scalar = .{} }) } } });
     const metadata_gid = try refinements.appendEntity(.{ .optional = .{
         .analyte = .{ .null_safety = .{ .unknown = {} } },
         .to = metadata_payload_gid,
@@ -316,7 +316,7 @@ test "store to optional with null sets null state" {
     // Create a pointer to an optional
     const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = opt_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = opt_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -338,7 +338,7 @@ test "store to optional with value sets non_null state" {
     // Create a pointer to an optional
     const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = opt_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = opt_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -371,7 +371,7 @@ test "store interned struct with null optional field sets field null" {
         .src = .{ .interned = .{ .ip_idx = 1234, .ty = struct_ty } },
     } });
 
-    const struct_gid = refinements.at(results[0].refinement.?).pointer.to;
+    const struct_gid = refinements.at(results[0].refinement.?).pointer.info.to;
     const field_gid = refinements.at(struct_gid).@"struct".fields[0];
     const ns = refinements.at(field_gid).optional.analyte.null_safety.?;
     try std.testing.expectEqual(.null, std.meta.activeTag(ns));
@@ -388,7 +388,7 @@ test "init_global sets null state on optional" {
     const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
     // Create pointer to the optional (ptr_gid)
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = opt_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = opt_gid } } });
 
     // Initialize as null global
     const loc = tag.GlobalLocation{ .file = "test.zig", .line = 1, .column = 1 };
@@ -410,7 +410,7 @@ test "init_global sets non_null state on optional" {
     const inner_gid = try refinements.appendEntity(.{ .scalar = .{} });
     const opt_gid = try refinements.appendEntity(.{ .optional = .{ .to = inner_gid } });
     // Create pointer to the optional
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = opt_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = opt_gid } } });
 
     // Initialize as non-null global (is_null_opt = false)
     const loc = tag.GlobalLocation{ .file = "test.zig", .line = 1, .column = 1 };

@@ -335,7 +335,7 @@ pub const FdSafety = struct {
 
         const ptr_ref = refinements.at(ptr_gid.?);
         if (ptr_ref.* != .pointer) return;
-        const pointee_gid = ptr_ref.pointer.to;
+        const pointee_gid = ptr_ref.pointer.info.to;
 
         // Copy fd_safety from source to destination
         copyFdSafetyState(state, pointee_gid, params.src);
@@ -497,7 +497,7 @@ pub const FdSafety = struct {
                     fds.put(fd.ref, {}) catch return;
                 }
             },
-            .pointer => |p| collectReachableFdsInner(refinements, p.to, fds, depth + 1),
+            .pointer => |p| collectReachableFdsInner(refinements, p.info.to, fds, depth + 1),
             .optional => |o| collectReachableFdsInner(refinements, o.to, fds, depth + 1),
             .errorunion => |e| collectReachableFdsInner(refinements, e.to, fds, depth + 1),
             .@"struct" => |s| {
@@ -839,6 +839,9 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
         // MUST BE NULL - fd_safety only applies to scalar file descriptors
         .pointer => |p| {
             if (p.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on pointer (idx={d})", .{idx});
+        },
+        .pointer_union => |p| {
+            if (p.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on pointer union (idx={d})", .{idx});
         },
         .optional => |o| {
             if (o.analyte.fd_safety != null) std.debug.panic("fd_safety must be null on optional (idx={d})", .{idx});

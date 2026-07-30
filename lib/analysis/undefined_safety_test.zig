@@ -56,7 +56,7 @@ test "alloc creates pointer with undefined pointee" {
     try std.testing.expectEqual(.pointer, std.meta.activeTag(refinements.at(ptr_gid).*));
 
     // Check pointee is undefined
-    const pointee_gid = refinements.at(ptr_gid).pointer.to;
+    const pointee_gid = refinements.at(ptr_gid).pointer.info.to;
     const undef = refinements.at(pointee_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
@@ -66,10 +66,9 @@ test "hashmap_header marks result defined" {
     defer ctx.deinit();
     defer refinements.deinit();
 
-    const metadata_payload_gid = try refinements.appendEntity(.{ .pointer = .{
+    const metadata_payload_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } }),
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
     const metadata_gid = try refinements.appendEntity(.{ .optional = .{ .to = metadata_payload_gid } });
     const size_gid = try refinements.appendEntity(.{ .scalar = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } } } });
     const fields = try std.testing.allocator.alloc(Gid, 2);
@@ -91,7 +90,7 @@ test "hashmap_header marks result defined" {
 
     const result_gid = results[1].refinement.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(result_gid).pointer.analyte.undefined_safety.?));
-    const pointee_gid = refinements.at(result_gid).pointer.to;
+    const pointee_gid = refinements.at(result_gid).pointer.info.to;
     const field_gid = refinements.at(pointee_gid).@"struct".fields[0];
     try std.testing.expectEqual(.defined, std.meta.activeTag(refinements.at(field_gid).scalar.analyte.undefined_safety.?));
 }
@@ -129,12 +128,12 @@ test "call intercepts HashMap valueIterator and marks result defined" {
     defer refinements.deinit();
 
     const len_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const metadata_gid = try refinements.appendEntity(.{ .pointer = .{
+    const metadata_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{
         .to = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } }),
-    } });
-    const values_gid = try refinements.appendEntity(.{ .pointer = .{
+    } } });
+    const values_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{
         .to = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } }),
-    } });
+    } } });
     const fields = try std.testing.allocator.alloc(Gid, 3);
     fields[0] = len_gid;
     fields[1] = metadata_gid;
@@ -174,7 +173,7 @@ test "store with undefined type wrapper keeps state undefined" {
     try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = undef_type } } } });
 
     // Check the pointee's undefined state
-    const pointee_gid = refinements.at(results[1].refinement.?).pointer.to;
+    const pointee_gid = refinements.at(results[1].refinement.?).pointer.info.to;
     const undef = refinements.at(pointee_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(undef));
 }
@@ -192,7 +191,7 @@ test "store with defined value sets state to defined" {
     try Inst.apply(state, 0, .{ .store = .{ .ptr = .{ .inst = 1 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = .{ .scalar = .{} } } } } });
 
     // Check the pointee's undefined state
-    const pointee_gid = refinements.at(results[1].refinement.?).pointer.to;
+    const pointee_gid = refinements.at(results[1].refinement.?).pointer.info.to;
     const undef = refinements.at(pointee_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(undef));
 }
@@ -239,7 +238,7 @@ test "init_global leaves union container without undefined_safety" {
     @memset(fields, null);
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 5120 } });
     // Create pointer to the union (ptr_gid)
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = union_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = union_gid } } });
 
     // Initialize as undefined global
     const UndefinedSafety = @import("undefined_safety.zig").UndefinedSafety;
@@ -297,10 +296,9 @@ test "set_union_tag does not set undefined_safety on union container" {
     const fields = try std.testing.allocator.alloc(?Gid, 2);
     @memset(fields, null);
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 5120 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = union_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
     results[0].refinement = ptr_gid;
 
     try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
@@ -320,10 +318,9 @@ test "set_union_tag marks active field undefined" {
     const fields = try std.testing.allocator.alloc(?Gid, 2);
     @memset(fields, null);
     const union_gid = try refinements.appendEntity(.{ .@"union" = .{ .fields = fields, .type_id = 5120 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = union_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
     results[0].refinement = ptr_gid;
 
     try Inst.apply(state, 1, .{ .set_union_tag = .{ .ptr = .{ .inst = 0 }, .field_index = 1, .ty = .{ .scalar = .{} } } });
@@ -350,7 +347,7 @@ test "store with .null to optional sets inner to defined" {
     try Inst.apply(state, 1, .{ .store = .{ .ptr = .{ .inst = 0 }, .src = .{ .interned = .{ .ip_idx = 0, .ty = null_type } } } });
 
     // Check the pointee is an optional
-    const pointee_gid = refinements.at(results[0].refinement.?).pointer.to;
+    const pointee_gid = refinements.at(results[0].refinement.?).pointer.info.to;
     try std.testing.expectEqual(.optional, std.meta.activeTag(refinements.at(pointee_gid).*));
 
     // Check the optional's inner value is a defined scalar
@@ -1031,7 +1028,7 @@ test "load with is_packed_rmw skips undefined check and marks result defined" {
 
     // Verify pointee is undefined
     const ptr_gid = results[0].refinement.?;
-    const pointee_gid = refinements.at(ptr_gid).pointer.to;
+    const pointee_gid = refinements.at(ptr_gid).pointer.info.to;
     try std.testing.expectEqual(.undefined, std.meta.activeTag(refinements.at(pointee_gid).scalar.analyte.undefined_safety.?));
 
     // Load with is_packed_rmw=true should NOT error even though pointee is undefined
@@ -1179,10 +1176,9 @@ test "slice from pointer shares region and preserves defined state" {
     const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a pointer to the region (like slice.ptr)
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = region_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
 
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = ptr_gid;
@@ -1201,10 +1197,10 @@ test "slice from pointer shares region and preserves defined state" {
     try std.testing.expectEqual(.pointer, std.meta.activeTag(slice_ref.*));
 
     // Critical: the slice should point to the SAME region as the source pointer
-    try std.testing.expectEqual(region_gid, slice_ref.pointer.to);
+    try std.testing.expectEqual(region_gid, slice_ref.pointer.info.to);
 
     // The region's element should still be defined
-    const slice_elem_gid = slice_ref.pointer.to;
+    const slice_elem_gid = slice_ref.pointer.info.to;
     const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
 }
@@ -1230,10 +1226,9 @@ test "slice from ptr_add result shares region and preserves defined state" {
     const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a slice (pointer to region) - this is the input slice
-    const input_slice_gid = try refinements.appendEntity(.{ .pointer = .{
+    const input_slice_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = region_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
 
     var results = [_]Inst{.{}} ** 8;
     results[0].refinement = input_slice_gid;
@@ -1250,7 +1245,12 @@ test "slice from ptr_add result shares region and preserves defined state" {
     try Inst.apply(state, 3, .{ .store = .{ .ptr = .{ .inst = 2 }, .src = .{ .inst = 1 } } });
 
     // inst 4: bitcast - cast the alloc pointer type
-    try Inst.apply(state, 4, .{ .bitcast = .{ .src = .{ .inst = 2 }, .ty = .{ .pointer = .{ .to = &.{ .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } } } } } } });
+    try Inst.apply(state, 4, .{ .bitcast = .{
+        .src = .{ .inst = 2 },
+        .ty = .{ .pointer = .{ .to = &.{
+            .pointer = .{ .to = &.{ .scalar = .{ .multiplicity = .region } } },
+        } } },
+    } });
 
     // inst 5: load - load the pointer through the bitcast
     try Inst.apply(state, 5, .{ .load = .{ .ptr = .{ .inst = 4 } } });
@@ -1260,7 +1260,7 @@ test "slice from ptr_add result shares region and preserves defined state" {
     const loaded_ref = refinements.at(loaded_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(loaded_ref.*));
     // The loaded pointer should point to the same region
-    try std.testing.expectEqual(region_gid, loaded_ref.pointer.to);
+    try std.testing.expectEqual(region_gid, loaded_ref.pointer.info.to);
 
     // inst 6: ptr_add - pointer arithmetic (shares refinement)
     try Inst.apply(state, 6, .{ .ptr_add = .{ .ptr = .{ .inst = 5 } } });
@@ -1275,10 +1275,10 @@ test "slice from ptr_add result shares region and preserves defined state" {
     const slice_gid = results[7].refinement.?;
     const slice_ref = refinements.at(slice_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(slice_ref.*));
-    try std.testing.expectEqual(region_gid, slice_ref.pointer.to);
+    try std.testing.expectEqual(region_gid, slice_ref.pointer.info.to);
 
     // The region's element should still be defined
-    const slice_elem_gid = slice_ref.pointer.to;
+    const slice_elem_gid = slice_ref.pointer.info.to;
     const elem_undef = refinements.at(slice_elem_gid).scalar.analyte.undefined_safety.?;
     try std.testing.expectEqual(.defined, std.meta.activeTag(elem_undef));
 }
@@ -1339,8 +1339,10 @@ test "slice sets undefined_safety on result pointer" {
     // Create a pointer to the region - without undefined_safety set (simulating some edge case)
     const ptr_gid = try refinements.appendEntity(.{
         .pointer = .{
-            .to = region_gid,
-            // No undefined_safety set
+            .info = .{
+                .to = region_gid,
+                // No undefined_safety set
+            },
         },
     });
 
@@ -1381,10 +1383,9 @@ test "ptr_add sets undefined_safety on result pointer" {
     const region_gid = makeRegion(&refinements, elem_gid);
 
     // Create a pointer to the region - with undefined_safety set
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = region_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
 
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = ptr_gid;
@@ -1411,10 +1412,9 @@ test "ptr_sub sets undefined_safety on result pointer" {
         .analyte = .{ .undefined_safety = .{ .defined = {} } },
     } });
     const region_gid = makeRegion(&refinements, elem_gid);
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = region_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
 
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = ptr_gid;
@@ -1446,16 +1446,17 @@ test "load pointer with null undefined_safety sets result to defined" {
     // Create a pointer to the scalar - WITHOUT undefined_safety set (null)
     const inner_ptr_gid = try refinements.appendEntity(.{
         .pointer = .{
-            .to = inner_scalar_gid,
-            // Note: analyte.undefined_safety is null by default
+            .info = .{
+                .to = inner_scalar_gid,
+                // Note: analyte.undefined_safety is null by default
+            },
         },
     });
 
     // Create a pointer-to-pointer (like stack storage for a pointer)
-    const outer_ptr_gid = try refinements.appendEntity(.{ .pointer = .{
+    const outer_ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .analyte = .{ .undefined_safety = .{ .defined = {} } }, .info = .{
         .to = inner_ptr_gid,
-        .analyte = .{ .undefined_safety = .{ .defined = {} } },
-    } });
+    } } });
 
     var results = [_]Inst{.{}} ** 2;
     results[0].refinement = outer_ptr_gid;

@@ -39,13 +39,16 @@ pub const FieldParentPtrSafety = struct {
         // Get the pointer we just created
         const ptr_idx = results[index].refinement orelse
             std.debug.panic("fieldparentptr_safety.struct_field_ptr: result instruction {d} has no refinement", .{index});
-        const ptr = &refinements.at(ptr_idx).pointer;
-
         // Use the type_id from the tag params (set by codegen from the container type)
         // If type_id is 0, we can't track fieldParentPtr
         if (params.type_id == 0) return;
 
-        ptr.analyte.fieldparentptr_safety = .{
+        const analyte = switch (refinements.at(ptr_idx).*) {
+            .pointer => |*ptr| &ptr.analyte,
+            .pointer_union => |*ptr| &ptr.analyte,
+            else => @panic("fieldparentptr_safety.struct_field_ptr: result is not a pointer"),
+        };
+        analyte.fieldparentptr_safety = .{
             .field_index = params.field_index,
             .container_type_id = params.type_id,
         };
@@ -234,6 +237,7 @@ pub fn testValid(refinement: Refinements.Refinement, idx: usize) void {
     switch (refinement) {
         // ALLOWED - fieldparentptr_safety can be null or non-null on pointers
         .pointer => {},
+        .pointer_union => {},
         // MUST BE NULL - fieldparentptr_safety only applies to pointers from struct fields
         .scalar => |s| {
             if (s.analyte.fieldparentptr_safety != null) std.debug.panic("fieldparentptr_safety must be null on scalar (idx={d})", .{idx});

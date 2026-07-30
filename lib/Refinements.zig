@@ -86,9 +86,7 @@ pub const Refinement = union(enum) {
         multiplicity: Multiplicity = .single,
     };
 
-    pub const Pointer = struct {
-        gid: Gid = INVALID_GID,
-        analyte: Analyte = .{},
+    pub const PointerInfo = struct {
         // NOTE: this is the multiplicity of the pointer (for example if you have []*u8),
         // not the multiplicity of the 'to' item.
         multiplicity: Multiplicity = .single,
@@ -100,6 +98,19 @@ pub const Refinement = union(enum) {
         /// If set, this pointer was created to represent `to` as raw bytes,
         /// which should be treated as region access.
         raw_bytes: ?RawBytes = null,
+    };
+
+    pub const Pointer = struct {
+        gid: Gid = INVALID_GID,
+        analyte: Analyte = .{},
+        info: PointerInfo,
+    };
+
+    pub const PointerUnion = struct {
+        gid: Gid = INVALID_GID,
+        /// Analysis state of the GID slot replaced by this union.
+        analyte: Analyte = .{},
+        members: []PointerInfo,
     };
 
     pub const Struct = struct {
@@ -163,6 +174,7 @@ pub const Refinement = union(enum) {
 
     scalar: Scalar,
     pointer: Pointer,
+    pointer_union: PointerUnion,
     optional: Indirected,
     errorunion: Indirected,
     recursive: Indirected,
@@ -201,6 +213,7 @@ pub const Refinement = union(enum) {
                 dst.fnptr.choices = mergeChoices(allocator, dst.fnptr.choices, src.fnptr.choices) catch @panic("out of memory");
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
+            .pointer_union => try copyToSlot(dst.getGid(), src, src_list, dst_list),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             .recursive => try recurse_indirected(dst, dst_list, src, src_list, .recursive),
@@ -256,6 +269,7 @@ pub const Refinement = union(enum) {
                 dst.fnptr.choices = mergeChoices(allocator, dst.fnptr.choices, src.fnptr.choices) catch @panic("out of memory");
             },
             .pointer => try recurse_indirected(dst, dst_list, src, src_list, .pointer),
+            .pointer_union => try copyToSlot(dst_gid, src, src_list, dst_list),
             .optional => try recurse_indirected(dst, dst_list, src, src_list, .optional),
             .errorunion => try recurse_indirected(dst, dst_list, src, src_list, .errorunion),
             .recursive => try recurse_indirected(dst, dst_list, src, src_list, .recursive),
@@ -274,24 +288,33 @@ pub const Refinement = union(enum) {
         const allocator = dst_list.list.allocator;
 
         // Free old analyte resources before overwriting
-        @field(dst, @tagName(ref_tag)).analyte.deinit(allocator);
+        const dst_data = &@field(dst, @tagName(ref_tag));
+        const src_data = @field(src, @tagName(ref_tag));
+        const dst_analyte = if (ref_tag == .pointer) &dst_data.analyte else &dst_data.analyte;
+        const src_analyte = if (ref_tag == .pointer) src_data.analyte else src_data.analyte;
+        dst_analyte.deinit(allocator);
 
         // Always deep-copy analytes to prevent mutation through shared references.
         // This is important for types like VariantSafety whose active_metas slice
         // would otherwise be shared between entities.
-        const new_analyte = @field(src, @tagName(ref_tag)).analyte.copy(allocator) catch @panic("out of memory");
-        @field(dst, @tagName(ref_tag)).analyte = new_analyte;
-        @field(dst, @tagName(ref_tag)).multiplicity = @field(src, @tagName(ref_tag)).multiplicity;
+        const new_analyte = src_analyte.copy(allocator) catch @panic("out of memory");
+        if (ref_tag == .pointer) {
+            dst_data.analyte = new_analyte;
+            dst_data.info.multiplicity = src_data.info.multiplicity;
+        } else {
+            dst_data.analyte = new_analyte;
+            dst_data.multiplicity = src_data.multiplicity;
+        }
 
         // Preserve packed_field for pointers (only .pointer has this field)
         if (ref_tag == .pointer) {
-            @field(dst, @tagName(ref_tag)).packed_field = @field(src, @tagName(ref_tag)).packed_field;
-            @field(dst, @tagName(ref_tag)).raw_bytes = @field(src, @tagName(ref_tag)).raw_bytes;
+            dst_data.info.packed_field = src_data.info.packed_field;
+            dst_data.info.raw_bytes = src_data.info.raw_bytes;
         }
-        @field(dst, @tagName(ref_tag)).multiplicity = @field(src, @tagName(ref_tag)).multiplicity;
-
-        const new_dst = dst_list.at(@field(dst, @tagName(ref_tag)).to);
-        const new_src = src_list.at(@field(src, @tagName(ref_tag)).to);
+        const dst_to = if (ref_tag == .pointer) dst_data.info.to else dst_data.to;
+        const src_to = if (ref_tag == .pointer) src_data.info.to else src_data.to;
+        const new_dst = dst_list.at(dst_to);
+        const new_src = src_list.at(src_to);
         try clobber_structured(new_dst, dst_list, new_src.*, src_list);
     }
 
@@ -368,6 +391,7 @@ pub const Refinement = union(enum) {
                 } });
             },
             .pointer => try src.copyToIndirected(src_list, dst_list, .pointer),
+            .pointer_union => try src.copyPointerUnionTo(src_list, dst_list),
             .optional => try src.copyToIndirected(src_list, dst_list, .optional),
             .errorunion => try src.copyToIndirected(src_list, dst_list, .errorunion),
             .recursive => try src.copyToIndirected(src_list, dst_list, .recursive),
@@ -413,15 +437,22 @@ pub const Refinement = union(enum) {
                 } };
             },
             .pointer => |p| blk: {
-                const copied_to = if (p.to < dst_list.list.items.len)
-                    p.to
+                const copied_to = if (p.info.to < dst_list.list.items.len)
+                    p.info.to
                 else
-                    try copyValuePreservingPointerTargetsMapped(p.to, src_list, dst_list, &copied_targets);
+                    try copyValuePreservingPointerTargetsMapped(p.info.to, src_list, dst_list, &copied_targets);
                 const new_analyte = try p.analyte.copy(allocator);
                 var new_data = p;
                 new_data.analyte = new_analyte;
-                new_data.to = copied_to;
+                new_data.info.to = copied_to;
                 break :blk .{ .pointer = new_data };
+            },
+            .pointer_union => |p| blk: {
+                const members = try copyPointerUnionMembers(p.members, src_list, dst_list, &copied_targets);
+                break :blk .{ .pointer_union = .{
+                    .analyte = try p.analyte.copy(allocator),
+                    .members = members,
+                } };
             },
             inline .optional, .errorunion, .recursive => |data, ref_tag| blk: {
                 const copied_to = if (ref_tag == .recursive)
@@ -510,18 +541,24 @@ pub const Refinement = union(enum) {
                 } });
             },
             .pointer => |p| blk: {
-                const copied_to = if (p.to < dst_list.list.items.len)
-                    p.to
+                const copied_to = if (p.info.to < dst_list.list.items.len)
+                    p.info.to
                 else
-                    try copyValuePreservingPointerTargetsMapped(p.to, src_list, dst_list, copied_targets);
+                    try copyValuePreservingPointerTargetsMapped(p.info.to, src_list, dst_list, copied_targets);
                 const new_analyte = try p.analyte.copy(allocator);
                 break :blk try dst_list.appendEntity(.{ .pointer = .{
                     .analyte = new_analyte,
-                    .multiplicity = p.multiplicity,
-                    .to = copied_to,
-                    .packed_field = p.packed_field,
-                    .raw_bytes = p.raw_bytes,
+                    .info = .{
+                        .multiplicity = p.info.multiplicity,
+                        .to = copied_to,
+                        .packed_field = p.info.packed_field,
+                        .raw_bytes = p.info.raw_bytes,
+                    },
                 } });
+            },
+            .pointer_union => |p| blk: {
+                const members = try copyPointerUnionMembers(p.members, src_list, dst_list, copied_targets);
+                break :blk try dst_list.appendEntity(.{ .pointer_union = .{ .members = members } });
             },
             inline .optional, .errorunion, .recursive => |data, ref_tag| blk: {
                 const copied_to = if (ref_tag == .recursive)
@@ -570,7 +607,13 @@ pub const Refinement = union(enum) {
         if (src_gid >= src_list.list.items.len) return false;
         const src = src_list.at(src_gid);
         return switch (src.*) {
-            .pointer => |p| p.to < dst_list.list.items.len,
+            .pointer => |p| p.info.to < dst_list.list.items.len,
+            .pointer_union => |p| blk: {
+                for (p.members) |member| {
+                    if (member.to >= dst_list.list.items.len) break :blk false;
+                }
+                break :blk true;
+            },
             .optional => |o| pointerTargetsExistInDestination(o.to, src_list, dst_list),
             .errorunion => |e| pointerTargetsExistInDestination(e.to, src_list, dst_list),
             .recursive => |r| r.to == 0 or r.to < dst_list.list.items.len,
@@ -596,23 +639,63 @@ pub const Refinement = union(enum) {
 
     fn copyToIndirected(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements, comptime ref_tag: anytype) error{OutOfMemory}!Gid {
         const src_data = @field(src, @tagName(ref_tag));
-        const dst_inner_idx = try copyTo(src_list.at(src_data.to).*, src_list, dst_list);
-        var to_insert: Refinement = @unionInit(Refinement, @tagName(ref_tag), .{
-            .to = dst_inner_idx,
-            .analyte = src_data.analyte,
-        });
-        // Preserve packed_field for pointers (only .pointer has this field)
-        if (ref_tag == .pointer) {
-            to_insert.pointer.packed_field = src_data.packed_field;
-            to_insert.pointer.raw_bytes = src_data.raw_bytes;
-        }
-        @field(to_insert, @tagName(ref_tag)).multiplicity = src_data.multiplicity;
+        const src_to = if (ref_tag == .pointer) src_data.info.to else src_data.to;
+        const dst_inner_idx = try copyTo(src_list.at(src_to).*, src_list, dst_list);
+        const to_insert: Refinement = if (ref_tag == .pointer)
+            .{ .pointer = .{
+                .analyte = src_data.analyte,
+                .info = .{
+                    .to = dst_inner_idx,
+                    .multiplicity = src_data.info.multiplicity,
+                    .packed_field = src_data.info.packed_field,
+                    .raw_bytes = src_data.info.raw_bytes,
+                },
+            } }
+        else
+            @unionInit(Refinement, @tagName(ref_tag), .{
+                .to = dst_inner_idx,
+                .analyte = src_data.analyte,
+                .multiplicity = src_data.multiplicity,
+            });
         return dst_list.appendEntity(to_insert);
+    }
+
+    fn copyPointerUnionTo(src: Refinement, noalias src_list: *Refinements, noalias dst_list: *Refinements) error{OutOfMemory}!Gid {
+        const allocator = dst_list.list.allocator;
+        var copied_targets = std.AutoHashMap(Gid, Gid).init(allocator);
+        defer copied_targets.deinit();
+        const members = try copyPointerUnionMembers(src.pointer_union.members, src_list, dst_list, &copied_targets);
+        return dst_list.appendEntity(.{ .pointer_union = .{
+            .analyte = try src.pointer_union.analyte.copy(allocator),
+            .members = members,
+        } });
+    }
+
+    fn copyPointerUnionMembers(
+        members: []const PointerInfo,
+        noalias src_list: *Refinements,
+        noalias dst_list: *Refinements,
+        copied_targets: *std.AutoHashMap(Gid, Gid),
+    ) error{OutOfMemory}![]PointerInfo {
+        const allocator = dst_list.list.allocator;
+        const copied_members = try allocator.alloc(PointerInfo, members.len);
+        errdefer allocator.free(copied_members);
+
+        for (members, 0..) |member, i| {
+            copied_members[i] = member;
+            copied_members[i].to = if (member.to < dst_list.list.items.len)
+                member.to
+            else
+                try copyValuePreservingPointerTargetsMapped(member.to, src_list, dst_list, copied_targets);
+        }
+        return copied_members;
     }
 
     pub fn getMultiplicity(self: Refinement) Multiplicity {
         return switch (self) {
             .void, .noreturn, .unimplemented => .single,
+            .pointer => |pointer| pointer.info.multiplicity,
+            .pointer_union => .single,
             inline else => |data| data.multiplicity,
         };
     }
@@ -620,6 +703,8 @@ pub const Refinement = union(enum) {
     pub fn setMultiplicity(self: *Refinement, multiplicity: Multiplicity) void {
         switch (self.*) {
             .void, .noreturn, .unimplemented => {},
+            .pointer => |*pointer| pointer.info.multiplicity = multiplicity,
+            .pointer_union => {},
             inline else => |*data| data.multiplicity = multiplicity,
         }
     }
@@ -632,7 +717,13 @@ pub const Refinement = union(enum) {
 
     pub fn hasRegionAccess(self: Refinement, refinements: *Refinements) bool {
         return switch (self) {
-            .pointer => |p| p.raw_bytes != null or refinements.at(p.to).getMultiplicity() == .region,
+            .pointer => |p| p.info.raw_bytes != null or refinements.at(p.info.to).getMultiplicity() == .region,
+            .pointer_union => |p| blk: {
+                for (p.members) |member| {
+                    if (member.raw_bytes == null and refinements.at(member.to).getMultiplicity() != .region) break :blk false;
+                }
+                break :blk true;
+            },
             else => self.getMultiplicity() == .region,
         };
     }
@@ -659,7 +750,22 @@ pub const Refinement = union(enum) {
                     }
                 }
             },
-            inline .pointer, .optional, .errorunion, .recursive => |data| {
+            .pointer => |data| {
+                const inner_gid = data.info.to;
+                if (!collected.contains(inner_gid)) {
+                    try collected.put(inner_gid, {});
+                    try collectReachableGids(src_list.at(inner_gid).*, src_list, collected);
+                }
+            },
+            .pointer_union => |data| {
+                for (data.members) |member| {
+                    if (!collected.contains(member.to)) {
+                        try collected.put(member.to, {});
+                        try collectReachableGids(src_list.at(member.to).*, src_list, collected);
+                    }
+                }
+            },
+            inline .optional, .errorunion, .recursive => |data| {
                 const inner_gid = data.to;
                 if (!collected.contains(inner_gid)) {
                     try collected.put(inner_gid, {});
@@ -774,7 +880,7 @@ fn createGlobalEntity(
         // This happens when a field pointer is registered before its parent struct.
         // Call splatInitGlobal to let analysis modules handle it (no direct analyte access).
         if (field_info != null) {
-            const pointee_gid = self.at(existing_gid).pointer.to;
+            const pointee_gid = self.at(existing_gid).pointer.info.to;
             const loc = tag.GlobalLocation{ .file = def.loc.file, .line = def.loc.line, .column = def.loc.column };
             tag.splatInitGlobal(self, existing_gid, pointee_gid, ctx, false, false, loc, field_info);
         }
@@ -796,10 +902,10 @@ fn createGlobalEntity(
                 const target_ptr_gid = createGlobalEntity(self, target_def, all_globals, ctx, null);
 
                 // Our value (the pointer) points to the target's value (pointee)
-                const target_pointee = self.at(target_ptr_gid).pointer.to;
+                const target_pointee = self.at(target_ptr_gid).pointer.info.to;
 
                 // Create our pointer value entity pointing to target's pointee
-                pointee_gid = self.appendEntity(.{ .pointer = .{ .to = target_pointee } }) catch @panic("appendEntity failed");
+                pointee_gid = self.appendEntity(.{ .pointer = .{ .info = .{ .to = target_pointee } } }) catch @panic("appendEntity failed");
             } else {
                 // Pointer starts undefined - create fresh pointee from type
                 const pointee_ref = tag.typeToRefinement(def.ty, self) catch @panic("typeToRefinement failed for global");
@@ -826,7 +932,7 @@ fn createGlobalEntity(
                     };
                     const field_ptr_gid = createGlobalEntity(self, field_def, all_globals, ctx, finfo);
                     // Get the pointee from the field pointer
-                    field_gids[field_idx] = self.at(field_ptr_gid).pointer.to;
+                    field_gids[field_idx] = self.at(field_ptr_gid).pointer.info.to;
                 } else {
                     // Field not linked - create fresh scalar from type
                     field_gids[field_idx] = self.appendEntity(.{ .scalar = .{} }) catch @panic("appendEntity failed");
@@ -878,9 +984,9 @@ fn createGlobalEntity(
     }
 
     // Create the global address pointer (undefined state set by splatInitGlobal)
-    const ptr_gid = self.appendEntity(.{ .pointer = .{
+    const ptr_gid = self.appendEntity(.{ .pointer = .{ .info = .{
         .to = pointee_gid,
-    } }) catch @panic("appendEntity failed for global pointer");
+    } } }) catch @panic("appendEntity failed for global pointer");
 
     // Register in global_map
     self.global_map.put(def.ip_idx, ptr_gid) catch {};
@@ -921,7 +1027,12 @@ pub fn deinit(self: *Refinements) void {
                 allocator.free(@constCast(data.choices));
                 data.analyte.deinit(allocator);
             },
-            inline .scalar, .pointer, .optional, .recursive, .allocator, .hashmap => |data| {
+            .pointer => |data| data.analyte.deinit(allocator),
+            .pointer_union => |data| {
+                data.analyte.deinit(allocator);
+                allocator.free(data.members);
+            },
+            inline .scalar, .optional, .recursive, .allocator, .hashmap => |data| {
                 data.analyte.deinit(allocator);
             },
             .errorunion => |data| {
@@ -1018,7 +1129,22 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
                 try new.list.append(.{ .hashmap = copied });
             },
             // Deep copy analyte for types that have one - memory_safety state must be independent
-            inline .scalar, .pointer, .optional, .errorunion, .recursive, .allocator => |data, ref_tag| {
+            .pointer => |data| {
+                var copied = data;
+                copied.analyte = try data.analyte.copy(allocator);
+                try new.list.append(.{ .pointer = copied });
+            },
+            .pointer_union => |data| {
+                const members = try allocator.alloc(Refinement.PointerInfo, data.members.len);
+                errdefer allocator.free(members);
+                @memcpy(members, data.members);
+                try new.list.append(.{ .pointer_union = .{
+                    .gid = data.gid,
+                    .analyte = try data.analyte.copy(allocator),
+                    .members = members,
+                } });
+            },
+            inline .scalar, .optional, .errorunion, .recursive, .allocator => |data, ref_tag| {
                 const new_analyte = try data.analyte.copy(allocator);
                 var new_data = data;
                 new_data.analyte = new_analyte;
@@ -1051,7 +1177,12 @@ pub fn freeValue(self: *Refinements, value: *Refinement) void {
             allocator.free(@constCast(data.choices));
             data.analyte.deinit(allocator);
         },
-        inline .scalar, .pointer, .optional, .recursive, .allocator, .hashmap => |data| {
+        .pointer => |data| data.analyte.deinit(allocator),
+        .pointer_union => |data| {
+            data.analyte.deinit(allocator);
+            allocator.free(data.members);
+        },
+        inline .scalar, .optional, .recursive, .allocator, .hashmap => |data| {
             data.analyte.deinit(allocator);
         },
         .errorunion => |data| {
@@ -1112,8 +1243,19 @@ pub fn valueCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
         .pointer => |p| blk: {
             var new_pointer = p;
             new_pointer.gid = INVALID_GID;
+            new_pointer.analyte = try p.analyte.copy(allocator);
             const new_gid = try self.appendEntity(.{ .pointer = new_pointer });
             break :blk new_gid;
+        },
+
+        .pointer_union => |p| blk: {
+            const members = try allocator.alloc(Refinement.PointerInfo, p.members.len);
+            errdefer allocator.free(members);
+            @memcpy(members, p.members);
+            break :blk try self.appendEntity(.{ .pointer_union = .{
+                .analyte = try p.analyte.copy(allocator),
+                .members = members,
+            } });
         },
 
         // Optionals/errorunions: recurse into payload (value-copy the inner value)
@@ -1187,7 +1329,7 @@ pub fn valueCopy(self: *Refinements, src_gid: Gid) error{OutOfMemory}!Gid {
 pub fn createPointerTo(self: *Refinements, pointee_gid: Gid, analyte: Analyte) !Gid {
     return self.appendEntity(.{ .pointer = .{
         .analyte = analyte,
-        .to = pointee_gid,
+        .info = .{ .to = pointee_gid },
     } });
 }
 
@@ -1196,8 +1338,10 @@ pub fn createPointerTo(self: *Refinements, pointee_gid: Gid, analyte: Analyte) !
 pub fn createPointerToPackedField(self: *Refinements, pointee_gid: Gid, analyte: Analyte, packed_field: Refinement.PackedFieldRef) !Gid {
     return self.appendEntity(.{ .pointer = .{
         .analyte = analyte,
-        .to = pointee_gid,
-        .packed_field = packed_field,
+        .info = .{
+            .to = pointee_gid,
+            .packed_field = packed_field,
+        },
     } });
 }
 
@@ -1240,6 +1384,8 @@ fn hashRefinement(ref: Refinement) u64 {
     hasher.update(&.{@intFromEnum(ref)});
     switch (ref) {
         .void, .noreturn, .unimplemented => {},
+        .pointer => |pointer| hasher.update(&.{@intFromEnum(pointer.info.multiplicity)}),
+        .pointer_union => {},
         inline else => |data| {
             hasher.update(&.{@intFromEnum(data.multiplicity)});
         },
@@ -1248,7 +1394,15 @@ fn hashRefinement(ref: Refinement) u64 {
         .scalar => |s| hashAnalyte(s.analyte, &hasher),
         .pointer => |p| {
             hashAnalyte(p.analyte, &hasher);
-            if (p.raw_bytes) |raw_bytes| hasher.update(&.{@intFromEnum(raw_bytes)});
+            if (p.info.raw_bytes) |raw_bytes| hasher.update(&.{@intFromEnum(raw_bytes)});
+        },
+        .pointer_union => |p| {
+            hashAnalyte(p.analyte, &hasher);
+            for (p.members) |member| {
+                hasher.update(std.mem.asBytes(&member.to));
+                hasher.update(&.{@intFromEnum(member.multiplicity)});
+                if (member.raw_bytes) |raw_bytes| hasher.update(&.{@intFromEnum(raw_bytes)});
+            }
         },
         .optional => |o| hashAnalyte(o.analyte, &hasher),
         .errorunion => |e| hashAnalyte(e.analyte, &hasher),
@@ -1288,9 +1442,9 @@ test "copyValuePreservingPointerTargets imports missing pointer target" {
     const branch_region_gid = try src.appendEntity(.{ .scalar = .{
         .multiplicity = .region,
     } });
-    const branch_ptr_gid = try src.appendEntity(.{ .pointer = .{
+    const branch_ptr_gid = try src.appendEntity(.{ .pointer = .{ .info = .{
         .to = branch_region_gid,
-    } });
+    } } });
     const branch_optional_gid = try src.appendEntity(.{ .optional = .{
         .to = branch_ptr_gid,
     } });
@@ -1301,8 +1455,8 @@ test "copyValuePreservingPointerTargets imports missing pointer target" {
     const copied_ptr_gid = copied_optional.optional.to;
     const copied_ptr = dst.at(copied_ptr_gid);
     try std.testing.expect(copied_ptr.* == .pointer);
-    try std.testing.expect(copied_ptr.pointer.to < dst.list.items.len);
-    try std.testing.expectEqual(.region, dst.at(copied_ptr.pointer.to).getMultiplicity());
+    try std.testing.expect(copied_ptr.pointer.info.to < dst.list.items.len);
+    try std.testing.expectEqual(.region, dst.at(copied_ptr.pointer.info.to).getMultiplicity());
 }
 
 test "copyToSlot preserves pointer target when destination already has pointee" {
@@ -1311,17 +1465,17 @@ test "copyToSlot preserves pointer target when destination already has pointee" 
 
     const field_gid = try src.appendEntity(.{ .scalar = .{} });
     const field_ptr_gid = try src.appendEntity(.{ .pointer = .{
-        .to = field_gid,
         .analyte = .{
             .fieldparentptr_safety = .{
                 .field_index = 0,
                 .container_type_id = 100,
             },
         },
+        .info = .{ .to = field_gid },
     } });
-    const return_slot_gid = try src.appendEntity(.{ .pointer = .{
+    const return_slot_gid = try src.appendEntity(.{ .pointer = .{ .info = .{
         .to = try src.appendEntity(.{ .scalar = .{} }),
-    } });
+    } } });
 
     var dst = try src.clone(std.testing.allocator);
     defer dst.deinit();
@@ -1329,6 +1483,36 @@ test "copyToSlot preserves pointer target when destination already has pointee" 
 
     const return_slot = dst.at(return_slot_gid);
     try std.testing.expectEqual(.pointer, std.meta.activeTag(return_slot.*));
-    try std.testing.expectEqual(field_gid, return_slot.pointer.to);
+    try std.testing.expectEqual(field_gid, return_slot.pointer.info.to);
     try std.testing.expect(return_slot.pointer.analyte.fieldparentptr_safety != null);
+}
+
+test "pointer union valueCopy owns slot analyte and preserves targets" {
+    var refinements = Refinements.init(std.testing.allocator);
+    defer refinements.deinit();
+
+    const stack_target = try refinements.appendEntity(.{ .scalar = .{} });
+    const heap_target = try refinements.appendEntity(.{ .scalar = .{} });
+    const members = try std.testing.allocator.alloc(Refinement.PointerInfo, 2);
+    members[0] = .{ .to = stack_target };
+    members[1] = .{ .to = heap_target };
+    const union_gid = try refinements.appendEntity(.{ .pointer_union = .{
+        .analyte = .{
+            .undefined_safety = .{ .defined = {} },
+            .memory_safety = .{ .error_stub = {} },
+        },
+        .members = members,
+    } });
+
+    const copied_gid = try refinements.valueCopy(union_gid);
+    const copied = refinements.at(copied_gid);
+    try std.testing.expectEqual(.pointer_union, std.meta.activeTag(copied.*));
+    try std.testing.expectEqual(stack_target, copied.pointer_union.members[0].to);
+    try std.testing.expectEqual(heap_target, copied.pointer_union.members[1].to);
+
+    refinements.at(union_gid).pointer_union.analyte.undefined_safety = .{ .undefined = .{
+        .meta = .{ .function = "test", .file = "test", .line = 1 },
+    } };
+    try std.testing.expect(copied.pointer_union.analyte.undefined_safety.? == .defined);
+    refinements.testValid(union_gid);
 }

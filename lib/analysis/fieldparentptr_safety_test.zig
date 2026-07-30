@@ -37,7 +37,7 @@ test "struct_field_ptr records origin on field pointer" {
     const fields = try allocator.alloc(Gid, 1);
     fields[0] = field_gid;
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = fields, .type_id = 100 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = struct_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -64,7 +64,7 @@ test "field_parent_ptr succeeds when origin matches" {
     const fields = try allocator.alloc(Gid, 1);
     fields[0] = field_gid;
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = fields, .type_id = 100 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = struct_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 3;
     const state = testState(&ctx, &results, &refinements);
@@ -87,7 +87,7 @@ test "field_parent_ptr errors on wrong field index" {
     const fields = try allocator.alloc(Gid, 1);
     fields[0] = field_gid;
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = fields, .type_id = 100 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = struct_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 3;
     const state = testState(&ctx, &results, &refinements);
@@ -107,7 +107,7 @@ test "field_parent_ptr errors on non-field pointer" {
 
     // Create a regular pointer with NO fieldparentptr_safety
     const scalar_gid = try refinements.appendEntity(.{ .scalar = .{} });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = scalar_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = scalar_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 2;
     const state = testState(&ctx, &results, &refinements);
@@ -141,7 +141,7 @@ test "field_parent_ptr errors on wrong container type" {
     const fields = try allocator.alloc(Gid, 1);
     fields[0] = field_gid;
     const struct_gid = try refinements.appendEntity(.{ .@"struct" = .{ .fields = fields, .type_id = 100 } });
-    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .to = struct_gid } });
+    const ptr_gid = try refinements.appendEntity(.{ .pointer = .{ .info = .{ .to = struct_gid } } });
 
     var results = [_]Inst{.{ .refinement = ptr_gid }} ** 3;
     const state = testState(&ctx, &results, &refinements);
