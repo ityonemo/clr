@@ -927,8 +927,10 @@ pub const MemorySafety = union(enum) {
             },
             .hashmap => |h| {
                 try checkReturnedStackEscape(refinements, h.metadata_gid, ctx);
-                try checkReturnedStackEscape(refinements, h.keys_gid, ctx);
-                try checkReturnedStackEscape(refinements, h.values_gid, ctx);
+                for (h.entries) |entry| {
+                    try checkReturnedStackEscape(refinements, entry.key, ctx);
+                    try checkReturnedStackEscape(refinements, entry.value, ctx);
+                }
             },
             .recursive => |r| try checkReturnedStackEscape(refinements, r.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => {},
@@ -1011,8 +1013,10 @@ pub const MemorySafety = union(enum) {
             },
             .hashmap => |h| {
                 try checkStackEscapeRecursive(refinements, h.metadata_gid, ctx, func_name);
-                try checkStackEscapeRecursive(refinements, h.keys_gid, ctx, func_name);
-                try checkStackEscapeRecursive(refinements, h.values_gid, ctx, func_name);
+                for (h.entries) |entry| {
+                    try checkStackEscapeRecursive(refinements, entry.key, ctx, func_name);
+                    try checkStackEscapeRecursive(refinements, entry.value, ctx, func_name);
+                }
             },
             .optional => |o| try checkStackEscapeRecursive(refinements, o.to, ctx, func_name),
             .errorunion => |e| try checkStackEscapeRecursive(refinements, e.to, ctx, func_name),
@@ -1433,9 +1437,14 @@ pub const MemorySafety = union(enum) {
                 }
                 break :blk false;
             },
-            .hashmap => |h| isReachableFromInner(refinements, target_gid, h.metadata_gid, depth + 1) or
-                isReachableFromInner(refinements, target_gid, h.keys_gid, depth + 1) or
-                isReachableFromInner(refinements, target_gid, h.values_gid, depth + 1),
+            .hashmap => |h| blk: {
+                if (isReachableFromInner(refinements, target_gid, h.metadata_gid, depth + 1)) break :blk true;
+                for (h.entries) |entry| {
+                    if (isReachableFromInner(refinements, target_gid, entry.key, depth + 1) or
+                        isReachableFromInner(refinements, target_gid, entry.value, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
             else => false,
         };
     }
@@ -1481,8 +1490,10 @@ pub const MemorySafety = union(enum) {
             },
             .hashmap => |h| {
                 collectReachableGids(refinements, h.metadata_gid, reachable);
-                collectReachableGids(refinements, h.keys_gid, reachable);
-                collectReachableGids(refinements, h.values_gid, reachable);
+                for (h.entries) |entry| {
+                    collectReachableGids(refinements, entry.key, reachable);
+                    collectReachableGids(refinements, entry.value, reachable);
+                }
             },
             else => {},
         }
@@ -1584,8 +1595,10 @@ pub const MemorySafety = union(enum) {
             },
             .hashmap => |h| {
                 collectReachableAllocationsInner(refinements, h.metadata_gid, allocs, depth + 1);
-                collectReachableAllocationsInner(refinements, h.keys_gid, allocs, depth + 1);
-                collectReachableAllocationsInner(refinements, h.values_gid, allocs, depth + 1);
+                for (h.entries) |entry| {
+                    collectReachableAllocationsInner(refinements, entry.key, allocs, depth + 1);
+                    collectReachableAllocationsInner(refinements, entry.value, allocs, depth + 1);
+                }
             },
             else => {},
         }
@@ -1721,9 +1734,14 @@ pub const MemorySafety = union(enum) {
                 }
                 break :blk false;
             },
-            .hashmap => |h| hasEquivalentAllocationInner(refinements, h.metadata_gid, allocation, depth + 1) or
-                hasEquivalentAllocationInner(refinements, h.keys_gid, allocation, depth + 1) or
-                hasEquivalentAllocationInner(refinements, h.values_gid, allocation, depth + 1),
+            .hashmap => |h| blk: {
+                if (hasEquivalentAllocationInner(refinements, h.metadata_gid, allocation, depth + 1)) break :blk true;
+                for (h.entries) |entry| {
+                    if (hasEquivalentAllocationInner(refinements, entry.key, allocation, depth + 1) or
+                        hasEquivalentAllocationInner(refinements, entry.value, allocation, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
         };
     }
@@ -3429,8 +3447,6 @@ pub const MemorySafety = union(enum) {
                 };
                 if (src_ref.* == .hashmap) {
                     copyMemorySafetyStateRecursive(refinements, h.metadata_gid, src_ref.hashmap.metadata_gid, ctx);
-                    copyMemorySafetyStateRecursive(refinements, h.keys_gid, src_ref.hashmap.keys_gid, ctx);
-                    copyMemorySafetyStateRecursive(refinements, h.values_gid, src_ref.hashmap.values_gid, ctx);
                 }
             },
             .fnptr => |*f| {
@@ -3533,9 +3549,14 @@ pub const MemorySafety = union(enum) {
                 }
                 break :blk false;
             },
-            .hashmap => |h| containsReachableAllocation(refinements, h.metadata_gid, depth + 1) or
-                containsReachableAllocation(refinements, h.keys_gid, depth + 1) or
-                containsReachableAllocation(refinements, h.values_gid, depth + 1),
+            .hashmap => |h| blk: {
+                if (containsReachableAllocation(refinements, h.metadata_gid, depth + 1)) break :blk true;
+                for (h.entries) |entry| {
+                    if (containsReachableAllocation(refinements, entry.key, depth + 1) or
+                        containsReachableAllocation(refinements, entry.value, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => false,
         };
     }
@@ -4041,7 +4062,9 @@ pub const MemorySafety = union(enum) {
             const map_ref = state.refinements.at(map_gid);
             if (map_ref.* == .hashmap) {
                 paintPrivilegedHashMapView(state, result_ref.@"struct".fields[1], map_gid, map_ref.hashmap.metadata_gid);
-                paintPrivilegedHashMapView(state, result_ref.@"struct".fields[2], map_gid, map_ref.hashmap.values_gid);
+                if (try composeHashMapEntries(state, map_gid, .value)) |values_gid| {
+                    paintPrivilegedHashMapView(state, result_ref.@"struct".fields[2], map_gid, values_gid);
+                }
                 return;
             }
         }
@@ -4087,8 +4110,12 @@ pub const MemorySafety = union(enum) {
         if (entry.* != .@"struct" or entry.@"struct".fields.len != 2) {
             @panic("hashmap Iterator.next payload is not a two-field entry struct");
         }
-        paintPrivilegedHashMapView(state, entry.@"struct".fields[0], map_gid, map.hashmap.keys_gid);
-        paintPrivilegedHashMapView(state, entry.@"struct".fields[1], map_gid, map.hashmap.values_gid);
+        if (composeHashMapEntries(state, map_gid, .key) catch @panic("out of memory")) |keys_gid| {
+            paintPrivilegedHashMapView(state, entry.@"struct".fields[0], map_gid, keys_gid);
+        }
+        if (composeHashMapEntries(state, map_gid, .value) catch @panic("out of memory")) |values_gid| {
+            paintPrivilegedHashMapView(state, entry.@"struct".fields[1], map_gid, values_gid);
+        }
     }
 
     fn paintPrivilegedHashMapView(state: State, result_gid: Gid, map_gid: Gid, target_gid: Gid) void {
@@ -4200,21 +4227,10 @@ pub const MemorySafety = union(enum) {
         if (managed.* == .hashmap) {
             if (args.len < 3) @panic("hashmap put missing key or value");
 
+            const key_gid = try hashMapEntryGid(state, args[1]) orelse return;
+            const value_gid = try hashMapEntryGid(state, args[2]) orelse return;
+            try appendHashMapEntry(state.refinements, managed_gid, .{ .key = key_gid, .value = value_gid });
             const map = state.refinements.at(managed_gid).hashmap;
-            if (srcGid(state, args[1])) |key_gid| {
-                installHashMapSlot(state.refinements, map.keys_gid, key_gid);
-            } else if (args[1] == .interned) {
-                try installHashMapInternedSlot(state, map.keys_gid, args[1].interned);
-            }
-            if (srcGid(state, args[2])) |value_gid| {
-                installHashMapSlot(state.refinements, map.values_gid, value_gid);
-            } else if (args[2] == .interned) {
-                try installHashMapInternedSlot(state, map.values_gid, args[2].interned);
-            } else {
-                return;
-            }
-            state.refinements.at(map.keys_gid).setMultiplicity(.region);
-            state.refinements.at(map.values_gid).setMultiplicity(.region);
             const allocator_gid = map.allocator_gid orelse
                 @panic("hashmap put before allocator initialization");
             const metadata_gid = map.metadata_gid;
@@ -4255,6 +4271,55 @@ pub const MemorySafety = union(enum) {
         } };
         metadata_ptr.pointer.analyte.memory_safety = allocation;
         paintSpatialMemory(state.refinements, region_gid, allocation);
+    }
+
+    const HashMapEntryField = enum { key, value };
+
+    fn hashMapEntryGid(state: State, src: tag.Src) !?Gid {
+        if (srcGid(state, src)) |gid| return gid;
+        return switch (src) {
+            .interned => |interned| blk: {
+                const gid = try state.refinements.appendEntity(try tag.typeToRefinement(interned.ty, state.refinements));
+                tag.splatInitInterned(state.refinements, gid);
+                break :blk gid;
+            },
+            .fnptr => null,
+            .inst => unreachable,
+        };
+    }
+
+    fn appendHashMapEntry(refinements: *Refinements, map_gid: Gid, entry: Refinements.Refinement.HashMapRef.Entry) !void {
+        const allocator = refinements.list.allocator;
+        const map = refinements.at(map_gid);
+        if (map.* != .hashmap) @panic("appendHashMapEntry target is not hashmap");
+        const old_entries = map.hashmap.entries;
+        const entries = try allocator.realloc(old_entries, old_entries.len + 1);
+        entries[old_entries.len] = entry;
+        refinements.at(map_gid).hashmap.entries = entries;
+    }
+
+    fn composeHashMapEntries(state: State, map_gid: Gid, comptime field: HashMapEntryField) !?Gid {
+        const map = state.refinements.at(map_gid);
+        if (map.* != .hashmap) @panic("composeHashMapEntries target is not hashmap");
+        // valueCopy can grow the refinement table, so preserve the separately
+        // allocated entry slice before creating the composed view.
+        const entries = map.hashmap.entries;
+        if (entries.len == 0) return null;
+
+        const first = switch (field) {
+            .key => entries[0].key,
+            .value => entries[0].value,
+        };
+        const slot_gid = try state.refinements.valueCopy(first);
+        for (entries[1..]) |entry| {
+            const source_gid = switch (field) {
+                .key => entry.key,
+                .value => entry.value,
+            };
+            installHashMapSlot(state.refinements, slot_gid, source_gid);
+        }
+        state.refinements.at(slot_gid).setMultiplicity(.region);
+        return slot_gid;
     }
 
     fn installHashMapInternedSlot(state: State, slot_gid: Gid, interned: core.Interned) !void {
@@ -4358,7 +4423,7 @@ pub const MemorySafety = union(enum) {
         if (result.* != .optional) @panic("hashmap getPtr result is not optional");
         const pointer = state.refinements.at(result.optional.to);
         if (pointer.* != .pointer) @panic("hashmap getPtr payload is not pointer");
-        pointer.pointer.info.to = map.values_gid;
+        pointer.pointer.info.to = composeHashMapEntries(state, map_gid, .value) catch @panic("out of memory") orelse return;
 
         const metadata_ms = state.refinements.at(map_gid).hashmap.analyte.memory_safety orelse
             @panic("hashmap getPtr before storage initialization");
@@ -4382,7 +4447,7 @@ pub const MemorySafety = union(enum) {
         const result_gid = requireResult(state, index, "hashmap get");
         const result = state.refinements.at(result_gid);
         if (result.* != .optional) @panic("hashmap get result is not optional");
-        result.optional.to = state.refinements.valueCopy(map.hashmap.values_gid) catch @panic("out of memory");
+        result.optional.to = composeHashMapEntries(state, map_gid, .value) catch @panic("out of memory") orelse return;
     }
 
     fn handleHashMapManagedDeinit(state: State, args: []const tag.Src) void {
@@ -4924,8 +4989,10 @@ pub const MemorySafety = union(enum) {
             .optional => |o| try checkUseAfterFreeRecursive(refinements, o.to, ctx),
             .hashmap => |h| {
                 try checkUseAfterFreeRecursive(refinements, h.metadata_gid, ctx);
-                try checkUseAfterFreeRecursive(refinements, h.keys_gid, ctx);
-                try checkUseAfterFreeRecursive(refinements, h.values_gid, ctx);
+                for (h.entries) |entry| {
+                    try checkUseAfterFreeRecursive(refinements, entry.key, ctx);
+                    try checkUseAfterFreeRecursive(refinements, entry.value, ctx);
+                }
             },
             .errorunion => |e| try checkUseAfterFreeRecursive(refinements, e.to, ctx),
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented, .recursive => {},

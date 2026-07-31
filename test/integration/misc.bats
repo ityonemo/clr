@@ -168,6 +168,22 @@ load test_helper
     [ "$status" -eq 0 ]
 }
 
+@test "HashMap empty iterator rejects destructive payload traversal" {
+    run compile_and_run "$TEST_CASES/std/hashmap_empty_iterator.zig"
+    [ "$status" -ne 0 ]
+    [[ "$output" =~ "InvalidReallocInput" ]]
+}
+
+@test "HashMap cleanup handles an optionally configured pointer entry" {
+    run compile_and_run "$TEST_CASES/std/hashmap_optional_configuration_cleanup.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "splitScalar traversal cleans nullable pointer groups" {
+    run compile_and_run "$TEST_CASES/std/split_scalar_nullable_pointer_cleanup.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "no analyzer panic for std.process.args" {
     # std.process.args initializes an ArgIterator from OS-provided argv state.
     # CLR should treat that as a stdlib boundary rather than requiring an

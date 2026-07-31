@@ -554,8 +554,12 @@ test "privileged HashMap iterator preserves map and entry slot identity" {
     tag.splatInitCallReturnSlot(&refinements, map_gid, &ctx);
     refinements.at(map_gid).hashmap.allocator_gid = allocator_gid;
     const metadata_gid = refinements.at(map_gid).hashmap.metadata_gid;
-    const keys_gid = refinements.at(map_gid).hashmap.keys_gid;
-    const values_gid = refinements.at(map_gid).hashmap.values_gid;
+    const key_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const value_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const entries = try refinements.list.allocator.alloc(Refinements.Refinement.HashMapRef.Entry, 1);
+    entries[0] = .{ .key = key_gid, .value = value_gid };
+    refinements.list.allocator.free(refinements.at(map_gid).hashmap.entries);
+    refinements.at(map_gid).hashmap.entries = entries;
     refinements.at(map_gid).hashmap.analyte.memory_safety = .{ .allocated = .{
         .trace = ctx.captureTrace(),
         .root_gid = metadata_gid,
@@ -603,8 +607,10 @@ test "privileged HashMap iterator preserves map and entry slot identity" {
         "hash_map.HashMapUnmanaged(u32,u32,hash_map.AutoContext(u32),80).Iterator.next",
     ));
     const entry = refinements.at(refinements.at(entry_gid).optional.to).@"struct";
-    try std.testing.expectEqual(keys_gid, refinements.at(entry.fields[0]).pointer.info.to);
-    try std.testing.expectEqual(values_gid, refinements.at(entry.fields[1]).pointer.info.to);
+    const returned_key_gid = refinements.at(entry.fields[0]).pointer.info.to;
+    const returned_value_gid = refinements.at(entry.fields[1]).pointer.info.to;
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(returned_key_gid).*));
+    try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(returned_value_gid).*));
 }
 
 test "allocation stored in caller-owned privileged HashMap is not reported as callee leak" {

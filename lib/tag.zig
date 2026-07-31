@@ -125,13 +125,10 @@ pub fn typeToRefinement(ty: Type, refinements: *Refinements) !Refinement {
         },
         .hashmap => |hashmap_type| blk: {
             const metadata_gid = try refinements.appendEntity(.{ .scalar = .{ .multiplicity = .region } });
-            const keys_gid = try refinements.appendEntity(.{ .unimplemented = {} });
-            const values_gid = try refinements.appendEntity(.{ .unimplemented = {} });
             break :blk .{ .hashmap = .{
                 .type_id = hashmap_type.type_id,
                 .metadata_gid = metadata_gid,
-                .keys_gid = keys_gid,
-                .values_gid = values_gid,
+                .entries = try refinements.list.allocator.alloc(Refinements.Refinement.HashMapRef.Entry, 0),
             } };
         },
         .@"struct" => |struct_type| blk: {
@@ -3671,34 +3668,22 @@ fn mergeRefinementRecursive(
             }
         },
         .hashmap => |h| {
-            const storage_gids = [_]Gid{ h.metadata_gid, h.keys_gid, h.values_gid };
-            const field_gids = try allocator.alloc(?Gid, branches.len);
-            defer allocator.free(field_gids);
-
-            for (storage_gids, 0..) |storage_gid, storage_i| {
-                for (branches, branch_gids, 0..) |branch_opt, branch_gid_opt, i| {
-                    const branch = branch_opt orelse {
-                        field_gids[i] = null;
-                        continue;
-                    };
-                    const branch_gid = branch_gid_opt orelse {
-                        field_gids[i] = null;
-                        continue;
-                    };
-                    const branch_ref = branch.refinements.at(branch_gid).*;
-                    if (branch_ref != .hashmap) {
-                        field_gids[i] = null;
-                        continue;
-                    }
-                    field_gids[i] = switch (storage_i) {
-                        0 => branch_ref.hashmap.metadata_gid,
-                        1 => branch_ref.hashmap.keys_gid,
-                        2 => branch_ref.hashmap.values_gid,
-                        else => unreachable,
-                    };
-                }
-                try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, storage_gid, branches, field_gids, merged, copied_from_branch, base_len);
+            const metadata_gids = try allocator.alloc(?Gid, branches.len);
+            defer allocator.free(metadata_gids);
+            for (branches, branch_gids, 0..) |branch_opt, branch_gid_opt, i| {
+                const branch = branch_opt orelse {
+                    metadata_gids[i] = null;
+                    continue;
+                };
+                const branch_gid = branch_gid_opt orelse {
+                    metadata_gids[i] = null;
+                    continue;
+                };
+                const branch_ref = branch.refinements.at(branch_gid).*;
+                metadata_gids[i] = if (branch_ref == .hashmap) branch_ref.hashmap.metadata_gid else null;
             }
+            try mergeRefinementRecursive(merge_tag, allocator, ctx, refinements, h.metadata_gid, branches, metadata_gids, merged, copied_from_branch, base_len);
+            try mergeHashMapEntries(allocator, refinements, orig_gid, branches, branch_gids, copied_from_branch);
         },
         .@"union" => |u| {
             // Need separate array for union fields since we recurse multiple times
@@ -3753,6 +3738,54 @@ fn mergeRefinementRecursive(
     }
 }
 
+/// HashMap contents are an entry set, not independent key and value slots.
+/// Every reachable branch contributes entries appended after the parent entry
+/// prefix. Existing entries are shared by branch clones and retained once.
+fn mergeHashMapEntries(
+    allocator: std.mem.Allocator,
+    refinements: *Refinements,
+    orig_gid: Gid,
+    branches: []const ?State,
+    branch_gids: []const ?Gid,
+    copied_from_branch: *std.AutoHashMap(Gid, void),
+) !void {
+    const original = refinements.at(orig_gid);
+    if (original.* != .hashmap) @panic("mergeHashMapEntries target is not hashmap");
+    const original_entries = original.hashmap.entries;
+
+    var entries = std.ArrayListUnmanaged(Refinements.Refinement.HashMapRef.Entry){};
+    errdefer entries.deinit(allocator);
+    try entries.appendSlice(allocator, original_entries);
+
+    for (branches, branch_gids) |branch_opt, branch_gid_opt| {
+        const branch = branch_opt orelse continue;
+        const branch_gid = branch_gid_opt orelse continue;
+        const branch_ref = branch.refinements.at(branch_gid);
+        if (branch_ref.* != .hashmap) continue;
+
+        // Branches start as clones of the parent. Only their suffix represents
+        // entries added on that path; preserve the shared prefix once.
+        const start = @min(original_entries.len, branch_ref.hashmap.entries.len);
+        for (branch_ref.hashmap.entries[start..]) |entry| {
+            const key_ref = branch.refinements.at(entry.key).*;
+            const value_ref = branch.refinements.at(entry.value).*;
+            try copied_from_branch.put(entry.key, {});
+            try Refinements.Refinement.collectReachableGids(key_ref, branch.refinements, copied_from_branch);
+            try copied_from_branch.put(entry.value, {});
+            try Refinements.Refinement.collectReachableGids(value_ref, branch.refinements, copied_from_branch);
+            try entries.append(allocator, .{
+                .key = try Refinements.Refinement.copyTo(key_ref, branch.refinements, refinements),
+                .value = try Refinements.Refinement.copyTo(value_ref, branch.refinements, refinements),
+            });
+        }
+    }
+
+    const merged_entries = try entries.toOwnedSlice(allocator);
+    const destination = refinements.at(orig_gid);
+    allocator.free(destination.hashmap.entries);
+    destination.hashmap.entries = merged_entries;
+}
+
 // Tests
 
 /// Test helper to create a State for testing.
@@ -3769,6 +3802,15 @@ fn testState(ctx: *Context, results: []Inst, refinements: *Refinements) State {
 fn makeRegion(refinements: *Refinements, gid: Gid) Gid {
     refinements.at(gid).setMultiplicity(.region);
     return gid;
+}
+
+fn appendHashMapTestEntry(refinements: *Refinements, map_gid: Gid) !void {
+    const key_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const value_gid = try refinements.appendEntity(.{ .scalar = .{} });
+    const map = refinements.at(map_gid);
+    const entries = try refinements.list.allocator.realloc(map.hashmap.entries, map.hashmap.entries.len + 1);
+    entries[entries.len - 1] = .{ .key = key_gid, .value = value_gid };
+    map.hashmap.entries = entries;
 }
 
 /// Test getName function that maps name IDs to strings for tests
@@ -4097,9 +4139,95 @@ test "privileged hashmap value copies preserve canonical identity and storage sl
 
     try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(map.metadata_gid).*));
     try std.testing.expectEqual(.region, refinements.at(map.metadata_gid).scalar.multiplicity);
-    try std.testing.expectEqual(.unimplemented, std.meta.activeTag(refinements.at(map.keys_gid).*));
-    try std.testing.expectEqual(.unimplemented, std.meta.activeTag(refinements.at(map.values_gid).*));
+    try std.testing.expectEqual(@as(usize, 0), map.entries.len);
     try std.testing.expectEqual(map_gid, try refinements.valueCopy(map_gid));
+}
+
+test "cond_br merge retains every branch-added hashmap entry" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+    const map_gid = try refinements.appendEntity(try typeToRefinement(
+        .{ .hashmap = .{ .type_id = 1 } },
+        &refinements,
+    ));
+    try appendHashMapTestEntry(&refinements, map_gid);
+
+    var true_refinements = try refinements.clone(allocator);
+    defer true_refinements.deinit();
+    var false_refinements = try refinements.clone(allocator);
+    defer false_refinements.deinit();
+    try appendHashMapTestEntry(&true_refinements, map_gid);
+    try appendHashMapTestEntry(&false_refinements, map_gid);
+
+    var results = [_]Inst{.{ .refinement = map_gid }};
+    var true_results = results;
+    var false_results = results;
+    const branches = [_]State{
+        testState(&ctx, &true_results, &true_refinements),
+        testState(&ctx, &false_results, &false_refinements),
+    };
+
+    try splatMerge(.cond_br, &results, &ctx, &refinements, &branches, null, null, null);
+
+    const entries = refinements.at(map_gid).hashmap.entries;
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+    for (entries) |entry| {
+        try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(entry.key).*));
+        try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(entry.value).*));
+    }
+}
+
+test "switch_br merge retains every reachable hashmap entry" {
+    const allocator = std.testing.allocator;
+
+    var buf: [4096]u8 = undefined;
+    var discarding = std.Io.Writer.Discarding.init(&buf);
+    var ctx = Context.init(allocator, &discarding.writer);
+    defer ctx.deinit();
+
+    var refinements = Refinements.init(allocator);
+    defer refinements.deinit();
+    const map_gid = try refinements.appendEntity(try typeToRefinement(
+        .{ .hashmap = .{ .type_id = 1 } },
+        &refinements,
+    ));
+    try appendHashMapTestEntry(&refinements, map_gid);
+
+    var case_a_refinements = try refinements.clone(allocator);
+    defer case_a_refinements.deinit();
+    var case_b_refinements = try refinements.clone(allocator);
+    defer case_b_refinements.deinit();
+    var case_c_refinements = try refinements.clone(allocator);
+    defer case_c_refinements.deinit();
+    try appendHashMapTestEntry(&case_a_refinements, map_gid);
+    try appendHashMapTestEntry(&case_b_refinements, map_gid);
+    try appendHashMapTestEntry(&case_c_refinements, map_gid);
+
+    var results = [_]Inst{.{ .refinement = map_gid }};
+    var case_a_results = results;
+    var case_b_results = results;
+    var case_c_results = results;
+    const branches = [_]State{
+        testState(&ctx, &case_a_results, &case_a_refinements),
+        testState(&ctx, &case_b_results, &case_b_refinements),
+        testState(&ctx, &case_c_results, &case_c_refinements),
+    };
+
+    try splatMerge(.switch_br, &results, &ctx, &refinements, &branches, null, null, null);
+
+    const entries = refinements.at(map_gid).hashmap.entries;
+    try std.testing.expectEqual(@as(usize, 4), entries.len);
+    for (entries) |entry| {
+        try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(entry.key).*));
+        try std.testing.expectEqual(.scalar, std.meta.activeTag(refinements.at(entry.value).*));
+    }
 }
 
 test "store struct preserves allocator field identity" {

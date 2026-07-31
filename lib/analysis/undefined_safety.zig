@@ -174,6 +174,7 @@ pub const UndefinedSafety = union(enum) {
                 initRecursive(refinements, p.info.to, undef_state);
             },
             .pointer_union => |p| {
+                ref.pointer_union.analyte.undefined_safety = undef_state;
                 for (p.members) |member| {
                     initRecursive(refinements, member.to, undef_state);
                 }

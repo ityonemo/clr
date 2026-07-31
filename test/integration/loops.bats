@@ -113,6 +113,21 @@ load test_helper
 # Memory Safety Loop Tests
 # =============================================================================
 
+@test "optional iterator cleans each yielded allocation" {
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/optional_iterator_multiple_cleanup.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "optional iterator accepts immediate exhaustion" {
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/optional_iterator_empty.zig"
+    [ "$status" -eq 0 ]
+}
+
+@test "optional iterator cleans nullable slice items" {
+    run compile_and_run "$TEST_CASES/allocator_safety/loops/optional_iterator_nullable_slice_cleanup.zig"
+    [ "$status" -eq 0 ]
+}
+
 @test "detects memory leak in loop" {
     run compile_and_run "$TEST_CASES/allocator_safety/loops/leak_in_loop.zig"
     [ "$status" -ne 0 ]

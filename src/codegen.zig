@@ -4650,8 +4650,11 @@ fn generateOneFunction(
                 const condition_idx: ?u32 = if (condition_ref.toIndex()) |i| @intFromEnum(i) else null;
                 line = generateDotQCondBrLine(info.arena, instr.idx, condition_idx);
             } else {
-                // Generate Inst.cond_br call with function references
-                line = generateCondBrLine(info.arena, instr.idx, func_index);
+                // Optional-payload loop conditions summarize one traversal pass.
+                line = if (isOptionalPayloadCondBr(info, instr.idx))
+                    generateOptionalCondBrLine(info.arena, instr.idx, func_index)
+                else
+                    generateCondBrLine(info.arena, instr.idx, func_index);
             }
         } else if (instr.tag == .switch_br) {
             // Generate Inst.switch_br call with all case function references
@@ -4675,7 +4678,7 @@ fn generateOneFunction(
             }
         } else if (instr.tag == .loop) {
             // Generate Inst.loop call with body function reference
-            line = generateLoopLine(info.arena, instr.idx, func_index);
+            line = generateLoopLine(info, instr.idx, func_index);
         } else {
             line = _instLine(info, instr.tag, instr.datum, instr.idx, &arg_counter);
         }
@@ -4727,6 +4730,13 @@ fn generateCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u3
     , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
 }
 
+fn generateOptionalCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, func_index: u32) []const u8 {
+    return clr_allocator.allocPrint(arena,
+        \\    try Inst.optional_cond_br(state, {d}, fn_{d}_cond_br_true_{d}, fn_{d}_cond_br_false_{d});
+        \\
+    , .{ cond_br_idx, func_index, cond_br_idx, func_index, cond_br_idx }, null);
+}
+
 /// Generate fused remap_br instruction line.
 /// This combines call(remap) + is_non_null + cond_br into a single instruction
 /// that handles both branches with proper memory semantics via splatRemapSetup.
@@ -4773,12 +4783,85 @@ fn generateDotQCondBrLine(arena: std.mem.Allocator, cond_br_idx: u32, condition_
     }
 }
 
-/// Generate the Inst.loop call line with body function reference
-fn generateLoopLine(arena: std.mem.Allocator, loop_idx: u32, func_index: u32) []const u8 {
-    return clr_allocator.allocPrint(arena,
-        \\    try Inst.loop(state, {d}, fn_{d}_loop_body_{d});
+/// Generate the loop call line with body function reference.
+/// Optional-payload loops execute one abstract payload pass; all other loops
+/// retain fixed-point execution.
+fn generateLoopLine(info: *const FnInfo, loop_idx: u32, func_index: u32) []const u8 {
+    const loop_fn = if (isOptionalPayloadLoop(info, loop_idx)) "optional_loop" else "loop";
+    return clr_allocator.allocPrint(info.arena,
+        \\    try Inst.{s}(state, {d}, fn_{d}_loop_body_{d});
         \\
-    , .{ loop_idx, func_index, loop_idx }, null);
+    , .{ loop_fn, loop_idx, func_index, loop_idx }, null);
+}
+
+/// Detect the AIR shape used for `while (optional) |payload|`:
+/// `is_non_null` feeds a branch whose true side repeats this loop and whose
+/// false side exits it. This is intentionally structural rather than tied to
+/// any iterator type or stdlib override.
+fn isOptionalPayloadLoop(info: *const FnInfo, loop_idx: u32) bool {
+    const body = extractBlockBody(loop_idx, info.data, info.extra) orelse return false;
+
+    var repeats = false;
+    for (body) |body_idx| {
+        if (body_idx >= info.tags.len or info.tags[body_idx] != .repeat) continue;
+        if (@intFromEnum(info.data[body_idx].repeat.loop_inst) == loop_idx) {
+            repeats = true;
+            break;
+        }
+    }
+    if (!repeats) return false;
+
+    return containsOptionalPayloadExit(info, body);
+}
+
+fn isOptionalPayloadCondBr(info: *const FnInfo, cond_br_idx: u32) bool {
+    if (!isOptionalPayloadExitCondBr(info, cond_br_idx)) return false;
+    for (info.tags, 0..) |air_tag, loop_idx| {
+        if (air_tag != .loop or !isOptionalPayloadLoop(info, @intCast(loop_idx))) continue;
+        const body = extractBlockBody(@intCast(loop_idx), info.data, info.extra) orelse continue;
+        if (blockContainsInstruction(info, body, cond_br_idx)) return true;
+    }
+    return false;
+}
+
+fn isOptionalPayloadExitCondBr(info: *const FnInfo, cond_br_idx: u32) bool {
+    if (cond_br_idx >= info.tags.len or info.tags[cond_br_idx] != .cond_br) return false;
+    const condition_ref = info.data[cond_br_idx].pl_op.operand;
+    const condition_idx = condition_ref.toIndex() orelse return false;
+    if (info.tags[@intFromEnum(condition_idx)] != .is_non_null) return false;
+
+    const branches = extractCondBrBodies(cond_br_idx, info.data, info.extra) orelse return false;
+    for (branches.@"else") |branch_idx| {
+        if (info.tags[branch_idx] == .br) return true;
+    }
+    return false;
+}
+
+fn blockContainsInstruction(info: *const FnInfo, body: []const u32, needle: u32) bool {
+    for (body) |body_idx| {
+        if (body_idx == needle) return true;
+        if (body_idx >= info.tags.len or info.tags[body_idx] != .block) continue;
+        const nested = extractBlockBody(body_idx, info.data, info.extra) orelse continue;
+        if (blockContainsInstruction(info, nested, needle)) return true;
+    }
+    return false;
+}
+
+fn containsOptionalPayloadExit(info: *const FnInfo, body: []const u32) bool {
+    for (body) |body_idx| {
+        if (body_idx >= info.tags.len) continue;
+
+        if (info.tags[body_idx] == .block) {
+            if (extractBlockBody(body_idx, info.data, info.extra)) |nested_body| {
+                if (containsOptionalPayloadExit(info, nested_body)) return true;
+            }
+            continue;
+        }
+
+        if (isOptionalPayloadExitCondBr(info, body_idx)) return true;
+    }
+
+    return false;
 }
 
 /// Generate noop line for unreferenced instructions (gaps in the AIR array)

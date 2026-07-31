@@ -417,6 +417,23 @@ pub fn cond_br(
     }
 }
 
+/// Execute the payload path of a compiler-recognized `while (optional)` loop.
+///
+/// The optional-loop abstraction represents traversal, not a general optional
+/// branch: one payload pass summarizes every candidate and control then
+/// continues at the loop exit. `else` and break-bearing optional loops need a
+/// separate model before they can use this instruction.
+pub fn optional_cond_br(
+    state: State,
+    comptime index: usize,
+    comptime true_fn: fn (State) anyerror!void,
+    comptime false_fn: fn (State) anyerror!void,
+) !void {
+    _ = false_fn;
+    try true_fn(state);
+    state.results[index].refinement = try state.refinements.appendEntity(.{ .void = {} });
+}
+
 /// Parameters for remap_br - passed from codegen to set up both branches
 pub const RemapBrParams = struct {
     /// Source slice being remapped
@@ -957,6 +974,26 @@ pub fn loop(
     comptime index: usize,
     comptime body_fn: fn (State) anyerror!void,
 ) !void {
+    return loopImpl(state, index, body_fn, false);
+}
+
+/// Execute a compiler-lowered `while (optional) |payload|` as one abstract
+/// payload pass. The specialized conditional transfers directly through the
+/// payload path, then normal generated control continues after the loop.
+pub fn optional_loop(
+    state: State,
+    comptime index: usize,
+    comptime body_fn: fn (State) anyerror!void,
+) !void {
+    return loopImpl(state, index, body_fn, true);
+}
+
+fn loopImpl(
+    state: State,
+    comptime index: usize,
+    comptime body_fn: fn (State) anyerror!void,
+    comptime one_pass: bool,
+) !void {
     const ctx = state.ctx;
     const results = state.results;
     const return_gid = state.return_gid;
@@ -1115,6 +1152,8 @@ pub fn loop(
         };
         try iteration_states.append(allocator, saved_state);
 
+        if (one_pass) break;
+
         // Update current_refinements for next iteration (use this iteration's output as next input)
         current_refinements_ptr.deinit();
         current_refinements_ptr.* = try iter_refinements_ptr.clone(allocator);
@@ -1155,12 +1194,14 @@ pub fn loop(
         }
     }
 
-    // NOTE: iteration_states are NOT included in the merge.
-    // For undefined_safety: only exit paths (br_states) matter - iteration states are intermediate
-    // For memory_safety: exit paths reflect any state changes from loop body (frees, etc.)
-    // Iteration states represent "loop continues" not "loop exits" - merging them causes false positives
+    // Generic fixed-point iteration states represent loop continuation, not an
+    // exit path. An optional loop deliberately executes one abstract payload
+    // pass, so that completed state is its final traversal result.
+    if (one_pass) {
+        try all_states.appendSlice(allocator, iteration_states.items);
+    }
 
-    // Merge exit states only (br_states)
+    // Merge null/break exits, plus the one payload pass for optional loops.
     if (all_states.items.len > 0) {
         try tag.splatMerge(.loop, results, ctx, state.refinements, all_states.items, null, branch_base_len, state.copied_gids);
     }

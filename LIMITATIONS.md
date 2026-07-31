@@ -29,7 +29,7 @@ the future.
 ### Stdlib HashMap Invariants
 
 Managed `std.HashMap` values are represented by a privileged refinement with
-canonical metadata, key, and value storage GIDs. The supported opaque boundary
+canonical metadata and explicit `{ key, value }` entry references. The supported opaque boundary
 currently covers `init`, `put`, `get`, `getPtr`, `contains`, `iterator`,
 `Iterator.next`, `valueIterator`, `FieldIterator.next`, `keys`/`values`,
 `getIndex`, `deinit`, and `deallocate`; selected unmanaged metadata helpers
@@ -38,12 +38,20 @@ assume-capacity storage mutators) remain narrow overrides. This avoids depending
 on HashMap's private struct layout and does not weaken general optional unwrap,
 pointer arithmetic, packed metadata, or leak checking.
 
-The current model has one representative key slot and one representative value
-slot per map, not per-entry storage. It covers scalar maps and the tested case
-where a stored aggregate owns one pointer allocation. A map containing multiple
-entries with independently managed pointer values may require multiple-source
-provenance or per-entry identities and is not yet claimed as fully modeled.
-Unlisted HashMap methods are unsupported until given focused boundary tests.
+Branch merges retain the shared entry prefix once and import every entry added
+on a reachable branch. Iterator and lookup views compose candidate entry values
+as a multiple-source pointer where necessary. The model remains agnostic about
+whether a map has custody of the pointed-to values; `deinit` frees its backing
+storage only. Unlisted HashMap methods are unsupported until given focused
+boundary tests.
+
+The experimental `while (iterator.next()) |item|` traversal model executes one
+abstract payload pass. Therefore, destructively processing the payload of a
+known-empty HashMap is deliberately rejected with `InvalidReallocInput`: the
+HashMap override leaves the nonexistent value as a placeholder and the payload
+operation makes that missing provenance explicit. This conservative rejection
+is accepted for now; it does not claim that an empty runtime iterator actually
+yields an item.
 
 This is a stdlib-specific override. User datastructures could eventually allow 
 similar analysis of user datas through a declarative refinement/tag mechanism 
@@ -68,6 +76,13 @@ and `next` only require the compiler-lowered self argument to exist.
 
 ## Current Active Gaps (planned to be addressed)
 
+### Loop Control-Flow Coverage
+
+Before changing loop semantics, add focused integration coverage for `while`
+and `for` loops that exercise normal exhaustion, `else` clauses, and `break`.
+The tests must verify that `else` runs after normal exhaustion and is bypassed
+by `break` or another terminal body path.
+
 ### Declarations
 
 In the future, we may implement a "declarative statement" that
@@ -81,12 +96,10 @@ declarations has not been decided.
 
 CLR does not yet fully model *custody* — a container taking ownership of
 independently allocated values on behalf of the code that inserts them. The
-representative case is the stdlib HashMap: its refinement carries a single
-representative key slot and value slot, not per-entry storage. This covers
-scalar maps and the tested case where a stored aggregate owns one pointer
-allocation, but a map holding multiple entries with independently managed
-pointer values has no per-entry provenance or ownership identity, so their
-allocation lifecycles are not individually tracked.
+stdlib HashMap records per-entry provenance, but deliberately does not infer
+that insertion transfers deletion responsibility to the map. A map holding
+independently managed pointer values therefore has tracked provenance without a
+container-owned lifecycle policy.
 
 The same limitation applies in principle to any container that takes custody of
 distinct owned allocations. A full model needs per-entry (or multiple-source)

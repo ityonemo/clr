@@ -162,13 +162,17 @@ pub const Refinement = union(enum) {
     };
 
     pub const HashMapRef = struct {
+        pub const Entry = struct {
+            key: Gid,
+            value: Gid,
+        };
+
         gid: Gid = INVALID_GID,
         multiplicity: Multiplicity = .single,
         analyte: Analyte = .{},
         type_id: Tid,
         metadata_gid: Gid,
-        keys_gid: Gid,
-        values_gid: Gid,
+        entries: []Entry,
         allocator_gid: ?Gid = null,
     };
 
@@ -369,13 +373,11 @@ pub const Refinement = union(enum) {
             .allocator => try dst_list.appendEntity(src),
             .hashmap => |h| blk: {
                 const metadata_gid = try copyValuePreservingPointerTargets(h.metadata_gid, src_list, dst_list);
-                const keys_gid = try copyValuePreservingPointerTargets(h.keys_gid, src_list, dst_list);
-                const values_gid = try copyValuePreservingPointerTargets(h.values_gid, src_list, dst_list);
+                const entries = try copyHashMapEntries(h.entries, src_list, dst_list);
                 var copied = h;
                 copied.analyte = try h.analyte.copy(dst_list.list.allocator);
                 copied.metadata_gid = metadata_gid;
-                copied.keys_gid = keys_gid;
-                copied.values_gid = values_gid;
+                copied.entries = entries;
                 break :blk try dst_list.appendEntity(.{ .hashmap = copied });
             },
             .fnptr => |f| blk: {
@@ -422,8 +424,12 @@ pub const Refinement = union(enum) {
             .scalar => src,
             .allocator => src,
             .hashmap => |h| blk: {
+                const metadata_gid = try copyValuePreservingPointerTargets(h.metadata_gid, src_list, dst_list);
+                const entries = try copyHashMapEntries(h.entries, src_list, dst_list);
                 var copied = h;
                 copied.analyte = try h.analyte.copy(allocator);
+                copied.metadata_gid = metadata_gid;
+                copied.entries = entries;
                 break :blk .{ .hashmap = copied };
             },
             .fnptr => |f| blk: {
@@ -521,13 +527,11 @@ pub const Refinement = union(enum) {
             .allocator => try dst_list.appendEntity(src),
             .hashmap => |h| blk: {
                 const metadata_gid = try copyValuePreservingPointerTargetsMapped(h.metadata_gid, src_list, dst_list, copied_targets);
-                const keys_gid = try copyValuePreservingPointerTargetsMapped(h.keys_gid, src_list, dst_list, copied_targets);
-                const values_gid = try copyValuePreservingPointerTargetsMapped(h.values_gid, src_list, dst_list, copied_targets);
+                const entries = try copyHashMapEntriesMapped(h.entries, src_list, dst_list, copied_targets);
                 var copied = h;
                 copied.analyte = try h.analyte.copy(allocator);
                 copied.metadata_gid = metadata_gid;
-                copied.keys_gid = keys_gid;
-                copied.values_gid = values_gid;
+                copied.entries = entries;
                 break :blk try dst_list.appendEntity(.{ .hashmap = copied });
             },
             .fnptr => |f| blk: {
@@ -558,7 +562,10 @@ pub const Refinement = union(enum) {
             },
             .pointer_union => |p| blk: {
                 const members = try copyPointerUnionMembers(p.members, src_list, dst_list, copied_targets);
-                break :blk try dst_list.appendEntity(.{ .pointer_union = .{ .members = members } });
+                break :blk try dst_list.appendEntity(.{ .pointer_union = .{
+                    .analyte = try p.analyte.copy(allocator),
+                    .members = members,
+                } });
             },
             inline .optional, .errorunion, .recursive => |data, ref_tag| blk: {
                 const copied_to = if (ref_tag == .recursive)
@@ -630,9 +637,14 @@ pub const Refinement = union(enum) {
                 }
                 break :blk true;
             },
-            .hashmap => |h| pointerTargetsExistInDestination(h.metadata_gid, src_list, dst_list) and
-                pointerTargetsExistInDestination(h.keys_gid, src_list, dst_list) and
-                pointerTargetsExistInDestination(h.values_gid, src_list, dst_list),
+            .hashmap => |h| blk: {
+                if (!pointerTargetsExistInDestination(h.metadata_gid, src_list, dst_list)) break :blk false;
+                for (h.entries) |entry| {
+                    if (!pointerTargetsExistInDestination(entry.key, src_list, dst_list) or
+                        !pointerTargetsExistInDestination(entry.value, src_list, dst_list)) break :blk false;
+                }
+                break :blk true;
+            },
             .scalar, .allocator, .fnptr, .void, .noreturn, .unimplemented => true,
         };
     }
@@ -691,6 +703,33 @@ pub const Refinement = union(enum) {
         return copied_members;
     }
 
+    fn copyHashMapEntries(
+        entries: []const HashMapRef.Entry,
+        noalias src_list: *Refinements,
+        noalias dst_list: *Refinements,
+    ) error{OutOfMemory}![]HashMapRef.Entry {
+        var copied_targets = std.AutoHashMap(Gid, Gid).init(dst_list.list.allocator);
+        defer copied_targets.deinit();
+        return copyHashMapEntriesMapped(entries, src_list, dst_list, &copied_targets);
+    }
+
+    fn copyHashMapEntriesMapped(
+        entries: []const HashMapRef.Entry,
+        noalias src_list: *Refinements,
+        noalias dst_list: *Refinements,
+        copied_targets: *std.AutoHashMap(Gid, Gid),
+    ) error{OutOfMemory}![]HashMapRef.Entry {
+        const copied_entries = try dst_list.list.allocator.alloc(HashMapRef.Entry, entries.len);
+        errdefer dst_list.list.allocator.free(copied_entries);
+        for (entries, 0..) |entry, i| {
+            copied_entries[i] = .{
+                .key = try copyValuePreservingPointerTargetsMapped(entry.key, src_list, dst_list, copied_targets),
+                .value = try copyValuePreservingPointerTargetsMapped(entry.value, src_list, dst_list, copied_targets),
+            };
+        }
+        return copied_entries;
+    }
+
     pub fn getMultiplicity(self: Refinement) Multiplicity {
         return switch (self) {
             .void, .noreturn, .unimplemented => .single,
@@ -743,7 +782,15 @@ pub const Refinement = union(enum) {
             // fnptr has no nested GIDs - choices are IP indices, not GIDs
             .scalar, .allocator, .fnptr, .unimplemented, .void, .noreturn => {},
             .hashmap => |h| {
-                for ([_]Gid{ h.metadata_gid, h.keys_gid, h.values_gid }) |child_gid| {
+                for (h.entries) |entry| {
+                    for ([_]Gid{ entry.key, entry.value }) |child_gid| {
+                        if (!collected.contains(child_gid)) {
+                            try collected.put(child_gid, {});
+                            try collectReachableGids(src_list.at(child_gid).*, src_list, collected);
+                        }
+                    }
+                }
+                for ([_]Gid{h.metadata_gid}) |child_gid| {
                     if (!collected.contains(child_gid)) {
                         try collected.put(child_gid, {});
                         try collectReachableGids(src_list.at(child_gid).*, src_list, collected);
@@ -1032,7 +1079,11 @@ pub fn deinit(self: *Refinements) void {
                 data.analyte.deinit(allocator);
                 allocator.free(data.members);
             },
-            inline .scalar, .optional, .recursive, .allocator, .hashmap => |data| {
+            .hashmap => |data| {
+                allocator.free(data.entries);
+                data.analyte.deinit(allocator);
+            },
+            inline .scalar, .optional, .recursive, .allocator => |data| {
                 data.analyte.deinit(allocator);
             },
             .errorunion => |data| {
@@ -1126,6 +1177,7 @@ pub fn clone(self: *Refinements, allocator: Allocator) !Refinements {
             .hashmap => |data| {
                 var copied = data;
                 copied.analyte = try data.analyte.copy(allocator);
+                copied.entries = try allocator.dupe(Refinement.HashMapRef.Entry, data.entries);
                 try new.list.append(.{ .hashmap = copied });
             },
             // Deep copy analyte for types that have one - memory_safety state must be independent
@@ -1182,7 +1234,11 @@ pub fn freeValue(self: *Refinements, value: *Refinement) void {
             data.analyte.deinit(allocator);
             allocator.free(data.members);
         },
-        inline .scalar, .optional, .recursive, .allocator, .hashmap => |data| {
+        .hashmap => |data| {
+            allocator.free(data.entries);
+            data.analyte.deinit(allocator);
+        },
+        inline .scalar, .optional, .recursive, .allocator => |data| {
             data.analyte.deinit(allocator);
         },
         .errorunion => |data| {
@@ -1413,8 +1469,10 @@ fn hashRefinement(ref: Refinement) u64 {
         .hashmap => |h| {
             hashAnalyte(h.analyte, &hasher);
             hasher.update(std.mem.asBytes(&h.metadata_gid));
-            hasher.update(std.mem.asBytes(&h.keys_gid));
-            hasher.update(std.mem.asBytes(&h.values_gid));
+            for (h.entries) |entry| {
+                hasher.update(std.mem.asBytes(&entry.key));
+                hasher.update(std.mem.asBytes(&entry.value));
+            }
         },
         .fnptr => |f| {
             hashAnalyte(f.analyte, &hasher);
